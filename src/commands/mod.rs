@@ -6,7 +6,15 @@ use std::path::PathBuf;
 use crate::config::Config;
 
 pub async fn chat_cmd() -> Result<()> {
-    crate::channels::cli::run_repl().await
+    let config = load_config_or_init()?;
+
+    let log_dir = PathBuf::from(&config.log.dir);
+    let _ = crate::log::init(&config.log.level, &log_dir);
+
+    let agent = crate::channels::cli::build_agent(&config).await?;
+
+    let cli = std::sync::Arc::new(crate::channels::CliChannel::new());
+    crate::channels::Channel::run(cli, agent).await
 }
 
 pub fn config_cmd() -> Result<()> {

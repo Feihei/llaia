@@ -1,5 +1,6 @@
 use crate::agent::runner::ToolRegistry;
 use crate::agent::Agent;
+use crate::channels::Channel;
 use crate::commands::slash::{try_handle, SlashOutcome};
 use crate::config::Config;
 use crate::memory::sqlite::SessionStore;
@@ -13,27 +14,64 @@ use crate::tools::tavily::TavilySearch;
 use crate::tools::terminal::Terminal;
 use crate::tools::web::WebFetch;
 use anyhow::Result;
+use async_trait::async_trait;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
-pub async fn run_repl() -> Result<()> {
-    let config = crate::commands::load_config_or_init()?;
+pub struct CliChannel;
 
-    let log_dir = PathBuf::from(&config.log.dir);
-    let _ = crate::log::init(&config.log.level, &log_dir);
+impl CliChannel {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
+#[async_trait]
+impl Channel for CliChannel {
+    async fn run(self: Arc<Self>, agent: Arc<Mutex<Agent>>) -> Result<()> {
+        println!("laia v0.1.5 - type /help for commands, /exit to quit\n");
+        let stdin = std::io::stdin();
+        loop {
+            print!("> ");
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            if stdin.lock().read_line(&mut line)? == 0 {
+                break;
+            }
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            match try_handle(line, &mut *agent.lock().await).await? {
+                SlashOutcome::Exit => break,
+                SlashOutcome::Handled => continue,
+                SlashOutcome::NotSlash => {
+                    let mut a = agent.lock().await;
+                    match a.handle_input(line, "cli").await {
+                        Ok(resp) => println!("\n{}\n", resp),
+                        Err(e) => println!("\n[error: {}]\n", e),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 构建 Agent 实例（CLI 和 QQ 共用）
+pub async fn build_agent(config: &Config) -> Result<Arc<Mutex<Agent>>> {
     let agent_cfg = config
         .agent
         .get("main")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("agent.main not configured"))?;
 
-    // workspace 是该 agent 的根目录，所有 md 和 sessions.db 都从这里推导
     let workspace = PathBuf::from(&agent_cfg.workspace);
     std::fs::create_dir_all(&workspace).ok();
 
-    // md 路径：显式 > workspace 推导
     let soul_path = resolve_md_path(&agent_cfg.soul, &workspace, "SOUL.md");
     let user_path = resolve_md_path(&agent_cfg.user, &workspace, "USER.md");
     let memory_path = resolve_md_path(&agent_cfg.memory, &workspace, "MEMORY.md");
@@ -45,7 +83,6 @@ pub async fn run_repl() -> Result<()> {
     let user = load_md(&user_path).await?;
     let memory = load_md(&memory_path).await?;
 
-    // 解析 "provider_id.model_alias"，取出连接信息和模型配置
     let (prov_id, model_alias) = Config::parse_model_ref(&agent_cfg.model)?;
     let prov_cfg = config
         .provider
@@ -56,7 +93,9 @@ pub async fn run_repl() -> Result<()> {
         .model
         .get(model_alias)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
+        })?;
 
     let provider: Arc<dyn Provider> = Arc::new(OpenAiCompatibleProvider::new(
         &prov_cfg.base_url,
@@ -82,7 +121,6 @@ pub async fn run_repl() -> Result<()> {
     }
     registry.register(Arc::new(MemoryWrite::new(memory_path.clone())));
 
-    // 拼 system prompt：告知 workspace + 标签降级模式下注入工具协议说明
     let mut system_prompt = format!(
         "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}\n\n# WORKSPACE\n{}\n\n工作目录说明：所有工具的相对路径都相对于 WORKSPACE 解析；terminal 命令在 WORKSPACE 下执行。需要写到其它位置时请使用绝对路径。",
         soul, user, memory, workspace.display()
@@ -103,8 +141,8 @@ pub async fn run_repl() -> Result<()> {
         }
     };
 
-    let mut agent = Agent::new(
-        &config,
+    let agent = Agent::new(
+        config,
         provider,
         registry,
         session_store,
@@ -114,33 +152,9 @@ pub async fn run_repl() -> Result<()> {
     )
     .await;
 
-    println!("laia v0.1.0 - type /help for commands, /exit to quit\n");
-    let stdin = std::io::stdin();
-    loop {
-        print!("> ");
-        std::io::stdout().flush()?;
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 {
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        match try_handle(line, &mut agent).await? {
-            SlashOutcome::Exit => break,
-            SlashOutcome::Handled => continue,
-            SlashOutcome::NotSlash => match agent.handle_input(line, "cli").await {
-                Ok(resp) => println!("\n{}\n", resp),
-                Err(e) => println!("\n[error: {}]\n", e),
-            },
-        }
-    }
-    Ok(())
+    Ok(Arc::new(Mutex::new(agent)))
 }
 
-/// 解析 md 文件路径：显式 > workspace 拼接
 fn resolve_md_path(explicit: &Option<String>, workspace: &PathBuf, default_name: &str) -> PathBuf {
     match explicit {
         Some(s) => {

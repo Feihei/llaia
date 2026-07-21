@@ -1,6 +1,9 @@
 pub mod cli;
 pub mod qq_split;
 
+// 重新导出，方便外部使用
+pub use cli::CliChannel;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
