@@ -13,8 +13,38 @@ pub async fn chat_cmd() -> Result<()> {
 
     let agent = crate::channels::cli::build_agent(&config).await?;
 
-    let cli = std::sync::Arc::new(crate::channels::CliChannel::new());
-    crate::channels::Channel::run(cli, agent).await
+    let mut tasks = Vec::new();
+
+    if config.channels.cli.enabled {
+        let cli = std::sync::Arc::new(crate::channels::CliChannel::new());
+        let agent = agent.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = crate::channels::Channel::run(cli, agent).await {
+                tracing::error!(error = %e, "CliChannel exited with error");
+            }
+        }));
+    }
+
+    if config.channels.qq.enabled {
+        let qq = std::sync::Arc::new(crate::channels::qq::QqChannel::new(
+            config.channels.qq.clone(),
+        ));
+        let agent = agent.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = crate::channels::Channel::run(qq, agent).await {
+                tracing::error!(error = %e, "QqChannel exited with error");
+            }
+        }));
+    }
+
+    if tasks.is_empty() {
+        anyhow::bail!("no channel enabled in config");
+    }
+
+    for t in tasks {
+        let _ = t.await;
+    }
+    Ok(())
 }
 
 pub fn config_cmd() -> Result<()> {
