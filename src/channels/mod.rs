@@ -1,8 +1,10 @@
 pub mod cli;
+pub mod qq;
 pub mod qq_split;
 
 // 重新导出，方便外部使用
 pub use cli::CliChannel;
+pub use qq::QqChannel;
 
 use anyhow::Result;
 use async_trait::async_trait;

@@ -1,6 +1,6 @@
 use crate::provider::{ChatMessage, ToolCall};
 use crate::tools::Tool;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
