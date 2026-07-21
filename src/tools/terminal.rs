@@ -59,6 +59,9 @@ impl Tool for Terminal {
             "required": ["command"]
         })
     }
+    fn requires_confirm(&self) -> bool {
+        true
+    }
     async fn execute(&self, args: &Value) -> Result<String> {
         let command = args
             .get("command")
@@ -166,5 +169,12 @@ mod tests {
             "expected 'marker.txt' in output, got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_terminal_requires_confirm() {
+        let (_guard, ws) = make_workspace();
+        let t = Terminal::new("none".into(), vec![], ws);
+        assert!(t.requires_confirm());
     }
 }

@@ -88,6 +88,9 @@ impl Tool for FileWrite {
             "required": ["path", "content"]
         })
     }
+    fn requires_confirm(&self) -> bool {
+        true
+    }
     async fn execute(&self, args: &Value) -> Result<String> {
         let path = args
             .get("path")
@@ -126,6 +129,9 @@ impl Tool for FileEdit {
             },
             "required": ["path", "old_string", "new_string"]
         })
+    }
+    fn requires_confirm(&self) -> bool {
+        true
     }
     async fn execute(&self, args: &Value) -> Result<String> {
         let path = args
@@ -255,5 +261,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_requires_confirm_flags() {
+        let ws = PathBuf::from(".");
+        assert!(!FileRead::new(ws.clone()).requires_confirm());
+        assert!(FileWrite::new(ws.clone()).requires_confirm());
+        assert!(FileEdit::new(ws).requires_confirm());
     }
 }

@@ -17,6 +17,12 @@ pub trait Tool: Send + Sync {
 
     async fn execute(&self, args: &Value) -> Result<String>;
 
+    /// 是否需要确认（有副作用）。默认 false（只读工具）。
+    /// 有副作用的工具（file_write, terminal, memory_write 等）应 override 返回 true。
+    fn requires_confirm(&self) -> bool {
+        false
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.name().to_string(),

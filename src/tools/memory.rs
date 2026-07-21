@@ -37,6 +37,9 @@ impl Tool for MemoryWrite {
             "required": ["entry"]
         })
     }
+    fn requires_confirm(&self) -> bool {
+        true
+    }
     async fn execute(&self, args: &Value) -> Result<String> {
         let entry = args
             .get("entry")
