@@ -18,6 +18,7 @@ pub struct Agent {
     pub session_id: i64,
     pub max_tokens: usize,
     pub context_threshold: f64,
+    pub max_iterations: u32,
 }
 
 impl Agent {
@@ -30,11 +31,6 @@ impl Agent {
         system_prompt: String,
         max_tokens: usize,
     ) -> Self {
-        let context_threshold = config
-            .agent
-            .get("main")
-            .map(|a| a.context_threshold)
-            .unwrap_or(0.7);
         Self {
             provider,
             tools,
@@ -42,7 +38,8 @@ impl Agent {
             session_store,
             session_id,
             max_tokens,
-            context_threshold,
+            context_threshold: config.runtime.context_threshold,
+            max_iterations: config.runtime.max_iterations,
         }
     }
 
@@ -60,7 +57,7 @@ impl Agent {
             }
         }
 
-        let max_iters = 10;
+        let max_iters = self.max_iterations;
         for i in 0..max_iters {
             let messages = self.context.to_messages();
             let tools = self.tools.specs();

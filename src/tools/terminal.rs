@@ -3,17 +3,20 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::io::Write;
+use std::path::PathBuf;
 
 pub struct Terminal {
     pub confirm_mode: String,
     pub whitelist: Vec<String>,
+    pub workspace: PathBuf,
 }
 
 impl Terminal {
-    pub fn new(confirm_mode: String, whitelist: Vec<String>) -> Self {
+    pub fn new(confirm_mode: String, whitelist: Vec<String>, workspace: PathBuf) -> Self {
         Self {
             confirm_mode,
             whitelist,
+            workspace,
         }
     }
 
@@ -45,13 +48,13 @@ impl Tool for Terminal {
         "terminal"
     }
     fn description(&self) -> &str {
-        "Execute a shell command. Returns combined stdout+stderr."
+        "Execute a shell command in the agent workspace. Returns combined stdout+stderr."
     }
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Shell command to execute" }
+                "command": { "type": "string", "description": "Shell command to execute (runs in agent workspace)" }
             },
             "required": ["command"]
         })
@@ -71,11 +74,13 @@ impl Tool for Terminal {
         #[cfg(windows)]
         let output = tokio::process::Command::new("cmd")
             .args(["/C", command])
+            .current_dir(&self.workspace)
             .output()
             .await;
         #[cfg(not(windows))]
         let output = tokio::process::Command::new("sh")
             .args(["-c", command])
+            .current_dir(&self.workspace)
             .output()
             .await;
 
@@ -97,22 +102,36 @@ impl Tool for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn make_workspace() -> (TempDir, PathBuf) {
+        let t = TempDir::new().unwrap();
+        let p = t.path().to_path_buf();
+        (t, p)
+    }
 
     #[test]
     fn test_needs_confirmation_none() {
-        let t = Terminal::new("none".into(), vec![]);
+        let (_guard, ws) = make_workspace();
+        let t = Terminal::new("none".into(), vec![], ws);
         assert!(!t.needs_confirmation("rm -rf /"));
     }
 
     #[test]
     fn test_needs_confirmation_always() {
-        let t = Terminal::new("always".into(), vec![]);
+        let (_guard, ws) = make_workspace();
+        let t = Terminal::new("always".into(), vec![], ws);
         assert!(t.needs_confirmation("ls"));
     }
 
     #[test]
     fn test_needs_confirmation_whitelist() {
-        let t = Terminal::new("whitelist".into(), vec!["ls".into(), "cat".into()]);
+        let (_guard, ws) = make_workspace();
+        let t = Terminal::new(
+            "whitelist".into(),
+            vec!["ls".into(), "cat".into()],
+            ws,
+        );
         assert!(!t.needs_confirmation("ls -la"));
         assert!(!t.needs_confirmation("cat foo"));
         assert!(t.needs_confirmation("rm foo"));
@@ -120,11 +139,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_echo() {
-        let t = Terminal::new("none".into(), vec![]);
+        let (_guard, ws) = make_workspace();
+        let t = Terminal::new("none".into(), vec![], ws);
         let result = t
             .execute(&serde_json::json!({"command": "echo hello"}))
             .await
             .unwrap();
         assert!(result.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_command_runs_in_workspace() {
+        let (_guard, ws) = make_workspace();
+        // 在 workspace 下创建一个标记文件
+        std::fs::write(ws.join("marker.txt"), "I_AM_HERE").unwrap();
+
+        let t = Terminal::new("none".into(), vec![], ws.clone());
+        // 列当前目录，预期看到 marker.txt（证明 CWD 是 workspace）
+        let cmd = if cfg!(windows) { "dir /b" } else { "ls" };
+        let result = t
+            .execute(&serde_json::json!({"command": cmd}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("marker.txt"),
+            "expected 'marker.txt' in output, got: {}",
+            result
+        );
     }
 }

@@ -56,6 +56,7 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
         }
         "/config" => {
             println!("context_threshold: {}", agent.context_threshold);
+            println!("max_iterations: {}", agent.max_iterations);
             println!("max_tokens: {}", agent.max_tokens);
             println!("history msgs: {}", agent.context.history.len());
             println!("summary: {}", agent.context.summary.is_some());

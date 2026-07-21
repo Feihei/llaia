@@ -1,6 +1,7 @@
 use crate::agent::runner::ToolRegistry;
 use crate::agent::Agent;
 use crate::commands::slash::{try_handle, SlashOutcome};
+use crate::config::Config;
 use crate::memory::sqlite::SessionStore;
 use crate::memory::{ensure_template, load_md, MEMORY_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
@@ -22,16 +23,20 @@ pub async fn run_repl() -> Result<()> {
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
 
-    let workspace = PathBuf::from(&config.workspace.dir);
-    std::fs::create_dir_all(&workspace).ok();
     let agent_cfg = config
         .agent
         .get("main")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("agent.main not configured"))?;
-    let soul_path = PathBuf::from(&agent_cfg.soul);
-    let user_path = PathBuf::from(&agent_cfg.user);
-    let memory_path = PathBuf::from(&agent_cfg.memory);
+
+    // workspace 是该 agent 的根目录，所有 md 和 sessions.db 都从这里推导
+    let workspace = PathBuf::from(&agent_cfg.workspace);
+    std::fs::create_dir_all(&workspace).ok();
+
+    // md 路径：显式 > workspace 推导
+    let soul_path = resolve_md_path(&agent_cfg.soul, &workspace, "SOUL.md");
+    let user_path = resolve_md_path(&agent_cfg.user, &workspace, "USER.md");
+    let memory_path = resolve_md_path(&agent_cfg.memory, &workspace, "MEMORY.md");
     ensure_template(&soul_path, SOUL_TEMPLATE).await?;
     ensure_template(&user_path, USER_TEMPLATE).await?;
     ensure_template(&memory_path, MEMORY_TEMPLATE).await?;
@@ -40,25 +45,34 @@ pub async fn run_repl() -> Result<()> {
     let user = load_md(&user_path).await?;
     let memory = load_md(&memory_path).await?;
 
+    // 解析 "provider_id.model_alias"，取出连接信息和模型配置
+    let (prov_id, model_alias) = Config::parse_model_ref(&agent_cfg.model)?;
     let prov_cfg = config
         .provider
-        .get("default")
+        .get(prov_id)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("provider.default not configured"))?;
+        .ok_or_else(|| anyhow::anyhow!("provider.{} not configured", prov_id))?;
+    let model_cfg = prov_cfg
+        .model
+        .get(model_alias)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias))?;
+
     let provider: Arc<dyn Provider> = Arc::new(OpenAiCompatibleProvider::new(
         &prov_cfg.base_url,
         &prov_cfg.api_key,
-        &prov_cfg.model,
-        prov_cfg.native_tool_calling,
+        &model_cfg.model,
+        model_cfg.native_tool_calling,
     )?);
 
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(FileRead));
-    registry.register(Arc::new(FileWrite));
-    registry.register(Arc::new(FileEdit));
+    registry.register(Arc::new(FileRead::new(workspace.clone())));
+    registry.register(Arc::new(FileWrite::new(workspace.clone())));
+    registry.register(Arc::new(FileEdit::new(workspace.clone())));
     registry.register(Arc::new(Terminal::new(
         config.tools.terminal.confirm.clone(),
         config.tools.terminal.whitelist.clone(),
+        workspace.clone(),
     )));
     registry.register(Arc::new(WebFetch::new()?));
     if !config.tools.tavily.api_key.is_empty() {
@@ -68,10 +82,10 @@ pub async fn run_repl() -> Result<()> {
     }
     registry.register(Arc::new(MemoryWrite::new(memory_path.clone())));
 
-    // 拼 system prompt：标签降级模式下注入工具协议说明
+    // 拼 system prompt：告知 workspace + 标签降级模式下注入工具协议说明
     let mut system_prompt = format!(
-        "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}",
-        soul, user, memory
+        "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}\n\n# WORKSPACE\n{}\n\n工作目录说明：所有工具的相对路径都相对于 WORKSPACE 解析；terminal 命令在 WORKSPACE 下执行。需要写到其它位置时请使用绝对路径。",
+        soul, user, memory, workspace.display()
     );
     if !provider.native_tool_calling() {
         system_prompt.push_str(&build_tool_instructions(&registry.specs()));
@@ -124,4 +138,19 @@ pub async fn run_repl() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 解析 md 文件路径：显式 > workspace 拼接
+fn resolve_md_path(explicit: &Option<String>, workspace: &PathBuf, default_name: &str) -> PathBuf {
+    match explicit {
+        Some(s) => {
+            let p = PathBuf::from(s);
+            if p.is_absolute() {
+                p
+            } else {
+                workspace.join(s)
+            }
+        }
+        None => workspace.join(default_name),
+    }
 }
