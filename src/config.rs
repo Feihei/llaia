@@ -115,12 +115,44 @@ pub struct AgentConfig {
 pub struct ChannelsConfig {
     #[serde(default)]
     pub cli: CliChannelConfig,
+    #[serde(default)]
+    pub qq: QqConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CliChannelConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QqConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub bot_qq: String,
+    #[serde(default = "default_qq_confirm")]
+    pub confirm_mode: String,
+}
+
+impl Default for QqConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            app_id: String::new(),
+            token: String::new(),
+            bot_qq: String::new(),
+            confirm_mode: default_qq_confirm(),
+        }
+    }
+}
+
+fn default_qq_confirm() -> String {
+    "always".into()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -392,5 +424,55 @@ memory = "~/custom/MEMORY.md"
         let a = config.agent.get("main").unwrap();
         assert!(a.soul.as_ref().unwrap().contains("custom/SOUL.md"));
         assert!(!a.soul.as_ref().unwrap().contains('~'));
+    }
+
+    #[test]
+    fn test_qq_config_defaults() {
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.laia"
+
+[channels.qq]
+app_id = "12345"
+token = "test-token"
+bot_qq = "10000"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert!(!config.channels.qq.enabled); // 默认 false
+        assert_eq!(config.channels.qq.app_id, "12345");
+        assert_eq!(config.channels.qq.token, "test-token");
+        assert_eq!(config.channels.qq.bot_qq, "10000");
+        assert_eq!(config.channels.qq.confirm_mode, "always"); // 默认 always
+    }
+
+    #[test]
+    fn test_qq_config_disabled_by_default() {
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.laia"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert!(!config.channels.qq.enabled);
+        assert_eq!(config.channels.qq.confirm_mode, "always");
     }
 }
