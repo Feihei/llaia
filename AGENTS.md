@@ -15,6 +15,24 @@
 - 用户只跟主 Agent 接触，特定任务主 Agent 委派给特定子 Agent
 - v1 子 Agent 不实现，所有任务由主 Agent 完成
 
+### Channel 抽象（v1.5 引入）
+
+用户接入通道抽象为 `Channel` trait，CLI 和 QQ 各自实现：
+
+```rust
+#[async_trait]
+pub trait Channel: Send + Sync + 'static {
+    async fn run(self: Arc<Self>, agent: Arc<Mutex<Agent>>) -> Result<()>;
+}
+```
+
+- 每个 channel 负责自己的 I/O 循环（读用户输入、写回复）
+- 共享同一个 Agent，通过 `Arc<tokio::sync::Mutex<Agent>>` 串行化访问
+- `chat_cmd` 根据 config 启用情况 `tokio::spawn` 多个 channel 任务
+- v1.5 实现：`CliChannel`（终端 REPL）、`QqChannel`（腾讯官方 QQ 开放平台 C2C 单聊）
+
+详见 [docs/adr/0009-qq-channel.md](docs/adr/0009-qq-channel.md)。
+
 详见 [docs/adr/0002-agent-architecture.md](docs/adr/0002-agent-architecture.md)。
 
 ## 持久化
@@ -62,10 +80,20 @@ MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消�
 
 终端命令安全：配置项控制（`none` / `whitelist` 默认 / `always`）。
 
+### 工具副作用标记（v1.5 引入）
+
+`Tool` trait 加 `requires_confirm()` 方法（默认 `false`）。`FileWrite` / `FileEdit` / `Terminal` / `MemoryWrite` override 为 `true`。
+
+QQ channel 下无法弹 stdin 等用户确认，`execute_tool_calls` 接收 `channel` 和 `qq_confirm_mode` 参数，按 `[channels.qq].confirm_mode` 决定是否执行：
+
+- `always`（默认）：跳过需确认工具，回复用户原因
+- `whitelist`：v1.5 简化，等同于 `always`
+- `none`：全放行
+
 CLI 子命令：`laia chat`（默认）/ `laia config` / `laia doctor` / `laia remember`。
 斜杠命令：`/new` `/exit` `/compact` `/clear` `/remember` `/config` `/help`。
 
-详见 [docs/adr/0006-tools-and-cli.md](docs/adr/0006-tools-and-cli.md)。
+详见 [docs/adr/0006-tools-and-cli.md](docs/adr/0006-tools-and-cli.md) 与 [docs/adr/0009-qq-channel.md](docs/adr/0009-qq-channel.md)。
 
 ## 工作区与工程约定
 
@@ -81,12 +109,27 @@ CLI 子命令：`laia chat`（默认）/ `laia config` / `laia doctor` / `laia r
   logs/
 ```
 
-- 配置格式：toml，命名式 section（`[provider.<id>]` / `[agent.<alias>]`）
+- 配置格式：toml，命名式 section（`[provider.<id>]` / `[provider.<id>.<model_alias>]` / `[agent.<alias>]` / `[channels.<cli|qq>]`）
+- workspace 同时作为 state dir 和 tool working dir（v1.1 起，详见 ADR 0008）
 - 错误处理：`anyhow::Result`（v1 简单优先）
 - 日志：tracing，输出到文件 + stderr
 - v1 单 crate，v2 视复杂度再考虑拆分
 
-详见 [docs/adr/0007-project-structure-and-conventions.md](docs/adr/0007-project-structure-and-conventions.md)。
+### Channels 配置（v1.5）
+
+```toml
+[channels.cli]
+enabled = true                # 默认 true
+
+[channels.qq]
+enabled = false               # 默认 false
+app_id = ""
+token = ""
+bot_qq = ""
+confirm_mode = "always"       # always / whitelist / none
+```
+
+详见 [docs/adr/0007-project-structure-and-conventions.md](docs/adr/0007-project-structure-and-conventions.md) 与 [docs/adr/0008-config-schema-v1.1.md](docs/adr/0008-config-schema-v1.1.md)。
 
 ## v1 MVP 验收标准
 
@@ -99,5 +142,7 @@ CLI 子命令：`laia chat`（默认）/ `laia config` / `laia doctor` / `laia r
 
 ## 设计文档索引
 
-- [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 到 ADR-0007）
+- [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 到 ADR-0009）
 - [docs/glossary.md](docs/glossary.md) — 术语表
+- [docs/specs/](docs/specs/) — 规格文档
+- [docs/plans/](docs/plans/) — 实现计划

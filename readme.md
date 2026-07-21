@@ -27,11 +27,34 @@ cargo run -- chat
 
 | 版本 | 状态 | 重点 |
 |---|---|---|
-| **v1** | MVP 开发中 | CLI REPL + 本地 OpenAI 兼容 Provider + 主 Agent 单干 + 基础工具集 + 记忆持久化 |
-| **v1.5** | 计划中 | QQ Bot 频道接入 |
+| **v1** | 已完成 | CLI REPL + 本地 OpenAI 兼容 Provider + 主 Agent 单干 + 基础工具集 + 记忆持久化 |
+| **v1.5** | 开发中 | QQ Bot 频道接入（腾讯官方开放平台，C2C 单聊） |
 | **v2** | 规划中 | Web 面板、子 Agent 委派、MCP/Skill 支持、流式输出、邮箱频道、cron 任务 |
 
 **v1 不做**：多用户、群聊、流式输出、自动环境发现、自己打包 Python/Node.js 环境。
+
+## QQ 频道（v1.5）
+
+在 `~/.laia/config.toml` 加 `[channels.qq]` 节即可启用 QQ 单聊：
+
+```toml
+[channels.cli]
+enabled = true
+
+[channels.qq]
+enabled = true
+app_id = "你的 app_id"
+token = "你的 token"
+bot_qq = "机器人的 QQ 号"
+confirm_mode = "always"   # always（默认，跳过有副作用工具）/ whitelist / none
+```
+
+- 接入腾讯官方 QQ 开放平台，走 WebSocket + HTTPS，无需公网回调
+- CLI 和 QQ 同进程，共享同一 session（跨频道接续对话）
+- 长回复自动分片（≤1800 字符/片），代码块跨片时闭合重开
+- QQ 下默认禁用 `file_write` / `file_edit` / `terminal` / `memory_write` 等有副作用的工具
+
+详见 [docs/adr/0009-qq-channel.md](docs/adr/0009-qq-channel.md)。
 
 ## 参考
 
