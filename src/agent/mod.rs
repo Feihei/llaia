@@ -19,6 +19,7 @@ pub struct Agent {
     pub max_tokens: usize,
     pub context_threshold: f64,
     pub max_iterations: u32,
+    pub qq_confirm_mode: String,
 }
 
 impl Agent {
@@ -40,10 +41,11 @@ impl Agent {
             max_tokens,
             context_threshold: config.runtime.context_threshold,
             max_iterations: config.runtime.max_iterations,
+            qq_confirm_mode: config.channels.qq.confirm_mode.clone(),
         }
     }
 
-    pub async fn handle_input(&mut self, user_input: &str, _channel: &str) -> Result<String> {
+    pub async fn handle_input(&mut self, user_input: &str, channel: &str) -> Result<String> {
         self.session_store
             .append_message(self.session_id, &Role::User, user_input)?;
         self.context.push(ChatMessage::user(user_input));
@@ -112,7 +114,13 @@ impl Agent {
                     .ok();
             }
 
-            let tool_msgs = execute_tool_calls(&self.tools, &final_calls).await?;
+            let tool_msgs = execute_tool_calls(
+                &self.tools,
+                &final_calls,
+                channel,
+                &self.qq_confirm_mode,
+            )
+            .await?;
             for msg in tool_msgs.iter() {
                 self.session_store
                     .append_message(self.session_id, &Role::Tool, &msg.content)?;

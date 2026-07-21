@@ -31,12 +31,37 @@ impl ToolRegistry {
 pub async fn execute_tool_calls(
     registry: &ToolRegistry,
     calls: &[ToolCall],
+    channel: &str,
+    qq_confirm_mode: &str,
 ) -> Result<Vec<ChatMessage>> {
     let mut results = Vec::new();
     for call in calls {
-        let tool = registry
-            .get(&call.name)
-            .ok_or_else(|| anyhow!("unknown tool: {}", call.name))?;
+        let tool = match registry.get(&call.name) {
+            Some(t) => t,
+            None => {
+                tracing::warn!(tool = %call.name, "unknown tool");
+                results.push(ChatMessage::tool(
+                    format!("[error: unknown tool {}]", call.name),
+                    &call.id,
+                ));
+                continue;
+            }
+        };
+
+        // QQ channel 下的 confirm 检查：跳过有副作用的工具
+        if channel == "qq" && tool.requires_confirm() {
+            let allowed = match qq_confirm_mode {
+                "none" => true,
+                _ => false, // "always"（默认）和 "whitelist"（v1.5 简化：禁用所有需确认工具）
+            };
+            if !allowed {
+                let msg = format!("QQ 频道下不能执行此操作：{}", call.name);
+                tracing::warn!(tool = %call.name, mode = qq_confirm_mode, "qq blocked");
+                results.push(ChatMessage::tool(msg, &call.id));
+                continue;
+            }
+        }
+
         tracing::info!(tool = %call.name, args = %call.arguments, "executing tool");
         let outcome = match tool.execute(&call.arguments).await {
             Ok(s) => s,
@@ -80,7 +105,7 @@ mod tests {
             name: "echo".into(),
             arguments: json!({"x": 1}),
         }];
-        let msgs = execute_tool_calls(&reg, &calls).await.unwrap();
+        let msgs = execute_tool_calls(&reg, &calls, "cli", "always").await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, crate::provider::Role::Tool);
         assert!(msgs[0].content.contains("x"));
@@ -94,7 +119,56 @@ mod tests {
             name: "missing".into(),
             arguments: json!({}),
         }];
-        let result = execute_tool_calls(&reg, &calls).await;
-        assert!(result.is_err());
+        // unknown tool 不再返回 Err，而是返回一条错误消息
+        let msgs = execute_tool_calls(&reg, &calls, "cli", "always").await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.contains("unknown tool"));
+    }
+
+    /// 验证 QQ channel + always 模式下，requires_confirm=true 的工具被跳过
+    #[tokio::test]
+    async fn test_qq_blocks_confirm_required_tool() {
+        struct DangerousTool;
+        #[async_trait]
+        impl Tool for DangerousTool {
+            fn name(&self) -> &str {
+                "dangerous"
+            }
+            fn description(&self) -> &str {
+            "dangerous"
+            }
+            fn parameters_schema(&self) -> Value {
+                json!({"type":"object"})
+            }
+            fn requires_confirm(&self) -> bool {
+                true
+            }
+            async fn execute(&self, _args: &Value) -> Result<String> {
+                Ok("executed".into())
+            }
+        }
+
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(DangerousTool));
+        let calls = vec![ToolCall {
+            id: "1".into(),
+            name: "dangerous".into(),
+            arguments: json!({}),
+        }];
+
+        // QQ + always：应被跳过，返回提示消息
+        let msgs = execute_tool_calls(&reg, &calls, "qq", "always").await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.contains("QQ 频道下不能执行此操作"));
+
+        // QQ + none：应执行
+        let msgs = execute_tool_calls(&reg, &calls, "qq", "none").await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "executed");
+
+        // CLI + always：应执行（CLI 不受 QQ confirm 限制）
+        let msgs = execute_tool_calls(&reg, &calls, "cli", "always").await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "executed");
     }
 }
