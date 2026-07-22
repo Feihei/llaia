@@ -5,10 +5,26 @@ use crate::agent::context::Context;
 use crate::agent::runner::{execute_tool_calls, ToolRegistry};
 use crate::config::Config;
 use crate::memory::sqlite::SessionStore;
-use crate::provider::{ChatMessage, ChatRequest, Provider, Role};
+use crate::provider::{ChatMessage, ChatRequest, Provider, Role, StreamEvent};
 use crate::tool_call::parse_tool_calls;
 use anyhow::Result;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+
+/// Agent turn 事件（推给 channel 消费）
+#[derive(Debug, Clone)]
+pub enum TurnEvent {
+    /// 文本增量（已过滤掉 tool_call 标签）
+    Chunk { delta: String },
+    /// 工具调用开始
+    ToolStart { id: String, name: String },
+    /// 工具执行结果
+    ToolResult { id: String, output: String },
+    /// 整轮结束（所有文本和工具调用完成）
+    Done,
+    /// 错误（已生成的文本保留，错误追加）
+    Error { message: String },
+}
 
 pub struct Agent {
     pub provider: Arc<dyn Provider>,

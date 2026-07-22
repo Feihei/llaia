@@ -1,6 +1,7 @@
-use crate::provider::{ChatRequest, ChatResponse, Provider, Role, ToolCall};
+use crate::provider::{ChatRequest, ChatResponse, Provider, Role, StreamEvent, ToolCall};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use futures_util::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -209,6 +210,17 @@ impl Provider for OpenAiCompatibleProvider {
             text: choice.message.content,
             tool_calls,
         })
+    }
+
+    async fn chat_stream(
+        &self,
+        _req: &ChatRequest<'_>,
+    ) -> BoxStream<'_, Result<StreamEvent>> {
+        // stub：Task 3 替换为真实 SSE 流式实现
+        let s = async_stream::try_stream! {
+            yield StreamEvent::Error("chat_stream not yet implemented".into());
+        };
+        Box::pin(s)
     }
 
     fn native_tool_calling(&self) -> bool {

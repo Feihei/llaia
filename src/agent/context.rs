@@ -140,7 +140,7 @@ mod tests {
 #[cfg(test)]
 mod compact_tests {
     use super::*;
-    use crate::provider::{ChatRequest, ChatResponse, Provider};
+    use crate::provider::{ChatRequest, ChatResponse, Provider, StreamEvent};
     use async_trait::async_trait;
 
     struct MockProvider;
@@ -151,6 +151,16 @@ mod compact_tests {
                 text: Some("summary of old".into()),
                 tool_calls: vec![],
             })
+        }
+        async fn chat_stream(
+            &self,
+            _req: &ChatRequest<'_>,
+        ) -> futures_util::stream::BoxStream<'_, Result<StreamEvent>> {
+            let s = async_stream::try_stream! {
+                yield StreamEvent::TextDelta("summary of old".into());
+                yield StreamEvent::Done;
+            };
+            Box::pin(s)
         }
         fn native_tool_calling(&self) -> bool {
             true

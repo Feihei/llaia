@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 pub mod openai_compat;
@@ -92,9 +93,26 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
 }
 
+/// 流式事件
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// 文本增量
+    TextDelta(String),
+    /// 工具调用（native 模式下完整 ToolCall；标签模式不产生此事件，由 Agent 状态机解析）
+    ToolCall(ToolCall),
+    /// 本轮流式结束
+    Done,
+    /// 错误
+    Error(String),
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     async fn chat(&self, req: &ChatRequest<'_>) -> Result<ChatResponse>;
+    async fn chat_stream(
+        &self,
+        req: &ChatRequest<'_>,
+    ) -> BoxStream<'_, Result<StreamEvent>>;
     fn native_tool_calling(&self) -> bool;
 }
 
