@@ -5,11 +5,11 @@ use serde_json::json;
 #[tokio::test]
 async fn test_native_tool_calling() {
     let mut server = mockito::Server::new_async().await;
-    let body = json!({
+    let delta = json!({
         "choices": [{
-            "message": {
-                "content": null,
+            "delta": {
                 "tool_calls": [{
+                    "index": 0,
                     "id": "call_1",
                     "function": {
                         "name": "file_read",
@@ -19,11 +19,12 @@ async fn test_native_tool_calling() {
             }
         }]
     });
+    let sse_body = format!("data: {}\n\ndata: [DONE]\n\n", delta);
     let m = server
         .mock("POST", "/chat/completions")
         .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(body.to_string())
+        .with_header("content-type", "text/event-stream")
+        .with_body(sse_body)
         .create_async()
         .await;
 
@@ -46,15 +47,17 @@ async fn test_native_tool_calling() {
 #[tokio::test]
 async fn test_text_response() {
     let mut server = mockito::Server::new_async().await;
-    let body = json!({
+    let delta = json!({
         "choices": [{
-            "message": { "content": "hello back" }
+            "delta": { "content": "hello back" }
         }]
     });
+    let sse_body = format!("data: {}\n\ndata: [DONE]\n\n", delta);
     let m = server
         .mock("POST", "/chat/completions")
         .with_status(200)
-        .with_body(body.to_string())
+        .with_header("content-type", "text/event-stream")
+        .with_body(sse_body)
         .create_async()
         .await;
 
