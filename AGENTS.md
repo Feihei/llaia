@@ -143,7 +143,7 @@ confirm_mode = "always"       # always / whitelist / none
 
 ## 设计文档索引
 
-- [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 到 ADR-0009）
+- [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 到 ADR-0010）
 - [docs/glossary.md](docs/glossary.md) — 术语表
 - [docs/specs/](docs/specs/) — 规格文档
 - [docs/plans/](docs/plans/) — 实现计划
