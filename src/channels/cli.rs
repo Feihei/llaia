@@ -1,5 +1,6 @@
 use crate::agent::runner::ToolRegistry;
 use crate::agent::Agent;
+use crate::agent::TurnEvent;
 use crate::channels::Channel;
 use crate::commands::slash::{try_handle, SlashOutcome};
 use crate::config::Config;
@@ -49,10 +50,43 @@ impl Channel for CliChannel {
                 SlashOutcome::Exit => break,
                 SlashOutcome::Handled => continue,
                 SlashOutcome::NotSlash => {
-                    let mut a = agent.lock().await;
-                    match a.handle_input(line, "cli").await {
-                        Ok(resp) => println!("\n{}\n", resp),
-                        Err(e) => println!("\n[error: {}]\n", e),
+                    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+                    let agent_clone = agent.clone();
+                    let input_clone = line.to_string();
+                    tokio::spawn(async move {
+                        let mut a = agent_clone.lock().await;
+                        if let Err(e) = a
+                            .handle_input_streaming(&input_clone, "cli", tx)
+                            .await
+                        {
+                            tracing::error!(error = %e, "handle_input_streaming failed");
+                        }
+                    });
+                    println!();  // 换行，分隔 prompt 和回复
+                    while let Some(ev) = rx.recv().await {
+                        match ev {
+                            TurnEvent::Chunk { delta } => {
+                                print!("{}", delta);
+                                std::io::stdout().flush().ok();
+                            }
+                            TurnEvent::ToolStart { name, .. } => {
+                                println!("\n[tool: {}]", name);
+                            }
+                            TurnEvent::ToolResult { output, .. } => {
+                                let preview = if output.len() > 200 {
+                                    format!("{}...(truncated)", &output[..200])
+                                } else {
+                                    output
+                                };
+                                println!("[result: {}]", preview);
+                            }
+                            TurnEvent::Done => {
+                                println!("\n");
+                            }
+                            TurnEvent::Error { message } => {
+                                println!("\n[error: {}]\n", message);
+                            }
+                        }
                     }
                 }
             }
