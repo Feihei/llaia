@@ -198,6 +198,13 @@ impl Config {
             .with_context(|| format!("failed to read config: {:?}", path))?;
         let mut config: Config = toml::from_str(&content)
             .with_context(|| format!("failed to parse config: {:?}", path))?;
+        // log.dir 未显式配置时（仍为 serde 默认值），跟随 config 文件所在目录
+        // 注意：必须在 expand_paths 之前比较，因为 expand 后路径会变
+        if config.log.dir == default_log_dir() {
+            if let Some(parent) = path.parent() {
+                config.log.dir = parent.join("logs").to_string_lossy().into_owned();
+            }
+        }
         config.expand_paths();
         Ok(config)
     }
@@ -247,7 +254,7 @@ impl Config {
             "main".into(),
             AgentConfig {
                 model: "default.qwen".into(),
-                workspace: ws,
+                workspace: ws.clone(),
                 soul: None,
                 user: None,
                 memory: None,
@@ -256,7 +263,10 @@ impl Config {
 
         Config {
             runtime: RuntimeConfig::default(),
-            log: LogConfig::default(),
+            log: LogConfig {
+                level: default_level(),
+                dir: format!("{}/logs", ws),
+            },
             provider,
             agent,
             channels: ChannelsConfig::default(),
@@ -386,9 +396,15 @@ workspace = "~/.laia"
         assert_eq!(config.runtime.context_threshold, 0.7);
         // 缺省 confirm 默认 whitelist
         assert_eq!(config.tools.terminal.confirm, "whitelist");
-        // 缺省 log.dir 默认展开自 ~/.laia/logs
-        assert!(config.log.dir.ends_with(".laia/logs"));
-        assert!(!config.log.dir.contains('~'));
+        // 缺省 log.dir 跟随 config 文件所在目录的 logs/
+        let expected = tmp
+            .path()
+            .parent()
+            .unwrap()
+            .join("logs")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(config.log.dir, expected);
     }
 
     #[test]

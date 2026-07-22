@@ -1,12 +1,27 @@
 pub mod slash;
 
 use anyhow::Result;
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::config::Config;
 
-pub async fn chat_cmd() -> Result<()> {
-    let config = load_config_or_init()?;
+/// 终端交互模式：只启动 CliChannel，不连 QQ 等后台频道
+pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
+    let config = load_config_or_init(config_dir)?;
+
+    let log_dir = PathBuf::from(&config.log.dir);
+    let _ = crate::log::init(&config.log.level, &log_dir);
+
+    let agent = crate::channels::cli::build_agent(&config).await?;
+
+    let cli = std::sync::Arc::new(crate::channels::CliChannel::new());
+    crate::channels::Channel::run(cli, agent).await
+}
+
+/// 守护进程模式：启动所有非 CLI 的后台频道（QQ、未来 WebUI 等），不启动终端交互
+pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
+    let config = load_config_or_init(config_dir)?;
 
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
@@ -14,16 +29,6 @@ pub async fn chat_cmd() -> Result<()> {
     let agent = crate::channels::cli::build_agent(&config).await?;
 
     let mut tasks = Vec::new();
-
-    if config.channels.cli.enabled {
-        let cli = std::sync::Arc::new(crate::channels::CliChannel::new());
-        let agent = agent.clone();
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = crate::channels::Channel::run(cli, agent).await {
-                tracing::error!(error = %e, "CliChannel exited with error");
-            }
-        }));
-    }
 
     if config.channels.qq.enabled {
         let qq = std::sync::Arc::new(crate::channels::qq::QqChannel::new(
@@ -35,11 +40,14 @@ pub async fn chat_cmd() -> Result<()> {
                 tracing::error!(error = %e, "QqChannel exited with error");
             }
         }));
+        tracing::info!("QqChannel started");
     }
 
     if tasks.is_empty() {
-        anyhow::bail!("no channel enabled in config");
+        anyhow::bail!("no service channel enabled in config (QQ/WebUI/...)");
     }
+
+    tracing::info!(channels = tasks.len(), "serve mode: channels running");
 
     for t in tasks {
         let _ = t.await;
@@ -47,15 +55,16 @@ pub async fn chat_cmd() -> Result<()> {
     Ok(())
 }
 
-pub fn config_cmd() -> Result<()> {
-    let cfg = load_config_or_init()?;
+pub fn config_cmd(config_dir: &Path) -> Result<()> {
+    let cfg = load_config_or_init(config_dir)?;
     println!("{}", toml::to_string_pretty(&cfg).unwrap_or_default());
     Ok(())
 }
 
-pub async fn doctor_cmd() -> Result<()> {
-    let cfg = load_config_or_init()?;
+pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
+    let cfg = load_config_or_init(config_dir)?;
 
+    println!("config_dir: {}", config_dir.display());
     println!("log.dir: {}", cfg.log.dir);
     println!("runtime.context_threshold: {}", cfg.runtime.context_threshold);
     println!("runtime.max_iterations: {}", cfg.runtime.max_iterations);
@@ -105,8 +114,8 @@ pub async fn doctor_cmd() -> Result<()> {
     Ok(())
 }
 
-pub async fn remember_cmd(text: &str) -> Result<()> {
-    let cfg = load_config_or_init()?;
+pub async fn remember_cmd(text: &str, config_dir: &Path) -> Result<()> {
+    let cfg = load_config_or_init(config_dir)?;
     let agent_cfg = cfg
         .agent
         .get("main")
@@ -133,12 +142,12 @@ pub async fn remember_cmd(text: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn load_config_or_init() -> Result<Config> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-    let config_path = home.join(".laia/config.toml");
+/// 加载配置：config_dir 下找 config.toml，不存在则用默认配置
+pub fn load_config_or_init(config_dir: &Path) -> Result<Config> {
+    let config_path = config_dir.join("config.toml");
     if config_path.exists() {
         Config::load(&config_path)
     } else {
-        Ok(Config::default_for_workspace("~/.laia"))
+        Ok(Config::default_for_workspace(&config_dir.to_string_lossy()))
     }
 }

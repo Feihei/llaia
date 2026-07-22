@@ -1,17 +1,24 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "laia", version = "0.1.0", about = "Lightweight AI Assistant")]
 struct Cli {
+    /// 配置目录，默认 ~/.laia
+    #[arg(long, global = true)]
+    config_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 进入交互式对话（默认）
+    /// 进入终端交互模式（默认）
     Chat,
+    /// 启动后台服务（QQ 频道、未来 WebUI 等），不启动终端交互
+    Serve,
     /// 打印当前配置
     Config,
     /// 诊断 provider 连通性、文件完整性
@@ -23,11 +30,18 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let config_dir = cli.config_dir.unwrap_or_else(|| {
+        dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("no home dir"))
+            .expect("no home dir")
+            .join(".laia")
+    });
     let command = cli.command.unwrap_or(Commands::Chat);
     match command {
-        Commands::Chat => laia::commands::chat_cmd().await,
-        Commands::Config => laia::commands::config_cmd(),
-        Commands::Doctor => laia::commands::doctor_cmd().await,
-        Commands::Remember { text } => laia::commands::remember_cmd(&text).await,
+        Commands::Chat => laia::commands::chat_cmd(&config_dir).await,
+        Commands::Serve => laia::commands::serve_cmd(&config_dir).await,
+        Commands::Config => laia::commands::config_cmd(&config_dir),
+        Commands::Doctor => laia::commands::doctor_cmd(&config_dir).await,
+        Commands::Remember { text } => laia::commands::remember_cmd(&text, &config_dir).await,
     }
 }
