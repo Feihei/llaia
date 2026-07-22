@@ -251,116 +251,141 @@ impl Channel for QqChannel {
 
         // 最近收到的 s 序列号，用于心跳
         let mut last_seq: Option<u64> = None;
+        // 心跳间隔（毫秒），收到 op=10 HELLO 后设置
+        let mut heartbeat_interval: u64 = 0;
+        // 下次发心跳的时间，None 表示还没收到 HELLO
+        let mut next_heartbeat: Option<Instant> = None;
 
         loop {
-            let msg = read.next().await;
-            match msg {
-                Some(Ok(Message::Text(text))) => {
-                    let payload: serde_json::Value = match serde_json::from_str(&text) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to parse ws payload");
-                            continue;
+            // 计算心跳超时：没收到 HELLO 时等很久（实际会很快收到 op=10）
+            let timeout = match next_heartbeat {
+                Some(t) => {
+                    let now = Instant::now();
+                    if t <= now {
+                        Duration::ZERO
+                    } else {
+                        t - now
+                    }
+                }
+                None => Duration::from_secs(3600),
+            };
+
+            tokio::select! {
+                msg = read.next() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            let payload: serde_json::Value = match serde_json::from_str(&text) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "failed to parse ws payload");
+                                    continue;
+                                }
+                            };
+
+                            let op = payload.get("op").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                            // 记录 s 序列号（用于心跳）
+                            if let Some(s) = payload.get("s").and_then(|v| v.as_u64()) {
+                                last_seq = Some(s);
+                            }
+
+                            // heartbeat ack (op=11)：服务端确认收到心跳
+                            if op == 11 {
+                                continue;
+                            }
+
+                            // hello (op=10)：包含 heartbeat_interval，发送 IDENTIFY (op=2)
+                            if op == 10 {
+                                heartbeat_interval = payload
+                                    .get("d")
+                                    .and_then(|d| d.get("heartbeat_interval"))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(45000);
+                                tracing::info!(heartbeat_interval, "qq ws hello, sending IDENTIFY");
+
+                                let access_token = self.get_access_token().await?;
+                                let identify = serde_json::json!({
+                                    "op": 2,
+                                    "d": {
+                                        "token": format!("QQBot {}", access_token),
+                                        "intents": 1 << 25,  // C2C 消息
+                                        "shard": [0, 1],
+                                        "properties": {
+                                            "$os": std::env::consts::OS,
+                                            "$browser": "laia",
+                                            "$device": "laia"
+                                        }
+                                    }
+                                });
+                                let _ = write.send(Message::Text(identify.to_string())).await;
+                                // 安排首次心跳
+                                next_heartbeat = Some(Instant::now() + Duration::from_millis(heartbeat_interval));
+                                continue;
+                            }
+
+                            // dispatch 事件 (op=0)
+                            if op == 0 {
+                                let t = payload.get("t").and_then(|v| v.as_str()).unwrap_or("");
+                                // READY 事件：鉴权成功
+                                if t == "READY" {
+                                    let session_id = payload
+                                        .get("d")
+                                        .and_then(|d| d.get("session_id"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    tracing::info!(session_id, "qq ws IDENTIFY success (READY)");
+                                    continue;
+                                }
+                                // RESUMED 事件
+                                if t == "RESUMED" {
+                                    tracing::info!("qq ws RESUMED");
+                                    continue;
+                                }
+
+                                // C2C 文本消息
+                                if let Some((user_openid, msg_id, text)) = Self::extract_c2c_text(&payload) {
+                                    let this = self.clone();
+                                    let agent = agent.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = this
+                                            .handle_user_message(&agent, &user_openid, &text, &msg_id)
+                                            .await
+                                        {
+                                            tracing::error!(error = %e, "handle_user_message failed");
+                                        }
+                                    });
+                                }
+                            }
                         }
-                    };
-
-                    let op = payload.get("op").and_then(|v| v.as_u64()).unwrap_or(0);
-
-                    // 记录 s 序列号（用于心跳）
-                    if let Some(s) = payload.get("s").and_then(|v| v.as_u64()) {
-                        last_seq = Some(s);
+                        Some(Ok(Message::Ping(data))) => {
+                            let _ = write.send(Message::Pong(data)).await;
+                        }
+                        Some(Ok(_)) => continue,
+                        Some(Err(e)) => {
+                            tracing::error!(error = %e, "ws read error");
+                            break;
+                        }
+                        None => {
+                            tracing::info!("ws closed");
+                            break;
+                        }
                     }
-
-                    // heartbeat ack (op=11)
-                    if op == 11 {
-                        continue;
-                    }
-
-                    // heartbeat request (op=1)：回复最近 s
-                    if op == 1 {
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    // 主动发心跳 op=1，d 为最近收到的 s（或 null）
+                    if heartbeat_interval > 0 {
                         let d = match last_seq {
                             Some(s) => serde_json::Value::from(s),
                             None => serde_json::Value::Null,
                         };
                         let hb = serde_json::json!({ "op": 1, "d": d });
-                        let _ = write.send(Message::Text(hb.to_string())).await;
-                        continue;
-                    }
-
-                    // hello (op=10)：包含 heartbeat_interval，发送 IDENTIFY (op=2)
-                    if op == 10 {
-                        let interval = payload
-                            .get("d")
-                            .and_then(|d| d.get("heartbeat_interval"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(45000);
-                        tracing::info!(interval, "qq ws hello, sending IDENTIFY");
-
-                        let access_token = self.get_access_token().await?;
-                        let identify = serde_json::json!({
-                            "op": 2,
-                            "d": {
-                                "token": format!("QQBot {}", access_token),
-                                "intents": 1 << 25,  // C2C 消息
-                                "shard": [0, 1],
-                                "properties": {
-                                    "$os": std::env::consts::OS,
-                                    "$browser": "laia",
-                                    "$device": "laia"
-                                }
-                            }
-                        });
-                        let _ = write.send(Message::Text(identify.to_string())).await;
-                        // v1.5 简化：心跳只在收到 op=1 时被动回复，不主动定时发送
-                        // 如果服务端断连，进程退出。生产级实现需要 tokio::select! + interval 主动心跳
-                        continue;
-                    }
-
-                    // dispatch 事件 (op=0)
-                    if op == 0 {
-                        let t = payload.get("t").and_then(|v| v.as_str()).unwrap_or("");
-                        // READY 事件：鉴权成功
-                        if t == "READY" {
-                            let session_id = payload
-                                .get("d")
-                                .and_then(|d| d.get("session_id"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            tracing::info!(session_id, "qq ws IDENTIFY success (READY)");
-                            continue;
+                        if let Err(e) = write.send(Message::Text(hb.to_string())).await {
+                            tracing::error!(error = %e, "failed to send heartbeat");
+                            break;
                         }
-                        // RESUMED 事件
-                        if t == "RESUMED" {
-                            tracing::info!("qq ws RESUMED");
-                            continue;
-                        }
-
-                        // C2C 文本消息
-                        if let Some((user_openid, msg_id, text)) = Self::extract_c2c_text(&payload) {
-                            let this = self.clone();
-                            let agent = agent.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = this
-                                    .handle_user_message(&agent, &user_openid, &text, &msg_id)
-                                    .await
-                                {
-                                    tracing::error!(error = %e, "handle_user_message failed");
-                                }
-                            });
-                        }
+                        tracing::debug!(seq = ?last_seq, "heartbeat sent");
+                        next_heartbeat = Some(Instant::now() + Duration::from_millis(heartbeat_interval));
                     }
-                }
-                Some(Ok(Message::Ping(data))) => {
-                    let _ = write.send(Message::Pong(data)).await;
-                }
-                Some(Ok(_)) => continue,
-                Some(Err(e)) => {
-                    tracing::error!(error = %e, "ws read error");
-                    break;
-                }
-                None => {
-                    tracing::info!("ws closed");
-                    break;
                 }
             }
         }
