@@ -286,6 +286,21 @@ impl Channel for QqChannel {
     async fn run(self: Arc<Self>, agent: Arc<Mutex<Agent>>) -> Result<()> {
         tracing::info!(app_id = %self.config.app_id, "QqChannel starting");
 
+        // 外层重连循环：ws 断开后等待 5 秒重连，避免 serve 进程退出
+        loop {
+            match self.clone().run_connection(&agent).await {
+                Ok(()) => tracing::warn!("qq ws connection closed, will reconnect"),
+                Err(e) => tracing::error!(error = %e, "qq ws connection ended with error, will reconnect"),
+            }
+            tracing::info!("reconnecting in 5 seconds...");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+}
+
+impl QqChannel {
+    /// 单次连接的完整生命周期：建连 → IDENTIFY → 消息/心跳循环 → 断开
+    async fn run_connection(self: Arc<Self>, agent: &Arc<Mutex<Agent>>) -> Result<()> {
         let ws_url = self.get_ws_url().await?;
         tracing::info!(url = %ws_url, "connecting to QQ gateway");
 
@@ -435,7 +450,6 @@ impl Channel for QqChannel {
             }
         }
 
-        tracing::warn!("QqChannel exited");
         Ok(())
     }
 }
