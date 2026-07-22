@@ -46,7 +46,12 @@ impl Channel for CliChannel {
                 continue;
             }
 
-            match try_handle(line, &mut *agent.lock().await).await? {
+            // 用独立块限定 MutexGuard 生命周期，避免其延续到 match arm 内导致死锁
+            let outcome = {
+                let mut a = agent.lock().await;
+                try_handle(line, &mut *a).await?
+            };
+            match outcome {
                 SlashOutcome::Exit => break,
                 SlashOutcome::Handled => continue,
                 SlashOutcome::NotSlash => {

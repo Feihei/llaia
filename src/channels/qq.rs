@@ -209,57 +209,72 @@ impl QqChannel {
     ) -> Result<()> {
         tracing::info!(user = %user_openid, text = %text, "qq received message");
 
+        // spawn 子任务调 agent，主任务并发消费 rx，避免 send 阻塞死锁
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        let reply = {
-            let mut a = agent.lock().await;
-            a.handle_input_streaming(text, "qq", tx).await
-        };
+        let agent_clone = agent.clone();
+        let text_clone = text.to_string();
+        let join = tokio::spawn(async move {
+            let mut a = agent_clone.lock().await;
+            a.handle_input_streaming(&text_clone, "qq", tx).await
+        });
 
-        if let Err(e) = reply {
-            tracing::error!(error = %e, "agent handle_input_streaming failed");
-            let err_msg = format!("[内部错误: {}]", e);
+        // 累积所有 Chunk，等 Done 后分片发送
+        let mut buffer = String::new();
+        let mut agent_err: Option<String> = None;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                crate::agent::TurnEvent::Chunk { delta } => buffer.push_str(&delta),
+                crate::agent::TurnEvent::Done => break,
+                crate::agent::TurnEvent::Error { message } => {
+                    agent_err = Some(message);
+                    break;
+                }
+                _ => {} // ToolStart / ToolResult 在 QQ 下不转发
+            }
+        }
+
+        // 等子任务结束（此时 tx 已 drop，rx 已返回 None 或 break）
+        let reply_result = join.await;
+        if let Err(e) = reply_result {
+            tracing::error!(error = %e, "agent task panicked");
+            let err_msg = format!("[内部错误: agent task panicked: {}]", e);
             let _ = self
                 .send_c2c_message(user_openid, &err_msg, Some(msg_id))
                 .await;
             return Ok(());
         }
+        if let Some(msg) = agent_err {
+            let err_msg = format!("[错误: {}]", msg);
+            let _ = self
+                .send_c2c_message(user_openid, &err_msg, Some(msg_id))
+                .await;
+            return Ok(());
+        }
+        if let Err(e) = reply_result.unwrap() {
+            tracing::error!(error = %e, "agent handle_input_streaming failed");
+            let err_msg = if buffer.is_empty() {
+                format!("[内部错误: {}]", e)
+            } else {
+                buffer
+            };
+            let chunks = split_reply(&err_msg, 1800);
+            for (i, chunk) in chunks.iter().enumerate() {
+                let id = if i == 0 { Some(msg_id) } else { None };
+                if let Err(e) = self.send_c2c_message(user_openid, chunk, id).await {
+                    tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
+                }
+            }
+            return Ok(());
+        }
 
-        // 累积所有 Chunk，等 Done 后分片发送
-        let mut buffer = String::new();
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                crate::agent::TurnEvent::Chunk { delta } => buffer.push_str(&delta),
-                crate::agent::TurnEvent::Done => {
-                    let chunks = split_reply(&buffer, 1800);
-                    tracing::info!(
-                        chunks = chunks.len(),
-                        total_len = buffer.len(),
-                        "sending reply"
-                    );
-                    for (i, chunk) in chunks.iter().enumerate() {
-                        // 只有第一片带 msg_id 用于被动回复，后续片用主动消息
-                        let id = if i == 0 { Some(msg_id) } else { None };
-                        if let Err(e) = self
-                            .send_c2c_message(user_openid, chunk, id)
-                            .await
-                        {
-                            tracing::error!(
-                                error = %e,
-                                chunk = i,
-                                "failed to send chunk after retries"
-                            );
-                        }
-                    }
-                    break;
-                }
-                crate::agent::TurnEvent::Error { message } => {
-                    let err_msg = format!("[错误: {}]", message);
-                    let _ = self
-                        .send_c2c_message(user_openid, &err_msg, Some(msg_id))
-                        .await;
-                    break;
-                }
-                _ => {} // ToolStart / ToolResult 在 QQ 下不转发
+        // 正常回复：分片发送
+        let chunks = split_reply(&buffer, 1800);
+        tracing::info!(chunks = chunks.len(), total_len = buffer.len(), "sending reply");
+        for (i, chunk) in chunks.iter().enumerate() {
+            // 只有第一片带 msg_id 用于被动回复，后续片用主动消息
+            let id = if i == 0 { Some(msg_id) } else { None };
+            if let Err(e) = self.send_c2c_message(user_openid, chunk, id).await {
+                tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
             }
         }
         Ok(())
