@@ -131,10 +131,9 @@ pub struct QqConfig {
     pub enabled: bool,
     #[serde(default)]
     pub app_id: String,
+    /// QQ 开放平台 AppSecret（用于换 access_token）
     #[serde(default)]
-    pub token: String,
-    #[serde(default)]
-    pub bot_qq: String,
+    pub app_secret: String,
     #[serde(default = "default_qq_confirm")]
     pub confirm_mode: String,
 }
@@ -144,8 +143,7 @@ impl Default for QqConfig {
         Self {
             enabled: false,
             app_id: String::new(),
-            token: String::new(),
-            bot_qq: String::new(),
+            app_secret: String::new(),
             confirm_mode: default_qq_confirm(),
         }
     }
@@ -442,16 +440,14 @@ workspace = "~/.laia"
 
 [channels.qq]
 app_id = "12345"
-token = "test-token"
-bot_qq = "10000"
+app_secret = "test-secret"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
         assert!(!config.channels.qq.enabled); // 默认 false
         assert_eq!(config.channels.qq.app_id, "12345");
-        assert_eq!(config.channels.qq.token, "test-token");
-        assert_eq!(config.channels.qq.bot_qq, "10000");
+        assert_eq!(config.channels.qq.app_secret, "test-secret");
         assert_eq!(config.channels.qq.confirm_mode, "always"); // 默认 always
     }
 

@@ -44,12 +44,12 @@ enabled = true
 [channels.qq]
 enabled = true
 app_id = "你的 app_id"
-token = "你的 token"
-bot_qq = "机器人的 QQ 号"
+app_secret = "你的 app_secret"
 confirm_mode = "always"   # always（默认，跳过有副作用工具）/ whitelist / none
 ```
 
 - 接入腾讯官方 QQ 开放平台，走 WebSocket + HTTPS，无需公网回调
+- 启动时用 `app_id` + `app_secret` 换 `access_token`（有效期 2 小时，自动刷新），鉴权头 `Authorization: QQBot {access_token}`
 - CLI 和 QQ 同进程，共享同一 session（跨频道接续对话）
 - 长回复自动分片（≤1800 字符/片），代码块跨片时闭合重开
 - QQ 下默认禁用 `file_write` / `file_edit` / `terminal` / `memory_write` 等有副作用的工具

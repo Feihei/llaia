@@ -124,10 +124,11 @@ enabled = true                # 默认 true
 [channels.qq]
 enabled = false               # 默认 false
 app_id = ""
-token = ""
-bot_qq = ""
+app_secret = ""
 confirm_mode = "always"       # always / whitelist / none
 ```
+
+鉴权流程：启动时用 `app_id` + `app_secret` 调 `https://bots.qq.com/app/getAppAccessToken` 换取 `access_token`（有效期 7200 秒，过期前 60 秒自动刷新），HTTPS 请求头 `Authorization: QQBot {access_token}`，WS IDENTIFY 的 `token` 字段同此格式。
 
 详见 [docs/adr/0007-project-structure-and-conventions.md](docs/adr/0007-project-structure-and-conventions.md) 与 [docs/adr/0008-config-schema-v1.1.md](docs/adr/0008-config-schema-v1.1.md)。
 

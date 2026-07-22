@@ -7,17 +7,39 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-/// 腾讯官方 QQ 开放平台 API base URL
+/// 腾讯官方 API base URL
 const DEFAULT_API_BASE: &str = "https://api.sgroup.qq.com";
+/// 腾讯官方鉴权服务 base URL（getAppAccessToken 在这里）
+const DEFAULT_AUTH_BASE: &str = "https://bots.qq.com";
+/// access_token 刷新提前量（秒），过期前 60 秒视为需要刷新
+const TOKEN_REFRESH_MARGIN: u64 = 60;
+
+/// 缓存的 access_token 及其过期时间
+#[derive(Default, Clone)]
+struct TokenState {
+    access_token: String,
+    expires_at: Option<Instant>,
+}
+
+impl TokenState {
+    fn is_valid(&self) -> bool {
+        match self.expires_at {
+            Some(t) => Instant::now() + Duration::from_secs(TOKEN_REFRESH_MARGIN) < t,
+            None => false,
+        }
+    }
+}
 
 pub struct QqChannel {
     config: QqConfig,
     http: Client,
     api_base: String,
+    auth_base: String,
+    token: Arc<Mutex<TokenState>>,
 }
 
 impl QqChannel {
@@ -26,30 +48,77 @@ impl QqChannel {
             config,
             http: Client::new(),
             api_base: DEFAULT_API_BASE.to_string(),
+            auth_base: DEFAULT_AUTH_BASE.to_string(),
+            token: Arc::new(Mutex::new(TokenState::default())),
         }
     }
 
-    /// 测试用：允许注入 api_base_url（如 mockito URL）
+    /// 测试用：允许注入 api_base（同时作为 api_base 和 auth_base，便于 mockito）
     pub fn new_with_api_base(config: QqConfig, api_base: String) -> Self {
         Self {
             config,
             http: Client::new(),
+            auth_base: api_base.clone(),
             api_base,
+            token: Arc::new(Mutex::new(TokenState::default())),
         }
     }
 
-    fn auth_header(&self) -> String {
-        format!("Bot {}.{}", self.config.app_id, self.config.token)
+    /// 获取 access_token，缓存有效则直接返回，否则调 /app/getAppAccessToken 换新
+    pub async fn get_access_token(&self) -> Result<String> {
+        {
+            let st = self.token.lock().await;
+            if st.is_valid() {
+                return Ok(st.access_token.clone());
+            }
+        }
+        // 缓存失效，换新 token
+        let url = format!("{}/app/getAppAccessToken", self.auth_base);
+        let body = serde_json::json!({
+            "appId": self.config.app_id,
+            "clientSecret": self.config.app_secret,
+        });
+        let resp = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("getAppAccessToken failed: status={}, body={}", status, text));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("getAppAccessToken parse json: {}, body={}", e, text))?;
+        let access_token = v
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("getAppAccessToken missing access_token: {}", text))?
+            .to_string();
+        let expires_in = v
+            .get("expires_in")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(7200);
+        let expires_at = Instant::now() + Duration::from_secs(expires_in);
+        let mut st = self.token.lock().await;
+        *st = TokenState {
+            access_token: access_token.clone(),
+            expires_at: Some(expires_at),
+        };
+        tracing::info!(expires_in, "qq access_token refreshed");
+        Ok(access_token)
     }
 
     /// 从腾讯 gateway 接口获取 WebSocket URL
-    /// GET {api_base}/gateway/bot，返回 { "url": "wss://...", "shards": 1, ... }
     pub async fn get_ws_url(&self) -> Result<String> {
+        let token = self.get_access_token().await?;
         let url = format!("{}/gateway/bot", self.api_base);
         let resp = self
             .http
             .get(&url)
-            .header("Authorization", self.auth_header())
+            .header("Authorization", format!("QQBot {}", token))
             .send()
             .await?
             .json::<serde_json::Value>()
@@ -62,11 +131,12 @@ impl QqChannel {
         Ok(ws_url)
     }
 
-    /// 从 WS 收到的 payload 中提取 C2C 文本消息
+    /// 从 WS payload 中提取 C2C 文本消息
     /// 返回 (user_openid, msg_id, text) 或 None
     pub fn extract_c2c_text(payload: &serde_json::Value) -> Option<(String, String, String)> {
-        // 腾讯官方 C2C 消息事件 op=0, t="C2C_MESSAGE_CREATE"
-        if payload.get("t").and_then(|v| v.as_str()) != Some("C2C_MESSAGE_CREATE") {
+        // 腾讯官方 C2C 消息事件 op=0, t="C2C_MESSAGE_CREATE"（私域）或 "PUBLIC_C2C_MESSAGE_CREATE"（公域）
+        let t = payload.get("t").and_then(|v| v.as_str())?;
+        if t != "C2C_MESSAGE_CREATE" && t != "PUBLIC_C2C_MESSAGE_CREATE" {
             return None;
         }
         let d = payload.get("d")?;
@@ -75,12 +145,6 @@ impl QqChannel {
         let content = d.get("content")?.as_str()?.to_string();
         if content.trim().is_empty() {
             return None;
-        }
-        // 跳过自己（bot）发的消息
-        if let Some(bot_id) = &payload.get("d").and_then(|d| d.get("author")).and_then(|a| a.get("id")).and_then(|v| v.as_str()) {
-            // 这里 author.id 是发送者 id，bot 不会收到自己的消息，但保险起见
-            // 如果未来需要从 self.config.bot_qq 判断，可以在这里加
-            let _ = bot_id;
         }
         Some((user_id, msg_id, content))
     }
@@ -93,6 +157,7 @@ impl QqChannel {
         content: &str,
         msg_id: Option<&str>,
     ) -> Result<()> {
+        let token = self.get_access_token().await?;
         let url = format!("{}/v2/users/{}/messages", self.api_base, user_openid);
         let mut body = serde_json::json!({
             "content": content,
@@ -108,7 +173,7 @@ impl QqChannel {
             let resp = self
                 .http
                 .post(&url)
-                .header("Authorization", self.auth_header())
+                .header("Authorization", format!("QQBot {}", token))
                 .header("Content-Type", "application/json")
                 .json(&body)
                 .send()
@@ -165,7 +230,6 @@ impl QqChannel {
             let id = if i == 0 { Some(msg_id) } else { None };
             if let Err(e) = self.send_c2c_message(user_openid, chunk, id).await {
                 tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
-                // 不 return，继续尝试后续片
             }
         }
         Ok(())
@@ -185,18 +249,8 @@ impl Channel for QqChannel {
             .map_err(|e| anyhow!("ws connect: {}", e))?;
         let (mut write, mut read) = ws_stream.split();
 
-        // 注意：完整的腾讯官方鉴权 handshake (IDENTIFY op=2) 需要根据官方文档实现。
-        // 这里只给出骨架。实际运行时需要发送：
-        // {
-        //   "op": 2,
-        //   "d": {
-        //     "token": "Bot {app_id}.{token}",
-        //     "intents": 1 << 25,  // C2C_GROUP_AT_MESSAGE_CREATE
-        //     "shard": [0, 1],
-        //     "properties": { "$os": "linux", "$browser": "laia", "$device": "laia" }
-        //   }
-        // }
-        // 详见 https://bot.q.qq.com/wiki/
+        // 最近收到的 s 序列号，用于心跳
+        let mut last_seq: Option<u64> = None;
 
         loop {
             let msg = read.next().await;
@@ -212,26 +266,42 @@ impl Channel for QqChannel {
 
                     let op = payload.get("op").and_then(|v| v.as_u64()).unwrap_or(0);
 
+                    // 记录 s 序列号（用于心跳）
+                    if let Some(s) = payload.get("s").and_then(|v| v.as_u64()) {
+                        last_seq = Some(s);
+                    }
+
                     // heartbeat ack (op=11)
                     if op == 11 {
                         continue;
                     }
 
-                    // heartbeat request (op=1)
+                    // heartbeat request (op=1)：回复最近 s
                     if op == 1 {
-                        let _ = write.send(Message::Text("1".into())).await;
+                        let d = match last_seq {
+                            Some(s) => serde_json::Value::from(s),
+                            None => serde_json::Value::Null,
+                        };
+                        let hb = serde_json::json!({ "op": 1, "d": d });
+                        let _ = write.send(Message::Text(hb.to_string())).await;
                         continue;
                     }
 
-                    // hello (op=10)：服务端发送，包含 heartbeat_interval
+                    // hello (op=10)：包含 heartbeat_interval，发送 IDENTIFY (op=2)
                     if op == 10 {
-                        // 应在此发送 IDENTIFY (op=2)
-                        // 简化实现：TODO 根据 https://bot.q.qq.com/wiki/ 补全
+                        let interval = payload
+                            .get("d")
+                            .and_then(|d| d.get("heartbeat_interval"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(45000);
+                        tracing::info!(interval, "qq ws hello, sending IDENTIFY");
+
+                        let access_token = self.get_access_token().await?;
                         let identify = serde_json::json!({
                             "op": 2,
                             "d": {
-                                "token": format!("Bot {}.{}", self.config.app_id, self.config.token),
-                                "intents": 1 << 25,
+                                "token": format!("QQBot {}", access_token),
+                                "intents": 1 << 25,  // C2C 消息
                                 "shard": [0, 1],
                                 "properties": {
                                     "$os": std::env::consts::OS,
@@ -241,21 +311,43 @@ impl Channel for QqChannel {
                             }
                         });
                         let _ = write.send(Message::Text(identify.to_string())).await;
+                        // v1.5 简化：心跳只在收到 op=1 时被动回复，不主动定时发送
+                        // 如果服务端断连，进程退出。生产级实现需要 tokio::select! + interval 主动心跳
                         continue;
                     }
 
-                    // 提取 C2C 文本消息
-                    if let Some((user_openid, msg_id, text)) = Self::extract_c2c_text(&payload) {
-                        let this = self.clone();
-                        let agent = agent.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = this
-                                .handle_user_message(&agent, &user_openid, &text, &msg_id)
-                                .await
-                            {
-                                tracing::error!(error = %e, "handle_user_message failed");
-                            }
-                        });
+                    // dispatch 事件 (op=0)
+                    if op == 0 {
+                        let t = payload.get("t").and_then(|v| v.as_str()).unwrap_or("");
+                        // READY 事件：鉴权成功
+                        if t == "READY" {
+                            let session_id = payload
+                                .get("d")
+                                .and_then(|d| d.get("session_id"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            tracing::info!(session_id, "qq ws IDENTIFY success (READY)");
+                            continue;
+                        }
+                        // RESUMED 事件
+                        if t == "RESUMED" {
+                            tracing::info!("qq ws RESUMED");
+                            continue;
+                        }
+
+                        // C2C 文本消息
+                        if let Some((user_openid, msg_id, text)) = Self::extract_c2c_text(&payload) {
+                            let this = self.clone();
+                            let agent = agent.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = this
+                                    .handle_user_message(&agent, &user_openid, &text, &msg_id)
+                                    .await
+                                {
+                                    tracing::error!(error = %e, "handle_user_message failed");
+                                }
+                            });
+                        }
                     }
                 }
                 Some(Ok(Message::Ping(data))) => {
