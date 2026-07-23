@@ -111,8 +111,30 @@ impl QqChannel {
         Ok(access_token)
     }
 
+    /// 清空 token 缓存，下次 get_access_token 会强制刷新
+    async fn invalidate_token(&self) {
+        let mut st = self.token.lock().await;
+        *st = TokenState::default();
+    }
+
     /// 从腾讯 gateway 接口获取 WebSocket URL
     pub async fn get_ws_url(&self) -> Result<String> {
+        match self.get_ws_url_inner(false).await {
+            Ok(url) => Ok(url),
+            Err(first_err) => {
+                // 首次失败若是 token 过期，强制刷新 token 重试一次
+                if first_err.to_string().contains("token not exist or expire") {
+                    tracing::warn!("gateway returned token-expired, force refreshing and retrying");
+                    self.invalidate_token().await;
+                    self.get_ws_url_inner(true).await
+                } else {
+                    Err(first_err)
+                }
+            }
+        }
+    }
+
+    async fn get_ws_url_inner(&self, _force: bool) -> Result<String> {
         let token = self.get_access_token().await?;
         let url = format!("{}/gateway/bot", self.api_base);
         let resp = self
@@ -199,7 +221,7 @@ impl QqChannel {
         Err(last_err.unwrap_or_else(|| anyhow!("unknown error")))
     }
 
-    /// 处理一条用户消息：流式调 agent，等 Done 后分片发送
+    /// 处理一条用户消息：先检查斜杠命令，否则流式调 agent，等 Done 后分片发送
     async fn handle_user_message(
         self: Arc<Self>,
         agent: &Arc<Mutex<Agent>>,
@@ -209,7 +231,30 @@ impl QqChannel {
     ) -> Result<()> {
         tracing::info!(user = %user_openid, text = %text, "qq received message");
 
-        // spawn 子任务调 agent，主任务并发消费 rx，避免 send 阻塞死锁
+        // 斜杠命令：在锁内处理，把输出发回用户
+        if text.trim().starts_with('/') {
+            let outcome = {
+                let mut a = agent.lock().await;
+                crate::commands::slash::try_handle(text, &mut *a).await?
+            };
+            match outcome {
+                crate::commands::slash::SlashOutcome::Exit => {
+                    // QQ 下忽略 /exit，不退出
+                    let _ = self
+                        .send_c2c_message(user_openid, "[/exit 在 QQ 下不可用]", Some(msg_id))
+                        .await;
+                }
+                crate::commands::slash::SlashOutcome::Handled(msg) => {
+                    let _ = self.send_c2c_message(user_openid, &msg, Some(msg_id)).await;
+                }
+                crate::commands::slash::SlashOutcome::NotSlash => {
+                    // 不会走到这里（已检查 starts_with '/'）
+                }
+            }
+            return Ok(());
+        }
+
+        // 普通消息：spawn 子任务调 agent，主任务并发消费 rx，避免 send 阻塞死锁
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let agent_clone = agent.clone();
         let text_clone = text.to_string();

@@ -53,7 +53,10 @@ impl Channel for CliChannel {
             };
             match outcome {
                 SlashOutcome::Exit => break,
-                SlashOutcome::Handled => continue,
+                SlashOutcome::Handled(msg) => {
+                    println!("{}", msg);
+                    continue;
+                }
                 SlashOutcome::NotSlash => {
                     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
                     let agent_clone = agent.clone();
@@ -187,7 +190,7 @@ pub async fn build_agent(config: &Config) -> Result<Arc<Mutex<Agent>>> {
         session_store,
         session_id,
         system_prompt,
-        8192,
+        model_cfg.context_size,
     )
     .await;
 

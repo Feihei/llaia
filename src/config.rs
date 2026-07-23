@@ -93,10 +93,18 @@ pub struct ModelConfig {
     pub model: String,
     #[serde(default = "default_true")]
     pub native_tool_calling: bool,
+    /// 模型上下文窗口大小（tokens），用于判断何时触发自动压缩。
+    /// 默认 8192，大模型请按实际配置（如 128000）。
+    #[serde(default = "default_context_size")]
+    pub context_size: usize,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_context_size() -> usize {
+    8192
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +245,7 @@ impl Config {
             ModelConfig {
                 model: "qwen2.5:7b".into(),
                 native_tool_calling: true,
+                context_size: default_context_size(),
             },
         );
         provider.insert(

@@ -2,11 +2,13 @@ use crate::agent::Agent;
 use anyhow::Result;
 
 pub enum SlashOutcome {
-    Handled,
+    Handled(String),
     Exit,
     NotSlash,
 }
 
+/// 处理斜杠命令，返回 (outcome, 输出文本)。
+/// 输出文本由调用方决定如何呈现（CLI 打印，QQ 发回用户）。
 pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
     let trimmed = line.trim();
     if !trimmed.starts_with('/') {
@@ -18,54 +20,48 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
     };
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
-        "/help" => {
-            println!("commands: /new /exit /compact /clear /remember <text> /config /help");
-            Ok(SlashOutcome::Handled)
-        }
+        "/help" => Ok(SlashOutcome::Handled(
+            "commands: /new /exit /compact /clear /remember <text> /config /help".into(),
+        )),
         "/new" => {
             agent.context.clear();
             agent.context.summary = None;
-            println!("[new session]");
-            Ok(SlashOutcome::Handled)
+            Ok(SlashOutcome::Handled("[new session]".into()))
         }
         "/clear" => {
             agent.context.clear();
             agent.context.summary = None;
-            println!("[context cleared]");
-            Ok(SlashOutcome::Handled)
+            Ok(SlashOutcome::Handled("[context cleared]".into()))
         }
-        "/compact" => {
-            match agent.context.compact(agent.provider.as_ref(), 6).await {
-                Ok(_) => println!("[compacted]"),
-                Err(e) => println!("[compact failed: {}]", e),
-            }
-            Ok(SlashOutcome::Handled)
-        }
+        "/compact" => match agent.context.compact(agent.provider.as_ref(), 6).await {
+            Ok(_) => Ok(SlashOutcome::Handled("[compacted]".into())),
+            Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
+        },
         "/remember" => {
             if args.is_empty() {
-                println!("usage: /remember <text>");
+                Ok(SlashOutcome::Handled("usage: /remember <text>".into()))
             } else if let Some(tool) = agent.tools.get("memory_write") {
-                let _ = tool
-                    .execute(&serde_json::json!({"entry": args}))
-                    .await;
-                println!("[remembered]");
+                let _ = tool.execute(&serde_json::json!({"entry": args})).await;
+                Ok(SlashOutcome::Handled("[remembered]".into()))
             } else {
-                println!("[memory_write tool not registered]");
+                Ok(SlashOutcome::Handled("[memory_write tool not registered]".into()))
             }
-            Ok(SlashOutcome::Handled)
         }
         "/config" => {
-            println!("context_threshold: {}", agent.context_threshold);
-            println!("max_iterations: {}", agent.max_iterations);
-            println!("max_tokens: {}", agent.max_tokens);
-            println!("history msgs: {}", agent.context.history.len());
-            println!("summary: {}", agent.context.summary.is_some());
-            println!("tools: {:?}", agent.tools.names());
-            Ok(SlashOutcome::Handled)
+            let info = format!(
+                "context_threshold: {}\nmax_iterations: {}\nmax_tokens: {}\nhistory msgs: {}\nsummary: {}\ntools: {:?}",
+                agent.context_threshold,
+                agent.max_iterations,
+                agent.max_tokens,
+                agent.context.history.len(),
+                agent.context.summary.is_some(),
+                agent.tools.names()
+            );
+            Ok(SlashOutcome::Handled(info))
         }
-        _ => {
-            println!("[unknown command: {}]", cmd);
-            Ok(SlashOutcome::Handled)
-        }
+        _ => Ok(SlashOutcome::Handled(format!(
+            "[unknown command: {}]",
+            cmd
+        ))),
     }
 }
