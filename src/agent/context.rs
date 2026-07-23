@@ -52,9 +52,9 @@ impl Context {
         self.history.clear();
     }
 
-    pub fn needs_compaction(&self, max_tokens: usize, threshold: f64) -> bool {
+    pub fn needs_compaction(&self, context_size: usize, threshold: f64) -> bool {
         let current = self.estimate_tokens();
-        (current as f64 / max_tokens as f64) > threshold
+        (current as f64 / context_size as f64) > threshold
     }
 
     pub async fn compact(&mut self, provider: &dyn Provider, keep_recent: usize) -> Result<()> {

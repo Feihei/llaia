@@ -183,6 +183,21 @@ pub async fn build_agent(config: &Config) -> Result<Arc<Mutex<Agent>>> {
         }
     };
 
+    // context_size: min(配置值, 探测值)，探测不到用配置值，都没有用默认 8192
+    let detected = provider.detect_context_size().await;
+    let context_size = match (model_cfg.context_size, detected) {
+        (Some(cfg), Some(det)) => cfg.min(det),
+        (Some(cfg), None) => cfg,
+        (None, Some(det)) => det,
+        (None, None) => 8192,
+    };
+    tracing::info!(
+        configured = ?model_cfg.context_size,
+        detected = ?detected,
+        final = context_size,
+        "context_size resolved"
+    );
+
     let agent = Agent::new(
         config,
         provider,
@@ -190,7 +205,7 @@ pub async fn build_agent(config: &Config) -> Result<Arc<Mutex<Agent>>> {
         session_store,
         session_id,
         system_prompt,
-        model_cfg.context_size,
+        context_size,
     )
     .await;
 

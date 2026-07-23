@@ -49,10 +49,10 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
         }
         "/config" => {
             let info = format!(
-                "context_threshold: {}\nmax_iterations: {}\nmax_tokens: {}\nhistory msgs: {}\nsummary: {}\ntools: {:?}",
+                "context_threshold: {}\nmax_iterations: {}\ncontext_size: {}\nhistory msgs: {}\nsummary: {}\ntools: {:?}",
                 agent.context_threshold,
                 agent.max_iterations,
-                agent.max_tokens,
+                agent.context_size,
                 agent.context.history.len(),
                 agent.context.summary.is_some(),
                 agent.tools.names()

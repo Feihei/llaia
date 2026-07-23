@@ -276,6 +276,83 @@ impl Provider for OpenAiCompatibleProvider {
     fn native_tool_calling(&self) -> bool {
         self.native_tool_calling
     }
+
+    /// 探测模型上下文窗口大小。
+    /// 先尝试 llama.cpp 特征端点 /props，再尝试 Ollama 的 /api/tags + /api/show。
+    /// 探测失败返回 None。
+    async fn detect_context_size(&self) -> Option<usize> {
+        // llama.cpp: GET /props → default_generation_settings.n_ctx
+        if let Some(n) = self.try_llamacpp_props().await {
+            tracing::info!(n_ctx = n, "detected context_size from llama.cpp /props");
+            return Some(n);
+        }
+        // Ollama: POST /api/show → model_info["<arch>.context_length"]
+        if let Some(n) = self.try_ollama_show().await {
+            tracing::info!(n_ctx = n, "detected context_size from ollama /api/show");
+            return Some(n);
+        }
+        None
+    }
+}
+
+impl OpenAiCompatibleProvider {
+    /// 尝试 llama.cpp 的 /props 端点
+    async fn try_llamacpp_props(&self) -> Option<usize> {
+        let url = format!("{}/props", self.base_url);
+        let resp = self.client.get(&url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = resp.json().await.ok()?;
+        v.get("default_generation_settings")?
+            .get("n_ctx")?
+            .as_u64()
+            .map(|n| n as usize)
+    }
+
+    /// 尝试 Ollama 的 /api/show 端点
+    async fn try_ollama_show(&self) -> Option<usize> {
+        // 先用 /api/tags 确认是 Ollama 后端
+        let tags_url = format!("{}/api/tags", self.base_url);
+        let tags_resp = self.client.get(&tags_url).send().await.ok()?;
+        if !tags_resp.status().is_success() {
+            return None;
+        }
+        // POST /api/show {"model": "<model>"}
+        let show_url = format!("{}/api/show", self.base_url);
+        let resp = self
+            .client
+            .post(&show_url)
+            .json(&serde_json::json!({ "model": self.model }))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = resp.json().await.ok()?;
+        // model_info 里找 *.context_length
+        if let Some(info) = v.get("model_info").and_then(|m| m.as_object()) {
+            for (k, val) in info {
+                if k.ends_with(".context_length") {
+                    if let Some(n) = val.as_u64() {
+                        return Some(n as usize);
+                    }
+                }
+            }
+        }
+        // 回退：parameters 字段解析 "num_ctx <n>"
+        if let Some(params) = v.get("parameters").and_then(|p| p.as_str()) {
+            for line in params.lines() {
+                if let Some(rest) = line.trim().strip_prefix("num_ctx ") {
+                    if let Ok(n) = rest.trim().parse::<usize>() {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Default)]

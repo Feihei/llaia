@@ -32,7 +32,8 @@ pub struct Agent {
     pub context: Context,
     pub session_store: Arc<SessionStore>,
     pub session_id: i64,
-    pub max_tokens: usize,
+    /// 模型上下文窗口大小（tokens），用于判断何时触发自动压缩
+    pub context_size: usize,
     pub context_threshold: f64,
     pub max_iterations: u32,
     pub qq_confirm_mode: String,
@@ -46,7 +47,7 @@ impl Agent {
         session_store: Arc<SessionStore>,
         session_id: i64,
         system_prompt: String,
-        max_tokens: usize,
+        context_size: usize,
     ) -> Self {
         Self {
             provider,
@@ -54,7 +55,7 @@ impl Agent {
             context: Context::new(system_prompt),
             session_store,
             session_id,
-            max_tokens,
+            context_size,
             context_threshold: config.runtime.context_threshold,
             max_iterations: config.runtime.max_iterations,
             qq_confirm_mode: config.channels.qq.confirm_mode.clone(),
@@ -92,7 +93,7 @@ impl Agent {
 
         if self
             .context
-            .needs_compaction(self.max_tokens, self.context_threshold)
+            .needs_compaction(self.context_size, self.context_threshold)
         {
             if let Err(e) = self.context.compact(self.provider.as_ref(), 6).await {
                 tracing::warn!(error = %e, "auto-compact failed");

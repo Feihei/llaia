@@ -114,6 +114,10 @@ pub trait Provider: Send + Sync {
         req: &ChatRequest<'_>,
     ) -> BoxStream<'_, Result<StreamEvent>>;
     fn native_tool_calling(&self) -> bool;
+    /// 探测模型上下文窗口大小（tokens）。默认返回 None，由具体 provider 实现。
+    async fn detect_context_size(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[cfg(test)]
