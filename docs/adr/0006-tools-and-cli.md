@@ -5,11 +5,11 @@
 
 ## 背景
 
-需要确定 v1 主 Agent 挂载哪些工具、终端命令的安全策略、CLI 入口形态和斜杠命令清单。
+需要确定 P1 主 Agent 挂载哪些工具、终端命令的安全策略、CLI 入口形态和斜杠命令清单。
 
 ## 决策
 
-### v1 工具集（最小集）
+### P1 工具集（最小集）
 
 | 工具 | 用途 | 备注 |
 |---|---|---|
@@ -24,7 +24,7 @@
 | `session_*` | 会话 sqlite 读写 | 内部实现，不暴露给 LLM |
 
 不单列 ls/grep——让 LLM 走 `terminal` 工具调系统命令。
-不单列 glob/search——v1 用终端命令凑，v2 视需要再加。
+不单列 glob/search——P1 用终端命令凑，P2 视需要再加。
 
 ### 终端命令安全
 
@@ -63,16 +63,16 @@ whitelist = ["ls", "cat", "grep", "pwd", "dir"]
 | `/config` | 查看当前配置 |
 | `/help` | 帮助 |
 
-不做 `/undo`、`/show`、`/model`（v2 视需要）。
+不做 `/undo`、`/show`、`/model`（P2 视需要）。
 
 ### 自动环境发现
 
-v1 不做（扫 PATH、检测 python/nodejs/rust 版本、生成工具描述——工程量大）。
-v1 直接把工具写死。v2 再做。
+P1 不做（扫 PATH、检测 python/nodejs/rust 版本、生成工具描述——工程量大）。
+P1 直接把工具写死。P2 再做。
 
 ## 影响
 
-- 工具 trait 设计要支持 v2 的白名单过滤，但 v1 不过滤
+- 工具 trait 设计要支持 P2 的白名单过滤，但 P1 不过滤
 - REPL 解析层要区分斜杠命令与普通输入
 - `laia remember` 子命令是 `memory_write` 工具的 CLI 快捷方式
 

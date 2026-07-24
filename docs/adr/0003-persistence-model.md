@@ -53,7 +53,7 @@ USER.md 列出 owner 在各频道的身份清单，任一频道命中即认作 o
 
 ## 影响
 
-- MEMORY 检索 v1 用全文搜索，v2 视需要再加向量索引
+- MEMORY 检索 P1 用全文搜索，P2 视需要再加向量索引
 - sqlite schema 不需要 memory 表，只需要 sessions/messages/tool_calls
 - 启动流程：读 SOUL.md + USER.md + MEMORY.md 拼入 system prompt
 

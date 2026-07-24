@@ -1,12 +1,12 @@
-# v1.5: QQ Channel 接入设计
+# P1.5: QQ Channel 接入设计
 
 - 状态：Spec
 - 日期：2026-07-21
-- 目标版本：v1.5
+- 目标版本：P1.5
 
 ## 背景
 
-v1 已完成 CLI channel 的 LAIA MVP。v1.5 的目标是接入腾讯官方 QQ 开放平台机器人，让用户可以通过 QQ 单聊与 LAIA 交互，实现"跨频道接续会话"的核心设计。
+P1 已完成 CLI channel 的 LAIA MVP。P1.5 的目标是接入腾讯官方 QQ 开放平台机器人，让用户可以通过 QQ 单聊与 LAIA 交互，实现"跨频道接续会话"的核心设计。
 
 ## 范围
 
@@ -212,5 +212,5 @@ src/
 ## 风险与开放问题
 
 1. **腾讯官方 API 鉴权细节**：spec 阶段未深入协议细节（WebSocket endpoint 路径、事件 payload schema、鉴权 handshake）。实现阶段需查阅官方文档：https://bot.q.qq.com/wiki/
-2. **token 安全**：当前 config 明文存 token，与 v1 tavily api_key 一致。后续 ADR 单独讨论环境变量插值。
-3. **CLI 跟 QQ 同时运行的进程模型**：spec 假设单进程多 task。如果用户希望 CLI 和 QQ 分进程运行（例如 QQ 守护进程常驻、CLI 按需启动），需要重新设计 session 共享（当前 SessionStore 是 `Arc<Mutex<Connection>>`，跨进程会冲突）。**v1.5 接受单进程限制，文档中注明。**
+2. **token 安全**：当前 config 明文存 token，与 P1 tavily api_key 一致。后续 ADR 单独讨论环境变量插值。
+3. **CLI 跟 QQ 同时运行的进程模型**：spec 假设单进程多 task。如果用户希望 CLI 和 QQ 分进程运行（例如 QQ 守护进程常驻、CLI 按需启动），需要重新设计 session 共享（当前 SessionStore 是 `Arc<Mutex<Connection>>`，跨进程会冲突）。**P1.5 接受单进程限制，文档中注明。**

@@ -3,14 +3,14 @@
 ## Agent 相关
 
 ### 主 Agent（Main Agent）
-LAIA v1 唯一的 Agent，单干所有任务。用户所有交互都直接与主 Agent 进行。
-v2 引入子 Agent 后，主 Agent 负责委派与结果整合。
+LAIA P1 唯一的 Agent，单干所有任务。用户所有交互都直接与主 Agent 进行。
+P2 引入子 Agent 后，主 Agent 负责委派与结果整合。
 配置 section：`[agent.main]`。
 
 ### 子 Agent（Sub Agent）
-v2 引入的概念。由用户通过 Web 面板预定义（起名、写提示词、勾选工具白名单）。
+P2 引入的概念。由用户通过 Web 面板预定义（起名、写提示词、勾选工具白名单）。
 主 Agent 遇到特定任务时整体委派给对应子 Agent，子 Agent 起独立会话执行，
-结果回传主 Agent 整合后再回用户。v1 不存在子 Agent。
+结果回传主 Agent 整合后再回用户。P1 不存在子 Agent。
 
 ### 委派（Delegation）
 主 Agent 把特定任务整体甩给子 Agent 独立完成的模式。
@@ -84,7 +84,7 @@ schema 见 ADR-0004。上下文压缩时旧消息从内存移除但 sqlite 留�
 ## Provider 相关
 
 ### Provider
-LLM 服务提供方抽象。v1 只实现 `OpenAiCompatible` 一种，配置 section：`[provider.default]`。
+LLM 服务提供方抽象。P1 只实现 `OpenAiCompatible` 一种，配置 section：`[provider.default]`。
 Provider trait 含 `native_tool_calling: bool` 能力声明，决定工具调用协议走原生还是标签降级。
 
 ### OpenAiCompatible Provider
@@ -103,10 +103,10 @@ provider 返回结构化的 `tool_calls` 字段，无需文本解析。
 ## 工具相关
 
 ### Tool
-主 Agent 可调用的能力。v1 最小集：`file_read`、`file_write`、`file_edit`、
+主 Agent 可调用的能力。P1 最小集：`file_read`、`file_write`、`file_edit`、
 `terminal`、`web_fetch`、`tavily_search`、`memory_write`。
 `memory_read` 和 `session_*` 为内部实现，不暴露给 LLM。
-v2 引入工具白名单，按子 Agent 过滤可见工具。
+P2 引入工具白名单，按子 Agent 过滤可见工具。
 
 ### 终端命令安全（Terminal Safety）
 配置项 `[tools.terminal].confirm` 控制：
@@ -117,14 +117,14 @@ v2 引入工具白名单，按子 Agent 过滤可见工具。
 ## 频道相关
 
 ### 频道（Channel）
-消息出入口。v1 只有 CLI 频道，v1.5 加 QQ，v2 加 Web 面板、邮箱。
+消息出入口。P1 只有 CLI 频道，P1.5 加 QQ，P2 加 Web 面板、邮箱。
 所有频道共享同一会话上下文（同用户同会话）。
 
 ### CLI REPL
 `laia chat` 进入的交互式命令行。支持斜杠命令。
 
 ### 斜杠命令（Slash Command）
-REPL 内以 `/` 开头的指令。v1 清单：
+REPL 内以 `/` 开头的指令。P1 清单：
 `/new` `/exit` `/compact` `/clear` `/remember` `/config` `/help`。
 
 ## CLI 子命令
@@ -143,28 +143,28 @@ REPL 内以 `/` 开头的指令。v1 清单：
 
 ## 版本规划
 
-### v1（MVP）
+### P1（MVP）
 单主 Agent + CLI + 本地 provider + 基础工具 + 三份 md + sqlite 会话。
 验收标准见 ADR-0006 与 grilling 第六轮 Q34。
 
-### v1.5
+### P1.5
 加 QQ bot 频道（单聊每条必回，已有 bot 账号）。
 
-### v2
+### P2
 Web 控制面板、子 Agent 委派、邮箱频道、MCP、skill、cron、自动环境发现、
 流式输出、多 provider、FTS5 全文搜索、向量记忆索引。
 
 ## 工程约定
 
 ### 命名式配置 Section
-`[provider.<id>]` / `[agent.<alias>]` 结构。v1 只认 `default` 和 `main`，
-v2 加多 provider/多 agent 时只增 section 不改 schema。
+`[provider.<id>]` / `[agent.<alias>]` 结构。P1 只认 `default` 和 `main`，
+P2 加多 provider/多 agent 时只增 section 不改 schema。
 
 ### 错误处理
-v1 用 `anyhow::Result` 全局兜底。v2 视需要对外 API 引入 `thiserror`。
+P1 用 `anyhow::Result` 全局兜底。P2 视需要对外 API 引入 `thiserror`。
 
 ### 日志
-tracing，v1 只配一个 fmt layer 输出到文件（`~/.laia/logs/`）+ stderr。
+tracing，P1 只配一个 fmt layer 输出到文件（`~/.laia/logs/`）+ stderr。
 
 ### 工作区目录
 默认 `~/.laia/`，用户可在 `[workspace].dir` 配置中改到别处。

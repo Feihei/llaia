@@ -6,13 +6,13 @@
 
 ## 背景
 
-v1 实现完成后，用户在使用过程中发现 config schema 存在以下问题：
+P1 实现完成后，用户在使用过程中发现 config schema 存在以下问题：
 
 1. **md 文件路径需重复书写**：`[agent.main]` 下必须显式写 `soul/user/memory` 三个绝对路径，即使用户已通过 `[workspace].dir` 指定了工作区。
-2. **`context_threshold` 放错位置**：v1 把它放在 `[agent.main]` 下，但它本质是全局运行时参数，与具体 agent 无关。
+2. **`context_threshold` 放错位置**：P1 把它放在 `[agent.main]` 下，但它本质是全局运行时参数，与具体 agent 无关。
 3. **`max_iterations` 未暴露**：硬编码在 `agent/mod.rs` 的 `10`，不可配置。
-4. **provider 与 model 耦合**：v1 的 `[provider.default]` 直接平铺 `model` 和 `native_tool_calling`，导致一个 provider 端点（base_url + api_key）只能配一个模型组合。实际场景中同一 Ollama/LMStudio 实例下挂多个模型很常见。
-5. **`workspace` 是顶层字段**：但 workspace 在语义上属于 agent（v2 多 agent 各自独立 workspace），放顶层不合理。
+4. **provider 与 model 耦合**：P1 的 `[provider.default]` 直接平铺 `model` 和 `native_tool_calling`，导致一个 provider 端点（base_url + api_key）只能配一个模型组合。实际场景中同一 Ollama/LMStudio 实例下挂多个模型很常见。
+5. **`workspace` 是顶层字段**：但 workspace 在语义上属于 agent（P2 多 agent 各自独立 workspace），放顶层不合理。
 6. **sessions.db 路径硬编码**：代码里写死 `workspace.join("sessions.db")`，schema 没体现。
 7. **log.dir 默认值写死 `~/.laia/logs`**：与 workspace 脱节。
 
@@ -26,7 +26,7 @@ workspace = "e:/play/coding/laia/.test"
 ```
 
 - 每个 agent 独立 workspace，互不干扰
-- v2 子 agent 在各自 `[agent.<alias>].workspace` 下
+- P2 子 agent 在各自 `[agent.<alias>].workspace` 下
 - md 文件 (`SOUL.md`/`USER.md`/`MEMORY.md`) 默认从 workspace 推导，可显式覆盖
 - `sessions.db` 硬编码为 `<workspace>/sessions.db`，不暴露 config
 
@@ -62,7 +62,7 @@ max_iterations = 10       # agent 工具循环上限，默认 10
 ```
 
 - 从 `[agent.main]` 提到全局
-- v2 多 agent 共享同一阈值；若未来需要差异化，再回退到 agent 节覆盖
+- P2 多 agent 共享同一阈值；若未来需要差异化，再回退到 agent 节覆盖
 
 ### 4. md 路径推导规则
 
@@ -114,10 +114,10 @@ api_key = ""
 
 ## 遗留问题（推迟到后续 ADR）
 
-- **环境变量插值**：`${TAVILY_API_KEY}` 语法避免明文存储，待 v2 安全性增强时讨论。
+- **环境变量插值**：`${TAVILY_API_KEY}` 语法避免明文存储，待 P2 安全性增强时讨论。
 - **`--config <path>` CLI 参数**：当前 config 路径写死 `~/.laia/config.toml`，多实例场景需 CLI 参数覆盖。
-- **tools 改为 HashMap**：当前 `ToolsConfig` 是固定 struct，加新工具要改 struct。v2 加新工具多了再重构。
-- **工具 enabled 字段**：当前 FileRead/FileWrite/Terminal 永远注册，无法关闭。v1.5 加 web 面板时一起改。
+- **tools 改为 HashMap**：当前 `ToolsConfig` 是固定 struct，加新工具要改 struct。P2 加新工具多了再重构。
+- **工具 enabled 字段**：当前 FileRead/FileWrite/Terminal 永远注册，无法关闭。P1.5 加 web 面板时一起改。
 
 ## 影响的代码
 

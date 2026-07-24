@@ -1,19 +1,23 @@
 use crate::agent::runner::ToolRegistry;
 use crate::agent::Agent;
+use crate::agent::AgentRegistry;
 use crate::agent::TurnEvent;
 use crate::channels::Channel;
 use crate::commands::slash::{try_handle, SlashOutcome};
-use crate::config::Config;
+use crate::config::{AgentConfig, Config};
 use crate::memory::sqlite::SessionStore;
 use crate::memory::{ensure_template, load_md, MEMORY_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE};
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
 use crate::provider::Provider;
 use crate::tool_call::build_tool_instructions;
+use crate::tools::delegate::DelegateTool;
 use crate::tools::file::{FileEdit, FileRead, FileWrite};
 use crate::tools::memory::MemoryWrite;
+use crate::tools::send_media::{SendFile, SendImage};
 use crate::tools::tavily::TavilySearch;
 use crate::tools::terminal::Terminal;
 use crate::tools::web::WebFetch;
+use crate::tools::Tool;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::io::{BufRead, Write};
@@ -31,86 +35,257 @@ impl CliChannel {
 
 #[async_trait]
 impl Channel for CliChannel {
-    async fn run(self: Arc<Self>, agent: Arc<Mutex<Agent>>) -> Result<()> {
-        println!("laia v0.1.5 - type /help for commands, /exit to quit\n");
-        let stdin = std::io::stdin();
-        loop {
-            print!("> ");
-            std::io::stdout().flush()?;
-            let mut line = String::new();
-            if stdin.lock().read_line(&mut line)? == 0 {
-                break;
+    async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
+        let agent = registry.main.clone();
+        // 缓存 workspace 路径，用于解析 @path 图片引用的相对路径
+        let workspace = {
+            let a = agent.lock().await;
+            a.workspace.clone()
+        };
+        println!("(੭aᴗa)੭ Laia - Come On~\nlaia v0.1.0 - type /help for commands, /exit to quit, /stop to interrupt\n");
+        println!("生成中可继续输入，/stop 立即中断，Ctrl+C 紧急中断\n");
+
+        // 后台读 stdin 的 task：把每行输入送到 mpsc，EOF 时发 None
+        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Option<String>>(16);
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            loop {
+                let mut line = String::new();
+                match stdin.lock().read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = stdin_tx.blocking_send(None);
+                        break;
+                    }
+                    Ok(_) => {
+                        let trimmed = line.trim().to_string();
+                        if !trimmed.is_empty() {
+                            if stdin_tx.blocking_send(Some(trimmed)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        let _ = stdin_tx.blocking_send(None);
+                        break;
+                    }
+                }
             }
-            let line = line.trim();
-            if line.is_empty() {
+        });
+
+        // 待处理输入队列：生成中收到的普通输入排入此处
+        let mut queued_inputs: Vec<String> = Vec::new();
+
+        loop {
+            if queued_inputs.is_empty() {
+                print!("> ");
+            } else {
+                print!("> ({} queued) ", queued_inputs.len());
+            }
+            std::io::stdout().flush()?;
+
+            // 取下一条输入：优先队列，否则等 stdin
+            let line = if let Some(q) = queued_inputs.first().cloned() {
+                queued_inputs.remove(0);
+                q
+            } else {
+                tokio::select! {
+                    input = stdin_rx.recv() => match input {
+                        Some(Some(l)) => l,
+                        Some(None) | None => break, // EOF
+                    },
+                    // 空闲态 Ctrl+C：等价于 /exit，优雅退出
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("\n[goodbye]");
+                        break;
+                    }
+                }
+            };
+
+            // /stop 在空闲态无意义
+            if line == "/stop" {
+                println!("[no active generation to stop]");
                 continue;
             }
 
-            // 用独立块限定 MutexGuard 生命周期，避免其延续到 match arm 内导致死锁
-            let outcome = {
-                let mut a = agent.lock().await;
-                try_handle(line, &mut *a).await?
-            };
-            match outcome {
-                SlashOutcome::Exit => break,
-                SlashOutcome::Handled(msg) => {
-                    println!("{}", msg);
-                    continue;
+            // 斜杠命令（非 /stop）：同步处理
+            if line.starts_with('/') {
+                let outcome = {
+                    let mut a = agent.lock().await;
+                    try_handle(&line, &mut *a).await?
+                };
+                match outcome {
+                    SlashOutcome::Exit => break,
+                    SlashOutcome::Handled(msg) => {
+                        println!("{}", msg);
+                        continue;
+                    }
+                    SlashOutcome::NotSlash => {} // 不会到这里（已 starts_with '/'）
                 }
-                SlashOutcome::NotSlash => {
-                    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-                    let agent_clone = agent.clone();
-                    let input_clone = line.to_string();
-                    tokio::spawn(async move {
-                        let mut a = agent_clone.lock().await;
-                        if let Err(e) = a
-                            .handle_input_streaming(&input_clone, "cli", tx)
-                            .await
-                        {
-                            tracing::error!(error = %e, "handle_input_streaming failed");
-                        }
+            }
+
+            // 普通输入：解析 @path 图片引用，构造消息
+            // @path/to/image.jpg 语法：@ 开头的 token 视为图片路径
+            // 相对路径相对于 agent workspace 解析（与 file_read 等工具一致）
+            let mut image_paths = Vec::new();
+            let mut text_parts = Vec::new();
+            for token in line.split_whitespace() {
+                if let Some(p) = token.strip_prefix('@') {
+                    image_paths.push(p.to_string());
+                } else {
+                    text_parts.push(token);
+                }
+            }
+            let text = text_parts.join(" ");
+
+            // 构造消息：有图片则多模态，否则纯文本
+            let user_msg = if image_paths.is_empty() {
+                Some(crate::provider::ChatMessage::user(&line))
+            } else {
+                let mut parts: Vec<crate::provider::ContentPart> = Vec::new();
+                if !text.is_empty() {
+                    parts.push(crate::provider::ContentPart::Text {
+                        text: text.clone(),
                     });
-                    println!();  // 换行，分隔 prompt 和回复
-                    while let Some(ev) = rx.recv().await {
+                }
+                for img_path in &image_paths {
+                    // 相对路径解析到 workspace；绝对路径直接用（resolve_within 内部处理）
+                    let resolved = match crate::tools::file::resolve_within(&workspace, img_path) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            println!("[failed to resolve {}: {}]", img_path, e);
+                            continue;
+                        }
+                    };
+                    if !crate::image_utils::is_image_file(&resolved) {
+                        println!("[skip {}: not an image]", img_path);
+                        continue;
+                    }
+                    match crate::image_utils::prepare_image_for_vision(&resolved) {
+                        Ok(data_url) => {
+                            println!("[loaded image: {}]", img_path);
+                            parts.push(crate::provider::ContentPart::ImageUrl {
+                                image_url: crate::provider::ImageUrlContent { url: data_url },
+                            });
+                        }
+                        Err(e) => {
+                            println!("[failed to load {}: {}]", img_path, e);
+                        }
+                    }
+                }
+                if parts.is_empty() {
+                    None // 没有有效内容，跳过
+                } else {
+                    Some(crate::provider::ChatMessage::user_multimodal(parts))
+                }
+            };
+
+            let user_msg = match user_msg {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // spawn agent task，进入生成态
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            let agent_clone = agent.clone();
+            tokio::spawn(async move {
+                let mut a = agent_clone.lock().await;
+                if let Err(e) = a
+                    .handle_message_streaming(user_msg, "cli", tx)
+                    .await
+                {
+                    tracing::error!(error = %e, "handle_message_streaming failed");
+                }
+            });
+            println!(); // 换行，分隔 prompt 和回复
+            print!(">> "); // 生成态提示符：可输入排队或 /stop（与回复同行）
+            std::io::stdout().flush()?;
+
+            // 生成态：select 监听 agent 事件 / stdin 输入 / Ctrl+C
+            loop {
+                tokio::select! {
+                    // Ctrl+C：紧急中断（与 /stop 等价）
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("\n[stopped]");
+                        break;
+                    }
+                    // stdin 有输入：/stop 中断，其他排入队列
+                    input = stdin_rx.recv() => {
+                        match input {
+                            Some(Some(l)) if l == "/stop" => {
+                                println!("\n[stopped]");
+                                break;
+                            }
+                            Some(Some(l)) => {
+                                println!("[queued: {}]", l);
+                                queued_inputs.push(l);
+                            }
+                            Some(None) | None => {
+                                // stdin EOF：等当前生成结束
+                            }
+                        }
+                    }
+                    // agent 事件
+                    ev = rx.recv() => {
                         match ev {
-                            TurnEvent::Chunk { delta } => {
+                            Some(TurnEvent::Chunk { delta }) => {
                                 print!("{}", delta);
                                 std::io::stdout().flush().ok();
                             }
-                            TurnEvent::ToolStart { name, .. } => {
+                            Some(TurnEvent::ToolStart { name, .. }) => {
                                 println!("\n[tool: {}]", name);
                             }
-                            TurnEvent::ToolResult { output, .. } => {
+                            Some(TurnEvent::ToolResult { output, .. }) => {
                                 let preview = if output.len() > 200 {
-                                    format!("{}...(truncated)", &output[..200])
+                                    let mut end = 200;
+                                    while end > 0 && !output.is_char_boundary(end) {
+                                        end -= 1;
+                                    }
+                                    format!("{}...(truncated)", &output[..end])
                                 } else {
                                     output
                                 };
                                 println!("[result: {}]", preview);
                             }
-                            TurnEvent::Done => {
-                                println!("\n");
+                            Some(TurnEvent::MediaOutput { path, kind }) => {
+                                // CLI 模式下仅打印路径（终端原生不支持图片显示）
+                                let label = match kind {
+                                    crate::agent::MediaKind::Image => "image",
+                                    crate::agent::MediaKind::File => "file",
+                                };
+                                println!("[sent {}: {}]", label, path);
                             }
-                            TurnEvent::Error { message } => {
+                            Some(TurnEvent::Done) => {
+                                println!("\n");
+                                break;
+                            }
+                            Some(TurnEvent::Error { message }) => {
                                 println!("\n[error: {}]\n", message);
+                                break;
+                            }
+                            None => {
+                                // agent task 结束
+                                println!();
+                                break;
                             }
                         }
                     }
                 }
             }
+            // 中断或正常结束时 rx 被 drop，spawn 的 task 检测 tx closed 自动结束并保存部分输出
+            drop(rx);
         }
         Ok(())
     }
 }
 
-/// 构建 Agent 实例（CLI 和 QQ 共用）
-pub async fn build_agent(config: &Config) -> Result<Arc<Mutex<Agent>>> {
-    let agent_cfg = config
-        .agent
-        .get("main")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("agent.main not configured"))?;
-
+/// 构建单个 Agent 实例。返回 (Agent, 可能的 delegate 工具)
+/// is_main=true 且 config 有子 Agent 时，挂载 delegate 工具并返回其引用用于后续注入 registry
+async fn build_single_agent(
+    config: &Config,
+    alias: &str,
+    agent_cfg: AgentConfig,
+    is_main: bool,
+) -> Result<(Arc<Mutex<Agent>>, Option<Arc<DelegateTool>>)> {
     let workspace = PathBuf::from(&agent_cfg.workspace);
     std::fs::create_dir_all(&workspace).ok();
 
@@ -146,28 +321,56 @@ pub async fn build_agent(config: &Config) -> Result<Arc<Mutex<Agent>>> {
         model_cfg.native_tool_calling,
     )?);
 
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(FileRead::new(workspace.clone())));
-    registry.register(Arc::new(FileWrite::new(workspace.clone())));
-    registry.register(Arc::new(FileEdit::new(workspace.clone())));
-    registry.register(Arc::new(Terminal::new(
+    // 构建完整工具集
+    let mut all_tools: Vec<Arc<dyn Tool>> = Vec::new();
+    all_tools.push(Arc::new(FileRead::new(workspace.clone())));
+    all_tools.push(Arc::new(FileWrite::new(workspace.clone())));
+    all_tools.push(Arc::new(FileEdit::new(workspace.clone())));
+    all_tools.push(Arc::new(Terminal::new(
         config.tools.terminal.confirm.clone(),
         config.tools.terminal.whitelist.clone(),
         workspace.clone(),
     )));
-    registry.register(Arc::new(WebFetch::new()?));
+    all_tools.push(Arc::new(WebFetch::new()?));
     if !config.tools.tavily.api_key.is_empty() {
-        registry.register(Arc::new(TavilySearch::new(
+        all_tools.push(Arc::new(TavilySearch::new(
             config.tools.tavily.api_key.clone(),
         )?));
     }
-    registry.register(Arc::new(MemoryWrite::new(memory_path.clone())));
+    all_tools.push(Arc::new(MemoryWrite::new(memory_path.clone())));
+    all_tools.push(Arc::new(SendImage::new(workspace.clone())));
+    all_tools.push(Arc::new(SendFile::new(workspace.clone())));
+
+    // 按 denied_tools 过滤
+    let denied: std::collections::HashSet<&str> = agent_cfg
+        .denied_tools
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    let mut delegate_tool: Option<Arc<DelegateTool>> = None;
+    let mut registry = ToolRegistry::new();
+    for tool in all_tools {
+        if !denied.contains(tool.name()) {
+            registry.register(tool);
+        }
+    }
+
+    // main Agent 且配置了子 Agent 时挂 delegate 工具
+    let has_delegate = is_main && config.agent.len() > 1;
+    if has_delegate {
+        let d = Arc::new(DelegateTool::new(agent_cfg.delegate_timeout));
+        registry.register(d.clone());
+        delegate_tool = Some(d);
+    }
 
     let mut system_prompt = format!(
         "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}\n\n# WORKSPACE\n{}\n\n工作目录说明：所有工具的相对路径都相对于 WORKSPACE 解析；terminal 命令在 WORKSPACE 下执行。需要写到其它位置时请使用绝对路径。",
         soul, user, memory, workspace.display()
     );
-    if !provider.native_tool_calling() {
+    // 标签降级模式下注入 tool instructions 到 system prompt。
+    // 注意：有 delegate 工具时，OnceCell registry 尚未注入（在 build_agent 末尾才注入），
+    // 此时 delegate 的 enum 为空。所以推迟到 build_agent 里 set_registry 后再注入。
+    if !provider.native_tool_calling() && !has_delegate {
         system_prompt.push_str(&build_tool_instructions(&registry.specs()));
     }
     let registry = Arc::new(registry);
@@ -179,7 +382,7 @@ pub async fn build_agent(config: &Config) -> Result<Arc<Mutex<Agent>>> {
         Some((id, _)) => id,
         None => {
             let uuid = uuid::Uuid::new_v4().to_string();
-            session_store.create_session(&uuid, "cli")?
+            session_store.create_session(&uuid, alias)?
         }
     };
 
@@ -192,6 +395,7 @@ pub async fn build_agent(config: &Config) -> Result<Arc<Mutex<Agent>>> {
         (None, None) => 8192,
     };
     tracing::info!(
+        agent = alias,
         configured = ?model_cfg.context_size,
         detected = ?detected,
         final = context_size,
@@ -206,10 +410,57 @@ pub async fn build_agent(config: &Config) -> Result<Arc<Mutex<Agent>>> {
         session_id,
         system_prompt,
         context_size,
+        workspace.clone(),
     )
     .await;
 
-    Ok(Arc::new(Mutex::new(agent)))
+    Ok((Arc::new(Mutex::new(agent)), delegate_tool))
+}
+
+/// 构建 AgentRegistry（main + 所有子 Agent）
+pub async fn build_agent(config: &Config) -> Result<Arc<AgentRegistry>> {
+    // 构建子 Agent（跳过 main）
+    let mut sub_agents: Vec<(String, Arc<Mutex<Agent>>)> = Vec::new();
+    for (alias, cfg) in &config.agent {
+        if alias == "main" {
+            continue;
+        }
+        let (agent, _) = build_single_agent(config, alias, cfg.clone(), false).await?;
+        sub_agents.push((alias.clone(), agent));
+    }
+
+    // 构建 main Agent
+    let main_cfg = config
+        .agent
+        .get("main")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("agent.main not configured"))?;
+    let (main_agent, delegate_tool) = build_single_agent(config, "main", main_cfg, true).await?;
+
+    let mut registry = AgentRegistry::new(main_agent);
+    for (alias, agent) in sub_agents {
+        registry.register_sub_agent(alias, agent);
+    }
+    let registry = Arc::new(registry);
+
+    // 注入 registry 给 delegate 工具（OnceCell 延迟注入）
+    if let Some(d) = delegate_tool {
+        d.set_registry(registry.clone());
+
+        // 标签降级模式下，set_registry 后 delegate 的 enum 才有值，
+        // 此时重新生成 tool instructions 追加到 main agent 的 system prompt
+        let mut a = registry.main.lock().await;
+        if !a.provider.native_tool_calling() {
+            let instructions = build_tool_instructions(&a.tools.specs());
+            a.context.system.push_str(&instructions);
+        }
+    }
+
+    tracing::info!(
+        sub_agents = registry.available_sub_agents().len(),
+        "AgentRegistry built"
+    );
+    Ok(registry)
 }
 
 fn resolve_md_path(explicit: &Option<String>, workspace: &PathBuf, default_name: &str) -> PathBuf {

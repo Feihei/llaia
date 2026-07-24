@@ -35,7 +35,7 @@ LAIA 单用户但多频道（CLI/QQ/Web），需要明确"同一会话"的语义
 - 手动触发：`/compact` 斜杠命令
 - 手动清空：`/clear` 清空当前内存上下文（sqlite 留底）
 
-### sqlite schema（v1）
+### sqlite schema（P1）
 
 ```sql
 sessions:   id, session_uuid, channel, created_at, last_activity, token_count, state
@@ -43,14 +43,14 @@ messages:   id, session_id(FK), role, content, reasoning_content, created_at
 tool_calls: id, message_id(FK), tool_call_id, tool_name, payload, outcome, created_at
 ```
 
-参考 zeroclaw ACP schema，砍掉 v1 用不上的字段（workspace_dir、killed_at、agent_alias、session_events）。
-v1 不做 FTS5 全文搜索，等 MEMORY 检索需要时再加。
+参考 zeroclaw ACP schema，砍掉 P1 用不上的字段（workspace_dir、killed_at、agent_alias、session_events）。
+P1 不做 FTS5 全文搜索，等 MEMORY 检索需要时再加。
 
 ## 影响
 
 - 启动时需加载最近一个 session 的上下文（按 last_activity 排序）
 - 跨频道共享上下文要求 session_uuid 全局可见，频道路由层只负责把消息塞进对应 session
-- token 计数依赖 provider 返回的 usage 字段，无 usage 时回退到本地估算（v1 简单按字符数）
+- token 计数依赖 provider 返回的 usage 字段，无 usage 时回退到本地估算（P1 简单按字符数）
 
 ## 参考
 

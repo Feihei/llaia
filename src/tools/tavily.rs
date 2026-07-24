@@ -50,7 +50,7 @@ impl Tool for TavilySearch {
             "required": ["query"]
         })
     }
-    async fn execute(&self, args: &Value) -> Result<String> {
+    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
         if self.api_key.is_empty() {
             return Err(anyhow!("tavily api_key not configured"));
         }

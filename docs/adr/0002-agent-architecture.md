@@ -1,4 +1,4 @@
-# ADR-0002: 主从 Agent 架构 = 委派模式（v2）
+# ADR-0002: 主从 Agent 架构 = 委派模式（P2）
 
 - 状态：Accepted
 - 日期：2026-07-21
@@ -14,15 +14,15 @@ README 写"主控 Agent + 多个专用 Agent 协作（类似 AstrBot）"，但 A
 
 ## 决策
 
-采用 **委派模式（C）**，且 **v1 不实现，留到 v2 与 Web 面板一同上线**。
+采用 **委派模式（C）**，且 **P1 不实现，留到 P2 与 Web 面板一同上线**。
 
-### v1（MVP）
+### P1（MVP）
 
 - 只有主 Agent，单干所有任务
 - 所有工具直接挂载在主 Agent 上，无工具白名单
 - 不存在子 Agent 概念，不预留调度代码
 
-### v2
+### P2
 
 - 用户通过 Web 面板创建预定义子 Agent（起名、写提示词、勾选工具白名单）
 - 委派路由：混合策略——默认由主 Agent 的 LLM 判断，可被强制指令覆盖
@@ -32,10 +32,10 @@ README 写"主控 Agent + 多个专用 Agent 协作（类似 AstrBot）"，但 A
 
 ## 影响
 
-- v1 代码不需要 dispatcher / sub-agent spawn / 上下文摘要传递逻辑
-- v1 Provider 接口按"单会话"设计，v2 再扩展多会话编排
-- 配置 schema 采用命名式 `[agent.<alias>]`，v1 只认 `main`，便于 v2 扩展
-- 工具 trait 设计要考虑 v2 的白名单过滤，但 v1 不实现过滤逻辑
+- P1 代码不需要 dispatcher / sub-agent spawn / 上下文摘要传递逻辑
+- P1 Provider 接口按"单会话"设计，P2 再扩展多会话编排
+- 配置 schema 采用命名式 `[agent.<alias>]`，P1 只认 `main`，便于 P2 扩展
+- 工具 trait 设计要考虑 P2 的白名单过滤，但 P1 不实现过滤逻辑
 
 ## 参考
 

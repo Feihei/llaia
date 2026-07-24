@@ -114,6 +114,16 @@ pub struct AgentConfig {
     pub soul: Option<String>,
     pub user: Option<String>,
     pub memory: Option<String>,
+    /// 工具黑名单：列出的工具子 Agent 不可用。默认空（继承所有工具）
+    #[serde(default)]
+    pub denied_tools: Vec<String>,
+    /// 委派超时秒数（仅子 Agent 生效）。默认 120
+    #[serde(default = "default_delegate_timeout")]
+    pub delegate_timeout: u64,
+}
+
+fn default_delegate_timeout() -> u64 {
+    120
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -210,19 +220,31 @@ impl Config {
                 config.log.dir = parent.join("logs").to_string_lossy().into_owned();
             }
         }
-        config.expand_paths();
+        config.expand_paths()?;
         Ok(config)
     }
 
-    fn expand_paths(&mut self) {
-        let expand = |s: &str| -> String { shellexpand::tilde(s).into_owned() };
+    /// 展开 `~` 和 `${VAR}` 环境变量引用。
+    /// - `~` / `~/path` → 用户 home 目录
+    /// - `${VAR}` → 环境变量值（变量名须匹配 `[A-Z_][A-Z0-9_]*`，找不到报错）
+    /// 顺序：先 env 后 tilde（env 值里可以含 `~` 不会被二次展开，tilde 后不再处理 env）
+    fn expand_paths(&mut self) -> Result<()> {
+        let expand = |s: &str| -> Result<String> { expand_string(s) };
         for a in self.agent.values_mut() {
-            a.workspace = expand(&a.workspace);
-            a.soul = a.soul.as_ref().map(|s| expand(s));
-            a.user = a.user.as_ref().map(|s| expand(s));
-            a.memory = a.memory.as_ref().map(|s| expand(s));
+            a.workspace = expand(&a.workspace)?;
+            a.soul = a.soul.as_ref().map(|s| expand(s)).transpose()?;
+            a.user = a.user.as_ref().map(|s| expand(s)).transpose()?;
+            a.memory = a.memory.as_ref().map(|s| expand(s)).transpose()?;
         }
-        self.log.dir = expand(&self.log.dir);
+        for p in self.provider.values_mut() {
+            p.base_url = expand(&p.base_url)?;
+            p.api_key = expand(&p.api_key)?;
+        }
+        self.channels.qq.app_id = expand(&self.channels.qq.app_id)?;
+        self.channels.qq.app_secret = expand(&self.channels.qq.app_secret)?;
+        self.tools.tavily.api_key = expand(&self.tools.tavily.api_key)?;
+        self.log.dir = expand(&self.log.dir)?;
+        Ok(())
     }
 
     /// 解析 "provider_id.model_alias"，返回 (provider_id, model_alias)
@@ -264,6 +286,8 @@ impl Config {
                 soul: None,
                 user: None,
                 memory: None,
+                denied_tools: Vec::new(),
+                delegate_timeout: default_delegate_timeout(),
             },
         );
 
@@ -279,6 +303,42 @@ impl Config {
             tools: ToolsConfig::default(),
         }
     }
+}
+
+/// 展开字符串中的 `~` 和 `${VAR}` 环境变量引用。
+/// - `~` / `~/path` → 用户 home 目录（shellexpand::tilde）
+/// - `${VAR}` → 环境变量值（变量名须匹配 `[A-Z_][A-Z0-9_]*`）
+///
+/// 未定义的环境变量会报错（fail fast），避免用空字符串当 api_key。
+/// 先展开 env，再展开 tilde（env 值里的 `~` 不会被二次展开）。
+fn expand_string(s: &str) -> Result<String> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}").unwrap()
+    });
+
+    let mut err: Option<anyhow::Error> = None;
+    let expanded = re.replace_all(s, |caps: &regex::Captures| {
+        match std::env::var(&caps[1]) {
+            Ok(v) => v,
+            Err(e) => {
+                if err.is_none() {
+                    err = Some(anyhow::anyhow!(
+                        "environment variable '{}' referenced in config but not set: {}",
+                        &caps[1],
+                        e
+                    ));
+                }
+                String::new()
+            }
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    let result = shellexpand::tilde(&expanded).into_owned();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -492,5 +552,133 @@ workspace = "~/.laia"
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
         assert!(!config.channels.qq.enabled);
         assert_eq!(config.channels.qq.confirm_mode, "always");
+    }
+
+    #[test]
+    fn test_sub_agent_config_fields() {
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.laia"
+
+[agent.coder]
+model = "default.qwen"
+workspace = "~/.laia/agents/coder"
+soul = "~/.laia/agents/coder.md"
+denied_tools = ["memory_write"]
+delegate_timeout = 180
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+
+        let main = config.agent.get("main").unwrap();
+        assert!(main.denied_tools.is_empty());
+        assert_eq!(main.delegate_timeout, 120);
+
+        let coder = config.agent.get("coder").unwrap();
+        assert_eq!(coder.denied_tools, vec!["memory_write"]);
+        assert_eq!(coder.delegate_timeout, 180);
+    }
+
+    #[test]
+    fn test_env_var_expansion() {
+        // 用时间戳后缀避免测试间环境变量冲突
+        let key_var = "LAIA_TEST_API_KEY_2026";
+        let url_var = "LAIA_TEST_BASE_URL_2026";
+        let secret_var = "LAIA_TEST_SECRET_2026";
+        std::env::set_var(key_var, "sk-from-env-12345");
+        std::env::set_var(url_var, "http://example.com");
+        std::env::set_var(secret_var, "qq-secret");
+
+        let toml = format!(
+            r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "${{{}}}/v1"
+api_key = "${{{}}}"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.laia"
+
+[channels.qq]
+app_secret = "${{{}}}"
+"#,
+            url_var, key_var, secret_var
+        );
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+
+        let p = config.provider.get("default").unwrap();
+        assert_eq!(p.base_url, "http://example.com/v1");
+        assert_eq!(p.api_key, "sk-from-env-12345");
+        assert_eq!(config.channels.qq.app_secret, "qq-secret");
+
+        std::env::remove_var(key_var);
+        std::env::remove_var(url_var);
+        std::env::remove_var(secret_var);
+    }
+
+    #[test]
+    fn test_env_var_not_found_errors() {
+        std::env::remove_var("LAIA_NONEXISTENT_VAR_2026");
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+api_key = "${LAIA_NONEXISTENT_VAR_2026}"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.laia"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let result = Config::load(&tmp.path().to_path_buf());
+        assert!(result.is_err(), "should error on undefined env var");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("LAIA_NONEXISTENT_VAR_2026"),
+            "error should mention the missing var: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_env_var_not_expanded_for_lowercase() {
+        // 小写变量名不匹配 [A-Z_][A-Z0-9_]*，原样保留
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+api_key = "${lowercase_var}"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.laia"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        // 小写不匹配，原样保留（不报错）
+        assert_eq!(config.provider.get("default").unwrap().api_key, "${lowercase_var}");
     }
 }

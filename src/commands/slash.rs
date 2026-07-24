@@ -21,7 +21,7 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /compact /clear /remember <text> /config /help".into(),
+            "commands: /new /exit /stop /compact /clear /remember <text> /config /help".into(),
         )),
         "/new" => {
             agent.context.clear();
@@ -41,7 +41,7 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
             if args.is_empty() {
                 Ok(SlashOutcome::Handled("usage: /remember <text>".into()))
             } else if let Some(tool) = agent.tools.get("memory_write") {
-                let _ = tool.execute(&serde_json::json!({"entry": args})).await;
+                let _ = tool.execute(&serde_json::json!({"entry": args}), "cli").await;
                 Ok(SlashOutcome::Handled("[remembered]".into()))
             } else {
                 Ok(SlashOutcome::Handled("[memory_write tool not registered]".into()))

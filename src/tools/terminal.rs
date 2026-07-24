@@ -62,7 +62,7 @@ impl Tool for Terminal {
     fn requires_confirm(&self) -> bool {
         true
     }
-    async fn execute(&self, args: &Value) -> Result<String> {
+    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -145,7 +145,7 @@ mod tests {
         let (_guard, ws) = make_workspace();
         let t = Terminal::new("none".into(), vec![], ws);
         let result = t
-            .execute(&serde_json::json!({"command": "echo hello"}))
+            .execute(&serde_json::json!({"command": "echo hello"}), "cli")
             .await
             .unwrap();
         assert!(result.contains("hello"));
@@ -161,7 +161,7 @@ mod tests {
         // 列当前目录，预期看到 marker.txt（证明 CWD 是 workspace）
         let cmd = if cfg!(windows) { "dir /b" } else { "ls" };
         let result = t
-            .execute(&serde_json::json!({"command": cmd}))
+            .execute(&serde_json::json!({"command": cmd}), "cli")
             .await
             .unwrap();
         assert!(

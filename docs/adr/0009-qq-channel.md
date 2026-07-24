@@ -6,7 +6,7 @@
 
 ## 背景
 
-v1 完成后用户希望接入 QQ 作为第二个交互频道，主要场景是在手机端通过 QQ 单聊唤醒桌面上的 LAIA 完成任务查询、记忆追加等。候选方案：
+P1 完成后用户希望接入 QQ 作为第二个交互频道，主要场景是在手机端通过 QQ 单聊唤醒桌面上的 LAIA 完成任务查询、记忆追加等。候选方案：
 
 1. 腾讯官方 QQ 开放平台（qbot.qq.com）
 2. OneBot / go-cqhttp 等第三方协议
@@ -51,7 +51,7 @@ pub trait Channel: Send + Sync + 'static {
 
 - 每个 channel 负责自己的 I/O 循环（读用户输入、写回复）
 - 共享同一个 Agent，通过 `Arc<tokio::sync::Mutex<Agent>>` 串行化访问
-- 单用户场景下 Mutex 排队可接受；v2 多用户化时再考虑 per-user agent
+- 单用户场景下 Mutex 排队可接受；P2 多用户化时再考虑 per-user agent
 - `chat_cmd` 根据 config 启用情况 `tokio::spawn` 多个 channel 任务
 
 ### QQ confirm 策略
@@ -59,7 +59,7 @@ pub trait Channel: Send + Sync + 'static {
 QQ 下无法弹 stdin 等用户确认，独立设计三档：
 
 - `always`（默认）：跳过有副作用的工具，回复用户原因
-- `whitelist`：白名单内放行，其余跳过（v1.5 简化：等同于 always）
+- `whitelist`：白名单内放行，其余跳过（P1.5 简化：等同于 always）
 - `none`：全放行
 
 `Tool` trait 加 `requires_confirm()` 方法（默认 `false`），`FileWrite`/`FileEdit`/`Terminal`/`MemoryWrite` override 为 `true`。`execute_tool_calls` 接收 `channel` 和 `qq_confirm_mode` 参数，QQ + 需确认工具时按 mode 决定是否执行。
@@ -78,15 +78,15 @@ QQ 单条消息上限约 2000 字符。LAIA 取 1800 作为安全阈值，纯函
 
 - CLI 和 QQ 同进程，由 `chat_cmd` 用 `tokio::spawn` 启动两个 channel 任务
 - 任一 channel 退出不影响另一个；都退出后进程退出
-- WS 断开即进程退出，v1.5 不做自动重连 + RESUME
+- WS 断开即进程退出，P1.5 不做自动重连 + RESUME
 
 ## 限制
 
-- v1.5 只支持单进程运行（CLI 和 QQ 同进程）。分进程运行需要重新设计 `SessionStore`（SQLite 多写者）
+- P1.5 只支持单进程运行（CLI 和 QQ 同进程）。分进程运行需要重新设计 `SessionStore`（SQLite 多写者）
 - 只支持 C2C 文本消息。群聊、图片、语音、文件均不支持
 - 不做主动消息推送（所有回复都是被动跟随用户消息）
 - WS 断开即退出，不自动重连
-- QQ confirm 在 `whitelist` 模式下与 `always` 行为相同（v1.5 简化）
+- QQ confirm 在 `whitelist` 模式下与 `always` 行为相同（P1.5 简化）
 
 ## 影响的代码
 

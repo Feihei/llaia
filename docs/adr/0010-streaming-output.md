@@ -5,7 +5,7 @@
 
 ## 背景
 
-v1.5 QQ channel 完成后，所有 channel 的 LLM 回复都是一次性返回。CLI 体验差（长回复要等十几秒），QQ 虽然内部流式但用户要等全部生成完。未来 Web channel 必须流式。
+P1.5 QQ channel 完成后，所有 channel 的 LLM 回复都是一次性返回。CLI 体验差（长回复要等十几秒），QQ 虽然内部流式但用户要等全部生成完。未来 Web channel 必须流式。
 
 ## 决策
 
@@ -37,4 +37,4 @@ v1.5 QQ channel 完成后，所有 channel 的 LLM 回复都是一次性返回�
 
 - 用户主动中止（Ctrl+C 退出进程）
 - 工具执行进度流式（工具一次性返回）
-- WebChannel 实现（v2）
+- WebChannel 实现（P2）

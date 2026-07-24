@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -24,6 +24,10 @@ shellexpand = "3"
 tokio-tungstenite = { version = "0.23", features = ["native-tls"] }
 futures-util = "0.3"
 async-stream = "0.3"
+sysinfo = "0.30"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+base64 = "0.22"
+mime_guess = "2"
 
 [dev-dependencies]
 mockito = "1"

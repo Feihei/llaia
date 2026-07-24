@@ -1,14 +1,19 @@
 use crate::agent::Agent;
+use crate::agent::AgentRegistry;
 use crate::channels::qq_split::split_reply;
 use crate::channels::Channel;
 use crate::config::QqConfig;
+use crate::provider::{ChatMessage, ContentPart, ImageUrlContent};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// 腾讯官方 API base URL
@@ -23,6 +28,30 @@ const TOKEN_REFRESH_MARGIN: u64 = 60;
 struct TokenState {
     access_token: String,
     expires_at: Option<Instant>,
+}
+
+/// 从 QQ 收到的 C2C 消息（文本 + 附件）
+#[derive(Debug, Clone)]
+pub struct C2cIncoming {
+    pub user_id: String,
+    pub msg_id: String,
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+}
+
+/// 消息附件（图片/文件）
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub content_type: String,
+    pub filename: String,
+    pub url: String,
+}
+
+impl Attachment {
+    /// 是否为图片
+    pub fn is_image(&self) -> bool {
+        self.content_type.starts_with("image/")
+    }
 }
 
 impl TokenState {
@@ -40,6 +69,12 @@ pub struct QqChannel {
     api_base: String,
     auth_base: String,
     token: Arc<Mutex<TokenState>>,
+    /// 被动回复 msg_seq 递增计数器。
+    /// QQ 要求同一 msg_id 下 msg_seq 递增，否则被去重（err_code 40054005）。
+    msg_seq_counter: AtomicU32,
+    /// 每个 user 正在执行的 turn 的中断信号。
+    /// key: user_openid，value: Notify。/stop 时 notify 对应 turn 使其中断。
+    running_stops: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
 }
 
 impl QqChannel {
@@ -50,6 +85,8 @@ impl QqChannel {
             api_base: DEFAULT_API_BASE.to_string(),
             auth_base: DEFAULT_AUTH_BASE.to_string(),
             token: Arc::new(Mutex::new(TokenState::default())),
+            msg_seq_counter: AtomicU32::new(1),
+            running_stops: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -61,7 +98,14 @@ impl QqChannel {
             auth_base: api_base.clone(),
             api_base,
             token: Arc::new(Mutex::new(TokenState::default())),
+            msg_seq_counter: AtomicU32::new(1),
+            running_stops: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// 取下一个递增的 msg_seq（用于被动回复去重）
+    fn next_msg_seq(&self) -> u32 {
+        self.msg_seq_counter.fetch_add(1, Ordering::Relaxed)
     }
 
     /// 获取 access_token，缓存有效则直接返回，否则调 /app/getAppAccessToken 换新
@@ -153,9 +197,9 @@ impl QqChannel {
         Ok(ws_url)
     }
 
-    /// 从 WS payload 中提取 C2C 文本消息
-    /// 返回 (user_openid, msg_id, text) 或 None
-    pub fn extract_c2c_text(payload: &serde_json::Value) -> Option<(String, String, String)> {
+    /// 从 WS payload 中提取 C2C 消息（文本 + 附件）
+    /// 返回 C2cIncoming 或 None
+    pub fn extract_c2c_message(payload: &serde_json::Value) -> Option<C2cIncoming> {
         // 腾讯官方 C2C 消息事件 op=0, t="C2C_MESSAGE_CREATE"（私域）或 "PUBLIC_C2C_MESSAGE_CREATE"（公域）
         let t = payload.get("t").and_then(|v| v.as_str())?;
         if t != "C2C_MESSAGE_CREATE" && t != "PUBLIC_C2C_MESSAGE_CREATE" {
@@ -164,11 +208,43 @@ impl QqChannel {
         let d = payload.get("d")?;
         let user_id = d.get("author")?.get("id")?.as_str()?.to_string();
         let msg_id = d.get("id")?.as_str()?.to_string();
-        let content = d.get("content")?.as_str()?.to_string();
-        if content.trim().is_empty() {
+        let content = d
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // 提取附件（图片/文件）
+        let attachments: Vec<Attachment> = d
+            .get("attachments")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|a| {
+                        Some(Attachment {
+                            content_type: a.get("content_type")?.as_str()?.to_string(),
+                            filename: a
+                                .get("filename")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("file")
+                                .to_string(),
+                            url: a.get("url")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // 文本和附件都为空才跳过
+        if content.trim().is_empty() && attachments.is_empty() {
             return None;
         }
-        Some((user_id, msg_id, content))
+        Some(C2cIncoming {
+            user_id,
+            msg_id,
+            text: content,
+            attachments,
+        })
     }
 
     /// 通过 HTTPS API 发送 C2C 消息
@@ -187,6 +263,8 @@ impl QqChannel {
         });
         if let Some(id) = msg_id {
             body["msg_id"] = serde_json::Value::String(id.to_string());
+            // 被动回复必须带递增 msg_seq，否则同一 msg_id 的后续回复被去重 (err_code 40054005)
+            body["msg_seq"] = serde_json::Value::from(self.next_msg_seq());
         }
 
         let delays = [200u64, 400, 800];
@@ -221,18 +299,189 @@ impl QqChannel {
         Err(last_err.unwrap_or_else(|| anyhow!("unknown error")))
     }
 
-    /// 处理一条用户消息：先检查斜杠命令，否则流式调 agent，等 Done 后分片发送
+    /// 向 QQ 用户发送媒体文件（图片或文件）。
+    /// 流程：上传到 QQ 文件服务拿 file_info → 发送 msg_type=7 富媒体消息。
+    pub async fn send_media_to_user(
+        &self,
+        user_openid: &str,
+        path: &str,
+        kind: crate::agent::MediaKind,
+        msg_id: Option<&str>,
+    ) -> Result<()> {
+        let token = self.get_access_token().await?;
+        let file_type = match kind {
+            crate::agent::MediaKind::Image => 1,  // 1=图片
+            crate::agent::MediaKind::File => 4,   // 4=文件
+        };
+
+        // 读文件内容
+        let file_bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| anyhow!("read media file {:?}: {}", path, e))?;
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        // 1. 上传媒体到 QQ 文件服务
+        let upload_url = format!("{}/v2/users/{}/files", self.api_base, user_openid);
+        let part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name.clone())
+            .mime_str("application/octet-stream")?;
+        let form = reqwest::multipart::Form::new()
+            .text("file_type", file_type.to_string())
+            .part("file", part);
+
+        let resp = self
+            .http
+            .post(&upload_url)
+            .header("Authorization", format!("QQBot {}", token))
+            .multipart(form)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!(
+                "upload media failed: status={}, body={}",
+                status,
+                text
+            ));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("parse upload response: {}, body={}", e, text))?;
+        let file_info = v
+            .get("file_info")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("upload response missing file_info: {}", text))?
+            .to_string();
+        tracing::info!(file = %path, file_info = %file_info, "media uploaded");
+
+        // 2. 发送富媒体消息 msg_type=7
+        let send_url = format!("{}/v2/users/{}/messages", self.api_base, user_openid);
+        let mut body = serde_json::json!({
+            "msg_type": 7,
+            "media": {
+                "file_info": file_info,
+            },
+        });
+        if let Some(id) = msg_id {
+            body["msg_id"] = serde_json::Value::String(id.to_string());
+            body["msg_seq"] = serde_json::Value::from(self.next_msg_seq());
+        }
+
+        let resp = self
+            .http
+            .post(&send_url)
+            .header("Authorization", format!("QQBot {}", token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!(
+                "send media message failed: status={}, body={}",
+                status,
+                text
+            ));
+        }
+        tracing::info!(user = %user_openid, file = %path, "media sent");
+        Ok(())
+    }
+
+    /// 下载 QQ 消息附件到本地 uploads 目录。
+    /// 保存路径：`<uploads_dir>/<msg_id>_<filename>`（用 msg_id 防止同名冲突）。
+    /// 返回本地文件路径。
+    pub async fn download_attachment(
+        &self,
+        att: &Attachment,
+        uploads_dir: &Path,
+        msg_id: &str,
+    ) -> Result<PathBuf> {
+        let token = self.get_access_token().await?;
+        let url = &att.url;
+        // QQ 附件 url 可能是相对路径，需补全为 api_base 下的绝对 URL
+        let full_url = if url.starts_with("http://") || url.starts_with("https://") {
+            url.clone()
+        } else {
+            format!("{}{}", self.api_base, url)
+        };
+
+        let resp = self
+            .http
+            .get(&full_url)
+            .header("Authorization", format!("QQBot {}", token))
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "download attachment failed: status={}, body={}",
+                status,
+                text
+            ));
+        }
+        let bytes = resp.bytes().await?;
+
+        // 保存到 uploads/<msg_id>_<filename>
+        tokio::fs::create_dir_all(uploads_dir)
+            .await
+            .map_err(|e| anyhow!("create uploads dir: {}", e))?;
+        let safe_name = att.filename.replace('/', "_").replace('\\', "_");
+        let local_path = uploads_dir.join(format!("{}_{}", msg_id, safe_name));
+        tokio::fs::write(&local_path, &bytes)
+            .await
+            .map_err(|e| anyhow!("write attachment file: {}", e))?;
+
+        tracing::info!(
+            filename = %att.filename,
+            content_type = %att.content_type,
+            size = bytes.len(),
+            "attachment downloaded"
+        );
+        Ok(local_path)
+    }
+
+    /// 处理一条用户消息：先检查斜杠命令，否则下载附件构造多模态消息，再流式调 agent。
     async fn handle_user_message(
         self: Arc<Self>,
         agent: &Arc<Mutex<Agent>>,
         user_openid: &str,
-        text: &str,
-        msg_id: &str,
+        incoming: &C2cIncoming,
     ) -> Result<()> {
-        tracing::info!(user = %user_openid, text = %text, "qq received message");
+        let text = &incoming.text;
+        let msg_id = &incoming.msg_id;
+        tracing::info!(
+            user = %user_openid,
+            text = %text,
+            attachments = incoming.attachments.len(),
+            "qq received message"
+        );
 
-        // 斜杠命令：在锁内处理，把输出发回用户
+        // 斜杠命令：在锁内处理，把输出发回用户（忽略附件）
         if text.trim().starts_with('/') {
+            // /stop：中断当前正在执行的 turn（不需要 lock agent，避免被长任务阻塞）
+            if text.trim() == "/stop" {
+                let notify = {
+                    let mut stops = self.running_stops.lock().await;
+                    stops.remove(user_openid)
+                };
+                if let Some(n) = notify {
+                    n.notify_one();
+                    let _ = self
+                        .send_c2c_message(user_openid, "[已中断当前任务]", Some(msg_id.as_str()))
+                        .await;
+                } else {
+                    let _ = self
+                        .send_c2c_message(user_openid, "[没有正在执行的任务]", Some(msg_id.as_str()))
+                        .await;
+                }
+                return Ok(());
+            }
             let outcome = {
                 let mut a = agent.lock().await;
                 crate::commands::slash::try_handle(text, &mut *a).await?
@@ -241,11 +490,11 @@ impl QqChannel {
                 crate::commands::slash::SlashOutcome::Exit => {
                     // QQ 下忽略 /exit，不退出
                     let _ = self
-                        .send_c2c_message(user_openid, "[/exit 在 QQ 下不可用]", Some(msg_id))
+                        .send_c2c_message(user_openid, "[/exit 在 QQ 下不可用]", Some(msg_id.as_str()))
                         .await;
                 }
                 crate::commands::slash::SlashOutcome::Handled(msg) => {
-                    let _ = self.send_c2c_message(user_openid, &msg, Some(msg_id)).await;
+                    let _ = self.send_c2c_message(user_openid, &msg, Some(msg_id.as_str())).await;
                 }
                 crate::commands::slash::SlashOutcome::NotSlash => {
                     // 不会走到这里（已检查 starts_with '/'）
@@ -254,28 +503,154 @@ impl QqChannel {
             return Ok(());
         }
 
+        // 构造消息：有附件则下载并构造多模态，否则纯文本
+        let user_msg = if incoming.attachments.is_empty() {
+            ChatMessage::user(text)
+        } else {
+            // 获取 workspace 路径（短暂持锁）
+            let workspace = {
+                let a = agent.lock().await;
+                a.workspace.clone()
+            };
+            let uploads_dir = workspace.join("uploads");
+
+            let mut parts: Vec<ContentPart> = Vec::new();
+            if !text.is_empty() {
+                parts.push(ContentPart::Text {
+                    text: text.clone(),
+                });
+            }
+            for att in &incoming.attachments {
+                match self.download_attachment(att, &uploads_dir, msg_id).await {
+                    Ok(local_path) => {
+                        if att.is_image() {
+                            // 图片：缩放并转 base64 data URL，发给 vision 模型
+                            match crate::image_utils::prepare_image_for_vision(&local_path) {
+                                Ok(data_url) => {
+                                    parts.push(ContentPart::ImageUrl {
+                                        image_url: ImageUrlContent { url: data_url },
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "prepare image failed");
+                                    parts.push(ContentPart::Text {
+                                        text: format!("[图片预处理失败: {}]", e),
+                                    });
+                                }
+                            }
+                        } else {
+                            // 非图片文件：仅告知 agent 附件名和保存路径
+                            parts.push(ContentPart::Text {
+                                text: format!(
+                                    "[附件已保存至 workspace/uploads/{}_{}]",
+                                    msg_id,
+                                    att.filename
+                                ),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, filename = %att.filename, "download attachment failed");
+                        parts.push(ContentPart::Text {
+                            text: format!("[附件下载失败: {}]", e),
+                        });
+                    }
+                }
+            }
+
+            if parts.is_empty() {
+                ChatMessage::user(text)
+            } else if parts.len() == 1 {
+                // 仅文本 part（所有附件下载失败）
+                if let Some(ContentPart::Text { text: t }) = parts.first() {
+                    ChatMessage::user(t)
+                } else {
+                    ChatMessage::user_multimodal(parts)
+                }
+            } else {
+                ChatMessage::user_multimodal(parts)
+            }
+        };
+
         // 普通消息：spawn 子任务调 agent，主任务并发消费 rx，避免 send 阻塞死锁
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let agent_clone = agent.clone();
-        let text_clone = text.to_string();
         let join = tokio::spawn(async move {
             let mut a = agent_clone.lock().await;
-            a.handle_input_streaming(&text_clone, "qq", tx).await
+            a.handle_message_streaming(user_msg, "qq", tx).await
         });
 
-        // 累积所有 Chunk，等 Done 后分片发送
+        // 注册中断信号：/stop 时 notify_one 唤醒下面的 select! 中断分支
+        let stop_notify = Arc::new(Notify::new());
+        {
+            let mut stops = self.running_stops.lock().await;
+            stops.insert(user_openid.to_string(), stop_notify.clone());
+        }
+
+        // 累积所有 Chunk，等 Done 后分片发送；select! 同时监听中断信号
         let mut buffer = String::new();
         let mut agent_err: Option<String> = None;
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                crate::agent::TurnEvent::Chunk { delta } => buffer.push_str(&delta),
-                crate::agent::TurnEvent::Done => break,
-                crate::agent::TurnEvent::Error { message } => {
-                    agent_err = Some(message);
+        let mut interrupted = false;
+        loop {
+            tokio::select! {
+                // 中断信号：用户发了 /stop
+                _ = stop_notify.notified() => {
+                    interrupted = true;
                     break;
                 }
-                _ => {} // ToolStart / ToolResult 在 QQ 下不转发
+                ev = rx.recv() => {
+                    match ev {
+                        Some(crate::agent::TurnEvent::Chunk { delta }) => buffer.push_str(&delta),
+                        Some(crate::agent::TurnEvent::Done) => break,
+                        Some(crate::agent::TurnEvent::Error { message }) => {
+                            agent_err = Some(message);
+                            break;
+                        }
+                        Some(crate::agent::TurnEvent::ToolStart { name, .. }) => {
+                            // 工具调用开始：发送提示消息给用户
+                            let notice = format!("🔧 {}...", name);
+                            let _ = self
+                                .send_c2c_message(user_openid, &notice, Some(msg_id.as_str()))
+                                .await;
+                        }
+                        Some(crate::agent::TurnEvent::ToolResult { .. }) => {
+                            // 工具结果不转发（可能很长，会刷屏）
+                        }
+                        Some(crate::agent::TurnEvent::MediaOutput { path, kind }) => {
+                            // Agent 请求发送媒体给用户
+                            if let Err(e) = self
+                                .send_media_to_user(user_openid, &path, kind, Some(msg_id.as_str()))
+                                .await
+                            {
+                                tracing::error!(error = %e, path = %path, "failed to send media");
+                                let _ = self
+                                    .send_c2c_message(
+                                        user_openid,
+                                        &format!("[发送媒体失败: {}]", e),
+                                        Some(msg_id.as_str()),
+                                    )
+                                    .await;
+                            }
+                        }
+                        None => break,
+                    }
+                }
             }
+        }
+
+        // 清理中断信号注册
+        {
+            let mut stops = self.running_stops.lock().await;
+            stops.remove(user_openid);
+        }
+
+        // 中断处理：drop rx 让 agent 检测 tx closed 优雅退出（保存部分输出到 sqlite/context），
+        // 等 agent task 结束后直接返回（/stop 的回复已由中断触发方发送）
+        if interrupted {
+            tracing::info!(user = %user_openid, "turn interrupted by /stop");
+            drop(rx);
+            let _ = join.await;
+            return Ok(());
         }
 
         // 等子任务结束（此时 tx 已 drop，rx 已返回 None 或 break）
@@ -284,14 +659,14 @@ impl QqChannel {
             tracing::error!(error = %e, "agent task panicked");
             let err_msg = format!("[内部错误: agent task panicked: {}]", e);
             let _ = self
-                .send_c2c_message(user_openid, &err_msg, Some(msg_id))
+                .send_c2c_message(user_openid, &err_msg, Some(msg_id.as_str()))
                 .await;
             return Ok(());
         }
         if let Some(msg) = agent_err {
             let err_msg = format!("[错误: {}]", msg);
             let _ = self
-                .send_c2c_message(user_openid, &err_msg, Some(msg_id))
+                .send_c2c_message(user_openid, &err_msg, Some(msg_id.as_str()))
                 .await;
             return Ok(());
         }
@@ -304,7 +679,7 @@ impl QqChannel {
             };
             let chunks = split_reply(&err_msg, 1800);
             for (i, chunk) in chunks.iter().enumerate() {
-                let id = if i == 0 { Some(msg_id) } else { None };
+                let id = if i == 0 { Some(msg_id.as_str()) } else { None };
                 if let Err(e) = self.send_c2c_message(user_openid, chunk, id).await {
                     tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
                 }
@@ -313,11 +688,23 @@ impl QqChannel {
         }
 
         // 正常回复：分片发送
-        let chunks = split_reply(&buffer, 1800);
-        tracing::info!(chunks = chunks.len(), total_len = buffer.len(), "sending reply");
+        // agent 可能只调工具无文本输出（如委派后直接 Done），buffer 为空时给占位回复，
+        // 否则 QQ 会因 content="" 返回 304061 invalid content
+        let reply = if buffer.trim().is_empty() {
+            tracing::warn!(total_len = buffer.len(), "agent reply empty, sending placeholder");
+            "[已完成（无文本输出）]"
+        } else {
+            buffer.as_str()
+        };
+        let chunks = split_reply(reply, 1800);
+        tracing::info!(chunks = chunks.len(), total_len = reply.len(), "sending reply");
         for (i, chunk) in chunks.iter().enumerate() {
+            // 跳过空片（split_reply 极端情况下可能产生）
+            if chunk.trim().is_empty() {
+                continue;
+            }
             // 只有第一片带 msg_id 用于被动回复，后续片用主动消息
-            let id = if i == 0 { Some(msg_id) } else { None };
+            let id = if i == 0 { Some(msg_id.as_str()) } else { None };
             if let Err(e) = self.send_c2c_message(user_openid, chunk, id).await {
                 tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
             }
@@ -328,7 +715,8 @@ impl QqChannel {
 
 #[async_trait]
 impl Channel for QqChannel {
-    async fn run(self: Arc<Self>, agent: Arc<Mutex<Agent>>) -> Result<()> {
+    async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
+        let agent = registry.main.clone();
         tracing::info!(app_id = %self.config.app_id, "QqChannel starting");
 
         // 外层重连循环：ws 断开后等待 5 秒重连，避免 serve 进程退出
@@ -447,13 +835,14 @@ impl QqChannel {
                                     continue;
                                 }
 
-                                // C2C 文本消息
-                                if let Some((user_openid, msg_id, text)) = Self::extract_c2c_text(&payload) {
+                                // C2C 消息（文本 + 可能的附件）
+                                if let Some(incoming) = Self::extract_c2c_message(&payload) {
+                                    let user_openid = incoming.user_id.clone();
                                     let this = self.clone();
                                     let agent = agent.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = this
-                                            .handle_user_message(&agent, &user_openid, &text, &msg_id)
+                                            .handle_user_message(&agent, &user_openid, &incoming)
                                             .await
                                         {
                                             tracing::error!(error = %e, "handle_user_message failed");

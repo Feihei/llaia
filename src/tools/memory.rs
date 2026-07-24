@@ -40,7 +40,7 @@ impl Tool for MemoryWrite {
     fn requires_confirm(&self) -> bool {
         true
     }
-    async fn execute(&self, args: &Value) -> Result<String> {
+    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
         let entry = args
             .get("entry")
             .and_then(|v| v.as_str())
@@ -71,7 +71,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("MEMORY.md");
         let tool = MemoryWrite::new(path.clone());
-        tool.execute(&serde_json::json!({"entry": "user likes rust"}))
+        tool.execute(&serde_json::json!({"entry": "user likes rust"}), "cli")
             .await
             .unwrap();
 

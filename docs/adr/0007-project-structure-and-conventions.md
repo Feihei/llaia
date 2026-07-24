@@ -23,7 +23,7 @@
   logs/
 ```
 
-### Rust 项目结构（v1 单 crate）
+### Rust 项目结构（P1 单 crate）
 
 ```
 laia/
@@ -55,23 +55,23 @@ laia/
     └── adr/                 # 决策记录
 ```
 
-v1 单 crate，v2 视复杂度再考虑拆分（参考 zeroclaw 的多 crate 布局）。
+P1 单 crate，P2 视复杂度再考虑拆分（参考 zeroclaw 的多 crate 布局）。
 
 ### 错误处理
 
-`anyhow::Result` 全局兜底，v1 简单优先。
-v2 视需要对外 API 引入 `thiserror` 自定义错误类型。
+`anyhow::Result` 全局兜底，P1 简单优先。
+P2 视需要对外 API 引入 `thiserror` 自定义错误类型。
 
 ### 日志库
 
-tracing，v1 只配一个 fmt layer 输出到文件（`~/.laia/logs/`）+ stderr。
+tracing，P1 只配一个 fmt layer 输出到文件（`~/.laia/logs/`）+ stderr。
 不做复杂订阅链。
 
 ### 配置文件完整 schema
 
 ```toml
 [provider.default]
-type = "openai_compatible"   # v1 只支持这一种
+type = "openai_compatible"   # P1 只支持这一种
 base_url = "http://localhost:11434/v1"
 api_key = ""
 model = "qwen2.5:7b"
@@ -103,13 +103,13 @@ dir = "~/.laia/logs"
 
 ### 命名式 section 的扩展性
 
-采用 `[provider.<id>]` / `[agent.<alias>]` 命名式结构，v1 代码只认 `default` 和 `main`，
-v2 加多 provider/多 agent 时只增 section 不改 schema。
+采用 `[provider.<id>]` / `[agent.<alias>]` 命名式结构，P1 代码只认 `default` 和 `main`，
+P2 加多 provider/多 agent 时只增 section 不改 schema。
 
 ## 影响
 
-- v1 工程量可控，无多 crate 协调成本
-- 配置 schema 为 v2 扩展留好口子
+- P1 工程量可控，无多 crate 协调成本
+- 配置 schema 为 P2 扩展留好口子
 - 日志和错误处理简单，便于快速迭代
 
 ## 参考

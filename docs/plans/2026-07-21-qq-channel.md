@@ -1,4 +1,4 @@
-# v1.5 QQ Channel 实现计划
+# P1.5 QQ Channel 实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -851,7 +851,7 @@ pub async fn execute_tool_calls(
             if tool.requires_confirm() {
                 let allowed = match qq_confirm_mode {
                     "none" => true,
-                    "whitelist" => false, // v1.5 简化：whitelist 在 QQ 下默认禁用所有需确认的工具
+                    "whitelist" => false, // P1.5 简化：whitelist 在 QQ 下默认禁用所有需确认的工具
                     _ => false,            // "always" 或未知
                 };
                 if !allowed {
@@ -1138,7 +1138,7 @@ impl QqChannel {
         // 分片发送，每片 ≤ 1800 字符
         let chunks = split_reply(&reply, 1800);
         for (i, chunk) in chunks.iter().enumerate() {
-            // 只有第一片带 msg_id 用于被动回复，后续片用主动消息（v1.5 简化：都带同一个 msg_id 试试）
+            // 只有第一片带 msg_id 用于被动回复，后续片用主动消息（P1.5 简化：都带同一个 msg_id 试试）
             let id = if i == 0 { msg_id } else { None };
             if let Err(e) = self.send_c2c_message(user_openid, chunk, id).await {
                 tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
@@ -1552,7 +1552,7 @@ git commit -m "fix(qq): <具体修复>"
 
 ## 背景
 
-v1.5 计划接入 QQ 作为第二个 channel。腾讯官方 QQ 开放平台提供 WebSocket + HTTPS API，单用户场景下本地运行无需公网端点。
+P1.5 计划接入 QQ 作为第二个 channel。腾讯官方 QQ 开放平台提供 WebSocket + HTTPS API，单用户场景下本地运行无需公网端点。
 
 ## 决策
 
@@ -1571,7 +1571,7 @@ v1.5 计划接入 QQ 作为第二个 channel。腾讯官方 QQ 开放平台提�
 
 QQ 下无法弹 stdin，独立设计三档：
 - `always`（默认）：跳过有副作用的工具，回复用户原因
-- `whitelist`：白名单内放行，其余跳过（v1.5 简化：禁用所有需确认工具）
+- `whitelist`：白名单内放行，其余跳过（P1.5 简化：禁用所有需确认工具）
 - `none`：全放行
 
 ### 长回复分片
@@ -1580,7 +1580,7 @@ QQ 单条消息上限约 2000 字符。LAIA 取 1800 作为安全阈值，按段
 
 ### 限制
 
-- v1.5 只支持单进程运行（CLI 和 QQ 同进程）。分进程运行需要重新设计 SessionStore。
+- P1.5 只支持单进程运行（CLI 和 QQ 同进程）。分进程运行需要重新设计 SessionStore。
 - 只支持 C2C 文本消息。群聊、图片、语音、文件均不支持。
 - 不做主动消息推送。
 
@@ -1594,7 +1594,7 @@ QQ 单条消息上限约 2000 字符。LAIA 取 1800 作为安全阈值，按段
 
 - [ ] **Step 2: 更新 readme.md**
 
-在 readme.md 的"版本规划"表里把 v1.5 状态从"计划中"改为"开发中"或"已完成"。在"快速开始"节加 QQ 配置说明（简短）。
+在 readme.md 的"版本规划"表里把 P1.5 状态从"计划中"改为"开发中"或"已完成"。在"快速开始"节加 QQ 配置说明（简短）。
 
 - [ ] **Step 3: 更新 AGENTS.md**
 
@@ -1629,7 +1629,7 @@ git commit -m "docs: ADR 0009 + readme/agents update for QQ channel"
    - C2C 消息事件 schema
    - 发送消息 API 的 msg_type 和 content 字段
 
-2. **WebSocket 重连**：spec 未深入。如果 WS 断开，简单实现是退出程序。生产级实现应该自动重连 + RESUME。v1.5 接受"断开即退出"。
+2. **WebSocket 重连**：spec 未深入。如果 WS 断开，简单实现是退出程序。生产级实现应该自动重连 + RESUME。P1.5 接受"断开即退出"。
 
 3. **mockito 测试中的 base_url 注入**：Task 9 给了 `QqChannelTestable` 的参考实现。如果觉得冗余，可以重构 `QqChannel` 本身加 `api_base_url: String` 字段，默认 `"https://api.sgroup.qq.com"`，测试时注入 mockito URL。这是更干净的方式，**推荐**。
 

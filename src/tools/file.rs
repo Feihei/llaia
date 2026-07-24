@@ -30,14 +30,47 @@ impl FileEdit {
     }
 }
 
-/// 将用户提供的路径解析为绝对路径：绝对路径原样使用，相对路径以 workspace 为基准
-fn resolve_within(workspace: &Path, p: &str) -> PathBuf {
+/// 将用户提供的路径解析为绝对路径，并确保落在 workspace 内。
+/// - 相对路径以 workspace 为基准
+/// - 绝对路径原样使用，但必须位于 workspace 子树内
+/// - `..` 逃逸报错
+///
+/// 注：使用词法规范化（非 canonicalize）做边界检查，能拦截 `..` 逃逸。
+/// 符号链接逃逸不检测——单用户私人助理场景下威胁低，且 terminal 在 QQ channel 下已禁用。
+pub(crate) fn resolve_within(workspace: &Path, p: &str) -> Result<PathBuf> {
     let path = PathBuf::from(p);
-    if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path
     } else {
         workspace.join(p)
+    };
+    let norm_joined = normalize_lexical(&joined);
+    let norm_ws = normalize_lexical(workspace);
+    if !norm_joined.starts_with(&norm_ws) {
+        anyhow::bail!(
+            "path {:?} is outside workspace {:?}",
+            joined,
+            workspace
+        );
     }
+    Ok(norm_joined)
+}
+
+/// 词法规范化：处理 `.` 和 `..`，不依赖文件系统存在。
+fn normalize_lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(c) => out.push(c),
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -57,12 +90,12 @@ impl Tool for FileRead {
             "required": ["path"]
         })
     }
-    async fn execute(&self, args: &Value) -> Result<String> {
+    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'path' argument"))?;
-        let resolved = resolve_within(&self.workspace, path);
+        let resolved = resolve_within(&self.workspace, path)?;
         let content = tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| anyhow!("read {:?}: {}", resolved, e))?;
@@ -88,10 +121,11 @@ impl Tool for FileWrite {
             "required": ["path", "content"]
         })
     }
+    /// false: workspace 边界检查（resolve_within）已保证路径安全
     fn requires_confirm(&self) -> bool {
-        true
+        false
     }
-    async fn execute(&self, args: &Value) -> Result<String> {
+    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -100,7 +134,7 @@ impl Tool for FileWrite {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'content'"))?;
-        let resolved = resolve_within(&self.workspace, path);
+        let resolved = resolve_within(&self.workspace, path)?;
         if let Some(parent) = resolved.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
@@ -130,10 +164,11 @@ impl Tool for FileEdit {
             "required": ["path", "old_string", "new_string"]
         })
     }
+    /// false: workspace 边界检查（resolve_within）已保证路径安全
     fn requires_confirm(&self) -> bool {
-        true
+        false
     }
-    async fn execute(&self, args: &Value) -> Result<String> {
+    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -146,7 +181,7 @@ impl Tool for FileEdit {
             .get("new_string")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'new_string'"))?;
-        let resolved = resolve_within(&self.workspace, path);
+        let resolved = resolve_within(&self.workspace, path)?;
         let content = tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| anyhow!("read {:?}: {}", resolved, e))?;
@@ -179,61 +214,64 @@ mod tests {
     use serde_json::json;
     use std::io::Write;
     use tempfile::tempdir;
-    use tempfile::NamedTempFile;
 
     #[tokio::test]
     async fn test_file_read_write() {
-        let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, "hello world").unwrap();
-        let path = tmp.path().to_str().unwrap();
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        let rel = "test.txt";
+        std::fs::write(ws_path.join(rel), "hello world").unwrap();
 
-        let tool = FileRead::new(PathBuf::from("."));
-        let result = tool.execute(&json!({"path": path})).await.unwrap();
+        let tool = FileRead::new(ws_path);
+        let result = tool.execute(&json!({"path": rel}), "cli").await.unwrap();
         assert!(result.contains("hello world"));
     }
 
     #[tokio::test]
     async fn test_file_write_and_read() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        let rel = "out.txt";
 
-        let write_tool = FileWrite::new(PathBuf::from("."));
+        let write_tool = FileWrite::new(ws_path.clone());
         write_tool
-            .execute(&json!({"path": &path, "content": "new content"}))
+            .execute(&json!({"path": rel, "content": "new content"}), "cli")
             .await
             .unwrap();
 
-        let read_tool = FileRead::new(PathBuf::from("."));
-        let result = read_tool.execute(&json!({"path": &path})).await.unwrap();
+        let read_tool = FileRead::new(ws_path);
+        let result = read_tool.execute(&json!({"path": rel}), "cli").await.unwrap();
         assert_eq!(result, "new content");
     }
 
     #[tokio::test]
     async fn test_file_edit() {
-        let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, "line1\nline2\nline3").unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        let rel = "edit.txt";
+        std::fs::write(ws_path.join(rel), "line1\nline2\nline3").unwrap();
 
-        let tool = FileEdit::new(PathBuf::from("."));
-        tool.execute(&json!({"path": &path, "old_string": "line2", "new_string": "LINE TWO"}))
+        let tool = FileEdit::new(ws_path.clone());
+        tool.execute(&json!({"path": rel, "old_string": "line2", "new_string": "LINE TWO"}), "cli")
             .await
             .unwrap();
 
-        let read = FileRead::new(PathBuf::from("."));
-        let result = read.execute(&json!({"path": &path})).await.unwrap();
+        let read = FileRead::new(ws_path);
+        let result = read.execute(&json!({"path": rel}), "cli").await.unwrap();
         assert!(result.contains("LINE TWO"));
         assert!(!result.contains("line2"));
     }
 
     #[tokio::test]
     async fn test_file_edit_no_match() {
-        let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, "hello").unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        let rel = "nomatch.txt";
+        std::fs::write(ws_path.join(rel), "hello").unwrap();
 
-        let tool = FileEdit::new(PathBuf::from("."));
+        let tool = FileEdit::new(ws_path);
         let result = tool
-            .execute(&json!({"path": &path, "old_string": "missing", "new_string": "x"}))
+            .execute(&json!({"path": rel, "old_string": "missing", "new_string": "x"}), "cli")
             .await;
         assert!(result.is_err());
     }
@@ -246,7 +284,7 @@ mod tests {
         // 写相对路径，预期落到 workspace 下
         let write_tool = FileWrite::new(ws_path.clone());
         write_tool
-            .execute(&json!({"path": "sub/test.txt", "content": "hello"}))
+            .execute(&json!({"path": "sub/test.txt", "content": "hello"}), "cli")
             .await
             .unwrap();
 
@@ -257,7 +295,7 @@ mod tests {
         // 读回来也用相对路径
         let read_tool = FileRead::new(ws_path);
         let result = read_tool
-            .execute(&json!({"path": "sub/test.txt"}))
+            .execute(&json!({"path": "sub/test.txt"}), "cli")
             .await
             .unwrap();
         assert_eq!(result, "hello");
@@ -267,7 +305,53 @@ mod tests {
     fn test_requires_confirm_flags() {
         let ws = PathBuf::from(".");
         assert!(!FileRead::new(ws.clone()).requires_confirm());
-        assert!(FileWrite::new(ws.clone()).requires_confirm());
-        assert!(FileEdit::new(ws).requires_confirm());
+        // file_write/file_edit 不再需要确认：workspace 边界检查已保证安全
+        assert!(!FileWrite::new(ws.clone()).requires_confirm());
+        assert!(!FileEdit::new(ws).requires_confirm());
+    }
+
+    #[tokio::test]
+    async fn test_workspace_boundary_blocks_parent_traversal() {
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        // 在 workspace 里放一个文件
+        let write_tool = FileWrite::new(ws_path.clone());
+        write_tool
+            .execute(&json!({"path": "inside.txt", "content": "ok"}), "cli")
+            .await
+            .unwrap();
+
+        // `..` 逃逸应当被拒绝
+        let read_tool = FileRead::new(ws_path.clone());
+        let escaped = read_tool
+            .execute(&json!({"path": "../outside.txt"}), "cli")
+            .await;
+        assert!(escaped.is_err(), "parent traversal should be blocked");
+
+        // 绝对路径指向 workspace 外应当被拒绝
+        let outside = ws_path.parent().unwrap().join("outside.txt");
+        let abs_read = FileRead::new(ws_path);
+        let result = abs_read
+            .execute(
+                &json!({"path": outside.to_str().unwrap()}),
+                "cli",
+            )
+            .await;
+        assert!(result.is_err(), "absolute path outside workspace should be blocked");
+    }
+
+    #[tokio::test]
+    async fn test_workspace_boundary_allows_subdir() {
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        // 子目录写文件应当成功
+        let write_tool = FileWrite::new(ws_path.clone());
+        let r = write_tool
+            .execute(
+                &json!({"path": "deep/nested/file.txt", "content": "x"}),
+                "cli",
+            )
+            .await;
+        assert!(r.is_ok(), "writing to workspace subdir should succeed: {:?}", r);
     }
 }

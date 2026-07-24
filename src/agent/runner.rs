@@ -3,6 +3,7 @@ use crate::tools::Tool;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -28,11 +29,13 @@ impl ToolRegistry {
     }
 }
 
+/// 执行工具调用。`event_tx` 用于工具（如 delegate）向 channel 转发进度事件。
 pub async fn execute_tool_calls(
     registry: &ToolRegistry,
     calls: &[ToolCall],
     channel: &str,
     qq_confirm_mode: &str,
+    event_tx: Option<&mpsc::Sender<crate::agent::TurnEvent>>,
 ) -> Result<Vec<ChatMessage>> {
     let mut results = Vec::new();
     for call in calls {
@@ -63,7 +66,10 @@ pub async fn execute_tool_calls(
         }
 
         tracing::info!(tool = %call.name, args = %call.arguments, "executing tool");
-        let outcome = match tool.execute(&call.arguments).await {
+        let outcome = match tool
+            .execute_with_events(&call.arguments, channel, event_tx)
+            .await
+        {
             Ok(s) => s,
             Err(e) => format!("[error: {}]", e),
         };
@@ -91,7 +97,7 @@ mod tests {
         fn parameters_schema(&self) -> Value {
             json!({"type":"object"})
         }
-        async fn execute(&self, args: &Value) -> Result<String> {
+        async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
             Ok(format!("{}", args))
         }
     }
@@ -105,10 +111,12 @@ mod tests {
             name: "echo".into(),
             arguments: json!({"x": 1}),
         }];
-        let msgs = execute_tool_calls(&reg, &calls, "cli", "always").await.unwrap();
+        let msgs = execute_tool_calls(&reg, &calls, "cli", "always", None)
+            .await
+            .unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, crate::provider::Role::Tool);
-        assert!(msgs[0].content.contains("x"));
+        assert!(msgs[0].content.as_text().contains("x"));
     }
 
     #[tokio::test]
@@ -120,9 +128,11 @@ mod tests {
             arguments: json!({}),
         }];
         // unknown tool 不再返回 Err，而是返回一条错误消息
-        let msgs = execute_tool_calls(&reg, &calls, "cli", "always").await.unwrap();
+        let msgs = execute_tool_calls(&reg, &calls, "cli", "always", None)
+            .await
+            .unwrap();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.contains("unknown tool"));
+        assert!(msgs[0].content.as_text().contains("unknown tool"));
     }
 
     /// 验证 QQ channel + always 模式下，requires_confirm=true 的工具被跳过
@@ -143,7 +153,7 @@ mod tests {
             fn requires_confirm(&self) -> bool {
                 true
             }
-            async fn execute(&self, _args: &Value) -> Result<String> {
+            async fn execute(&self, _args: &Value, _channel: &str) -> Result<String> {
                 Ok("executed".into())
             }
         }
@@ -157,18 +167,24 @@ mod tests {
         }];
 
         // QQ + always：应被跳过，返回提示消息
-        let msgs = execute_tool_calls(&reg, &calls, "qq", "always").await.unwrap();
+        let msgs = execute_tool_calls(&reg, &calls, "qq", "always", None)
+            .await
+            .unwrap();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.contains("QQ 频道下不能执行此操作"));
+        assert!(msgs[0].content.as_text().contains("QQ 频道下不能执行此操作"));
 
         // QQ + none：应执行
-        let msgs = execute_tool_calls(&reg, &calls, "qq", "none").await.unwrap();
+        let msgs = execute_tool_calls(&reg, &calls, "qq", "none", None)
+            .await
+            .unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].content, "executed");
+        assert_eq!(msgs[0].content.as_text(), "executed");
 
         // CLI + always：应执行（CLI 不受 QQ confirm 限制）
-        let msgs = execute_tool_calls(&reg, &calls, "cli", "always").await.unwrap();
+        let msgs = execute_tool_calls(&reg, &calls, "cli", "always", None)
+            .await
+            .unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].content, "executed");
+        assert_eq!(msgs[0].content.as_text(), "executed");
     }
 }

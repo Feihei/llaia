@@ -43,7 +43,7 @@ impl Context {
         let history_tokens: usize = self
             .history
             .iter()
-            .map(|m| m.content.chars().count() / 4)
+            .map(|m| m.content.as_text().chars().count() / 4)
             .sum();
         system_tokens + summary_tokens + history_tokens
     }
@@ -63,20 +63,27 @@ impl Context {
         }
         let to_compress: Vec<ChatMessage> =
             self.history[..self.history.len() - keep_recent].to_vec();
-        let to_keep: Vec<ChatMessage> = self.history[self.history.len() - keep_recent..].to_vec();
+        let mut to_keep: Vec<ChatMessage> = self.history[self.history.len() - keep_recent..].to_vec();
 
         let mut dump = String::new();
         for m in &to_compress {
-            dump.push_str(&format!(
-                "[{}] {}\n",
-                match m.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                },
-                m.content
-            ));
+            let role_str = match m.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+            };
+            dump.push_str(&format!("[{}] {}\n", role_str, m.content.as_text()));
+            // 多模态消息的图片部分用占位标注（base64 不送入 summary 生成）
+            if let crate::provider::MessageContent::Multimodal(parts) = &m.content {
+                let img_count = parts
+                    .iter()
+                    .filter(|p| matches!(p, crate::provider::ContentPart::ImageUrl { .. }))
+                    .count();
+                if img_count > 0 {
+                    dump.push_str(&format!("[{}张图片]\n", img_count));
+                }
+            }
         }
 
         let system = "You are a conversation summarizer. Summarize the following conversation into a concise paragraph preserving key facts, decisions, and context. Output only the summary.";
@@ -93,6 +100,22 @@ impl Context {
             None => summary,
         };
         self.summary = Some(new_summary);
+
+        // 对保留的消息做图片降级：把含图片的 Multimodal 降级为 Text（省 token）
+        // 图片信息已进入 summary，保留在 history 的图片 base64 会持续消耗 token
+        for m in &mut to_keep {
+            if let crate::provider::MessageContent::Multimodal(parts) = &m.content {
+                let text = parts
+                    .iter()
+                    .map(|p| match p {
+                        crate::provider::ContentPart::Text { text } => text.clone(),
+                        crate::provider::ContentPart::ImageUrl { .. } => "[图片]".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                m.content = crate::provider::MessageContent::Text(text);
+            }
+        }
         self.history = to_keep;
         Ok(())
     }

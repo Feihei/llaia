@@ -1,4 +1,6 @@
-use crate::provider::{ChatRequest, ChatResponse, Provider, Role, StreamEvent, ToolCall};
+use crate::provider::{
+    ChatRequest, ChatResponse, MessageContent, Provider, Role, StreamEvent, ToolCall,
+};
 use anyhow::{anyhow, Result};
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -35,11 +37,20 @@ impl OpenAiCompatibleProvider {
 #[derive(Serialize)]
 struct OpenAiMessage<'a> {
     role: &'a str,
-    content: &'a str,
+    content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiToolCallSer<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<&'a str>,
+}
+
+/// 把 MessageContent 转为 OpenAI 兼容的 JSON value：
+/// Text → 字符串；Multimodal → content 数组
+fn content_to_json(content: &MessageContent) -> serde_json::Value {
+    match content {
+        MessageContent::Text(s) => serde_json::Value::String(s.clone()),
+        MessageContent::Multimodal(parts) => serde_json::to_value(parts).unwrap_or(serde_json::Value::Null),
+    }
 }
 
 #[derive(Serialize)]
@@ -108,7 +119,7 @@ impl Provider for OpenAiCompatibleProvider {
                 };
                 OpenAiMessage {
                     role,
-                    content: &m.content,
+                    content: content_to_json(&m.content),
                     tool_calls: m.tool_calls.as_ref().map(|tcs| {
                         tcs.iter()
                             .map(|tc| OpenAiToolCallSer {

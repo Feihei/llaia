@@ -124,7 +124,7 @@ async fn test_get_ws_url_extracts_url() {
 }
 
 #[tokio::test]
-async fn test_extract_c2c_text() {
+async fn test_extract_c2c_message() {
     use serde_json::json;
 
     // 正常私域 C2C 文本消息
@@ -138,10 +138,11 @@ async fn test_extract_c2c_text() {
             "content": "你好"
         }
     });
-    let (user, msg_id, text) = QqChannel::extract_c2c_text(&payload).unwrap();
-    assert_eq!(user, "user_openid_xxx");
-    assert_eq!(msg_id, "msg_abc");
-    assert_eq!(text, "你好");
+    let m = QqChannel::extract_c2c_message(&payload).unwrap();
+    assert_eq!(m.user_id, "user_openid_xxx");
+    assert_eq!(m.msg_id, "msg_abc");
+    assert_eq!(m.text, "你好");
+    assert!(m.attachments.is_empty());
 
     // 公域 C2C 消息也应识别
     let payload = json!({
@@ -152,20 +153,63 @@ async fn test_extract_c2c_text() {
             "content": "hi"
         }
     });
-    let (_, _, text) = QqChannel::extract_c2c_text(&payload).unwrap();
-    assert_eq!(text, "hi");
+    let m = QqChannel::extract_c2c_message(&payload).unwrap();
+    assert_eq!(m.text, "hi");
 
     // 非 C2C 消息
     let payload = json!({
         "t": "GROUP_AT_MESSAGE_CREATE",
         "d": { "content": "hi" }
     });
-    assert!(QqChannel::extract_c2c_text(&payload).is_none());
+    assert!(QqChannel::extract_c2c_message(&payload).is_none());
 
-    // 空内容
+    // 空内容且无附件
     let payload = json!({
         "t": "C2C_MESSAGE_CREATE",
         "d": { "id": "m1", "author": { "id": "u1" }, "content": "  " }
     });
-    assert!(QqChannel::extract_c2c_text(&payload).is_none());
+    assert!(QqChannel::extract_c2c_message(&payload).is_none());
+
+    // 带附件的消息（图片）
+    let payload = json!({
+        "t": "C2C_MESSAGE_CREATE",
+        "d": {
+            "id": "msg_img",
+            "author": { "id": "u3" },
+            "content": "看看这张图",
+            "attachments": [
+                {
+                    "content_type": "image/png",
+                    "filename": "pic.png",
+                    "url": "https://api.sgroup.qq.com/files/pic"
+                }
+            ]
+        }
+    });
+    let m = QqChannel::extract_c2c_message(&payload).unwrap();
+    assert_eq!(m.text, "看看这张图");
+    assert_eq!(m.attachments.len(), 1);
+    assert!(m.attachments[0].is_image());
+    assert_eq!(m.attachments[0].filename, "pic.png");
+
+    // 仅附件无文本也应识别
+    let payload = json!({
+        "t": "C2C_MESSAGE_CREATE",
+        "d": {
+            "id": "msg_file_only",
+            "author": { "id": "u4" },
+            "content": "",
+            "attachments": [
+                {
+                    "content_type": "application/pdf",
+                    "filename": "doc.pdf",
+                    "url": "https://api.sgroup.qq.com/files/doc"
+                }
+            ]
+        }
+    });
+    let m = QqChannel::extract_c2c_message(&payload).unwrap();
+    assert_eq!(m.text, "");
+    assert_eq!(m.attachments.len(), 1);
+    assert!(!m.attachments[0].is_image());
 }

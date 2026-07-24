@@ -1,5 +1,8 @@
 pub mod context;
+pub mod registry;
 pub mod runner;
+
+pub use crate::agent::registry::AgentRegistry;
 
 use crate::agent::context::Context;
 use crate::agent::runner::{execute_tool_calls, ToolRegistry};
@@ -20,10 +23,22 @@ pub enum TurnEvent {
     ToolStart { id: String, name: String },
     /// 工具执行结果
     ToolResult { id: String, output: String },
+    /// 工具请求发送媒体给用户（channel 负责实际发送）
+    MediaOutput {
+        path: String,
+        kind: MediaKind,
+    },
     /// 整轮结束（所有文本和工具调用完成）
     Done,
     /// 错误（已生成的文本保留，错误追加）
     Error { message: String },
+}
+
+/// 媒体类型：图片或文件
+#[derive(Debug, Clone, Copy)]
+pub enum MediaKind {
+    Image,
+    File,
 }
 
 pub struct Agent {
@@ -37,6 +52,8 @@ pub struct Agent {
     pub context_threshold: f64,
     pub max_iterations: u32,
     pub qq_confirm_mode: String,
+    /// Agent 工作目录（用于附件下载等）
+    pub workspace: std::path::PathBuf,
 }
 
 impl Agent {
@@ -48,6 +65,7 @@ impl Agent {
         session_id: i64,
         system_prompt: String,
         context_size: usize,
+        workspace: std::path::PathBuf,
     ) -> Self {
         Self {
             provider,
@@ -59,6 +77,7 @@ impl Agent {
             context_threshold: config.runtime.context_threshold,
             max_iterations: config.runtime.max_iterations,
             qq_confirm_mode: config.channels.qq.confirm_mode.clone(),
+            workspace,
         }
     }
 
@@ -87,9 +106,23 @@ impl Agent {
         channel: &str,
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<String> {
+        self.handle_message_streaming(ChatMessage::user(user_input), channel, event_tx)
+            .await
+    }
+
+    /// 多模态流式版本：接收任意 ChatMessage（支持文本+图片）。
+    /// 文本消息存入 sqlite，多模态消息只存文本部分（图片 base64 不持久化）。
+    pub async fn handle_message_streaming(
+        &mut self,
+        user_msg: ChatMessage,
+        channel: &str,
+        event_tx: mpsc::Sender<TurnEvent>,
+    ) -> Result<String> {
+        // 持久化：只存文本部分（图片 base64 太大不存 sqlite）
+        let text_for_store = user_msg.content.as_text();
         self.session_store
-            .append_message(self.session_id, &Role::User, user_input)?;
-        self.context.push(ChatMessage::user(user_input));
+            .append_message(self.session_id, &Role::User, &text_for_store)?;
+        self.context.push(user_msg);
 
         if self
             .context
@@ -102,14 +135,32 @@ impl Agent {
 
         let max_iters = self.max_iterations;
 
+        // 重复工具调用检测：连续相同 (name, args) 调用计数
+        let mut last_tool_name: Option<String> = None;
+        let mut last_tool_args: Option<String> = None;
+        let mut same_tool_streak: u32 = 0;
+
         for i in 0..max_iters {
+            // 达到 max_iterations 前一步：拔掉工具 + 注入强制总结提示词
+            let force_summary = i + 1 >= max_iters;
+            if force_summary {
+                tracing::warn!(iter = i, max = max_iters, "approaching max_iterations, forcing summary");
+                self.context.push(ChatMessage::user(
+                    "已达工具调用次数上限，请停止调用工具，基于已获取的信息总结任务并直接回复用户。",
+                ));
+            }
             let messages = self.context.to_messages();
-            let tools = self.tools.specs();
-            let tools_ref = if tools.is_empty() {
+            let tools = if force_summary {
                 None
             } else {
-                Some(tools.as_slice())
+                let specs = self.tools.specs();
+                if specs.is_empty() {
+                    None
+                } else {
+                    Some(specs)
+                }
             };
+            let tools_ref = tools.as_deref();
             let req = ChatRequest {
                 messages: &messages,
                 tools: tools_ref,
@@ -121,6 +172,16 @@ impl Agent {
             let mut parser = crate::tool_call::ToolCallStreamParser::new();
 
             while let Some(ev) = stream.next().await {
+                // 用户中止（Ctrl+C）：event_tx 被关闭，提前结束并保存部分输出
+                if event_tx.is_closed() {
+                    tracing::info!(iter = i, "stream aborted by user (tx closed)");
+                    if !iter_text.is_empty() {
+                        self.session_store
+                            .append_message(self.session_id, &Role::Assistant, &iter_text)?;
+                        self.context.push(ChatMessage::assistant(&iter_text));
+                    }
+                    return Ok(iter_text);
+                }
                 match ev? {
                     StreamEvent::TextDelta(d) => {
                         if self.provider.native_tool_calling() {
@@ -165,6 +226,26 @@ impl Agent {
                 return Ok(iter_text);
             }
 
+            // 重复工具调用检测
+            for tc in &calls {
+                let args_str = tc.arguments.to_string();
+                if last_tool_name.as_deref() == Some(tc.name.as_str())
+                    && last_tool_args.as_deref() == Some(args_str.as_str())
+                {
+                    same_tool_streak += 1;
+                } else {
+                    last_tool_name = Some(tc.name.clone());
+                    last_tool_args = Some(args_str);
+                    same_tool_streak = 1;
+                }
+                if same_tool_streak >= 3 {
+                    let warning = build_repeated_tool_warning(&tc.name, same_tool_streak);
+                    tracing::warn!(tool = %tc.name, streak = same_tool_streak, "repeated tool call");
+                    // 追加到工具结果前，作为系统提示注入下一轮
+                    self.context.push(ChatMessage::system(&warning));
+                }
+            }
+
             let assistant_msg = ChatMessage::assistant_with_tools(iter_text.clone(), calls.clone());
             let assistant_msg_id = self.session_store.append_message(
                 self.session_id,
@@ -200,24 +281,33 @@ impl Agent {
                 &calls,
                 channel,
                 &self.qq_confirm_mode,
+                Some(&event_tx),
             )
             .await?;
             for msg in tool_msgs.iter() {
+                let text = msg.content.as_text();
                 let _ = event_tx
                     .send(TurnEvent::ToolResult {
                         id: msg.tool_call_id.clone().unwrap_or_default(),
-                        output: msg.content.clone(),
+                        output: text.clone(),
                     })
                     .await;
                 self.session_store
-                    .append_message(self.session_id, &Role::Tool, &msg.content)?;
+                    .append_message(self.session_id, &Role::Tool, &text)?;
                 self.context.push(msg.clone());
             }
 
             tracing::info!(iter = i, "tool iteration done");
+
+            // 工具执行后检测用户中止：保存已完成的工具结果，提前返回
+            if event_tx.is_closed() {
+                tracing::info!(iter = i, "aborted by user after tool execution");
+                return Ok(String::new());
+            }
         }
 
-        let fallback = "[reached max tool iterations]";
+        // 兜底：循环结束仍未返回（理论上 force_summary 那轮会返回，这里防御性处理）
+        let fallback = "[已达工具调用次数上限，未能生成总结]";
         self.session_store
             .append_message(self.session_id, &Role::Assistant, fallback)?;
         self.context.push(ChatMessage::assistant(fallback));
@@ -228,6 +318,26 @@ impl Agent {
             .await;
         let _ = event_tx.send(TurnEvent::Done).await;
         Ok(fallback.into())
+    }
+}
+
+/// 重复工具调用警告：三级渐进式
+fn build_repeated_tool_warning(tool_name: &str, streak: u32) -> String {
+    if streak >= 5 {
+        format!(
+            "\n\n[系统提示] 重要：你已经连续 {} 次用相同参数调用工具 `{}`。除非每次调用都明确产生了新信息，否则请立即停止重复，更换策略、调整参数，或向用户说明限制。",
+            streak, tool_name
+        )
+    } else if streak >= 4 {
+        format!(
+            "\n\n[系统提示] 重要：你已经连续 {} 次用相同参数调用工具 `{}`。除非重复明显必要，否则请停止重复同一操作，改用其他工具、调整参数，或总结还缺什么。",
+            streak, tool_name
+        )
+    } else {
+        format!(
+            "\n\n[系统提示] 提醒：你已经连续 {} 次用相同参数调用工具 `{}`。请检查是否有其他工具、不同参数或直接总结能更好地推进任务。",
+            streak, tool_name
+        )
     }
 }
 
@@ -296,6 +406,7 @@ mod tests {
             sid,
             "test system".into(),
             8192,
+            std::path::PathBuf::from("/tmp/laia-test"),
         )
         .await
     }
@@ -380,5 +491,185 @@ mod tests {
         }
         assert_eq!(chunks.concat(), "before  after");
         assert_eq!(tool_starts, vec!["x"]);
+    }
+
+    /// max_iterations 达上限后强制总结：最后一轮拔工具 + 注入提示词，LLM 应返回纯文本
+    #[tokio::test]
+    async fn test_force_summary_on_max_iterations() {
+        // max_iterations=2：第一轮调工具，第二轮强制总结（无工具可调）
+        // 第一轮：调 echo 工具
+        // 第二轮：应该返回纯文本总结
+        let tc = ToolCall {
+            id: "call_1".into(),
+            name: "echo".into(),
+            arguments: json!({}),
+        };
+        let rounds = vec![
+            vec![StreamEvent::ToolCall(tc), StreamEvent::Done],
+            vec![StreamEvent::TextDelta("总结完成".into()), StreamEvent::Done],
+        ];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        agent.max_iterations = 2;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = agent.handle_input_streaming("do task", "cli", tx).await.unwrap();
+
+        assert_eq!(result, "总结完成");
+
+        let mut chunks = Vec::new();
+        let mut done = false;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                TurnEvent::Chunk { delta } => chunks.push(delta),
+                TurnEvent::Done => done = true,
+                _ => {}
+            }
+        }
+        assert_eq!(chunks.concat(), "总结完成");
+        assert!(done);
+    }
+
+    /// 重复工具调用检测：连续 3 次相同调用后注入警告（不影响行为，但验证不 panic）
+    #[tokio::test]
+    async fn test_repeated_tool_detection_no_panic() {
+        // 连续 3 轮调相同工具相同参数，第 4 轮返回纯文本
+        let tc = ToolCall {
+            id: "call_1".into(),
+            name: "echo".into(),
+            arguments: json!({"x": 1}),
+        };
+        let mut rounds = vec![];
+        for _ in 0..3 {
+            rounds.push(vec![StreamEvent::ToolCall(tc.clone()), StreamEvent::Done]);
+        }
+        rounds.push(vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done]);
+
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        agent.max_iterations = 10;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = agent.handle_input_streaming("hi", "cli", tx).await.unwrap();
+        assert_eq!(result, "done");
+
+        // 确保事件流正常结束
+        let mut done = false;
+        while let Some(ev) = rx.recv().await {
+            if let TurnEvent::Done = ev {
+                done = true;
+            }
+        }
+        assert!(done);
+    }
+
+    /// 端到端委派：主 Agent 调 delegate 工具 → 子 Agent 执行 → 结果回传 → 主 Agent 整合回复
+    #[tokio::test]
+    async fn test_delegation_end_to_end() {
+        use crate::tools::delegate::DelegateTool;
+        use tokio::sync::Mutex as TokioMutex;
+
+        // 子 Agent：返回固定文本
+        let sub_provider: Arc<dyn Provider> = Arc::new(MockProvider::new(
+            true,
+            vec![vec![
+                StreamEvent::TextDelta("子 Agent 完成任务".into()),
+                StreamEvent::Done,
+            ]],
+        ));
+        let sub_store = SessionStore::open_in_memory().unwrap();
+        let sub_sid = sub_store.create_session("sub", "test").unwrap();
+        let sub_tools = Arc::new(ToolRegistry::new());
+        let config = Config::default_for_workspace("/tmp/laia-test");
+        let sub_agent = Agent::new(
+            &config,
+            sub_provider,
+            sub_tools,
+            Arc::new(sub_store),
+            sub_sid,
+            "sub soul".into(),
+            8192,
+            std::path::PathBuf::from("/tmp/laia-test"),
+        )
+        .await;
+        let sub_arc: Arc<TokioMutex<Agent>> = Arc::new(TokioMutex::new(sub_agent));
+
+        // 主 Agent：第一轮调 delegate，第二轮基于结果整合回复
+        let main_rounds = vec![
+            vec![
+                StreamEvent::ToolCall(ToolCall {
+                    id: "call_1".into(),
+                    name: "delegate".into(),
+                    arguments: json!({"agent_name": "coder", "task": "写个函数"}),
+                }),
+                StreamEvent::Done,
+            ],
+            vec![
+                StreamEvent::TextDelta("已委派完成".into()),
+                StreamEvent::Done,
+            ],
+        ];
+        let main_provider: Arc<dyn Provider> = Arc::new(MockProvider::new(true, main_rounds));
+        let main_store = SessionStore::open_in_memory().unwrap();
+        let main_sid = main_store.create_session("main", "test").unwrap();
+
+        let delegate = Arc::new(DelegateTool::new(120));
+        let mut main_tools = ToolRegistry::new();
+        main_tools.register(delegate.clone());
+        let main_tools = Arc::new(main_tools);
+
+        let main_agent = Agent::new(
+            &config,
+            main_provider,
+            main_tools,
+            Arc::new(main_store),
+            main_sid,
+            "main soul".into(),
+            8192,
+            std::path::PathBuf::from("/tmp/laia-test"),
+        )
+        .await;
+        let main_arc: Arc<TokioMutex<Agent>> = Arc::new(TokioMutex::new(main_agent));
+
+        let mut registry = AgentRegistry::new(main_arc);
+        registry.register_sub_agent("coder".into(), sub_arc);
+        let registry = Arc::new(registry);
+        delegate.set_registry(registry.clone());
+
+        // 执行
+        let main = registry.main.clone();
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut agent = main.lock().await;
+        let result = agent
+            .handle_input_streaming("帮我写个函数", "cli", tx)
+            .await
+            .unwrap();
+
+        // 验证主 Agent 最终回复
+        assert_eq!(result, "已委派完成");
+
+        // 验证事件流
+        let mut chunks = Vec::new();
+        let mut tool_starts = Vec::new();
+        let mut tool_results = Vec::new();
+        let mut done = false;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                TurnEvent::Chunk { delta } => chunks.push(delta),
+                TurnEvent::ToolStart { name, .. } => tool_starts.push(name),
+                TurnEvent::ToolResult { output, .. } => tool_results.push(output),
+                TurnEvent::Done => done = true,
+                _ => {}
+            }
+        }
+        assert_eq!(tool_starts, vec!["delegate"]);
+        // delegate 转发子 Agent 的 Chunk，主 Agent 第二轮再加自己的回复
+        assert_eq!(chunks.concat(), "子 Agent 完成任务已委派完成");
+        assert!(
+            tool_results
+                .iter()
+                .any(|s| s.contains("子 Agent 完成任务")),
+            "delegate tool result should contain sub agent output, got: {:?}",
+            tool_results
+        );
+        assert!(done);
     }
 }

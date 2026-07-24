@@ -13,10 +13,14 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
 
-    let agent = crate::channels::cli::build_agent(&config).await?;
+    let pid_file = crate::pid::PidFile::new(config_dir);
+    pid_file.acquire()?;
+    let _pid_guard = PidGuard(pid_file);
+
+    let registry = crate::channels::cli::build_agent(&config).await?;
 
     let cli = std::sync::Arc::new(crate::channels::CliChannel::new());
-    crate::channels::Channel::run(cli, agent).await
+    crate::channels::Channel::run(cli, registry).await
 }
 
 /// 守护进程模式：启动所有非 CLI 的后台频道（QQ、未来 WebUI 等），不启动终端交互
@@ -26,7 +30,11 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
 
-    let agent = crate::channels::cli::build_agent(&config).await?;
+    let pid_file = crate::pid::PidFile::new(config_dir);
+    pid_file.acquire()?;
+    let _pid_guard = PidGuard(pid_file);
+
+    let registry = crate::channels::cli::build_agent(&config).await?;
 
     let mut tasks = Vec::new();
 
@@ -34,9 +42,9 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         let qq = std::sync::Arc::new(crate::channels::qq::QqChannel::new(
             config.channels.qq.clone(),
         ));
-        let agent = agent.clone();
+        let registry = registry.clone();
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = crate::channels::Channel::run(qq, agent).await {
+            if let Err(e) = crate::channels::Channel::run(qq, registry).await {
                 tracing::error!(error = %e, "QqChannel exited with error");
             }
         }));
@@ -149,5 +157,14 @@ pub fn load_config_or_init(config_dir: &Path) -> Result<Config> {
         Config::load(&config_path)
     } else {
         Ok(Config::default_for_workspace(&config_dir.to_string_lossy()))
+    }
+}
+
+/// RAII guard：作用域结束时自动释放 PID 文件
+struct PidGuard(crate::pid::PidFile);
+
+impl Drop for PidGuard {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }

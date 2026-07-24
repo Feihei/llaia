@@ -32,7 +32,7 @@ impl Tool for WebFetch {
             "required": ["url"]
         })
     }
-    async fn execute(&self, args: &Value) -> Result<String> {
+    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
         let url = args
             .get("url")
             .and_then(|v| v.as_str())
