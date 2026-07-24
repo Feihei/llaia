@@ -1,2 +1,15 @@
 /target
 .test/
+
+# 运行时产物
+*.log
+*.pid
+*.db
+*.db-wal
+*.db-shm
+
+# 上传/媒体产物
+uploads/
+
+# 文档：PDF 等二进制不纳入版本控制
+*.pdf
