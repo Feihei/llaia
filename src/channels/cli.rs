@@ -1,7 +1,7 @@
 use crate::agent::runner::ToolRegistry;
+use crate::agent::sink::{OutputSink, run_turn};
 use crate::agent::Agent;
 use crate::agent::AgentRegistry;
-use crate::agent::TurnEvent;
 use crate::channels::Channel;
 use crate::commands::slash::{try_handle, SlashOutcome};
 use crate::config::{AgentConfig, Config};
@@ -23,7 +23,50 @@ use async_trait::async_trait;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
+
+/// CLI 输出 sink：即时打印到 stdout
+struct CliSink;
+
+#[async_trait]
+impl OutputSink for CliSink {
+    async fn on_chunk(&mut self, delta: &str) {
+        print!("{}", delta);
+        let _ = std::io::stdout().flush();
+    }
+    async fn on_tool_start(&mut self, name: &str) {
+        println!("\n[tool: {}]", name);
+    }
+    async fn on_tool_result(&mut self, output: &str) {
+        // 200 字符边界安全截断（与原 cli.rs 行为一致）
+        let preview = if output.len() > 200 {
+            let mut end = 200;
+            while end > 0 && !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...(truncated)", &output[..end])
+        } else {
+            output.to_string()
+        };
+        println!("[result: {}]", preview);
+    }
+    async fn on_media(&mut self, path: &str, kind: crate::agent::MediaKind) {
+        let label = match kind {
+            crate::agent::MediaKind::Image => "image",
+            crate::agent::MediaKind::File => "file",
+        };
+        println!("[sent {}: {}]", label, path);
+    }
+    async fn on_done(&mut self) {
+        println!("\n");
+    }
+    async fn on_error(&mut self, message: &str) {
+        println!("\n[error: {}]\n", message);
+    }
+    async fn on_interrupted(&mut self) {
+        println!("\n[stopped]");
+    }
+}
 
 pub struct CliChannel;
 
@@ -42,7 +85,7 @@ impl Channel for CliChannel {
             let a = agent.lock().await;
             a.workspace.clone()
         };
-        println!("(੭aᴗa)੭ Laia - Come On~\nlaia v0.1.0 - type /help for commands, /exit to quit, /stop to interrupt\n");
+        println!("(੭aᴗa)੭ Llaia - Come On~\nllaia v0.1.0 - type /help for commands, /exit to quit, /stop to interrupt\n");
         println!("生成中可继续输入，/stop 立即中断，Ctrl+C 紧急中断\n");
 
         // 后台读 stdin 的 task：把每行输入送到 mpsc，EOF 时发 None
@@ -184,95 +227,55 @@ impl Channel for CliChannel {
                 None => continue,
             };
 
-            // spawn agent task，进入生成态
-            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            // 用 run_turn 跑这一轮，sink 即时打印
+            let stop = Arc::new(Notify::new());
+            let sink = Box::new(CliSink);
             let agent_clone = agent.clone();
-            tokio::spawn(async move {
-                let mut a = agent_clone.lock().await;
-                if let Err(e) = a
-                    .handle_message_streaming(user_msg, "cli", tx)
-                    .await
-                {
-                    tracing::error!(error = %e, "handle_message_streaming failed");
-                }
-            });
+            let mut turn_handle = tokio::spawn(run_turn(
+                agent_clone,
+                user_msg,
+                "cli".into(),
+                sink,
+                stop.clone(),
+            ));
+
             println!(); // 换行，分隔 prompt 和回复
             print!(">> "); // 生成态提示符：可输入排队或 /stop（与回复同行）
             std::io::stdout().flush()?;
 
-            // 生成态：select 监听 agent 事件 / stdin 输入 / Ctrl+C
+            // 生成态：select 监听 turn 结束 / stdin 输入 / Ctrl+C
             loop {
                 tokio::select! {
-                    // Ctrl+C：紧急中断（与 /stop 等价）
+                    // Ctrl+C：触发中断，等 run_turn 自己结束
                     _ = tokio::signal::ctrl_c() => {
-                        println!("\n[stopped]");
-                        break;
+                        stop.notify_one();
                     }
                     // stdin 有输入：/stop 中断，其他排入队列
                     input = stdin_rx.recv() => {
                         match input {
                             Some(Some(l)) if l == "/stop" => {
-                                println!("\n[stopped]");
-                                break;
+                                stop.notify_one();
                             }
                             Some(Some(l)) => {
                                 println!("[queued: {}]", l);
                                 queued_inputs.push(l);
                             }
                             Some(None) | None => {
-                                // stdin EOF：等当前生成结束
+                                // stdin EOF：等当前 turn 结束
                             }
                         }
                     }
-                    // agent 事件
-                    ev = rx.recv() => {
-                        match ev {
-                            Some(TurnEvent::Chunk { delta }) => {
-                                print!("{}", delta);
-                                std::io::stdout().flush().ok();
-                            }
-                            Some(TurnEvent::ToolStart { name, .. }) => {
-                                println!("\n[tool: {}]", name);
-                            }
-                            Some(TurnEvent::ToolResult { output, .. }) => {
-                                let preview = if output.len() > 200 {
-                                    let mut end = 200;
-                                    while end > 0 && !output.is_char_boundary(end) {
-                                        end -= 1;
-                                    }
-                                    format!("{}...(truncated)", &output[..end])
-                                } else {
-                                    output
-                                };
-                                println!("[result: {}]", preview);
-                            }
-                            Some(TurnEvent::MediaOutput { path, kind }) => {
-                                // CLI 模式下仅打印路径（终端原生不支持图片显示）
-                                let label = match kind {
-                                    crate::agent::MediaKind::Image => "image",
-                                    crate::agent::MediaKind::File => "file",
-                                };
-                                println!("[sent {}: {}]", label, path);
-                            }
-                            Some(TurnEvent::Done) => {
-                                println!("\n");
-                                break;
-                            }
-                            Some(TurnEvent::Error { message }) => {
-                                println!("\n[error: {}]\n", message);
-                                break;
-                            }
-                            None => {
-                                // agent task 结束
-                                println!();
-                                break;
-                            }
+                    res = &mut turn_handle => {
+                        // run_turn 结束（正常/中断/错误都走 sink 回调已打印）
+                        match res {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => tracing::error!(error = %e, "run_turn failed"),
+                            Err(e) => tracing::error!(error = %e, "run_turn task panicked"),
                         }
+                        break;
                     }
                 }
             }
-            // 中断或正常结束时 rx 被 drop，spawn 的 task 检测 tx closed 自动结束并保存部分输出
-            drop(rx);
         }
         Ok(())
     }
