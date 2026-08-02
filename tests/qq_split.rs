@@ -1,4 +1,4 @@
-use laia::channels::qq_split::split_reply;
+use llaia::channels::qq::split_reply;
 
 #[test]
 fn test_short_reply_no_split() {
