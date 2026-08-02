@@ -1,5 +1,5 @@
-use crate::agent::Agent;
-use crate::agent::AgentRegistry;
+use crate::agent::sink::{OutputSink, run_turn};
+use crate::agent::{Agent, AgentRegistry, MediaKind};
 use crate::channels::Channel;
 use crate::config::QqConfig;
 use crate::provider::{ChatMessage, ContentPart, ImageUrlContent};
@@ -571,71 +571,21 @@ impl QqChannel {
             }
         };
 
-        // 普通消息：spawn 子任务调 agent，主任务并发消费 rx，避免 send 阻塞死锁
-        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        let agent_clone = agent.clone();
-        let join = tokio::spawn(async move {
-            let mut a = agent_clone.lock().await;
-            a.handle_message_streaming(user_msg, "qq", tx).await
-        });
-
-        // 注册中断信号：/stop 时 notify_one 唤醒下面的 select! 中断分支
-        let stop_notify = Arc::new(Notify::new());
+        // 普通消息：用 run_turn 跑这一轮，QqSink 负责输出
+        let stop = Arc::new(Notify::new());
         {
             let mut stops = self.running_stops.lock().await;
-            stops.insert(user_openid.to_string(), stop_notify.clone());
+            stops.insert(user_openid.to_string(), stop.clone());
         }
 
-        // 累积所有 Chunk，等 Done 后分片发送；select! 同时监听中断信号
-        let mut buffer = String::new();
-        let mut agent_err: Option<String> = None;
-        let mut interrupted = false;
-        loop {
-            tokio::select! {
-                // 中断信号：用户发了 /stop
-                _ = stop_notify.notified() => {
-                    interrupted = true;
-                    break;
-                }
-                ev = rx.recv() => {
-                    match ev {
-                        Some(crate::agent::TurnEvent::Chunk { delta }) => buffer.push_str(&delta),
-                        Some(crate::agent::TurnEvent::Done) => break,
-                        Some(crate::agent::TurnEvent::Error { message }) => {
-                            agent_err = Some(message);
-                            break;
-                        }
-                        Some(crate::agent::TurnEvent::ToolStart { name, .. }) => {
-                            // 工具调用开始：发送提示消息给用户
-                            let notice = format!("🔧 {}...", name);
-                            let _ = self
-                                .send_c2c_message(user_openid, &notice, Some(msg_id.as_str()))
-                                .await;
-                        }
-                        Some(crate::agent::TurnEvent::ToolResult { .. }) => {
-                            // 工具结果不转发（可能很长，会刷屏）
-                        }
-                        Some(crate::agent::TurnEvent::MediaOutput { path, kind }) => {
-                            // Agent 请求发送媒体给用户
-                            if let Err(e) = self
-                                .send_media_to_user(user_openid, &path, kind, Some(msg_id.as_str()))
-                                .await
-                            {
-                                tracing::error!(error = %e, path = %path, "failed to send media");
-                                let _ = self
-                                    .send_c2c_message(
-                                        user_openid,
-                                        &format!("[发送媒体失败: {}]", e),
-                                        Some(msg_id.as_str()),
-                                    )
-                                    .await;
-                            }
-                        }
-                        None => break,
-                    }
-                }
-            }
-        }
+        let sink = Box::new(QqSink {
+            qq: self.clone(),
+            user_openid: user_openid.to_string(),
+            msg_id: msg_id.to_string(),
+            buffer: String::new(),
+        });
+
+        let turn_result = run_turn(agent.clone(), user_msg, "qq".into(), sink, stop).await;
 
         // 清理中断信号注册
         {
@@ -643,72 +593,88 @@ impl QqChannel {
             stops.remove(user_openid);
         }
 
-        // 中断处理：drop rx 让 agent 检测 tx closed 优雅退出（保存部分输出到 sqlite/context），
-        // 等 agent task 结束后直接返回（/stop 的回复已由中断触发方发送）
-        if interrupted {
-            tracing::info!(user = %user_openid, "turn interrupted by /stop");
-            drop(rx);
-            let _ = join.await;
-            return Ok(());
-        }
+        turn_result?;
+        Ok(())
+    }
+}
 
-        // 等子任务结束（此时 tx 已 drop，rx 已返回 None 或 break）
-        let reply_result = join.await;
-        if let Err(e) = reply_result {
-            tracing::error!(error = %e, "agent task panicked");
-            let err_msg = format!("[内部错误: agent task panicked: {}]", e);
-            let _ = self
-                .send_c2c_message(user_openid, &err_msg, Some(msg_id.as_str()))
-                .await;
-            return Ok(());
-        }
-        if let Some(msg) = agent_err {
-            let err_msg = format!("[错误: {}]", msg);
-            let _ = self
-                .send_c2c_message(user_openid, &err_msg, Some(msg_id.as_str()))
-                .await;
-            return Ok(());
-        }
-        if let Err(e) = reply_result.unwrap() {
-            tracing::error!(error = %e, "agent handle_input_streaming failed");
-            let err_msg = if buffer.is_empty() {
-                format!("[内部错误: {}]", e)
-            } else {
-                buffer
-            };
-            let chunks = split_reply(&err_msg, 1800);
-            for (i, chunk) in chunks.iter().enumerate() {
-                let id = if i == 0 { Some(msg_id.as_str()) } else { None };
-                if let Err(e) = self.send_c2c_message(user_openid, chunk, id).await {
-                    tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
-                }
-            }
-            return Ok(());
-        }
+/// QQ 输出 sink：累积 chunk 后分片发送，工具调用即时通知
+struct QqSink {
+    qq: Arc<QqChannel>,
+    user_openid: String,
+    msg_id: String,
+    buffer: String,
+}
 
-        // 正常回复：分片发送
-        // agent 可能只调工具无文本输出（如委派后直接 Done），buffer 为空时给占位回复，
+#[async_trait]
+impl OutputSink for QqSink {
+    async fn on_chunk(&mut self, delta: &str) {
+        self.buffer.push_str(delta);
+    }
+    async fn on_tool_start(&mut self, name: &str) {
+        let notice = format!("🔧 {}...", name);
+        let _ = self
+            .qq
+            .send_c2c_message(&self.user_openid, &notice, Some(&self.msg_id))
+            .await;
+    }
+    async fn on_media(&mut self, path: &str, kind: MediaKind) {
+        if let Err(e) = self
+            .qq
+            .send_media_to_user(&self.user_openid, path, kind, Some(&self.msg_id))
+            .await
+        {
+            tracing::error!(error = %e, path = path, "failed to send media");
+            let _ = self
+                .qq
+                .send_c2c_message(
+                    &self.user_openid,
+                    &format!("[发送媒体失败: {}]", e),
+                    Some(&self.msg_id),
+                )
+                .await;
+        }
+    }
+    async fn on_done(&mut self) {
+        // agent 可能只调工具无文本输出，buffer 为空时给占位回复
         // 否则 QQ 会因 content="" 返回 304061 invalid content
-        let reply = if buffer.trim().is_empty() {
-            tracing::warn!(total_len = buffer.len(), "agent reply empty, sending placeholder");
+        let reply = if self.buffer.trim().is_empty() {
+            tracing::warn!(total_len = self.buffer.len(), "agent reply empty, sending placeholder");
             "[已完成（无文本输出）]"
         } else {
-            buffer.as_str()
+            self.buffer.as_str()
         };
         let chunks = split_reply(reply, 1800);
         tracing::info!(chunks = chunks.len(), total_len = reply.len(), "sending reply");
         for (i, chunk) in chunks.iter().enumerate() {
-            // 跳过空片（split_reply 极端情况下可能产生）
             if chunk.trim().is_empty() {
                 continue;
             }
-            // 只有第一片带 msg_id 用于被动回复，后续片用主动消息
-            let id = if i == 0 { Some(msg_id.as_str()) } else { None };
-            if let Err(e) = self.send_c2c_message(user_openid, chunk, id).await {
+            // 只有第一片带 msg_id（被动回复），后续片用主动消息
+            let id = if i == 0 { Some(self.msg_id.as_str()) } else { None };
+            if let Err(e) = self.qq.send_c2c_message(&self.user_openid, chunk, id).await {
                 tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
             }
         }
-        Ok(())
+    }
+    async fn on_error(&mut self, message: &str) {
+        let err_msg = if self.buffer.is_empty() {
+            format!("[内部错误: {}]", message)
+        } else {
+            // 保留已生成文本，错误追加
+            self.buffer.clone()
+        };
+        let chunks = split_reply(&err_msg, 1800);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let id = if i == 0 { Some(self.msg_id.as_str()) } else { None };
+            if let Err(e) = self.qq.send_c2c_message(&self.user_openid, chunk, id).await {
+                tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
+            }
+        }
+    }
+    async fn on_interrupted(&mut self) {
+        // /stop 的回复文本由中断触发方（QQ /stop handler）发送，这里只 log
+        tracing::info!(user = %self.user_openid, "turn interrupted by /stop");
     }
 }
 
