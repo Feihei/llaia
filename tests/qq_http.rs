@@ -1,5 +1,5 @@
-use laia::channels::qq::QqChannel;
-use laia::config::QqConfig;
+use llaia::channels::qq::QqChannel;
+use llaia::config::QqConfig;
 use mockito::Server;
 
 fn test_config() -> QqConfig {

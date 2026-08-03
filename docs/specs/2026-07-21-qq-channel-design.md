@@ -6,7 +6,7 @@
 
 ## 背景
 
-P1 已完成 CLI channel 的 LAIA MVP。P1.5 的目标是接入腾讯官方 QQ 开放平台机器人，让用户可以通过 QQ 单聊与 LAIA 交互，实现"跨频道接续会话"的核心设计。
+P1 已完成 CLI channel 的 LLAIA MVP。P1.5 的目标是接入腾讯官方 QQ 开放平台机器人，让用户可以通过 QQ 单聊与 LLAIA 交互，实现"跨频道接续会话"的核心设计。
 
 ## 范围
 
@@ -121,7 +121,7 @@ if channel == "qq" {
 
 ## 长回复分片
 
-腾讯 QQ 单条消息字符上限约 2000。LAIA 取 1800 作为安全阈值。
+腾讯 QQ 单条消息字符上限约 2000。LLAIA 取 1800 作为安全阈值。
 
 分片规则：
 
@@ -206,7 +206,7 @@ src/
 ### 端到端 smoke test
 
 - 配置真实 QQ bot 凭据
-- 用另一个 QQ 号发消息，验证 LAIA 回复
+- 用另一个 QQ 号发消息，验证 LLAIA 回复
 - 验证 CLI 和 QQ 跨 channel 共享 session（CLI 谈话题 → QQ 接续）
 
 ## 风险与开放问题

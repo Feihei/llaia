@@ -6,7 +6,7 @@
 
 ## 背景
 
-P1 + P1.5 完成了单 Agent 架构的 LAIA MVP（CLI + QQ channel + 流式输出）。主 Agent 单干所有任务，所有工具直接挂载。
+P1 + P1.5 完成了单 Agent 架构的 LLAIA MVP（CLI + QQ channel + 流式输出）。主 Agent 单干所有任务，所有工具直接挂载。
 
 P2-a 引入主从 Agent 委派模式：主 Agent 通过 `delegate` 工具把特定任务整体甩给专用子 Agent 独立完成，子 Agent 结果回传主 Agent 整合后再回用户。用户只跟主 Agent 接触。
 
@@ -81,20 +81,20 @@ pub struct AgentConfig {
 ```toml
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
-soul = "~/.laia/SOUL.md"
+workspace = "~/.llaia"
+soul = "~/.llaia/SOUL.md"
 
 [agent.coder]
 model = "default.qwen"
-workspace = "~/.laia/agents/coder"
-soul = "~/.laia/agents/coder.md"
+workspace = "~/.llaia/agents/coder"
+soul = "~/.llaia/agents/coder.md"
 denied_tools = ["memory_write"]
 delegate_timeout = 180
 
 [agent.searcher]
 model = "default.qwen"
-workspace = "~/.laia/agents/searcher"
-soul = "~/.laia/agents/searcher.md"
+workspace = "~/.llaia/agents/searcher"
+soul = "~/.llaia/agents/searcher.md"
 denied_tools = ["terminal", "file_write", "file_edit", "memory_write"]
 delegate_timeout = 60
 ```

@@ -398,7 +398,7 @@ mod tests {
         let sid = store.create_session("test", "test").unwrap();
         let provider: Arc<dyn Provider> = Arc::new(MockProvider::new(native, rounds));
         let tools = Arc::new(ToolRegistry::new());
-        let config = Config::default_for_workspace("/tmp/laia-test");
+        let config = Config::default_for_workspace("/tmp/llaia-test");
         Agent::new(
             &config,
             provider,
@@ -407,7 +407,7 @@ mod tests {
             sid,
             "test system".into(),
             8192,
-            std::path::PathBuf::from("/tmp/laia-test"),
+            std::path::PathBuf::from("/tmp/llaia-test"),
         )
         .await
     }
@@ -579,7 +579,7 @@ mod tests {
         let sub_store = SessionStore::open_in_memory().unwrap();
         let sub_sid = sub_store.create_session("sub", "test").unwrap();
         let sub_tools = Arc::new(ToolRegistry::new());
-        let config = Config::default_for_workspace("/tmp/laia-test");
+        let config = Config::default_for_workspace("/tmp/llaia-test");
         let sub_agent = Agent::new(
             &config,
             sub_provider,
@@ -588,7 +588,7 @@ mod tests {
             sub_sid,
             "sub soul".into(),
             8192,
-            std::path::PathBuf::from("/tmp/laia-test"),
+            std::path::PathBuf::from("/tmp/llaia-test"),
         )
         .await;
         let sub_arc: Arc<TokioMutex<Agent>> = Arc::new(TokioMutex::new(sub_agent));
@@ -625,7 +625,7 @@ mod tests {
             main_sid,
             "main soul".into(),
             8192,
-            std::path::PathBuf::from("/tmp/laia-test"),
+            std::path::PathBuf::from("/tmp/llaia-test"),
         )
         .await;
         let main_arc: Arc<TokioMutex<Agent>> = Arc::new(TokioMutex::new(main_agent));

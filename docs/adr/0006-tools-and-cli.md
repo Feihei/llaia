@@ -44,12 +44,12 @@ whitelist = ["ls", "cat", "grep", "pwd", "dir"]
 
 子命令式（参考 zeroclaw）：
 
-- `laia chat` —— 进入交互式 REPL
-- `laia config` —— 打印当前配置
-- `laia doctor` —— 诊断 provider 连通性、文件完整性
-- `laia remember "<text>"` —— 一次性写 MEMORY.md
+- `llaia chat` —— 进入交互式 REPL
+- `llaia config` —— 打印当前配置
+- `llaia doctor` —— 诊断 provider 连通性、文件完整性
+- `llaia remember "<text>"` —— 一次性写 MEMORY.md
 
-默认 `laia`（无子命令）等价于 `laia chat`。
+默认 `llaia`（无子命令）等价于 `llaia chat`。
 
 ### 斜杠命令清单（REPL 内）
 
@@ -74,7 +74,7 @@ P1 直接把工具写死。P2 再做。
 
 - 工具 trait 设计要支持 P2 的白名单过滤，但 P1 不过滤
 - REPL 解析层要区分斜杠命令与普通输入
-- `laia remember` 子命令是 `memory_write` 工具的 CLI 快捷方式
+- `llaia remember` 子命令是 `memory_write` 工具的 CLI 快捷方式
 
 ## 参考
 

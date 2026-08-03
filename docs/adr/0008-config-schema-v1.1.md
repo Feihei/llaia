@@ -14,7 +14,7 @@ P1 实现完成后，用户在使用过程中发现 config schema 存在以下�
 4. **provider 与 model 耦合**：P1 的 `[provider.default]` 直接平铺 `model` 和 `native_tool_calling`，导致一个 provider 端点（base_url + api_key）只能配一个模型组合。实际场景中同一 Ollama/LMStudio 实例下挂多个模型很常见。
 5. **`workspace` 是顶层字段**：但 workspace 在语义上属于 agent（P2 多 agent 各自独立 workspace），放顶层不合理。
 6. **sessions.db 路径硬编码**：代码里写死 `workspace.join("sessions.db")`，schema 没体现。
-7. **log.dir 默认值写死 `~/.laia/logs`**：与 workspace 脱节。
+7. **log.dir 默认值写死 `~/.llaia/logs`**：与 workspace 脱节。
 
 ## 决策
 
@@ -22,7 +22,7 @@ P1 实现完成后，用户在使用过程中发现 config schema 存在以下�
 
 ```toml
 [agent.main]
-workspace = "e:/play/coding/laia/.test"
+workspace = "e:/play/coding/llaia/.test"
 ```
 
 - 每个 agent 独立 workspace，互不干扰
@@ -74,7 +74,7 @@ max_iterations = 10       # agent 工具循环上限，默认 10
 
 ### 5. log.dir 保持全局
 
-`[log].dir` 默认 `~/.laia/logs`，不跟 agent 走。理由：日志是程序级基础设施，不是 agent 级状态。
+`[log].dir` 默认 `~/.llaia/logs`，不跟 agent 走。理由：日志是程序级基础设施，不是 agent 级状态。
 
 ## 完整 schema 示例
 
@@ -85,7 +85,7 @@ max_iterations = 10
 
 [log]
 level = "info"
-dir = "~/.laia/logs"
+dir = "~/.llaia/logs"
 
 [provider.default]
 type = "openai_compatible"
@@ -98,7 +98,7 @@ native_tool_calling = false
 
 [agent.main]
 model = "default.qwen3"
-workspace = "e:/play/coding/laia/.test"
+workspace = "e:/play/coding/llaia/.test"
 # soul/user/memory 可省
 
 [channels.cli]
@@ -115,7 +115,7 @@ api_key = ""
 ## 遗留问题（推迟到后续 ADR）
 
 - **环境变量插值**：`${TAVILY_API_KEY}` 语法避免明文存储，待 P2 安全性增强时讨论。
-- **`--config <path>` CLI 参数**：当前 config 路径写死 `~/.laia/config.toml`，多实例场景需 CLI 参数覆盖。
+- **`--config <path>` CLI 参数**：当前 config 路径写死 `~/.llaia/config.toml`，多实例场景需 CLI 参数覆盖。
 - **tools 改为 HashMap**：当前 `ToolsConfig` 是固定 struct，加新工具要改 struct。P2 加新工具多了再重构。
 - **工具 enabled 字段**：当前 FileRead/FileWrite/Terminal 永远注册，无法关闭。P1.5 加 web 面板时一起改。
 
@@ -126,4 +126,4 @@ api_key = ""
 - `src/commands/mod.rs`：`doctor_cmd` 适配新字段，`remember_cmd` 用 workspace 推导 memory 路径
 - `src/agent/mod.rs`：`Agent` 新增 `max_iterations` 字段，从 `config.runtime` 读取而非硬编码
 - `src/commands/slash.rs`：`/config` 命令展示 `max_iterations`
-- `C:\Users\THAD\.laia\config.toml`：用户需手动迁移到新格式
+- `C:\Users\THAD\.llaia\config.toml`：用户需手动迁移到新格式

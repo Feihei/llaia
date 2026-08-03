@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 接入腾讯官方 QQ 开放平台机器人作为 LAIA 的第二个 channel，实现跨 channel 共享 session 的 QQ 单聊交互。
+**Goal:** 接入腾讯官方 QQ 开放平台机器人作为 LLAIA 的第二个 channel，实现跨 channel 共享 session 的 QQ 单聊交互。
 
 **Architecture:** 抽象 `Channel` trait，CLI 和 QQ 各自实现；`Agent` 用 `Arc<tokio::sync::Mutex<Agent>>` 跨 channel 共享串行化访问；QqChannel 用 tokio-tungstenite 接 WS 事件，reqwest 调 HTTPS API 发送回复；长回复按段落分片，每片 ≤ 1800 字符；QQ 下的工具 confirm 走 `always`/`whitelist`/`none` 三档，跳过有副作用的工具时不弹 stdin。
 
@@ -85,7 +85,7 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 
 [channels.qq]
 app_id = "12345"
@@ -114,7 +114,7 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 "#;
     let mut tmp = tempfile::NamedTempFile::new().unwrap();
     std::io::Write::write_all(&mut tmp, toml.as_bytes()).unwrap();
@@ -313,7 +313,7 @@ git commit -m "feat(tools): add requires_confirm() to Tool trait"
 `tests/qq_split.rs`:
 
 ```rust
-use laia::channels::qq_split::split_reply;
+use llaia::channels::qq_split::split_reply;
 
 #[test]
 fn test_short_reply_no_split() {
@@ -635,7 +635,7 @@ impl CliChannel {
 #[async_trait]
 impl Channel for CliChannel {
     async fn run(self: Arc<Self>, agent: Arc<Mutex<Agent>>) -> Result<()> {
-        println!("laia v0.1.5 - type /help for commands, /exit to quit\n");
+        println!("llaia v0.1.5 - type /help for commands, /exit to quit\n");
         let stdin = std::io::stdin();
         loop {
             print!("> ");
@@ -1335,8 +1335,8 @@ git commit -m "feat: multi-channel startup in chat_cmd"
 `tests/qq_http.rs`:
 
 ```rust
-use laia::channels::qq::QqChannel;
-use laia::config::QqConfig;
+use llaia::channels::qq::QqChannel;
+use llaia::config::QqConfig;
 use mockito::Server;
 
 #[tokio::test]
@@ -1489,7 +1489,7 @@ git commit -m "test(qq): mockito tests for send_c2c_message with retries"
 ## Task 10: 端到端 smoke test
 
 **Files:**
-- Modify: `C:\Users\THAD\.laia\config.toml`（用户手动）
+- Modify: `C:\Users\THAD\.llaia\config.toml`（用户手动）
 - Manual test
 
 - [ ] **Step 1: 用户在 config.toml 加 QQ 配置**
@@ -1503,7 +1503,7 @@ bot_qq = "机器人的 QQ 号"
 confirm_mode = "always"
 ```
 
-- [ ] **Step 2: 启动 LAIA**
+- [ ] **Step 2: 启动 LLAIA**
 
 Run: `cargo run -- chat`
 Expected: 日志显示 QqChannel 启动并连接到 gateway，CLI 也能正常输入
@@ -1576,7 +1576,7 @@ QQ 下无法弹 stdin，独立设计三档：
 
 ### 长回复分片
 
-QQ 单条消息上限约 2000 字符。LAIA 取 1800 作为安全阈值，按段落 → 行 → 字符三级 fallback 切分。代码块跨片时闭合后再开。
+QQ 单条消息上限约 2000 字符。LLAIA 取 1800 作为安全阈值，按段落 → 行 → 字符三级 fallback 切分。代码块跨片时闭合后再开。
 
 ### 限制
 

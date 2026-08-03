@@ -1,6 +1,6 @@
-# LAIA 项目 Roadmap
+# LLAIA 项目 Roadmap
 
-> 本文档是 LAIA 的整体阶段路线图，标注各阶段状态与关键交付物。
+> 本文档是 LLAIA 的整体阶段路线图，标注各阶段状态与关键交付物。
 > 每个阶段的详细实现计划见 [docs/plans/](plans/)，设计规格见 [docs/specs/](specs/)，架构决策见 [docs/adr/](adr/)。
 
 **整体目标**：一个单用户、本地优先的私人 AI 助理，跨 CLI/QQ/Web 等多 channel 接入，主 Agent + 可委派子 Agent 协作，持久化记忆与会话。
@@ -32,7 +32,7 @@
 - [x] 上下文管理：token 估算 + 自动压缩（LLM 摘要 + 关键消息保留）
 - [x] Agent 主循环（工具调用迭代）
 - [x] CLI REPL + 斜杠命令（`/new` `/compact` `/remember` `/config` `/help` `/exit`）
-- [x] `laia config` / `laia doctor` / `laia remember` 子命令
+- [x] `llaia config` / `llaia doctor` / `llaia remember` 子命令
 
 **参考**：[ADR-0001](adr/0001-product-positioning.md) 到 [ADR-0008](adr/0008-config-schema-v1.1.md)
 
@@ -125,7 +125,7 @@
 
 - [x] token / api_key 环境变量插值（`${VAR}` 语法，未定义变量报错 fail fast）
 - [x] sqlite WAL 模式（已存在，确认生效）
-- [x] PID 文件检测（`<config_dir>/laia.pid`，重复实例警告不阻止，RAII 自动清理）
+- [x] PID 文件检测（`<config_dir>/llaia.pid`，重复实例警告不阻止，RAII 自动清理）
 
 ### P2-c：流式交互增强
 

@@ -5,10 +5,10 @@
 
 ## 背景
 
-LAIA 优先支持本地 OpenAI 兼容端点（Ollama/Llama.cpp/LMStudio），
+LLAIA 优先支持本地 OpenAI 兼容端点（Ollama/Llama.cpp/LMStudio），
 但这些端点对 function calling 的支持参差，需要决定工具调用协议。
 
-参考 zeroclaw 的混合策略（原生优先 + 标签降级），LAIA 需要决定 P1 裁剪到什么程度。
+参考 zeroclaw 的混合策略（原生优先 + 标签降级），LLAIA 需要决定 P1 裁剪到什么程度。
 
 ## 决策
 

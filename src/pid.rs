@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use sysinfo::{Pid, ProcessRefreshKind, System};
 
-/// PID 文件管理：用于检测是否有另一个 laia 实例正在运行。
+/// PID 文件管理：用于检测是否有另一个 llaia 实例正在运行。
 ///
 /// 行为：
 /// - `acquire`：检查现有 PID 文件，若对应进程还活着则警告（不阻止启动）。
@@ -19,7 +19,7 @@ pub struct PidFile {
 impl PidFile {
     pub fn new(config_dir: &Path) -> Self {
         Self {
-            path: config_dir.join("laia.pid"),
+            path: config_dir.join("llaia.pid"),
         }
     }
 
@@ -30,7 +30,7 @@ impl PidFile {
                 tracing::warn!(
                     pid = existing_pid,
                     pid_file = %self.path.display(),
-                    "another laia instance may be running; proceeding anyway"
+                    "another llaia instance may be running; proceeding anyway"
                 );
             } else {
                 tracing::debug!(
@@ -87,7 +87,7 @@ mod tests {
         let pid_file = PidFile::new(dir.path());
         pid_file.acquire().unwrap();
 
-        let content = fs::read_to_string(dir.path().join("laia.pid")).unwrap();
+        let content = fs::read_to_string(dir.path().join("llaia.pid")).unwrap();
         let stored: u32 = content.trim().parse().unwrap();
         assert_eq!(stored, std::process::id());
     }
@@ -97,10 +97,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let pid_file = PidFile::new(dir.path());
         pid_file.acquire().unwrap();
-        assert!(dir.path().join("laia.pid").exists());
+        assert!(dir.path().join("llaia.pid").exists());
 
         pid_file.release();
-        assert!(!dir.path().join("laia.pid").exists());
+        assert!(!dir.path().join("llaia.pid").exists());
     }
 
     #[test]
@@ -109,7 +109,7 @@ mod tests {
         let pid_file = PidFile::new(dir.path());
         // release 未 acquire 的 pid 文件不报错
         pid_file.release();
-        assert!(!dir.path().join("laia.pid").exists());
+        assert!(!dir.path().join("llaia.pid").exists());
     }
 
     #[test]
@@ -118,10 +118,10 @@ mod tests {
         let pid_file = PidFile::new(dir.path());
 
         // 写一个几乎肯定不存在的 PID
-        fs::write(dir.path().join("laia.pid"), "99999999").unwrap();
+        fs::write(dir.path().join("llaia.pid"), "99999999").unwrap();
 
         pid_file.acquire().unwrap();
-        let content = fs::read_to_string(dir.path().join("laia.pid")).unwrap();
+        let content = fs::read_to_string(dir.path().join("llaia.pid")).unwrap();
         let stored: u32 = content.trim().parse().unwrap();
         assert_eq!(stored, std::process::id());
     }

@@ -1,6 +1,6 @@
-# LAIA 开发文档
+# LLAIA 开发文档
 
-本文档面向开发者与 Agent，记录 LAIA 的内部架构、工程约定与技术细节。
+本文档面向开发者与 Agent，记录 LLAIA 的内部架构、工程约定与技术细节。
 
 ## 定位
 
@@ -90,17 +90,17 @@ QQ channel 下无法弹 stdin 等用户确认，`execute_tool_calls` 接收 `cha
 - `whitelist`：P1.5 简化，等同于 `always`
 - `none`：全放行
 
-CLI 子命令：`laia chat`（默认）/ `laia config` / `laia doctor` / `laia remember`。
+CLI 子命令：`llaia chat`（默认）/ `llaia config` / `llaia doctor` / `llaia remember`。
 斜杠命令：`/new` `/exit` `/compact` `/clear` `/remember` `/config` `/help`。
 
 详见 [docs/adr/0006-tools-and-cli.md](docs/adr/0006-tools-and-cli.md) 与 [docs/adr/0009-qq-channel.md](docs/adr/0009-qq-channel.md)。
 
 ## 工作区与工程约定
 
-默认工作区 `~/.laia/`，可配置：
+默认工作区 `~/.llaia/`，可配置：
 
 ```
-~/.laia/
+~/.llaia/
   config.toml
   SOUL.md
   USER.md
@@ -139,7 +139,7 @@ confirm_mode = "always"       # always / whitelist / none
 - 主 Agent 能调文件读写 / 终端 / 网页 / 搜索
 - `/remember` 写 MEMORY，下次加载生效
 - 自动压缩，sqlite 留底
-- `laia config` / `laia doctor` 可用
+- `llaia config` / `llaia doctor` 可用
 
 ## 设计文档索引
 

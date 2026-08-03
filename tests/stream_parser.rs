@@ -1,5 +1,5 @@
-use laia::tool_call::stream_parser::ToolCallStreamParser;
-use laia::provider::ToolCall;
+use llaia::tool_call::stream_parser::ToolCallStreamParser;
+use llaia::provider::ToolCall;
 
 #[test]
 fn test_plain_text_passthrough() {

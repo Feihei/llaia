@@ -3,9 +3,9 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "laia", version = "0.1.0", about = "Lightweight AI Assistant")]
+#[command(name = "llaia", version = "0.1.0", about = "Lightweight Local AI Assistant")]
 struct Cli {
-    /// 配置目录，默认 ~/.laia
+    /// 配置目录，默认 ~/.llaia
     #[arg(long, global = true)]
     config_dir: Option<PathBuf>,
 
@@ -34,14 +34,14 @@ async fn main() -> Result<()> {
         dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("no home dir"))
             .expect("no home dir")
-            .join(".laia")
+            .join(".llaia")
     });
     let command = cli.command.unwrap_or(Commands::Chat);
     match command {
-        Commands::Chat => laia::commands::chat_cmd(&config_dir).await,
-        Commands::Serve => laia::commands::serve_cmd(&config_dir).await,
-        Commands::Config => laia::commands::config_cmd(&config_dir),
-        Commands::Doctor => laia::commands::doctor_cmd(&config_dir).await,
-        Commands::Remember { text } => laia::commands::remember_cmd(&text, &config_dir).await,
+        Commands::Chat => llaia::commands::chat_cmd(&config_dir).await,
+        Commands::Serve => llaia::commands::serve_cmd(&config_dir).await,
+        Commands::Config => llaia::commands::config_cmd(&config_dir),
+        Commands::Doctor => llaia::commands::doctor_cmd(&config_dir).await,
+        Commands::Remember { text } => llaia::commands::remember_cmd(&text, &config_dir).await,
     }
 }

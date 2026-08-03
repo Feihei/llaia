@@ -1,9 +1,9 @@
-# LAIA 术语表
+# LLAIA 术语表
 
 ## Agent 相关
 
 ### 主 Agent（Main Agent）
-LAIA P1 唯一的 Agent，单干所有任务。用户所有交互都直接与主 Agent 进行。
+LLAIA P1 唯一的 Agent，单干所有任务。用户所有交互都直接与主 Agent 进行。
 P2 引入子 Agent 后，主 Agent 负责委派与结果整合。
 配置 section：`[agent.main]`。
 
@@ -121,7 +121,7 @@ P2 引入工具白名单，按子 Agent 过滤可见工具。
 所有频道共享同一会话上下文（同用户同会话）。
 
 ### CLI REPL
-`laia chat` 进入的交互式命令行。支持斜杠命令。
+`llaia chat` 进入的交互式命令行。支持斜杠命令。
 
 ### 斜杠命令（Slash Command）
 REPL 内以 `/` 开头的指令。P1 清单：
@@ -129,16 +129,16 @@ REPL 内以 `/` 开头的指令。P1 清单：
 
 ## CLI 子命令
 
-### `laia chat`
-进入交互式 REPL。默认子命令（`laia` 无参数等价于此）。
+### `llaia chat`
+进入交互式 REPL。默认子命令（`llaia` 无参数等价于此）。
 
-### `laia config`
+### `llaia config`
 打印当前配置。
 
-### `laia doctor`
+### `llaia doctor`
 诊断 provider 连通性、文件完整性。
 
-### `laia remember "<text>"`
+### `llaia remember "<text>"`
 一次性写 MEMORY.md，等价于 REPL 内 `/remember`。
 
 ## 版本规划
@@ -164,12 +164,12 @@ P2 加多 provider/多 agent 时只增 section 不改 schema。
 P1 用 `anyhow::Result` 全局兜底。P2 视需要对外 API 引入 `thiserror`。
 
 ### 日志
-tracing，P1 只配一个 fmt layer 输出到文件（`~/.laia/logs/`）+ stderr。
+tracing，P1 只配一个 fmt layer 输出到文件（`~/.llaia/logs/`）+ stderr。
 
 ### 工作区目录
-默认 `~/.laia/`，用户可在 `[workspace].dir` 配置中改到别处。
+默认 `~/.llaia/`，用户可在 `[workspace].dir` 配置中改到别处。
 ```
-~/.laia/
+~/.llaia/
   config.toml
   SOUL.md
   USER.md
@@ -182,13 +182,13 @@ tracing，P1 只配一个 fmt layer 输出到文件（`~/.laia/logs/`）+ stderr
 
 ### zeroclaw
 Rust 实现的 AI Agent 项目，源码克隆于 `e:\apps\zeroclaw\zeroclaw\`。
-LAIA 参考其：会话 sqlite schema（ACP 那套）、Provider trait 设计、
+LLAIA 参考其：会话 sqlite schema（ACP 那套）、Provider trait 设计、
 工具调用混合策略（原生优先 + 标签降级）、CLI 子命令形态、命名式配置 section。
-LAIA 相对 zeroclaw 的简化：单 crate、单 provider、单 agent、无流式、无多频道并发。
+LLAIA 相对 zeroclaw 的简化：单 crate、单 provider、单 agent、无流式、无多频道并发。
 
 ### AstrBot
 Python 实现的主从 Agent 协作项目，README 提到"类似 AstrBot"。
-LAIA 实际采用委派模式（C），不是 AstrBot 的编排者模式（A）。
+LLAIA 实际采用委派模式（C），不是 AstrBot 的编排者模式（A）。
 
 ### goose
 Rust 实现的 coding agent，README 列为参考。

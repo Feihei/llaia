@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
-use laia::provider::openai_compat::OpenAiCompatibleProvider;
-use laia::provider::{ChatMessage, ChatRequest, Provider, StreamEvent};
+use llaia::provider::openai_compat::OpenAiCompatibleProvider;
+use llaia::provider::{ChatMessage, ChatRequest, Provider, StreamEvent};
 use serde_json::json;
 
 #[tokio::test]

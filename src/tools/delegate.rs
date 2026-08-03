@@ -213,7 +213,7 @@ mod tests {
     async fn make_registry_with_sub(sub_alias: &str) -> Arc<AgentRegistry> {
         let store = SessionStore::open_in_memory().unwrap();
         let sid = store.create_session("sub", "test").unwrap();
-        let config = Config::default_for_workspace("/tmp/laia-test");
+        let config = Config::default_for_workspace("/tmp/llaia-test");
         let agent = Agent::new(
             &config,
             Arc::new(HangingProvider),
@@ -222,7 +222,7 @@ mod tests {
             sid,
             "sub soul".into(),
             8192,
-            std::path::PathBuf::from("/tmp/laia-test"),
+            std::path::PathBuf::from("/tmp/llaia-test"),
         )
         .await;
         let mut registry = AgentRegistry::new(Arc::new(Mutex::new(agent)));
@@ -336,7 +336,7 @@ mod tests {
             called: called.clone(),
         }));
         // config 默认 qq.confirm_mode = "always"，若 channel 被透传为 "qq" 则工具会被拦
-        let config = Config::default_for_workspace("/tmp/laia-test");
+        let config = Config::default_for_workspace("/tmp/llaia-test");
         let sub_agent = Agent::new(
             &config,
             provider,
@@ -345,7 +345,7 @@ mod tests {
             sid,
             "sub".into(),
             8192,
-            std::path::PathBuf::from("/tmp/laia-test"),
+            std::path::PathBuf::from("/tmp/llaia-test"),
         )
         .await;
 

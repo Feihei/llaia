@@ -6,7 +6,7 @@
 ## 背景
 
 README 写"主控 Agent + 多个专用 Agent 协作（类似 AstrBot）"，但 AstrBot 偏编排者模式，
-而 LAIA 的实际诉求是"用户只跟主 Agent 接触"。需要在三种模式中选定：
+而 LLAIA 的实际诉求是"用户只跟主 Agent 接触"。需要在三种模式中选定：
 
 - (A) 编排者：主 Agent 拆任务、调度子 Agent 执行
 - (B) 人格切换：同时只跑一个 Agent，"子 Agent"是不同提示词/技能包

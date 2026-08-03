@@ -216,12 +216,12 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 
 [agent.coder]
 model = "default.qwen"
-workspace = "~/.laia/agents/coder"
-soul = "~/.laia/agents/coder.md"
+workspace = "~/.llaia/agents/coder"
+soul = "~/.llaia/agents/coder.md"
 denied_tools = ["memory_write"]
 delegate_timeout = 180
 "#;
@@ -765,7 +765,7 @@ async fn test_delegation_end_to_end() {
     let sub_store = SessionStore::open_in_memory().unwrap();
     let sub_sid = sub_store.create_session("sub", "test").unwrap();
     let sub_tools = Arc::new(ToolRegistry::new());
-    let config = Config::default_for_workspace("/tmp/laia-test");
+    let config = Config::default_for_workspace("/tmp/llaia-test");
     let sub_agent = Agent::new(
         &config, sub_provider, sub_tools, Arc::new(sub_store), sub_sid,
         "sub soul".into(), 8192,
@@ -873,7 +873,7 @@ mod tests {
     async fn make_registry() -> Arc<AgentRegistry> {
         let store = SessionStore::open_in_memory().unwrap();
         let sid = store.create_session("main", "test").unwrap();
-        let config = Config::default_for_workspace("/tmp/laia-test");
+        let config = Config::default_for_workspace("/tmp/llaia-test");
         let agent = Agent::new(
             &config, Arc::new(DummyProvider), Arc::new(ToolRegistry::new()),
             Arc::new(store), sid, "test".into(), 8192,
@@ -916,18 +916,18 @@ Expected: PASS
 
 - [ ] **Step 1: 准备 config.toml 配一个 coder 子 Agent**
 
-在 `~/.laia/config.toml` 加：
+在 `~/.llaia/config.toml` 加：
 
 ```toml
 [agent.coder]
 model = "default.qwen"
-workspace = "~/.laia/agents/coder"
-soul = "~/.laia/agents/coder.md"
+workspace = "~/.llaia/agents/coder"
+soul = "~/.llaia/agents/coder.md"
 denied_tools = ["memory_write"]
 delegate_timeout = 180
 ```
 
-创建 `~/.laia/agents/coder.md`：
+创建 `~/.llaia/agents/coder.md`：
 
 ```markdown
 你是 coder，专注写代码。接到任务后用 file_read/file_write/file_edit/terminal 工具完成。

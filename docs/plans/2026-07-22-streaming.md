@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** LAIA 所有 channel 实现 LLM 流式输出，CLI 打字机效果，QQ 内部流式生成保持原行为，为未来 Web channel 打基础。
+**Goal:** LLAIA 所有 channel 实现 LLM 流式输出，CLI 打字机效果，QQ 内部流式生成保持原行为，为未来 Web channel 打基础。
 
 **Architecture:** 三层流式管道：Provider `chat_stream()` 返回 async Stream 产出 `StreamEvent` → Agent `handle_input_streaming()` 消费 stream 并通过 `tokio::sync::mpsc::Sender<TurnEvent>` 推送高层事件 → Channel 在 `run()` 内部消费 mpsc receiver 按各自协议输出（CLI 实时打印 / QQ 累积后分片）。`chat()` 和 `handle_input()` 非流式接口保留，内部调流式版本 collect。
 
@@ -212,8 +212,8 @@ git commit -m "feat: define StreamEvent and TurnEvent enums"
 创建 [tests/stream_parser.rs](tests/stream_parser.rs)：
 
 ```rust
-use laia::tool_call::stream_parser::ToolCallStreamParser;
-use laia::provider::ToolCall;
+use llaia::tool_call::stream_parser::ToolCallStreamParser;
+use llaia::provider::ToolCall;
 
 #[test]
 fn test_plain_text_passthrough() {
@@ -498,8 +498,8 @@ git commit -m "feat: ToolCallStreamParser state machine for streaming tag detect
 
 ```rust
 use futures_util::StreamExt;
-use laia::provider::openai_compat::OpenAiCompatibleProvider;
-use laia::provider::{ChatMessage, ChatRequest, Provider, StreamEvent};
+use llaia::provider::openai_compat::OpenAiCompatibleProvider;
+use llaia::provider::{ChatMessage, ChatRequest, Provider, StreamEvent};
 use serde_json::json;
 
 #[tokio::test]
@@ -958,7 +958,7 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(MockProvider::new(native, rounds));
         let tools = Arc::new(ToolRegistry::new());
         Agent::new(
-            &Config::default_for_workspace("/tmp/laia-test"),
+            &Config::default_for_workspace("/tmp/llaia-test"),
             provider,
             tools,
             Arc::new(store),
@@ -1293,7 +1293,7 @@ git commit -m "feat: implement Agent::handle_input_streaming with mpsc TurnEvent
 #[async_trait]
 impl Channel for CliChannel {
     async fn run(self: Arc<Self>, agent: Arc<Mutex<Agent>>) -> Result<()> {
-        println!("laia v0.1.5 - type /help for commands, /exit to quit\n");
+        println!("llaia v0.1.5 - type /help for commands, /exit to quit\n");
         let stdin = std::io::stdin();
         loop {
             print!("> ");
@@ -1502,7 +1502,7 @@ Expected: 编译成功
 
 Run: `cargo run -- chat`
 Expected:
-- 看到 `laia v0.1.5 - type /help for commands, /exit to quit` 提示
+- 看到 `llaia v0.1.5 - type /help for commands, /exit to quit` 提示
 - 输入 "你好"，回复应**逐字打印**（不是一次性出现）
 - 输入 "列出当前目录文件"（触发 terminal 工具），应看到 `[tool: terminal]` 后跟 `[result: ...]`，然后继续文本输出
 

@@ -11,10 +11,10 @@
 
 ### 工作区目录
 
-默认 `~/.laia/`，用户可在配置中改到别处：
+默认 `~/.llaia/`，用户可在配置中改到别处：
 
 ```
-~/.laia/
+~/.llaia/
   config.toml
   SOUL.md
   USER.md
@@ -26,7 +26,7 @@
 ### Rust 项目结构（P1 单 crate）
 
 ```
-laia/
+llaia/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs              # CLI 入口、子命令分发
@@ -64,7 +64,7 @@ P2 视需要对外 API 引入 `thiserror` 自定义错误类型。
 
 ### 日志库
 
-tracing，P1 只配一个 fmt layer 输出到文件（`~/.laia/logs/`）+ stderr。
+tracing，P1 只配一个 fmt layer 输出到文件（`~/.llaia/logs/`）+ stderr。
 不做复杂订阅链。
 
 ### 配置文件完整 schema
@@ -79,9 +79,9 @@ native_tool_calling = true    # false 则走 <tool_call> 标签降级
 
 [agent.main]
 context_threshold = 0.7       # 压缩阈值
-soul = "~/.laia/SOUL.md"
-user = "~/.laia/USER.md"
-memory = "~/.laia/MEMORY.md"
+soul = "~/.llaia/SOUL.md"
+user = "~/.llaia/USER.md"
+memory = "~/.llaia/MEMORY.md"
 
 [channels.cli]
 enabled = true
@@ -94,11 +94,11 @@ whitelist = ["ls", "cat", "grep", "pwd", "dir"]
 api_key = ""
 
 [workspace]
-dir = "~/.laia"
+dir = "~/.llaia"
 
 [log]
 level = "info"                # debug / info / warn / error
-dir = "~/.laia/logs"
+dir = "~/.llaia/logs"
 ```
 
 ### 命名式 section 的扩展性

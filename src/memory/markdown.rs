@@ -27,7 +27,7 @@ pub async fn ensure_template(path: &PathBuf, template: &str) -> Result<()> {
 
 pub const SOUL_TEMPLATE: &str = r#"# 人格
 
-<描述 LAIA 的性格>
+<描述 LLAIA 的性格>
 
 # 行为准则
 

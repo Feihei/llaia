@@ -1,5 +1,5 @@
-use laia::provider::openai_compat::OpenAiCompatibleProvider;
-use laia::provider::{ChatMessage, ChatRequest, Provider};
+use llaia::provider::openai_compat::OpenAiCompatibleProvider;
+use llaia::provider::{ChatMessage, ChatRequest, Provider};
 use serde_json::json;
 
 #[tokio::test]

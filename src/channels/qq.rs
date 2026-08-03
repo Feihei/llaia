@@ -642,7 +642,10 @@ impl OutputSink for QqSink {
             tracing::warn!(total_len = self.buffer.len(), "agent reply empty, sending placeholder");
             "[已完成（无文本输出）]"
         } else {
-            self.buffer.as_str()
+            // 模型回复常以 \n\n 开头（思考结束留白/markdown 习惯），
+            // CLI 下被终端吞掉不显眼，QQ 原样发送会显示成两个空行。
+            // 这里 trim 前导换行符（保留首行前导空格，避免影响 markdown 缩进）。
+            self.buffer.trim_start_matches(['\n', '\r'])
         };
         let chunks = split_reply(reply, 1800);
         tracing::info!(chunks = chunks.len(), total_len = reply.len(), "sending reply");
@@ -661,8 +664,8 @@ impl OutputSink for QqSink {
         let err_msg = if self.buffer.is_empty() {
             format!("[内部错误: {}]", message)
         } else {
-            // 保留已生成文本，错误追加
-            self.buffer.clone()
+            // 保留已生成文本，错误追加（同样 trim 前导换行）
+            self.buffer.trim_start_matches(['\n', '\r']).to_string()
         };
         let chunks = split_reply(&err_msg, 1800);
         for (i, chunk) in chunks.iter().enumerate() {

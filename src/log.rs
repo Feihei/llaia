@@ -8,7 +8,7 @@ pub fn init(level: &str, log_dir: &PathBuf) -> Result<()> {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_dir.join("laia.log"))?;
+        .open(log_dir.join("llaia.log"))?;
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level));
 
