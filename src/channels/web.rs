@@ -295,7 +295,7 @@ pub async fn serve_file(
 const MASK: &str = "••••";
 
 /// 标记哪些字段是敏感的（返回时掩码，保存时若仍为掩码则保留原值）
-fn mask_sensitive(mut config: Config) -> Config {
+pub fn mask_sensitive(mut config: Config) -> Config {
     for p in config.provider.values_mut() {
         if !p.api_key.is_empty() {
             p.api_key = MASK.into();
@@ -314,7 +314,7 @@ fn mask_sensitive(mut config: Config) -> Config {
 }
 
 /// 用 new_config 覆盖，但 new_config 中仍为 MASK 的字段保留 old 原值
-fn merge_masked(old: &Config, new: &Config) -> Config {
+pub fn merge_masked(old: &Config, new: &Config) -> Config {
     let mut merged = new.clone();
     for (k, np) in &mut merged.provider {
         if np.api_key == MASK {
