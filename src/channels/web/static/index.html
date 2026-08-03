@@ -1,5 +1,225 @@
 <!DOCTYPE html>
 <html lang="zh">
-<head><meta charset="utf-8"><title>Llaia</title></head>
-<body>placeholder</body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Llaia Web</title>
+  <link rel="stylesheet" href="/static/vendor/codemirror/codemirror.css">
+  <link rel="stylesheet" href="/static/vendor/codemirror/material-darker.css">
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #1e1e1e; color: #ddd; }
+    #app { display: flex; flex-direction: column; height: 100vh; }
+    header { background: #252526; padding: 8px 16px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #333; }
+    header h1 { font-size: 16px; margin: 0; }
+    .tabs { display: flex; gap: 4px; }
+    .tab { padding: 6px 14px; cursor: pointer; border-radius: 4px; background: #333; }
+    .tab.active { background: #0e639c; }
+    .spacer { flex: 1; }
+    .token-area { font-size: 12px; color: #888; }
+    .token-area input { width: 200px; background: #333; border: 1px solid #555; color: #ddd; padding: 2px 6px; }
+    main { flex: 1; overflow: hidden; }
+    .pane { display: none; height: 100%; }
+    .pane.active { display: flex; flex-direction: column; }
+    button { background: #0e639c; color: #fff; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    input, textarea { background: #2d2d2d; color: #ddd; border: 1px solid #555; padding: 4px 8px; border-radius: 4px; }
+    .msg { margin: 8px 0; padding: 8px; border-radius: 4px; }
+    .msg.user { background: #2a2a3a; }
+    .msg.assistant { background: #252526; }
+    .msg.tool { background: #1a2a1a; font-family: monospace; font-size: 12px; }
+    .msg pre { background: #1a1a1a; padding: 8px; border-radius: 4px; overflow-x: auto; }
+    .msg img { max-width: 400px; border-radius: 4px; }
+    /* chat layout */
+    #chat-pane .messages { flex: 1; overflow-y: auto; padding: 16px; }
+    #chat-pane .composer { display: flex; gap: 8px; padding: 8px; border-top: 1px solid #333; align-items: center; }
+    #chat-pane .composer input { flex: 1; }
+    /* config layout */
+    #config-pane { flex-direction: row; }
+    #config-pane .sidebar { width: 200px; background: #252526; padding: 8px; overflow-y: auto; }
+    #config-pane .sidebar div { padding: 6px 8px; cursor: pointer; border-radius: 4px; }
+    #config-pane .sidebar div.active { background: #0e639c; }
+    #config-pane .content { flex: 1; overflow-y: auto; padding: 16px; }
+    #config-pane .form-row { margin: 8px 0; }
+    #config-pane .form-row label { display: inline-block; width: 180px; }
+    #config-pane .provider-card, #config-pane .agent-card { background: #2d2d2d; padding: 12px; border-radius: 6px; margin: 8px 0; }
+    #config-pane .placeholder { color: #888; font-style: italic; }
+    /* about */
+    #about-pane { padding: 24px; overflow-y: auto; }
+    #about-pane dl dt { font-weight: bold; color: #0e639c; margin-top: 8px; }
+    #about-pane dl dd { margin-left: 16px; }
+  </style>
+</head>
+<body>
+<div id="app" x-data="llaiaApp()" x-init="init()">
+  <header>
+    <h1>Llaia</h1>
+    <div class="tabs">
+      <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
+      <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">配置</div>
+      <div class="tab" :class="{active: tab==='about'}" @click="switchAbout()">关于</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="token-area">
+      Token: <input type="password" x-model="token" @keydown.enter="saveToken()" placeholder="输入 token">
+      <button @click="saveToken()">保存</button>
+    </div>
+  </header>
+  <main>
+    <div id="chat-pane" class="pane" :class="{active: tab==='chat'}">
+      <div class="messages" x-ref="messages">
+        <template x-for="(m, i) in messages" :key="i">
+          <div class="msg" :class="m.role">
+            <template x-if="m.role==='user'"><div><b>用户:</b> <span x-text="m.text"></span></div></template>
+            <template x-if="m.role==='assistant'"><div><b>助手:</b> <div x-html="renderMd(m.text)"></div></div></template>
+            <template x-if="m.role==='tool'"><div><b>工具:</b> <span x-text="m.text"></span></div></template>
+            <template x-if="m.role==='media'">
+              <div><b>媒体:</b> <img :src="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)"></div>
+            </template>
+          </div>
+        </template>
+      </div>
+      <div class="composer">
+        <input type="file" accept="image/*" @change="onUpload($event)" multiple disabled>
+        <input type="text" x-model="inputText" @keydown.enter="send()" :disabled="busy" placeholder="输入消息...">
+        <button @click="send()" :disabled="busy">发送</button>
+        <button @click="stop()" :disabled="!busy">停止</button>
+        <span x-text="uploaded.map(u=>u.path).join(', ')"></span>
+      </div>
+    </div>
+
+    <div id="config-pane" class="pane" :class="{active: tab==='config'}">
+      <div class="sidebar">
+        <div :class="{active: configSection==='runtime'}" @click="configSection='runtime'">运行时参数</div>
+        <div :class="{active: configSection==='log'}" @click="configSection='log'">日志</div>
+        <div :class="{active: configSection==='provider'}" @click="configSection='provider'">Provider</div>
+        <div :class="{active: configSection==='agent'}" @click="configSection='agent'">Agent</div>
+        <div :class="{active: configSection==='channels'}" @click="configSection='channels'">Channels</div>
+        <div :class="{active: configSection==='tools'}" @click="configSection='tools'">Tools</div>
+        <div :class="{active: configSection==='mcp'}" @click="configSection='mcp'">MCP (开发中)</div>
+        <div :class="{active: configSection==='skills'}" @click="configSection='skills'">Skills (开发中)</div>
+        <div :class="{active: configSection==='raw'}" @click="configSection='raw'">原始 TOML</div>
+      </div>
+      <div class="content">
+        <template x-if="configSection==='runtime'">
+          <div>
+            <div class="form-row"><label>context_threshold</label><input type="number" step="0.1" min="0" max="1" x-model="cfg.runtime.context_threshold"></div>
+            <div class="form-row"><label>max_iterations</label><input type="number" min="1" x-model="cfg.runtime.max_iterations"></div>
+            <button @click="saveConfig()">保存</button>
+          </div>
+        </template>
+        <template x-if="configSection==='log'">
+          <div>
+            <div class="form-row"><label>level</label>
+              <select x-model="cfg.log.level"><option>debug</option><option>info</option><option>warn</option><option>error</option></select>
+            </div>
+            <div class="form-row"><label>dir</label><input type="text" x-model="cfg.log.dir" style="width:400px"></div>
+            <button @click="saveConfig()">保存</button>
+          </div>
+        </template>
+        <template x-if="configSection==='provider'">
+          <div>
+            <template x-for="(p, pid) in cfg.provider" :key="pid">
+              <div class="provider-card">
+                <h3 x-text="pid"></h3>
+                <div class="form-row"><label>type</label><input x-model="p.type"></div>
+                <div class="form-row"><label>base_url</label><input x-model="p.base_url" style="width:400px"></div>
+                <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
+                <h4>Models</h4>
+                <template x-for="(m, alias) in p.model" :key="alias">
+                  <div class="form-row">
+                    <label x-text="alias"></label>
+                    <input x-model="m.model" style="width:200px">
+                    <label><input type="checkbox" x-model="m.native_tool_calling"> native_tool_calling</label>
+                    <input type="number" placeholder="context_size" x-model="m.context_size">
+                  </div>
+                </template>
+              </div>
+            </template>
+            <button @click="saveConfig()">保存</button>
+          </div>
+        </template>
+        <template x-if="configSection==='agent'">
+          <div>
+            <template x-for="(a, alias) in cfg.agent" :key="alias">
+              <div class="agent-card">
+                <h3 x-text="alias"></h3>
+                <div class="form-row"><label>model</label><input x-model="a.model"></div>
+                <div class="form-row"><label>workspace</label><input x-model="a.workspace" style="width:400px"></div>
+                <div class="form-row"><label>soul</label><input x-model="a.soul"></div>
+                <div class="form-row"><label>user</label><input x-model="a.user"></div>
+                <div class="form-row"><label>memory</label><input x-model="a.memory"></div>
+                <div class="form-row"><label>delegate_timeout</label><input type="number" x-model="a.delegate_timeout"></div>
+              </div>
+            </template>
+            <button @click="saveConfig()">保存</button>
+          </div>
+        </template>
+        <template x-if="configSection==='channels'">
+          <div>
+            <h3>CLI</h3>
+            <div class="form-row"><label><input type="checkbox" x-model="cfg.channels.cli.enabled"> enabled</label></div>
+            <h3>QQ</h3>
+            <div class="form-row"><label><input type="checkbox" x-model="cfg.channels.qq.enabled"> enabled</label></div>
+            <div class="form-row"><label>app_id</label><input x-model="cfg.channels.qq.app_id"></div>
+            <div class="form-row"><label>app_secret</label><input type="password" x-model="cfg.channels.qq.app_secret"></div>
+            <div class="form-row"><label>confirm_mode</label><input x-model="cfg.channels.qq.confirm_mode"></div>
+            <h3>Web</h3>
+            <div class="form-row"><label><input type="checkbox" x-model="cfg.channels.web.enabled"> enabled</label></div>
+            <div class="form-row"><label>bind</label><input x-model="cfg.channels.web.bind"></div>
+            <div class="form-row"><label>token</label><input type="password" x-model="cfg.channels.web.token"></div>
+            <button @click="saveConfig()">保存</button>
+          </div>
+        </template>
+        <template x-if="configSection==='tools'">
+          <div>
+            <h3>terminal</h3>
+            <div class="form-row"><label>confirm</label><input x-model="cfg.tools.terminal.confirm"></div>
+            <div class="form-row"><label>whitelist (逗号分隔)</label><input :value="cfg.tools.terminal.whitelist.join(',')" @input="cfg.tools.terminal.whitelist=$event.target.value.split(',')"></div>
+            <h3>tavily</h3>
+            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.tavily.api_key"></div>
+            <button @click="saveConfig()">保存</button>
+          </div>
+        </template>
+        <template x-if="configSection==='mcp'"><div class="placeholder">MCP 配置开发中，敬请期待。</div></template>
+        <template x-if="configSection==='skills'"><div class="placeholder">Skills 配置开发中，敬请期待。</div></template>
+        <template x-if="configSection==='raw'">
+          <div>
+            <textarea x-ref="rawEditor" x-model="rawToml" style="width:100%;height:500px;font-family:monospace"></textarea>
+            <button @click="validateRaw()">校验</button>
+            <button @click="saveRaw()">保存</button>
+            <span x-text="rawMsg"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div id="about-pane" class="pane" :class="{active: tab==='about'}">
+      <template x-if="status">
+        <dl>
+          <dt>Version</dt><dd x-text="status.version"></dd>
+          <dt>Build</dt><dd x-text="status.build_hash"></dd>
+          <dt>Workspace</dt><dd x-text="status.workspace"></dd>
+          <dt>Config</dt><dd x-text="status.config_path"></dd>
+          <dt>PID</dt><dd x-text="status.pid"></dd>
+          <dt>Channels</dt>
+          <dd>
+            <template x-for="c in status.channels" :key="c.name">
+              <div x-text="(c.enabled?'✓':'✗')+' '+c.name+(c.listening?' ('+c.listening+')':'')"></div>
+            </template>
+          </dd>
+          <dt>DB Size</dt><dd x-text="formatBytes(status.db_size_bytes)"></dd>
+          <dt>Log Dir</dt><dd x-text="status.log_dir"></dd>
+          <dt>Uploads</dt><dd x-text="status.uploads_count+' files'"></dd>
+        </dl>
+      </template>
+    </div>
+  </main>
+</div>
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/highlight.min.js"></script>
+<script src="/static/vendor/codemirror/codemirror.js"></script>
+<script src="/static/vendor/codemirror/toml.js"></script>
+<script src="/static/vendor/alpine.min.js" defer></script>
+<script src="/static/app.js"></script>
+</body>
 </html>
