@@ -1,5 +1,5 @@
 [package]
-name = "laia"
+name = "llaia"
 version = "0.1.0"
 edition = "2021"
 
@@ -28,6 +28,10 @@ sysinfo = "0.30"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 base64 = "0.22"
 mime_guess = "2"
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower-http = { version = "0.5", features = ["fs"] }
+rust-embed = "8"
+rand = "0.8"
 
 [dev-dependencies]
 mockito = "1"

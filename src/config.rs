@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// 顶层配置。对应 ~/.laia/config.toml
+/// 顶层配置。对应 ~/.llaia/config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -70,7 +70,7 @@ fn default_level() -> String {
 }
 
 fn default_log_dir() -> String {
-    "~/.laia/logs".into()
+    "~/.llaia/logs".into()
 }
 
 /// 一个 provider 端点（连接信息），下挂多个 model 配置。
@@ -132,6 +132,8 @@ pub struct ChannelsConfig {
     pub cli: CliChannelConfig,
     #[serde(default)]
     pub qq: QqConfig,
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -166,6 +168,31 @@ impl Default for QqConfig {
 
 fn default_qq_confirm() -> String {
     "always".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_web_bind")]
+    pub bind: String,
+    /// 鉴权 token；留空则启动时随机生成并打印日志
+    #[serde(default)]
+    pub token: String,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_web_bind(),
+            token: String::new(),
+        }
+    }
+}
+
+fn default_web_bind() -> String {
+    "127.0.0.1:8080".into()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -242,6 +269,7 @@ impl Config {
         }
         self.channels.qq.app_id = expand(&self.channels.qq.app_id)?;
         self.channels.qq.app_secret = expand(&self.channels.qq.app_secret)?;
+        self.channels.web.token = expand(&self.channels.web.token)?;
         self.tools.tavily.api_key = expand(&self.tools.tavily.api_key)?;
         self.log.dir = expand(&self.log.dir)?;
         Ok(())
@@ -382,7 +410,7 @@ api_key = "tvly-test"
 
 [log]
 level = "debug"
-dir = "~/.laia-test/logs"
+dir = "~/.llaia-test/logs"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
@@ -418,7 +446,7 @@ dir = "~/.laia-test/logs"
 
     #[test]
     fn test_default_config() {
-        let config = Config::default_for_workspace("~/.laia");
+        let config = Config::default_for_workspace("~/.llaia");
         let p = config.provider.get("default").unwrap();
         assert_eq!(p.provider_type, "openai_compatible");
         let m = p.model.get("qwen").unwrap();
@@ -426,7 +454,7 @@ dir = "~/.laia-test/logs"
         let a = config.agent.get("main").unwrap();
         assert_eq!(a.model, "default.qwen");
         assert!(a.soul.is_none());
-        assert!(a.workspace.ends_with(".laia"));
+        assert!(a.workspace.ends_with(".llaia"));
         // runtime 默认值
         assert_eq!(config.runtime.context_threshold, 0.7);
         assert_eq!(config.runtime.max_iterations, 10);
@@ -444,7 +472,7 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
@@ -493,7 +521,7 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 soul = "~/custom/SOUL.md"
 user = "~/custom/USER.md"
 memory = "~/custom/MEMORY.md"
@@ -518,7 +546,7 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 
 [channels.qq]
 app_id = "12345"
@@ -545,7 +573,7 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
@@ -566,12 +594,12 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 
 [agent.coder]
 model = "default.qwen"
-workspace = "~/.laia/agents/coder"
-soul = "~/.laia/agents/coder.md"
+workspace = "~/.llaia/agents/coder"
+soul = "~/.llaia/agents/coder.md"
 denied_tools = ["memory_write"]
 delegate_timeout = 180
 "#;
@@ -591,9 +619,9 @@ delegate_timeout = 180
     #[test]
     fn test_env_var_expansion() {
         // 用时间戳后缀避免测试间环境变量冲突
-        let key_var = "LAIA_TEST_API_KEY_2026";
-        let url_var = "LAIA_TEST_BASE_URL_2026";
-        let secret_var = "LAIA_TEST_SECRET_2026";
+        let key_var = "LLAIA_TEST_API_KEY_2026";
+        let url_var = "LLAIA_TEST_BASE_URL_2026";
+        let secret_var = "LLAIA_TEST_SECRET_2026";
         std::env::set_var(key_var, "sk-from-env-12345");
         std::env::set_var(url_var, "http://example.com");
         std::env::set_var(secret_var, "qq-secret");
@@ -610,7 +638,7 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 
 [channels.qq]
 app_secret = "${{{}}}"
@@ -633,19 +661,19 @@ app_secret = "${{{}}}"
 
     #[test]
     fn test_env_var_not_found_errors() {
-        std::env::remove_var("LAIA_NONEXISTENT_VAR_2026");
+        std::env::remove_var("LLAIA_NONEXISTENT_VAR_2026");
         let toml = r#"
 [provider.default]
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
-api_key = "${LAIA_NONEXISTENT_VAR_2026}"
+api_key = "${LLAIA_NONEXISTENT_VAR_2026}"
 
 [provider.default.qwen]
 model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
@@ -653,7 +681,7 @@ workspace = "~/.laia"
         assert!(result.is_err(), "should error on undefined env var");
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("LAIA_NONEXISTENT_VAR_2026"),
+            err.contains("LLAIA_NONEXISTENT_VAR_2026"),
             "error should mention the missing var: {}",
             err
         );
@@ -673,12 +701,48 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.laia"
+workspace = "~/.llaia"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
         // 小写不匹配，原样保留（不报错）
         assert_eq!(config.provider.get("default").unwrap().api_key, "${lowercase_var}");
+    }
+
+    #[test]
+    fn test_web_config_defaults() {
+        let config = Config::default_for_workspace("~/.llaia");
+        assert!(!config.channels.web.enabled);
+        assert_eq!(config.channels.web.bind, "127.0.0.1:8080");
+        assert_eq!(config.channels.web.token, "");
+    }
+
+    #[test]
+    fn test_web_config_loaded_from_toml() {
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.llaia"
+
+[channels.web]
+enabled = true
+bind = "0.0.0.0:9000"
+token = "secret-token"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert!(config.channels.web.enabled);
+        assert_eq!(config.channels.web.bind, "0.0.0.0:9000");
+        assert_eq!(config.channels.web.token, "secret-token");
     }
 }
