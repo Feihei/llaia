@@ -1,18 +1,22 @@
-use crate::agent::sink::OutputSink;
+use crate::agent::sink::{OutputSink, run_turn};
 use crate::agent::{AgentRegistry, MediaKind};
-use crate::config::Config;
+use crate::channels::Channel;
+use crate::config::{Config, WebConfig};
+use crate::image_utils;
+use crate::provider::{ChatMessage, ContentPart, ImageUrlContent};
 use async_trait::async_trait;
 use axum::body::Body;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Multipart, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, Notify, RwLock};
 
 /// WS 出向事件：扁平化 JSON，与 TurnEvent 一一对应 + 协议层事件
 #[derive(Debug, Clone, Serialize)]
@@ -490,6 +494,218 @@ pub async fn get_status(
         uploads_count,
     };
     axum::Json(info).into_response()
+}
+
+/// GET /ws?token=... → WS upgrade
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    let provided = q.token.as_deref();
+    let ok = match provided {
+        Some(t) => check_token(t, state.token.as_str()),
+        None => false,
+    };
+    if !ok {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    }
+    ws.on_upgrade(move |socket| handle_ws(socket, state))
+}
+
+#[derive(Deserialize)]
+pub struct ChatIn {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub text: Option<String>,
+    pub images: Option<Vec<String>>,
+}
+
+async fn handle_ws(socket: WebSocket, state: AppState) {
+    let (mut ws_sink, mut ws_stream) = socket.split();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WebEvent>(64);
+    let (end_tx, mut end_rx) = tokio::sync::mpsc::channel::<TurnEndSignal>(4);
+
+    // 发 auth_ok
+    let _ = ws_sink
+        .send(Message::Text(serde_json::to_string(&WebEvent::AuthOk).unwrap()))
+        .await;
+
+    // 写 task：rx → ws_sink
+    let write_task = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let json = match serde_json::to_string(&ev) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if ws_sink.send(Message::Text(json)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let agent = state.registry.main.clone();
+    let workspace = {
+        let a = agent.lock().await;
+        a.workspace.clone()
+    };
+    let stop: Arc<Notify> = Arc::new(Notify::new());
+    let mut current_turn: Option<tokio::task::JoinHandle<()>> = None;
+
+    loop {
+        tokio::select! {
+            // WS 入向消息
+            msg = ws_stream.next() => {
+                match msg {
+                    Some(Ok(Message::Text(s))) => {
+                        let chat: Option<ChatIn> = serde_json::from_str(&s).ok();
+                        match chat.as_ref().map(|c| c.kind.as_str()) {
+                            Some("ping") => { let _ = tx.send(WebEvent::Pong).await; }
+                            Some("stop") => {
+                                if current_turn.is_some() {
+                                    stop.notify_one();
+                                }
+                            }
+                            Some("chat") => {
+                                if current_turn.is_some() {
+                                    let _ = tx.send(WebEvent::Busy { reason: "another turn running".into() }).await;
+                                } else {
+                                    let chat: ChatIn = serde_json::from_str(&s).unwrap();
+                                    let text = chat.text.unwrap_or_default();
+                                    // 构造消息
+                                    let user_msg = build_user_message(&text, chat.images.as_deref(), &workspace);
+                                    let sink = Box::new(WebSink::new(tx.clone(), end_tx.clone()));
+                                    let stop_clone = stop.clone();
+                                    let agent_clone = agent.clone();
+                                    current_turn = Some(tokio::spawn(async move {
+                                        let _ = run_turn(agent_clone, user_msg, "web".into(), sink, stop_clone).await;
+                                    }));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+            // turn 结束信号
+            _ = end_rx.recv() => {
+                if let Some(h) = current_turn.take() {
+                    let _ = h.await;
+                }
+            }
+        }
+    }
+
+    // 清理
+    if let Some(h) = current_turn.take() {
+        stop.notify_one();
+        let _ = h.await;
+    }
+    write_task.abort();
+}
+
+fn build_user_message(text: &str, images: Option<&[String]>, workspace: &Path) -> ChatMessage {
+    let imgs = images.unwrap_or(&[]);
+    if imgs.is_empty() {
+        return ChatMessage::user(text);
+    }
+    let mut parts: Vec<ContentPart> = Vec::new();
+    if !text.is_empty() {
+        parts.push(ContentPart::Text { text: text.into() });
+    }
+    let uploads_dir = workspace.join("uploads");
+    for img_rel in imgs {
+        match resolve_within(&uploads_dir, img_rel) {
+            Ok(abs) => {
+                if !image_utils::is_image_file(&abs) {
+                    parts.push(ContentPart::Text { text: format!("[not an image: {}]", img_rel) });
+                    continue;
+                }
+                match image_utils::prepare_image_for_vision(&abs) {
+                    Ok(data_url) => {
+                        parts.push(ContentPart::ImageUrl { image_url: ImageUrlContent { url: data_url } });
+                    }
+                    Err(e) => {
+                        parts.push(ContentPart::Text { text: format!("[image load failed: {}]", e) });
+                    }
+                }
+            }
+            Err(e) => {
+                parts.push(ContentPart::Text { text: format!("[invalid path: {}]", e) });
+            }
+        }
+    }
+    if parts.is_empty() {
+        ChatMessage::user(text)
+    } else {
+        ChatMessage::user_multimodal(parts)
+    }
+}
+
+pub struct WebChannel {
+    pub config: WebConfig,
+    pub registry: Arc<AgentRegistry>,
+    pub config_full: Arc<RwLock<Config>>,
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+}
+
+impl WebChannel {
+    pub fn new(
+        web_config: WebConfig,
+        registry: Arc<AgentRegistry>,
+        config_full: Arc<RwLock<Config>>,
+        config_path: PathBuf,
+        workspace: PathBuf,
+    ) -> Self {
+        Self { config: web_config, registry, config_full, config_path, workspace }
+    }
+
+    pub fn build_router(&self) -> axum::Router {
+        // token：配置非空用配置，留空随机生成
+        let token = if self.config.token.is_empty() {
+            let t = generate_token();
+            tracing::info!("WebUI token (randomly generated): {}", t);
+            t
+        } else {
+            self.config.token.clone()
+        };
+        let state = AppState {
+            registry: self.registry.clone(),
+            config: self.config_full.clone(),
+            config_path: self.config_path.clone(),
+            workspace: self.workspace.clone(),
+            token: Arc::new(token),
+        };
+        axum::Router::new()
+            .route("/", axum::routing::get(serve_index))
+            .route("/static/*path", axum::routing::get(serve_static))
+            .route("/ws", axum::routing::get(ws_handler))
+            .route("/upload", axum::routing::post(upload))
+            .route("/file", axum::routing::get(serve_file))
+            .route("/api/config", axum::routing::get(get_config).put(put_config))
+            .route("/api/config/raw", axum::routing::get(get_config_raw).put(put_config_raw))
+            .route("/api/config/validate", axum::routing::post(validate_config))
+            .route("/api/status", axum::routing::get(get_status))
+            .with_state(state)
+    }
+}
+
+#[async_trait]
+impl Channel for WebChannel {
+    async fn run(self: Arc<Self>, _registry: Arc<AgentRegistry>) -> Result<(), anyhow::Error> {
+        let addr: std::net::SocketAddr = self.config.bind.parse()
+            .map_err(|e| anyhow::anyhow!("invalid bind addr: {}", e))?;
+        let router = self.build_router();
+        let listener = tokio::net::TcpListener::bind(addr).await
+            .map_err(|e| anyhow::anyhow!("bind {}: {}", addr, e))?;
+        tracing::info!("WebChannel listening on {}", addr);
+        axum::serve(listener, router).await
+            .map_err(|e| anyhow::anyhow!("web server: {}", e))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ pub mod web;
 // 重新导出，方便外部使用
 pub use cli::CliChannel;
 pub use qq::QqChannel;
+pub use web::WebChannel;
 
 use anyhow::Result;
 use async_trait::async_trait;

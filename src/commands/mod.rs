@@ -51,6 +51,29 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         tracing::info!("QqChannel started");
     }
 
+    if config.channels.web.enabled {
+        let workspace = {
+            let a = registry.main.lock().await;
+            a.workspace.clone()
+        };
+        let config_path = config_dir.join("config.toml");
+        let web = std::sync::Arc::new(crate::channels::web::WebChannel::new(
+            config.channels.web.clone(),
+            registry.clone(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
+            config_path,
+            workspace,
+        ));
+        let registry_clone = registry.clone();
+        let bind = config.channels.web.bind.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = crate::channels::Channel::run(web, registry_clone).await {
+                tracing::error!(error = %e, "WebChannel exited with error");
+            }
+        }));
+        tracing::info!("WebChannel starting on {}", bind);
+    }
+
     if tasks.is_empty() {
         anyhow::bail!("no service channel enabled in config (QQ/WebUI/...)");
     }
