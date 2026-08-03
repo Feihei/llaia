@@ -4,6 +4,7 @@ use crate::config::Config;
 use async_trait::async_trait;
 use rand::Rng;
 use serde::Serialize;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -124,6 +125,29 @@ pub fn check_token(provided: &str, expected: &str) -> bool {
     !expected.is_empty() && provided == expected
 }
 
+/// 解析相对路径到 base 内的绝对路径，拒绝 .. 逃逸和绝对路径。
+/// 用于 uploads_dir 和 workspace 边界校验。
+pub fn resolve_within(base: &Path, relative: &str) -> Result<PathBuf, String> {
+    let p = Path::new(relative);
+    if p.is_absolute() {
+        return Err(format!("absolute path not allowed: {}", relative));
+    }
+    // 拒绝任何 Component::ParentDir
+    for comp in p.components() {
+        if matches!(comp, Component::ParentDir) {
+            return Err(format!("path traversal not allowed: {}", relative));
+        }
+    }
+    let joined = base.join(relative);
+    // canonicalize 确认最终路径在 base 内（base 可能不存在，跳过 canonicalize 时回退到 join 比较前缀）
+    let canon_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let canon_joined = joined.canonicalize().unwrap_or_else(|_| joined.clone());
+    if !canon_joined.starts_with(&canon_base) {
+        return Err(format!("path escapes base: {}", relative));
+    }
+    Ok(canon_joined)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +253,41 @@ mod tests {
     fn test_generate_token_length() {
         let t = generate_token();
         assert_eq!(t.len(), 64); // 32 bytes hex
+    }
+
+    use std::fs;
+
+    #[test]
+    fn test_resolve_within_rejects_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let r = resolve_within(base, "../../etc/passwd");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_resolve_within_rejects_absolute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = resolve_within(tmp.path(), "/etc/passwd");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_resolve_within_accepts_inside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        fs::create_dir_all(base.join("uploads")).unwrap();
+        fs::write(base.join("uploads/abc.png"), b"x").unwrap();
+        let r = resolve_within(base, "uploads/abc.png").unwrap();
+        // Windows: canonicalize 给路径加 \\?\ 前缀，对比时统一用 canonicalized base
+        let canon_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+        assert!(r.starts_with(&canon_base));
+    }
+
+    #[test]
+    fn test_resolve_within_rejects_windows_drive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = resolve_within(tmp.path(), "C:\\Windows\\system32");
+        assert!(r.is_err());
     }
 }
