@@ -28,7 +28,7 @@ sysinfo = "0.30"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 base64 = "0.22"
 mime_guess = "2"
-axum = { version = "0.7", features = ["ws", "macros"] }
+axum = { version = "0.7", features = ["ws", "macros", "multipart"] }
 tower-http = { version = "0.5", features = ["fs"] }
 rust-embed = "8"
 rand = "0.8"

@@ -3,12 +3,12 @@ use crate::agent::{AgentRegistry, MediaKind};
 use crate::config::Config;
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Multipart, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use rand::Rng;
 use rust_embed::RustEmbed;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -176,6 +176,114 @@ fn serve_static_path(path: &str) -> Response {
             (StatusCode::OK, headers, Body::from(asset.data.into_owned())).into_response()
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct TokenQuery {
+    pub token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct FilePathQueryWithToken {
+    pub path: String,
+    pub token: Option<String>,
+}
+
+/// 综合鉴权：header + cookie + query
+pub fn authorize(state: &AppState, headers: &HeaderMap, q: &TokenQuery) -> bool {
+    let cookie = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let provided = extract_token(headers, cookie, q.token.as_deref());
+    match provided {
+        Some(t) => check_token(&t, state.token.as_str()),
+        None => false,
+    }
+}
+
+pub fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+        axum::Json(serde_json::json!({ "error": "invalid token" })),
+    )
+        .into_response()
+}
+
+/// POST /upload：multipart/form-data 字段 file，保存到 workspace/uploads/
+pub async fn upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    mut multipart: Multipart,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let uploads_dir = state.workspace.join("uploads");
+    let _ = tokio::fs::create_dir_all(&uploads_dir).await;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            let filename = field.file_name().unwrap_or("upload.bin").to_string();
+            let ct = field.content_type().unwrap_or("application/octet-stream").to_string();
+            if !ct.starts_with("image/") {
+                return (StatusCode::BAD_REQUEST, "only image/* allowed").into_response();
+            }
+            let data = match field.bytes().await {
+                Ok(b) => b,
+                Err(e) => return (StatusCode::BAD_REQUEST, format!("read: {}", e)).into_response(),
+            };
+            if data.len() > 20 * 1024 * 1024 {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "max 20MB").into_response();
+            }
+            let id = uuid::Uuid::new_v4().simple().to_string();
+            let saved_name = format!("{}_{}", id, filename);
+            let saved_path = uploads_dir.join(&saved_name);
+            if tokio::fs::write(&saved_path, &data).await.is_err() {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "write failed").into_response();
+            }
+            let rel = format!("uploads/{}", saved_name);
+            return axum::Json(serde_json::json!({ "path": rel, "size": data.len() })).into_response();
+        }
+    }
+    (StatusCode::BAD_REQUEST, "no file field").into_response()
+}
+
+/// GET /file?path=<rel>&token=<token>：返回 workspace 内文件流
+pub async fn serve_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<FilePathQueryWithToken>,
+) -> Response {
+    // 用 query token 鉴权（<img src> 无法带 header）
+    let provided = q.token.clone();
+    let cookie = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let from_header = extract_token(&headers, cookie, None);
+    let token_ok = match (from_header, provided) {
+        (Some(t), _) => check_token(&t, state.token.as_str()),
+        (_, Some(t)) => check_token(&t, state.token.as_str()),
+        _ => false,
+    };
+    if !token_ok {
+        return unauthorized();
+    }
+    match resolve_within(&state.workspace, &q.path) {
+        Ok(abs) => match tokio::fs::read(&abs).await {
+            Ok(data) => {
+                let mime = mime_guess::from_path(&abs).first_or_octet_stream();
+                let mut h = HeaderMap::new();
+                h.insert(header::CONTENT_TYPE, mime.as_ref().parse().unwrap());
+                (StatusCode::OK, h, Body::from(data)).into_response()
+            }
+            Err(_) => (StatusCode::NOT_FOUND, "file not found").into_response(),
+        },
+        Err(e) => (StatusCode::BAD_REQUEST, format!("path: {}", e)).into_response(),
     }
 }
 
