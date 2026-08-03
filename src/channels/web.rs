@@ -439,6 +439,59 @@ pub async fn put_config_raw(
     }
 }
 
+#[derive(Serialize)]
+pub struct ChannelStatus {
+    pub name: String,
+    pub enabled: bool,
+    pub listening: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct StatusInfo {
+    pub version: String,
+    pub build_hash: String,
+    pub workspace: String,
+    pub config_path: String,
+    pub pid: u32,
+    pub channels: Vec<ChannelStatus>,
+    pub db_size_bytes: u64,
+    pub log_dir: String,
+    pub uploads_count: u64,
+}
+
+/// GET /api/status
+pub async fn get_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let cfg = state.config.read().await;
+    let db_path = state.workspace.join("sessions.db");
+    let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    let uploads_count = std::fs::read_dir(state.workspace.join("uploads"))
+        .map(|d| d.count() as u64)
+        .unwrap_or(0);
+    let info = StatusInfo {
+        version: env!("CARGO_PKG_VERSION").into(),
+        build_hash: env!("GIT_HASH").into(),
+        workspace: state.workspace.display().to_string(),
+        config_path: state.config_path.display().to_string(),
+        pid: std::process::id(),
+        channels: vec![
+            ChannelStatus { name: "cli".into(), enabled: cfg.channels.cli.enabled, listening: None },
+            ChannelStatus { name: "qq".into(), enabled: cfg.channels.qq.enabled, listening: None },
+            ChannelStatus { name: "web".into(), enabled: cfg.channels.web.enabled, listening: Some(cfg.channels.web.bind.clone()) },
+        ],
+        db_size_bytes: db_size,
+        log_dir: cfg.log.dir.clone(),
+        uploads_count,
+    };
+    axum::Json(info).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
