@@ -2,7 +2,12 @@ use crate::agent::sink::OutputSink;
 use crate::agent::{AgentRegistry, MediaKind};
 use crate::config::Config;
 use async_trait::async_trait;
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use rand::Rng;
+use rust_embed::RustEmbed;
 use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -146,6 +151,32 @@ pub fn resolve_within(base: &Path, relative: &str) -> Result<PathBuf, String> {
         return Err(format!("path escapes base: {}", relative));
     }
     Ok(canon_joined)
+}
+
+#[derive(RustEmbed)]
+#[folder = "src/channels/web/static/"]
+struct StaticAsset;
+
+/// GET / → index.html
+pub async fn serve_index(State(_state): State<AppState>) -> Response {
+    serve_static_path("index.html")
+}
+
+/// GET /static/*path
+pub async fn serve_static(axum::extract::Path(path): axum::extract::Path<String>) -> Response {
+    serve_static_path(&path)
+}
+
+fn serve_static_path(path: &str) -> Response {
+    match StaticAsset::get(path) {
+        Some(asset) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, mime.as_ref().parse().unwrap());
+            (StatusCode::OK, headers, Body::from(asset.data.into_owned())).into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
 }
 
 #[cfg(test)]
