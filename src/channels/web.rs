@@ -1,8 +1,12 @@
 use crate::agent::sink::OutputSink;
-use crate::agent::MediaKind;
+use crate::agent::{AgentRegistry, MediaKind};
+use crate::config::Config;
 use async_trait::async_trait;
+use rand::Rng;
 use serde::Serialize;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 
 /// WS 出向事件：扁平化 JSON，与 TurnEvent 一一对应 + 协议层事件
 #[derive(Debug, Clone, Serialize)]
@@ -66,6 +70,58 @@ impl OutputSink for WebSink {
         tracing::info!("web turn interrupted");
         let _ = self.turn_end_tx.send(TurnEndSignal).await;
     }
+}
+
+/// 共享状态：所有 handler 共用
+#[derive(Clone)]
+pub struct AppState {
+    pub registry: Arc<AgentRegistry>,
+    pub config: Arc<RwLock<Config>>,
+    pub config_path: std::path::PathBuf,
+    pub workspace: std::path::PathBuf,
+    pub token: Arc<String>,
+}
+
+/// 生成 32 字节随机 hex token
+pub fn generate_token() -> String {
+    let bytes: [u8; 32] = rand::thread_rng().gen();
+    hex_encode(&bytes)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// 从请求中提取 token：优先 Authorization: Bearer，其次 cookie llaia_token，最后 query ?token=
+pub fn extract_token(
+    headers: &axum::http::HeaderMap,
+    cookies: &str,
+    query_token: Option<&str>,
+) -> Option<String> {
+    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(s) = auth.to_str() {
+            if let Some(rest) = s.strip_prefix("Bearer ") {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    // cookie
+    for kv in cookies.split(';') {
+        let kv = kv.trim();
+        if let Some(rest) = kv.strip_prefix("llaia_token=") {
+            return Some(rest.to_string());
+        }
+    }
+    query_token.map(|s| s.to_string())
+}
+
+/// 校验 token 是否匹配
+pub fn check_token(provided: &str, expected: &str) -> bool {
+    !expected.is_empty() && provided == expected
 }
 
 #[cfg(test)]
@@ -135,5 +191,43 @@ mod tests {
         // 不应 panic
         sink.on_chunk("hi").await;
         sink.on_done().await;
+    }
+
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn test_extract_token_bearer_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer abc123".parse().unwrap());
+        let token = extract_token(&headers, "", None);
+        assert_eq!(token.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_extract_token_cookie() {
+        let headers = HeaderMap::new();
+        let cookies = "other=x; llaia_token=secret; foo=bar";
+        let token = extract_token(&headers, cookies, None);
+        assert_eq!(token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn test_extract_token_query() {
+        let headers = HeaderMap::new();
+        let token = extract_token(&headers, "", Some("from-query"));
+        assert_eq!(token.as_deref(), Some("from-query"));
+    }
+
+    #[test]
+    fn test_check_token() {
+        assert!(check_token("abc", "abc"));
+        assert!(!check_token("abc", "wrong"));
+        assert!(!check_token("abc", "")); // 空 expected 拒绝
+    }
+
+    #[test]
+    fn test_generate_token_length() {
+        let t = generate_token();
+        assert_eq!(t.len(), 64); // 32 bytes hex
     }
 }
