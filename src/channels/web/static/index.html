@@ -79,7 +79,7 @@
         </template>
       </div>
       <div class="composer">
-        <input type="file" accept="image/*" @change="onUpload($event)" multiple disabled>
+        <input type="file" accept="image/*" @change="onUpload($event)" multiple>
         <input type="text" x-model="inputText" @keydown.enter="send()" :disabled="busy" placeholder="输入消息...">
         <button @click="send()" :disabled="busy">发送</button>
         <button @click="stop()" :disabled="!busy">停止</button>
