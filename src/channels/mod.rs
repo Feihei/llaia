@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod qq;
+pub mod web;
 
 // 重新导出，方便外部使用
 pub use cli::CliChannel;

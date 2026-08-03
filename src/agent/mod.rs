@@ -12,6 +12,7 @@ use crate::memory::sqlite::SessionStore;
 use crate::provider::{ChatMessage, ChatRequest, Provider, Role, StreamEvent};
 use anyhow::Result;
 use futures_util::StreamExt;
+use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -36,7 +37,7 @@ pub enum TurnEvent {
 }
 
 /// 媒体类型：图片或文件
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub enum MediaKind {
     Image,
     File,
