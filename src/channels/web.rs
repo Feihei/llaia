@@ -287,6 +287,158 @@ pub async fn serve_file(
     }
 }
 
+/// 敏感字段掩码
+const MASK: &str = "••••";
+
+/// 标记哪些字段是敏感的（返回时掩码，保存时若仍为掩码则保留原值）
+fn mask_sensitive(mut config: Config) -> Config {
+    for p in config.provider.values_mut() {
+        if !p.api_key.is_empty() {
+            p.api_key = MASK.into();
+        }
+    }
+    if !config.channels.qq.app_secret.is_empty() {
+        config.channels.qq.app_secret = MASK.into();
+    }
+    if !config.channels.web.token.is_empty() {
+        config.channels.web.token = MASK.into();
+    }
+    if !config.tools.tavily.api_key.is_empty() {
+        config.tools.tavily.api_key = MASK.into();
+    }
+    config
+}
+
+/// 用 new_config 覆盖，但 new_config 中仍为 MASK 的字段保留 old 原值
+fn merge_masked(old: &Config, new: &Config) -> Config {
+    let mut merged = new.clone();
+    for (k, np) in &mut merged.provider {
+        if np.api_key == MASK {
+            if let Some(op) = old.provider.get(k) {
+                np.api_key = op.api_key.clone();
+            }
+        }
+    }
+    if merged.channels.qq.app_secret == MASK {
+        merged.channels.qq.app_secret = old.channels.qq.app_secret.clone();
+    }
+    if merged.channels.web.token == MASK {
+        merged.channels.web.token = old.channels.web.token.clone();
+    }
+    if merged.tools.tavily.api_key == MASK {
+        merged.tools.tavily.api_key = old.tools.tavily.api_key.clone();
+    }
+    merged
+}
+
+/// GET /api/config → 掩码后的结构化 JSON
+pub async fn get_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let cfg = state.config.read().await.clone();
+    axum::Json(mask_sensitive(cfg)).into_response()
+}
+
+/// PUT /api/config → 写盘 + 更新内存
+pub async fn put_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::Json(new_config): axum::Json<Config>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let old = state.config.read().await.clone();
+    let merged = merge_masked(&old, &new_config);
+    let toml_str = match toml::to_string_pretty(&merged) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("serialize: {}", e)).into_response(),
+    };
+    if let Err(e) = std::fs::write(&state.config_path, &toml_str) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("write: {}", e)).into_response();
+    }
+    *state.config.write().await = merged;
+    axum::Json(serde_json::json!({ "ok": true, "note": "restart llaia to take effect" })).into_response()
+}
+
+/// GET /api/config/raw → TOML 文本
+pub async fn get_config_raw(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    // 读盘上原始文本（含未掩码密钥）—— 已通过鉴权
+    match std::fs::read_to_string(&state.config_path) {
+        Ok(s) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            s,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "config not found").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ValidateBody {
+    pub toml: String,
+}
+
+/// POST /api/config/validate → 校验 TOML 语法
+pub async fn validate_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::Json(body): axum::Json<ValidateBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    match toml::from_str::<Config>(&body.toml) {
+        Ok(_) => axum::Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            let line = e
+                .span()
+                .map(|s| s.start.to_string())
+                .unwrap_or_default();
+            axum::Json(serde_json::json!({ "ok": false, "error": msg, "line": line })).into_response()
+        }
+    }
+}
+
+/// PUT /api/config/raw → 写 TOML 文本到盘
+pub async fn put_config_raw(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::Json(body): axum::Json<ValidateBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    // 先校验
+    match toml::from_str::<Config>(&body.toml) {
+        Ok(parsed) => {
+            if let Err(e) = std::fs::write(&state.config_path, &body.toml) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("write: {}", e)).into_response();
+            }
+            *state.config.write().await = parsed;
+            axum::Json(serde_json::json!({ "ok": true, "note": "restart llaia to take effect" })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, format!("invalid toml: {}", e)).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,5 +580,42 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let r = resolve_within(tmp.path(), "C:\\Windows\\system32");
         assert!(r.is_err());
+    }
+
+    use crate::config::Config;
+
+    fn sample_config() -> Config {
+        let mut c = Config::default_for_workspace("/tmp/llaia-test");
+        c.provider.get_mut("default").unwrap().api_key = "sk-secret".into();
+        c.channels.qq.app_secret = "qq-secret".into();
+        c.tools.tavily.api_key = "tvly-secret".into();
+        c
+    }
+
+    #[test]
+    fn test_mask_sensitive_redacts_secrets() {
+        let masked = mask_sensitive(sample_config());
+        assert_eq!(masked.provider.get("default").unwrap().api_key, "••••");
+        assert_eq!(masked.channels.qq.app_secret, "••••");
+        assert_eq!(masked.tools.tavily.api_key, "••••");
+    }
+
+    #[test]
+    fn test_merge_masked_preserves_original_secret() {
+        let old = sample_config();
+        let mut new = old.clone();
+        // 用户没改 api_key（仍为掩码）
+        new.provider.get_mut("default").unwrap().api_key = "••••".into();
+        let merged = merge_masked(&old, &new);
+        assert_eq!(merged.provider.get("default").unwrap().api_key, "sk-secret");
+    }
+
+    #[test]
+    fn test_merge_masked_uses_new_secret_when_changed() {
+        let old = sample_config();
+        let mut new = old.clone();
+        new.provider.get_mut("default").unwrap().api_key = "sk-new".into();
+        let merged = merge_masked(&old, &new);
+        assert_eq!(merged.provider.get("default").unwrap().api_key, "sk-new");
     }
 }
