@@ -1,4 +1,3 @@
-# ------------------------------
 # (੭aᴗa)੭ LLAIA - Come On~ 来啊~
 
 > **Local Lightweight AI Assistant, in Personal Favor**
