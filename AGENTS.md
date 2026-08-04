@@ -141,6 +141,12 @@ confirm_mode = "always"       # always / whitelist / none
 - 自动压缩，sqlite 留底
 - `llaia config` / `llaia doctor` 可用
 
+## 编码约定
+
+- 不用 `_` 前缀或 `#[allow(dead_code)]` 掩盖无用代码——删掉、接入逻辑，或开 issue 追踪。
+- 不加"先占着"的 config key 或 feature flag——没有具体用例就不写。
+- 生产路径不用 `unwrap()` / `expect()`——传播错误，或注释说明为何不可能 panic。
+
 ## 设计文档索引
 
 - [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 到 ADR-0010）

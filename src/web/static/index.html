@@ -53,7 +53,7 @@
     #about-pane { padding: 24px; overflow-y: auto; }
     #about-pane dl dt { font-weight: bold; color: #0e639c; margin-top: 8px; }
     #about-pane dl dd { margin-left: 16px; }
-    /* 登录遮罩 */
+    /* login overlay */
     #login-overlay { position: fixed; inset: 0; background: #1e1e1e; display: flex; align-items: center; justify-content: center; z-index: 999; }
     #login-overlay .login-box { background: #252526; padding: 32px; border-radius: 8px; width: 360px; text-align: center; }
     #login-overlay h2 { margin: 0 0 16px; color: #0e639c; }
@@ -65,30 +65,30 @@
 </head>
 <body>
 <div id="app" x-data="llaiaApp()" x-init="init()">
-  <!-- 未鉴权时显示登录遮罩 -->
+  <!-- show login overlay when not authenticated -->
   <div id="login-overlay" x-show="!authed">
     <div class="login-box">
       <h2>Llaia Web</h2>
-      <input type="password" x-model="token" @keydown.enter="saveToken()" placeholder="输入访问 token" :disabled="authing">
-      <button @click="saveToken()" :disabled="authing" x-text="authing ? '校验中...' : '进入'"></button>
+      <input type="password" x-model="token" @keydown.enter="saveToken()" placeholder="Enter access token" :disabled="authing">
+      <button @click="saveToken()" :disabled="authing" x-text="authing ? 'Verifying...' : 'Enter'"></button>
       <div class="err" x-text="authError"></div>
-      <div class="hint">token 在 config.toml 的 [channels.web] 中配置，也可通过 URL ?token=xxx 传入</div>
+      <div class="hint">Configure token in config.toml under [channels.web], or pass via URL ?token=xxx</div>
     </div>
   </div>
-  <!-- 鉴权后显示主界面 -->
+  <!-- show main UI after auth -->
   <template x-if="authed">
     <div>
   <header>
     <h1>Llaia</h1>
     <div class="tabs">
       <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
-      <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">配置</div>
-      <div class="tab" :class="{active: tab==='about'}" @click="switchAbout()">关于</div>
+      <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">Config</div>
+      <div class="tab" :class="{active: tab==='about'}" @click="switchAbout()">About</div>
     </div>
     <div class="spacer"></div>
     <div class="token-area">
-      Token: <input type="password" x-model="token" @keydown.enter="saveToken()" placeholder="输入 token">
-      <button @click="saveToken()">保存</button>
+      Token: <input type="password" x-model="token" @keydown.enter="saveToken()" placeholder="Enter token">
+      <button @click="saveToken()">Save</button>
     </div>
   </header>
   <main>
@@ -96,42 +96,42 @@
       <div class="messages" x-ref="messages">
         <template x-for="(m, i) in messages" :key="i">
           <div class="msg" :class="m.role">
-            <template x-if="m.role==='user'"><div><b>用户:</b> <span x-text="m.text"></span></div></template>
-            <template x-if="m.role==='assistant'"><div><b>助手:</b> <div x-html="renderMd(m.text)"></div></div></template>
-            <template x-if="m.role==='tool'"><div><b>工具:</b> <span x-text="m.text"></span></div></template>
+            <template x-if="m.role==='user'"><div><b>User:</b> <span x-text="m.text"></span></div></template>
+            <template x-if="m.role==='assistant'"><div><b>Assistant:</b> <div x-html="renderMd(m.text)"></div></div></template>
+            <template x-if="m.role==='tool'"><div><b>Tool:</b> <span x-text="m.text"></span></div></template>
             <template x-if="m.role==='media'">
-              <div><b>媒体:</b> <img :src="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)"></div>
+              <div><b>Media:</b> <img :src="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)"></div>
             </template>
           </div>
         </template>
       </div>
       <div class="composer">
         <input type="file" accept="image/*" @change="onUpload($event)" multiple>
-        <input type="text" x-model="inputText" @keydown.enter="send()" :disabled="busy" placeholder="输入消息...">
-        <button @click="send()" :disabled="busy">发送</button>
-        <button @click="stop()" :disabled="!busy">停止</button>
+        <input type="text" x-model="inputText" @keydown.enter="send()" :disabled="busy" placeholder="Type a message...">
+        <button @click="send()" :disabled="busy">Send</button>
+        <button @click="stop()" :disabled="!busy">Stop</button>
         <span x-text="uploaded.map(u=>u.path).join(', ')"></span>
       </div>
     </div>
 
     <div id="config-pane" class="pane" :class="{active: tab==='config'}">
       <div class="sidebar">
-        <div :class="{active: configSection==='runtime'}" @click="configSection='runtime'">运行时参数</div>
-        <div :class="{active: configSection==='log'}" @click="configSection='log'">日志</div>
+        <div :class="{active: configSection==='runtime'}" @click="configSection='runtime'">Runtime</div>
+        <div :class="{active: configSection==='log'}" @click="configSection='log'">Log</div>
         <div :class="{active: configSection==='provider'}" @click="configSection='provider'">Provider</div>
         <div :class="{active: configSection==='agent'}" @click="configSection='agent'">Agent</div>
         <div :class="{active: configSection==='channels'}" @click="configSection='channels'">Channels</div>
         <div :class="{active: configSection==='tools'}" @click="configSection='tools'">Tools</div>
-        <div :class="{active: configSection==='mcp'}" @click="configSection='mcp'">MCP (开发中)</div>
-        <div :class="{active: configSection==='skills'}" @click="configSection='skills'">Skills (开发中)</div>
-        <div :class="{active: configSection==='raw'}" @click="configSection='raw'">原始 TOML</div>
+        <div :class="{active: configSection==='mcp'}" @click="configSection='mcp'">MCP (WIP)</div>
+        <div :class="{active: configSection==='skills'}" @click="configSection='skills'">Skills (WIP)</div>
+        <div :class="{active: configSection==='raw'}" @click="configSection='raw'">Raw TOML</div>
       </div>
       <div class="content">
         <template x-if="configSection==='runtime'">
           <div>
             <div class="form-row"><label>context_threshold</label><input type="number" step="0.1" min="0" max="1" x-model="cfg.runtime.context_threshold"></div>
             <div class="form-row"><label>max_iterations</label><input type="number" min="1" x-model="cfg.runtime.max_iterations"></div>
-            <button @click="saveConfig()">保存</button>
+            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='log'">
@@ -140,7 +140,7 @@
               <select x-model="cfg.log.level"><option>debug</option><option>info</option><option>warn</option><option>error</option></select>
             </div>
             <div class="form-row"><label>dir</label><input type="text" x-model="cfg.log.dir" style="width:400px"></div>
-            <button @click="saveConfig()">保存</button>
+            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='provider'">
@@ -149,7 +149,7 @@
               <div class="provider-card">
                 <div class="card-header">
                   <h3 x-text="pid"></h3>
-                  <button class="btn-delete" @click="deleteProvider(pid)">删除</button>
+                  <button class="btn-delete" @click="deleteProvider(pid)">Delete</button>
                 </div>
                 <div class="form-row"><label>type</label><input x-model="p.type"></div>
                 <div class="form-row"><label>base_url</label><input x-model="p.base_url" style="width:400px"></div>
@@ -164,11 +164,11 @@
                     <button class="btn-delete" @click="deleteModel(pid, alias)">×</button>
                   </div>
                 </template>
-                <button class="inline-add" @click="addModel(pid)">+ 新增 model</button>
+                <button class="inline-add" @click="addModel(pid)">+ Add model</button>
               </div>
             </template>
-            <button class="btn-add" @click="addProvider()">+ 新增 provider</button>
-            <button @click="saveConfig()">保存</button>
+            <button class="btn-add" @click="addProvider()">+ Add provider</button>
+            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='agent'">
@@ -177,7 +177,7 @@
               <div class="agent-card">
                 <div class="card-header">
                   <h3 x-text="alias"></h3>
-                  <button class="btn-delete" @click="deleteAgent(alias)">删除</button>
+                  <button class="btn-delete" @click="deleteAgent(alias)">Delete</button>
                 </div>
                 <div class="form-row"><label>model</label><input x-model="a.model" placeholder="provider_id.model_alias"></div>
                 <div class="form-row"><label>workspace</label><input x-model="a.workspace" style="width:400px"></div>
@@ -187,8 +187,8 @@
                 <div class="form-row"><label>delegate_timeout</label><input type="number" x-model="a.delegate_timeout"></div>
               </div>
             </template>
-            <button class="btn-add" @click="addAgent()">+ 新增 agent</button>
-            <button @click="saveConfig()">保存</button>
+            <button class="btn-add" @click="addAgent()">+ Add agent</button>
+            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='channels'">
@@ -205,26 +205,26 @@
             <div class="form-row"><label>host</label><input x-model="cfg.channels.web.host"></div>
             <div class="form-row"><label>port</label><input type="number" x-model="cfg.channels.web.port"></div>
             <div class="form-row"><label>token</label><input type="password" x-model="cfg.channels.web.token"></div>
-            <button @click="saveConfig()">保存</button>
+            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='tools'">
           <div>
             <h3>terminal</h3>
             <div class="form-row"><label>confirm</label><input x-model="cfg.tools.terminal.confirm"></div>
-            <div class="form-row"><label>whitelist (逗号分隔)</label><input :value="cfg.tools.terminal.whitelist.join(',')" @input="cfg.tools.terminal.whitelist=$event.target.value.split(',')"></div>
+            <div class="form-row"><label>whitelist (comma separated)</label><input :value="cfg.tools.terminal.whitelist.join(',')" @input="cfg.tools.terminal.whitelist=$event.target.value.split(',')"></div>
             <h3>tavily</h3>
             <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.tavily.api_key"></div>
-            <button @click="saveConfig()">保存</button>
+            <button @click="saveConfig()">Save</button>
           </div>
         </template>
-        <template x-if="configSection==='mcp'"><div class="placeholder">MCP 配置开发中，敬请期待。</div></template>
-        <template x-if="configSection==='skills'"><div class="placeholder">Skills 配置开发中，敬请期待。</div></template>
+        <template x-if="configSection==='mcp'"><div class="placeholder">MCP config is under development.</div></template>
+        <template x-if="configSection==='skills'"><div class="placeholder">Skills config is under development.</div></template>
         <template x-if="configSection==='raw'">
           <div>
             <textarea x-ref="rawEditor" x-model="rawToml" style="width:100%;height:500px;font-family:monospace"></textarea>
-            <button @click="validateRaw()">校验</button>
-            <button @click="saveRaw()">保存</button>
+            <button @click="validateRaw()">Validate</button>
+            <button @click="saveRaw()">Save</button>
             <span x-text="rawMsg"></span>
           </div>
         </template>

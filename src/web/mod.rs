@@ -87,7 +87,7 @@ pub fn resolve_within(base: &Path, relative: &str) -> Result<PathBuf, String> {
 }
 
 #[derive(RustEmbed)]
-#[folder = "src/channels/web/static/"]
+#[folder = "src/web/static/"]
 struct StaticAsset;
 
 /// GET / → index.html

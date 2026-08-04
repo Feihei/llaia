@@ -2,7 +2,7 @@ function llaiaApp() {
   return {
     tab: 'chat',
     token: localStorage.getItem('llaia_token') || '',
-    // 鉴权状态：未校验 / 校验中 / 已通过 / 未通过
+    // auth state: unchecked / checking / passed / failed
     authed: false,
     authing: false,
     authError: '',
@@ -21,14 +21,14 @@ function llaiaApp() {
     status: null,
 
     async init() {
-      // 优先从 URL query 读取 token，其次 localStorage
+      // prefer URL query token, then localStorage
       const urlParams = new URLSearchParams(location.search);
       const urlToken = urlParams.get('token');
       if (urlToken) {
         this.token = urlToken;
         localStorage.setItem('llaia_token', urlToken);
       }
-      // 有 token 就校验，没有直接显示登录界面
+      // verify if token exists, otherwise show login
       if (this.token) {
         await this.verifyToken();
       }
@@ -44,14 +44,14 @@ function llaiaApp() {
           this.connectWs();
         } else if (r.status === 401) {
           this.authed = false;
-          this.authError = 'Token 不正确，请重新输入';
+          this.authError = 'Incorrect token, please re-enter';
         } else {
           this.authed = false;
-          this.authError = '服务异常: ' + r.status;
+          this.authError = 'Service error: ' + r.status;
         }
       } catch (e) {
         this.authed = false;
-        this.authError = '无法连接服务: ' + e.message;
+        this.authError = 'Cannot connect to server: ' + e.message;
       }
       this.authing = false;
     },
@@ -72,7 +72,7 @@ function llaiaApp() {
         case 'auth_ok': break;
         case 'auth_failed':
           this.authed = false;
-          this.authError = 'WebSocket 鉴权失败，请检查 token';
+          this.authError = 'WebSocket authentication failed, check token';
           break;
         case 'chunk':
           if (this.messages.length === 0 || this.messages[this.messages.length-1].role !== 'assistant') {
@@ -96,7 +96,7 @@ function llaiaApp() {
         case 'interrupted':
           this.busy = false;
           if (ev.type === 'error') this.messages.push({ role: 'tool', text: `[error: ${ev.message}]` });
-          if (ev.type === 'interrupted') this.messages.push({ role: 'tool', text: '[已中断]' });
+          if (ev.type === 'interrupted') this.messages.push({ role: 'tool', text: '[Interrupted]' });
           break;
         case 'busy': alert(ev.reason); break;
         case 'pong': break;
@@ -118,7 +118,7 @@ function llaiaApp() {
         fd.append('file', f);
         const r = await fetch('/upload?token=' + encodeURIComponent(this.token), { method: 'POST', body: fd });
         if (r.ok) { const j = await r.json(); this.uploaded.push(j); }
-        else { alert('上传失败: ' + await r.text()); }
+        else { alert('Upload failed: ' + await r.text()); }
       }
     },
     renderMd(text) { try { return marked.parse(text || ''); } catch { return text; } },
@@ -132,8 +132,8 @@ function llaiaApp() {
       if (r.ok) {
         const data = await r.json();
         console.log('config loaded:', Object.keys(data), 'provider keys:', Object.keys(data.provider || {}));
-        // 适配 serde flatten：provider 的 model 被 flatten 到顶层（如 qwen3_6），
-        // 前端需要把除 type/base_url/api_key 以外的字段收集到 p.model
+        // adapt for serde flatten: provider's model is flattened to top level (e.g. qwen3_6),
+        // frontend needs to collect non-type/base_url/api_key fields into p.model
         for (const pid in data.provider) {
           const p = data.provider[pid];
           if (!p.model) p.model = {};
@@ -160,9 +160,9 @@ function llaiaApp() {
       }
     },
     async saveConfig() {
-      if (!confirm('结构化保存会重写 config.toml，原始注释和未在 schema 中定义的字段（如 channels.cli.agent）将丢失。\n如需保留注释请使用「原始 TOML」编辑。\n\n确认继续？')) return;
-      // 展开 model 回 provider 顶层（适配 serde flatten）
-      // 清理 NaN（input[type=number] 空值时 .valueAsNumber 返回 NaN，JSON.stringify 转为 null，后端 u32 反序列化失败）
+      if (!confirm('Structured save will rewrite config.toml. Original comments and fields not in the schema (e.g. channels.cli.agent) will be lost.\nTo preserve comments, use the "Raw TOML" editor.\n\nContinue?')) return;
+      // expand model back to provider top level (adapt for serde flatten)
+      // strip NaN (empty input[type=number] yields NaN, JSON.stringify turns it to null, backend u32 parse fails)
       const cfgToSend = JSON.parse(JSON.stringify(this.cfg, (key, value) => {
         return typeof value === 'number' && isNaN(value) ? undefined : value;
       }));
@@ -178,56 +178,56 @@ function llaiaApp() {
       let j;
       try { j = await r.json(); } catch { j = {}; }
       console.log('PUT /api/config response:', r.status, j);
-      if (r.ok) { alert('已保存，重启 llaia 生效'); this.switchConfig(); } else { alert('保存失败: ' + (j.error||r.status)); }
+      if (r.ok) { alert('Saved, restart llaia to take effect'); this.switchConfig(); } else { alert('Save failed: ' + (j.error||r.status)); }
     },
-    // ---- provider/agent 增删 ----
+    // ---- provider/agent CRUD ----
     addProvider() {
-      const id = prompt('输入新 provider id（如 ollama、openai）：');
+      const id = prompt('Enter new provider id (e.g., ollama, openai):');
       if (!id || !id.trim()) return;
-      if (this.cfg.provider[id]) { alert('provider 已存在: ' + id); return; }
+      if (this.cfg.provider[id]) { alert('Provider already exists: ' + id); return; }
       this.cfg.provider[id] = { type: 'openai_compatible', base_url: '', api_key: '', model: {} };
     },
     deleteProvider(pid) {
-      if (!confirm('确认删除 provider.' + pid + '？所有引用它的 agent 会失效。')) return;
+      if (!confirm('Delete provider ' + pid + '? All agents referencing it will break.')) return;
       delete this.cfg.provider[pid];
     },
     addModel(pid) {
-      const alias = prompt('输入新 model alias（如 qwen3、gpt4）：');
+      const alias = prompt('Enter new model alias (e.g., qwen3, gpt4):');
       if (!alias || !alias.trim()) return;
-      if (this.cfg.provider[pid].model[alias]) { alert('model 已存在: ' + alias); return; }
+      if (this.cfg.provider[pid].model[alias]) { alert('Model already exists: ' + alias); return; }
       this.cfg.provider[pid].model[alias] = { model: '', native_tool_calling: true, context_size: null };
     },
     deleteModel(pid, alias) {
-      if (!confirm('确认删除 model ' + pid + '.' + alias + '？')) return;
+      if (!confirm('Delete model ' + pid + '.' + alias + '?')) return;
       delete this.cfg.provider[pid].model[alias];
     },
     addAgent() {
-      const alias = prompt('输入新 agent alias（如 coder、translator）：');
+      const alias = prompt('Enter new agent alias (e.g., coder, translator):');
       if (!alias || !alias.trim()) return;
-      if (this.cfg.agent[alias]) { alert('agent 已存在: ' + alias); return; }
+      if (this.cfg.agent[alias]) { alert('Agent already exists: ' + alias); return; }
       this.cfg.agent[alias] = {
         model: '', workspace: '', soul: null, user: null, memory: null,
         denied_tools: [], delegate_timeout: 120,
       };
     },
     deleteAgent(alias) {
-      if (alias === 'main') { alert('main agent 不可删除'); return; }
-      if (!confirm('确认删除 agent.' + alias + '？')) return;
+      if (alias === 'main') { alert('Cannot delete main agent'); return; }
+      if (!confirm('Delete agent ' + alias + '?')) return;
       delete this.cfg.agent[alias];
     },
     async validateRaw() {
       const toml = this._editor ? this._editor.getValue() : this.rawToml;
       const r = await fetch('/api/config/validate?token=' + encodeURIComponent(this.token), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ toml }) });
       const j = await r.json();
-      this.rawMsg = j.ok ? '✓ 校验通过' : '✗ ' + j.error;
+      this.rawMsg = j.ok ? '✓ Valid' : '✗ ' + j.error;
     },
     async saveRaw() {
       const toml = this._editor ? this._editor.getValue() : this.rawToml;
       const r = await fetch('/api/config/raw?token=' + encodeURIComponent(this.token), { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ toml }) });
       let j;
       try { j = await r.json(); } catch { j = {}; }
-      if (r.ok) { alert('已保存，重启 llaia 生效'); this.switchConfig(); }
-      else { alert('保存失败: ' + (j.error || r.status) + (j.line ? '\n位置(字符偏移): ' + j.line : '')); }
+      if (r.ok) { alert('Saved, restart llaia to take effect'); this.switchConfig(); }
+      else { alert('Save failed: ' + (j.error || r.status) + (j.line ? '\nPosition (char offset): ' + j.line : '')); }
     },
 
     // ---- about ----
