@@ -561,6 +561,10 @@ mod tests {
         assert!(r.starts_with(&canon_base));
     }
 
+    // Windows-only: on non-Windows the backslash is an ordinary char, so
+    // "C:\Windows\system32" is a benign (weird) relative filename, not an
+    // absolute path. The drive-letter rejection only applies on Windows.
+    #[cfg(windows)]
     #[test]
     fn test_resolve_within_rejects_windows_drive() {
         let tmp = tempfile::tempdir().unwrap();
