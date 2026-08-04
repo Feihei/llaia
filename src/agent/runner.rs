@@ -9,6 +9,12 @@ pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
 }
 
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -145,7 +151,7 @@ mod tests {
                 "dangerous"
             }
             fn description(&self) -> &str {
-            "dangerous"
+                "dangerous"
             }
             fn parameters_schema(&self) -> Value {
                 json!({"type":"object"})
@@ -171,7 +177,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.as_text().contains("QQ 频道下不能执行此操作"));
+        assert!(msgs[0]
+            .content
+            .as_text()
+            .contains("QQ 频道下不能执行此操作"));
 
         // QQ + none：应执行
         let msgs = execute_tool_calls(&reg, &calls, "qq", "none", None)

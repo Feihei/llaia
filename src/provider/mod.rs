@@ -170,10 +170,7 @@ pub enum StreamEvent {
 #[async_trait]
 pub trait Provider: Send + Sync {
     async fn chat(&self, req: &ChatRequest<'_>) -> Result<ChatResponse>;
-    async fn chat_stream(
-        &self,
-        req: &ChatRequest<'_>,
-    ) -> BoxStream<'_, Result<StreamEvent>>;
+    async fn chat_stream(&self, req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>>;
     fn native_tool_calling(&self) -> bool;
     /// 探测模型上下文窗口大小（tokens）。默认返回 None，由具体 provider 实现。
     async fn detect_context_size(&self) -> Option<usize> {
@@ -207,8 +204,14 @@ mod tests {
     #[test]
     fn test_multimodal_message() {
         let parts = vec![
-            ContentPart::Text { text: "这张图是什么？".into() },
-            ContentPart::ImageUrl { image_url: ImageUrlContent { url: "data:image/jpeg;base64,xxx".into() } },
+            ContentPart::Text {
+                text: "这张图是什么？".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/jpeg;base64,xxx".into(),
+                },
+            },
         ];
         let m = ChatMessage::user_multimodal(parts);
         assert_eq!(m.role, Role::User);
@@ -225,8 +228,14 @@ mod tests {
 
         // 多模态序列化为数组
         let parts = vec![
-            ContentPart::Text { text: "desc".into() },
-            ContentPart::ImageUrl { image_url: ImageUrlContent { url: "data:image/jpeg;base64,x".into() } },
+            ContentPart::Text {
+                text: "desc".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/jpeg;base64,x".into(),
+                },
+            },
         ];
         let m = ChatMessage::user_multimodal(parts);
         let v = serde_json::to_value(&m.content).unwrap();

@@ -1,4 +1,4 @@
-use crate::agent::sink::{OutputSink, run_turn};
+use crate::agent::sink::{run_turn, OutputSink};
 use crate::agent::{Agent, AgentRegistry, MediaKind};
 use crate::channels::Channel;
 use crate::config::QqConfig;
@@ -131,7 +131,11 @@ impl QqChannel {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow!("getAppAccessToken failed: status={}, body={}", status, text));
+            return Err(anyhow!(
+                "getAppAccessToken failed: status={}, body={}",
+                status,
+                text
+            ));
         }
         let v: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| anyhow!("getAppAccessToken parse json: {}, body={}", e, text))?;
@@ -140,10 +144,7 @@ impl QqChannel {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("getAppAccessToken missing access_token: {}", text))?
             .to_string();
-        let expires_in = v
-            .get("expires_in")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(7200);
+        let expires_in = v.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(7200);
         let expires_at = Instant::now() + Duration::from_secs(expires_in);
         let mut st = self.token.lock().await;
         *st = TokenState {
@@ -309,8 +310,8 @@ impl QqChannel {
     ) -> Result<()> {
         let token = self.get_access_token().await?;
         let file_type = match kind {
-            crate::agent::MediaKind::Image => 1,  // 1=图片
-            crate::agent::MediaKind::File => 4,   // 4=文件
+            crate::agent::MediaKind::Image => 1, // 1=图片
+            crate::agent::MediaKind::File => 4,  // 4=文件
         };
 
         // 读文件内容
@@ -430,7 +431,7 @@ impl QqChannel {
         tokio::fs::create_dir_all(uploads_dir)
             .await
             .map_err(|e| anyhow!("create uploads dir: {}", e))?;
-        let safe_name = att.filename.replace('/', "_").replace('\\', "_");
+        let safe_name = att.filename.replace(['/', '\\'], "_");
         let local_path = uploads_dir.join(format!("{}_{}", msg_id, safe_name));
         tokio::fs::write(&local_path, &bytes)
             .await
@@ -476,24 +477,34 @@ impl QqChannel {
                         .await;
                 } else {
                     let _ = self
-                        .send_c2c_message(user_openid, "[没有正在执行的任务]", Some(msg_id.as_str()))
+                        .send_c2c_message(
+                            user_openid,
+                            "[没有正在执行的任务]",
+                            Some(msg_id.as_str()),
+                        )
                         .await;
                 }
                 return Ok(());
             }
             let outcome = {
                 let mut a = agent.lock().await;
-                crate::commands::slash::try_handle(text, &mut *a).await?
+                crate::commands::slash::try_handle(text, &mut a).await?
             };
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
                     // QQ 下忽略 /exit，不退出
                     let _ = self
-                        .send_c2c_message(user_openid, "[/exit 在 QQ 下不可用]", Some(msg_id.as_str()))
+                        .send_c2c_message(
+                            user_openid,
+                            "[/exit 在 QQ 下不可用]",
+                            Some(msg_id.as_str()),
+                        )
                         .await;
                 }
                 crate::commands::slash::SlashOutcome::Handled(msg) => {
-                    let _ = self.send_c2c_message(user_openid, &msg, Some(msg_id.as_str())).await;
+                    let _ = self
+                        .send_c2c_message(user_openid, &msg, Some(msg_id.as_str()))
+                        .await;
                 }
                 crate::commands::slash::SlashOutcome::NotSlash => {
                     // 不会走到这里（已检查 starts_with '/'）
@@ -515,9 +526,7 @@ impl QqChannel {
 
             let mut parts: Vec<ContentPart> = Vec::new();
             if !text.is_empty() {
-                parts.push(ContentPart::Text {
-                    text: text.clone(),
-                });
+                parts.push(ContentPart::Text { text: text.clone() });
             }
             for att in &incoming.attachments {
                 match self.download_attachment(att, &uploads_dir, msg_id).await {
@@ -542,8 +551,7 @@ impl QqChannel {
                             parts.push(ContentPart::Text {
                                 text: format!(
                                     "[附件已保存至 workspace/uploads/{}_{}]",
-                                    msg_id,
-                                    att.filename
+                                    msg_id, att.filename
                                 ),
                             });
                         }
@@ -639,7 +647,10 @@ impl OutputSink for QqSink {
         // agent 可能只调工具无文本输出，buffer 为空时给占位回复
         // 否则 QQ 会因 content="" 返回 304061 invalid content
         let reply = if self.buffer.trim().is_empty() {
-            tracing::warn!(total_len = self.buffer.len(), "agent reply empty, sending placeholder");
+            tracing::warn!(
+                total_len = self.buffer.len(),
+                "agent reply empty, sending placeholder"
+            );
             "[已完成（无文本输出）]"
         } else {
             // 模型回复常以 \n\n 开头（思考结束留白/markdown 习惯），
@@ -648,13 +659,21 @@ impl OutputSink for QqSink {
             self.buffer.trim_start_matches(['\n', '\r'])
         };
         let chunks = split_reply(reply, 1800);
-        tracing::info!(chunks = chunks.len(), total_len = reply.len(), "sending reply");
+        tracing::info!(
+            chunks = chunks.len(),
+            total_len = reply.len(),
+            "sending reply"
+        );
         for (i, chunk) in chunks.iter().enumerate() {
             if chunk.trim().is_empty() {
                 continue;
             }
             // 只有第一片带 msg_id（被动回复），后续片用主动消息
-            let id = if i == 0 { Some(self.msg_id.as_str()) } else { None };
+            let id = if i == 0 {
+                Some(self.msg_id.as_str())
+            } else {
+                None
+            };
             if let Err(e) = self.qq.send_c2c_message(&self.user_openid, chunk, id).await {
                 tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
             }
@@ -669,7 +688,11 @@ impl OutputSink for QqSink {
         };
         let chunks = split_reply(&err_msg, 1800);
         for (i, chunk) in chunks.iter().enumerate() {
-            let id = if i == 0 { Some(self.msg_id.as_str()) } else { None };
+            let id = if i == 0 {
+                Some(self.msg_id.as_str())
+            } else {
+                None
+            };
             if let Err(e) = self.qq.send_c2c_message(&self.user_openid, chunk, id).await {
                 tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
             }
@@ -691,7 +714,9 @@ impl Channel for QqChannel {
         loop {
             match self.clone().run_connection(&agent).await {
                 Ok(()) => tracing::warn!("qq ws connection closed, will reconnect"),
-                Err(e) => tracing::error!(error = %e, "qq ws connection ended with error, will reconnect"),
+                Err(e) => {
+                    tracing::error!(error = %e, "qq ws connection ended with error, will reconnect")
+                }
             }
             tracing::info!("reconnecting in 5 seconds...");
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1057,8 +1082,15 @@ mod split_reply_tests {
         let long_line = "    println!(\"x\");\n".repeat(100);
         let text = format!("```rust\nfn main() {{\n{}}}\n```", long_line);
         let parts = split_reply(&text, 1800);
-        assert!(parts.len() > 1, "expected multiple chunks, got {}", parts.len());
+        assert!(
+            parts.len() > 1,
+            "expected multiple chunks, got {}",
+            parts.len()
+        );
         assert!(parts[0].ends_with("```"), "first chunk should end with ```");
-        assert!(parts[1].starts_with("```rust"), "second chunk should start with ```rust");
+        assert!(
+            parts[1].starts_with("```rust"),
+            "second chunk should start with ```rust"
+        );
     }
 }

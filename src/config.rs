@@ -234,7 +234,13 @@ fn default_confirm() -> String {
 }
 
 fn default_whitelist() -> Vec<String> {
-    vec!["ls".into(), "cat".into(), "grep".into(), "pwd".into(), "dir".into()]
+    vec![
+        "ls".into(),
+        "cat".into(),
+        "grep".into(),
+        "pwd".into(),
+        "dir".into(),
+    ]
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -261,8 +267,10 @@ impl Config {
     }
 
     /// 展开 `~` 和 `${VAR}` 环境变量引用。
+    ///
     /// - `~` / `~/path` → 用户 home 目录
     /// - `${VAR}` → 环境变量值（变量名须匹配 `[A-Z_][A-Z0-9_]*`，找不到报错）
+    ///
     /// 顺序：先 env 后 tilde（env 值里可以含 `~` 不会被二次展开，tilde 后不再处理 env）
     fn expand_paths(&mut self) -> Result<()> {
         let expand = |s: &str| -> Result<String> { expand_string(s) };
@@ -351,24 +359,20 @@ impl Config {
 fn expand_string(s: &str) -> Result<String> {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}").unwrap()
-    });
+    let re = RE.get_or_init(|| regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}").unwrap());
 
     let mut err: Option<anyhow::Error> = None;
-    let expanded = re.replace_all(s, |caps: &regex::Captures| {
-        match std::env::var(&caps[1]) {
-            Ok(v) => v,
-            Err(e) => {
-                if err.is_none() {
-                    err = Some(anyhow::anyhow!(
-                        "environment variable '{}' referenced in config but not set: {}",
-                        &caps[1],
-                        e
-                    ));
-                }
-                String::new()
+    let expanded = re.replace_all(s, |caps: &regex::Captures| match std::env::var(&caps[1]) {
+        Ok(v) => v,
+        Err(e) => {
+            if err.is_none() {
+                err = Some(anyhow::anyhow!(
+                    "environment variable '{}' referenced in config but not set: {}",
+                    &caps[1],
+                    e
+                ));
             }
+            String::new()
         }
     });
     if let Some(e) = err {
@@ -487,14 +491,16 @@ workspace = "~/.llaia"
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
         // 缺省 native_tool_calling 默认 true
-        assert!(config
-            .provider
-            .get("default")
-            .unwrap()
-            .model
-            .get("qwen")
-            .unwrap()
-            .native_tool_calling);
+        assert!(
+            config
+                .provider
+                .get("default")
+                .unwrap()
+                .model
+                .get("qwen")
+                .unwrap()
+                .native_tool_calling
+        );
         // 缺省 context_threshold 默认 0.7
         assert_eq!(config.runtime.context_threshold, 0.7);
         // 缺省 confirm 默认 whitelist
@@ -716,7 +722,10 @@ workspace = "~/.llaia"
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
         // 小写不匹配，原样保留（不报错）
-        assert_eq!(config.provider.get("default").unwrap().api_key, "${lowercase_var}");
+        assert_eq!(
+            config.provider.get("default").unwrap().api_key,
+            "${lowercase_var}"
+        );
     }
 
     #[test]

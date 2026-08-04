@@ -68,10 +68,8 @@ impl Tool for Terminal {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'command'"))?;
 
-        if self.needs_confirmation(command) {
-            if !Self::prompt_confirm(command) {
-                return Err(anyhow!("user denied command"));
-            }
+        if self.needs_confirmation(command) && !Self::prompt_confirm(command) {
+            return Err(anyhow!("user denied command"));
         }
 
         #[cfg(windows)]
@@ -96,7 +94,10 @@ impl Tool for Terminal {
             combined.push_str(&String::from_utf8_lossy(&output.stderr));
         }
         if !output.status.success() {
-            combined.push_str(&format!("\n[exit code: {}]", output.status.code().unwrap_or(-1)));
+            combined.push_str(&format!(
+                "\n[exit code: {}]",
+                output.status.code().unwrap_or(-1)
+            ));
         }
         Ok(combined)
     }
@@ -130,11 +131,7 @@ mod tests {
     #[test]
     fn test_needs_confirmation_whitelist() {
         let (_guard, ws) = make_workspace();
-        let t = Terminal::new(
-            "whitelist".into(),
-            vec!["ls".into(), "cat".into()],
-            ws,
-        );
+        let t = Terminal::new("whitelist".into(), vec!["ls".into(), "cat".into()], ws);
         assert!(!t.needs_confirmation("ls -la"));
         assert!(!t.needs_confirmation("cat foo"));
         assert!(t.needs_confirmation("rm foo"));

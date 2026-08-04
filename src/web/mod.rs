@@ -161,7 +161,10 @@ pub async fn upload(
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("file") {
             let filename = field.file_name().unwrap_or("upload.bin").to_string();
-            let ct = field.content_type().unwrap_or("application/octet-stream").to_string();
+            let ct = field
+                .content_type()
+                .unwrap_or("application/octet-stream")
+                .to_string();
             if !ct.starts_with("image/") {
                 return (StatusCode::BAD_REQUEST, "only image/* allowed").into_response();
             }
@@ -179,7 +182,8 @@ pub async fn upload(
                 return (StatusCode::INTERNAL_SERVER_ERROR, "write failed").into_response();
             }
             let rel = format!("uploads/{}", saved_name);
-            return axum::Json(serde_json::json!({ "path": rel, "size": data.len() })).into_response();
+            return axum::Json(serde_json::json!({ "path": rel, "size": data.len() }))
+                .into_response();
         }
     }
     (StatusCode::BAD_REQUEST, "no file field").into_response()
@@ -308,7 +312,8 @@ pub async fn put_config(
         return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e));
     }
     *state.config.write().await = merged;
-    axum::Json(serde_json::json!({ "ok": true, "note": "restart llaia to take effect" })).into_response()
+    axum::Json(serde_json::json!({ "ok": true, "note": "restart llaia to take effect" }))
+        .into_response()
 }
 
 fn json_err(code: StatusCode, msg: &str) -> Response {
@@ -355,11 +360,9 @@ pub async fn validate_config(
         Ok(_) => axum::Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => {
             let msg = e.to_string();
-            let line = e
-                .span()
-                .map(|s| s.start.to_string())
-                .unwrap_or_default();
-            axum::Json(serde_json::json!({ "ok": false, "error": msg, "line": line })).into_response()
+            let line = e.span().map(|s| s.start.to_string()).unwrap_or_default();
+            axum::Json(serde_json::json!({ "ok": false, "error": msg, "line": line }))
+                .into_response()
         }
     }
 }
@@ -378,15 +381,24 @@ pub async fn put_config_raw(
     match toml::from_str::<Config>(&body.toml) {
         Ok(parsed) => {
             if let Err(e) = std::fs::write(&state.config_path, &body.toml) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({ "error": format!("write: {}", e) }))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({ "error": format!("write: {}", e) })),
+                )
+                    .into_response();
             }
             *state.config.write().await = parsed;
-            axum::Json(serde_json::json!({ "ok": true, "note": "restart llaia to take effect" })).into_response()
+            axum::Json(serde_json::json!({ "ok": true, "note": "restart llaia to take effect" }))
+                .into_response()
         }
         Err(e) => {
             let msg = e.to_string();
             let line = e.span().map(|s| s.start.to_string()).unwrap_or_default();
-            (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": msg, "line": line }))).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": msg, "line": line })),
+            )
+                .into_response()
         }
     }
 }
@@ -433,9 +445,24 @@ pub async fn get_status(
         config_path: state.config_path.display().to_string(),
         pid: std::process::id(),
         channels: vec![
-            ChannelStatus { name: "cli".into(), enabled: cfg.channels.cli.enabled, listening: None },
-            ChannelStatus { name: "qq".into(), enabled: cfg.channels.qq.enabled, listening: None },
-            ChannelStatus { name: "web".into(), enabled: cfg.channels.web.enabled, listening: Some(format!("{}:{}", cfg.channels.web.host, cfg.channels.web.port)) },
+            ChannelStatus {
+                name: "cli".into(),
+                enabled: cfg.channels.cli.enabled,
+                listening: None,
+            },
+            ChannelStatus {
+                name: "qq".into(),
+                enabled: cfg.channels.qq.enabled,
+                listening: None,
+            },
+            ChannelStatus {
+                name: "web".into(),
+                enabled: cfg.channels.web.enabled,
+                listening: Some(format!(
+                    "{}:{}",
+                    cfg.channels.web.host, cfg.channels.web.port
+                )),
+            },
         ],
         db_size_bytes: db_size,
         log_dir: cfg.log.dir.clone(),
@@ -452,8 +479,14 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/static/*path", axum::routing::get(serve_static))
         .route("/upload", axum::routing::post(upload))
         .route("/file", axum::routing::get(serve_file))
-        .route("/api/config", axum::routing::get(get_config).put(put_config))
-        .route("/api/config/raw", axum::routing::get(get_config_raw).put(put_config_raw))
+        .route(
+            "/api/config",
+            axum::routing::get(get_config).put(put_config),
+        )
+        .route(
+            "/api/config/raw",
+            axum::routing::get(get_config_raw).put(put_config_raw),
+        )
         .route("/api/config/validate", axum::routing::post(validate_config))
         .route("/api/status", axum::routing::get(get_status))
 }

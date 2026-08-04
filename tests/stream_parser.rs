@@ -1,5 +1,4 @@
 use llaia::tool_call::stream_parser::ToolCallStreamParser;
-use llaia::provider::ToolCall;
 
 #[test]
 fn test_plain_text_passthrough() {
@@ -16,7 +15,9 @@ fn test_plain_text_passthrough() {
 #[test]
 fn test_single_tag_in_one_chunk() {
     let mut p = ToolCallStreamParser::new();
-    let out = p.feed(r#"before <tool_call>{"name":"file_read","arguments":{"path":"/tmp/x"}}</tool_call> after"#);
+    let out = p.feed(
+        r#"before <tool_call>{"name":"file_read","arguments":{"path":"/tmp/x"}}</tool_call> after"#,
+    );
     assert_eq!(out, "before  after");
     let calls = p.take_tool_calls();
     assert_eq!(calls.len(), 1);

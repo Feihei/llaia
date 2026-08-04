@@ -77,6 +77,8 @@ mod tests {
 
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(content.contains("user likes rust"));
-        assert!(content.contains("[2026-") || content.contains("[2025-") || content.contains("[2027-"));
+        assert!(
+            content.contains("[2026-") || content.contains("[2025-") || content.contains("[2027-")
+        );
     }
 }

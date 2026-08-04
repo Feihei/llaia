@@ -26,6 +26,12 @@ enum State {
 const OPEN_TAG: &str = "<tool_call>";
 const CLOSE_TAG: &str = "</tool_call>";
 
+impl Default for ToolCallStreamParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolCallStreamParser {
     pub fn new() -> Self {
         Self {
@@ -111,7 +117,11 @@ fn value_to_tool_call(value: &Value) -> Option<ToolCall> {
         _ => Value::Null,
     };
     let id = format!("tag_{}", uuid::Uuid::new_v4().simple());
-    Some(ToolCall { id, name, arguments })
+    Some(ToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 #[cfg(test)]

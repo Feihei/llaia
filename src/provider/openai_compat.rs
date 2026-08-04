@@ -57,7 +57,9 @@ struct OpenAiMessage<'a> {
 fn content_to_json(content: &MessageContent) -> serde_json::Value {
     match content {
         MessageContent::Text(s) => serde_json::Value::String(s.clone()),
-        MessageContent::Multimodal(parts) => serde_json::to_value(parts).unwrap_or(serde_json::Value::Null),
+        MessageContent::Multimodal(parts) => {
+            serde_json::to_value(parts).unwrap_or(serde_json::Value::Null)
+        }
     }
 }
 
@@ -109,10 +111,7 @@ impl Provider for OpenAiCompatibleProvider {
         })
     }
 
-    async fn chat_stream(
-        &self,
-        req: &ChatRequest<'_>,
-    ) -> BoxStream<'_, Result<StreamEvent>> {
+    async fn chat_stream(&self, req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
         let url = format!("{}/chat/completions", self.base_url);
 
         let messages: Vec<OpenAiMessage> = req
@@ -269,7 +268,7 @@ impl Provider for OpenAiCompatibleProvider {
                                                 if !tc_order.contains(&idx) {
                                                     tc_order.push(idx);
                                                 }
-                                                let acc = tc_accum.entry(idx).or_insert_with(|| ToolCallAccum::default());
+                                                let acc = tc_accum.entry(idx).or_default();
                                                 if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                                                     acc.id = id.to_string();
                                                 }

@@ -1,8 +1,8 @@
 use axum::http::HeaderMap;
-use llaia::channels::web::{
+use llaia::config::Config;
+use llaia::web::{
     check_token, extract_token, generate_token, mask_sensitive, merge_masked, resolve_within,
 };
-use llaia::config::Config;
 
 #[test]
 fn test_resolve_within_rejects_traversal() {
@@ -54,9 +54,11 @@ fn test_merge_masked_preserves_secret() {
 fn test_web_config_round_trip() {
     let mut c = Config::default_for_workspace("/tmp/x");
     c.channels.web.enabled = true;
-    c.channels.web.bind = "0.0.0.0:9999".into();
+    c.channels.web.host = "0.0.0.0".into();
+    c.channels.web.port = 9999;
     let s = toml::to_string(&c).unwrap();
     let parsed: Config = toml::from_str(&s).unwrap();
     assert!(parsed.channels.web.enabled);
-    assert_eq!(parsed.channels.web.bind, "0.0.0.0:9999");
+    assert_eq!(parsed.channels.web.host, "0.0.0.0");
+    assert_eq!(parsed.channels.web.port, 9999);
 }

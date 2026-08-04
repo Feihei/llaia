@@ -9,8 +9,7 @@ pub fn init(level: &str, log_dir: &PathBuf) -> Result<()> {
         .create(true)
         .append(true)
         .open(log_dir.join("llaia.log"))?;
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     let stderr_layer = fmt::layer().with_writer(std::io::stderr);
     let file_layer = fmt::layer()

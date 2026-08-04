@@ -45,7 +45,8 @@ pub async fn run_turn(
     let channel_clone = channel.clone();
     let join = tokio::spawn(async move {
         let mut a = agent_clone.lock().await;
-        a.handle_message_streaming(user_msg, &channel_clone, tx).await
+        a.handle_message_streaming(user_msg, &channel_clone, tx)
+            .await
     });
 
     let mut interrupted = false;
@@ -127,19 +128,31 @@ mod tests {
             self.events.lock().unwrap().push(format!("chunk:{}", delta));
         }
         async fn on_tool_start(&mut self, name: &str) {
-            self.events.lock().unwrap().push(format!("tool_start:{}", name));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("tool_start:{}", name));
         }
         async fn on_tool_result(&mut self, output: &str) {
-            self.events.lock().unwrap().push(format!("tool_result:{}", output));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("tool_result:{}", output));
         }
         async fn on_media(&mut self, path: &str, kind: MediaKind) {
-            self.events.lock().unwrap().push(format!("media:{:?}:{}", kind, path));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("media:{:?}:{}", kind, path));
         }
         async fn on_done(&mut self) {
             self.events.lock().unwrap().push("done".into());
         }
         async fn on_error(&mut self, message: &str) {
-            self.events.lock().unwrap().push(format!("error:{}", message));
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("error:{}", message));
         }
         async fn on_interrupted(&mut self) {
             self.events.lock().unwrap().push("interrupted".into());
@@ -161,10 +174,16 @@ mod tests {
 
     #[async_trait]
     impl Provider for MockProvider {
-        async fn chat(&self, _req: &crate::provider::ChatRequest<'_>) -> anyhow::Result<crate::provider::ChatResponse> {
+        async fn chat(
+            &self,
+            _req: &crate::provider::ChatRequest<'_>,
+        ) -> anyhow::Result<crate::provider::ChatResponse> {
             unreachable!()
         }
-        async fn chat_stream(&self, _req: &crate::provider::ChatRequest<'_>) -> BoxStream<'_, anyhow::Result<StreamEvent>> {
+        async fn chat_stream(
+            &self,
+            _req: &crate::provider::ChatRequest<'_>,
+        ) -> BoxStream<'_, anyhow::Result<StreamEvent>> {
             let events = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
             let s = try_stream! {
                 for ev in events { yield ev; }
@@ -174,7 +193,9 @@ mod tests {
             };
             Box::pin(s)
         }
-        fn native_tool_calling(&self) -> bool { true }
+        fn native_tool_calling(&self) -> bool {
+            true
+        }
     }
 
     async fn make_agent(rounds: Vec<Vec<StreamEvent>>) -> Arc<Mutex<Agent>> {
@@ -184,9 +205,16 @@ mod tests {
         let tools = Arc::new(crate::agent::runner::ToolRegistry::new());
         let config = Config::default_for_workspace("/tmp/llaia-test");
         let agent = Agent::new(
-            &config, provider, tools, Arc::new(store), sid,
-            "test".into(), 8192, std::path::PathBuf::from("/tmp/llaia-test"),
-        ).await;
+            &config,
+            provider,
+            tools,
+            Arc::new(store),
+            sid,
+            "test".into(),
+            8192,
+            std::path::PathBuf::from("/tmp/llaia-test"),
+        )
+        .await;
         Arc::new(Mutex::new(agent))
     }
 
@@ -195,11 +223,22 @@ mod tests {
         let agent = make_agent(vec![vec![
             StreamEvent::TextDelta("hello".into()),
             StreamEvent::Done,
-        ]]).await;
+        ]])
+        .await;
         let events = Arc::new(StdMutex::new(vec![]));
-        let sink = Box::new(MockSink { events: events.clone() });
+        let sink = Box::new(MockSink {
+            events: events.clone(),
+        });
         let stop = Arc::new(Notify::new());
-        run_turn(agent, crate::provider::ChatMessage::user("hi"), "cli".into(), sink, stop).await.unwrap();
+        run_turn(
+            agent,
+            crate::provider::ChatMessage::user("hi"),
+            "cli".into(),
+            sink,
+            stop,
+        )
+        .await
+        .unwrap();
         let evs = events.lock().unwrap().clone();
         assert!(evs.iter().any(|s| s == "chunk:hello"));
         assert!(evs.iter().any(|s| s == "done"));
@@ -212,15 +251,25 @@ mod tests {
         let agent = make_agent(vec![vec![
             StreamEvent::TextDelta("partial".into()),
             // 不发 Done，模拟长任务
-        ]]).await;
+        ]])
+        .await;
         let events = Arc::new(StdMutex::new(vec![]));
-        let sink = Box::new(MockSink { events: events.clone() });
+        let sink = Box::new(MockSink {
+            events: events.clone(),
+        });
         let stop = Arc::new(Notify::new());
 
         // 先 notify 再 await，确保 select! 能收到
         let stop_clone = stop.clone();
         let handle = tokio::spawn(async move {
-            run_turn(agent, crate::provider::ChatMessage::user("hi"), "cli".into(), sink, stop_clone).await
+            run_turn(
+                agent,
+                crate::provider::ChatMessage::user("hi"),
+                "cli".into(),
+                sink,
+                stop_clone,
+            )
+            .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         stop.notify_one();
@@ -234,15 +283,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_turn_tool_events_dispatched() {
-        let tc = ToolCall { id: "1".into(), name: "echo".into(), arguments: json!({}) };
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "echo".into(),
+            arguments: json!({}),
+        };
         let agent = make_agent(vec![
             vec![StreamEvent::ToolCall(tc), StreamEvent::Done],
             vec![StreamEvent::TextDelta("ok".into()), StreamEvent::Done],
-        ]).await;
+        ])
+        .await;
         let events = Arc::new(StdMutex::new(vec![]));
-        let sink = Box::new(MockSink { events: events.clone() });
+        let sink = Box::new(MockSink {
+            events: events.clone(),
+        });
         let stop = Arc::new(Notify::new());
-        run_turn(agent, crate::provider::ChatMessage::user("do"), "cli".into(), sink, stop).await.unwrap();
+        run_turn(
+            agent,
+            crate::provider::ChatMessage::user("do"),
+            "cli".into(),
+            sink,
+            stop,
+        )
+        .await
+        .unwrap();
         let evs = events.lock().unwrap().clone();
         assert!(evs.iter().any(|s| s == "tool_start:echo"));
         assert!(evs.iter().any(|s| s == "chunk:ok"));

@@ -98,7 +98,10 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
 
     println!("config_dir: {}", config_dir.display());
     println!("log.dir: {}", cfg.log.dir);
-    println!("runtime.context_threshold: {}", cfg.runtime.context_threshold);
+    println!(
+        "runtime.context_threshold: {}",
+        cfg.runtime.context_threshold
+    );
     println!("runtime.max_iterations: {}", cfg.runtime.max_iterations);
 
     let agent_cfg = match cfg.agent.get("main") {
@@ -116,10 +119,7 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
     match Config::parse_model_ref(&agent_cfg.model) {
         Ok((prov_id, model_alias)) => {
             if let Some(p) = cfg.provider.get(prov_id) {
-                println!(
-                    "\nprovider.{}: {}",
-                    prov_id, p.base_url
-                );
+                println!("\nprovider.{}: {}", prov_id, p.base_url);
                 if let Some(m) = p.model.get(model_alias) {
                     println!(
                         "  model.{}: {} (native_tool_calling={})",
@@ -134,7 +134,10 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
                         Err(e) => println!("  /models error: {}", e),
                     }
                 } else {
-                    println!("  [model.{} not found under provider.{}]", model_alias, prov_id);
+                    println!(
+                        "  [model.{} not found under provider.{}]",
+                        model_alias, prov_id
+                    );
                 }
             } else {
                 println!("\n[provider.{} not configured]", prov_id);
@@ -158,7 +161,11 @@ pub async fn remember_cmd(text: &str, config_dir: &Path) -> Result<()> {
     let memory_path = match &agent_cfg.memory {
         Some(s) => {
             let p = PathBuf::from(s);
-            if p.is_absolute() { p } else { workspace.join(s) }
+            if p.is_absolute() {
+                p
+            } else {
+                workspace.join(s)
+            }
         }
         None => workspace.join("MEMORY.md"),
     };

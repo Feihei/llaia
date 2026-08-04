@@ -59,17 +59,15 @@ mod tests {
 
     /// 创建带 .png 后缀的临时文件，让 image crate 能根据扩展名推断格式
     fn png_tempfile() -> tempfile::NamedTempFile {
-        tempfile::Builder::new()
-            .suffix(".png")
-            .tempfile()
-            .unwrap()
+        tempfile::Builder::new().suffix(".png").tempfile().unwrap()
     }
 
     #[test]
     fn test_prepare_small_image() {
         // 生成 100x100 纯色 PNG
         let tmp = png_tempfile();
-        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(100, 100, Rgb([255, 0, 0]));
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(100, 100, Rgb([255, 0, 0]));
         img.save(tmp.path()).unwrap();
 
         let data_url = prepare_image_for_vision(tmp.path()).unwrap();
@@ -91,7 +89,11 @@ mod tests {
         // 缩放后的 base64 应明显小于原图直接编码
         // （2000x2000 JPEG 约 100KB+，1024x1024 约 30KB）
         let b64_len = data_url.len() - "data:image/jpeg;base64,".len();
-        assert!(b64_len < 200_000, "downscaled image base64 too large: {}", b64_len);
+        assert!(
+            b64_len < 200_000,
+            "downscaled image base64 too large: {}",
+            b64_len
+        );
     }
 
     #[test]

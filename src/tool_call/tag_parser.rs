@@ -37,7 +37,11 @@ fn value_to_tool_call(value: &Value) -> Option<ToolCall> {
         _ => Value::Null,
     };
     let id = format!("tag_{}", uuid::Uuid::new_v4().simple());
-    Some(ToolCall { id, name, arguments })
+    Some(ToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 #[cfg(test)]

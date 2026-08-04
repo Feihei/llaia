@@ -3,7 +3,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "llaia", version = "0.1.0", about = "Lightweight Local AI Assistant")]
+#[command(
+    name = "llaia",
+    version = "0.1.0",
+    about = "Lightweight Local AI Assistant"
+)]
 struct Cli {
     /// 配置目录，默认 ~/.llaia
     #[arg(long, global = true)]

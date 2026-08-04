@@ -1,5 +1,5 @@
 use crate::agent::runner::ToolRegistry;
-use crate::agent::sink::{OutputSink, run_turn};
+use crate::agent::sink::{run_turn, OutputSink};
 use crate::agent::Agent;
 use crate::agent::AgentRegistry;
 use crate::channels::Channel;
@@ -70,6 +70,12 @@ impl OutputSink for CliSink {
 
 pub struct CliChannel;
 
+impl Default for CliChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CliChannel {
     pub fn new() -> Self {
         Self
@@ -101,10 +107,8 @@ impl Channel for CliChannel {
                     }
                     Ok(_) => {
                         let trimmed = line.trim().to_string();
-                        if !trimmed.is_empty() {
-                            if stdin_tx.blocking_send(Some(trimmed)).is_err() {
-                                break;
-                            }
+                        if !trimmed.is_empty() && stdin_tx.blocking_send(Some(trimmed)).is_err() {
+                            break;
                         }
                     }
                     Err(_) => {
@@ -154,7 +158,7 @@ impl Channel for CliChannel {
             if line.starts_with('/') {
                 let outcome = {
                     let mut a = agent.lock().await;
-                    try_handle(&line, &mut *a).await?
+                    try_handle(&line, &mut a).await?
                 };
                 match outcome {
                     SlashOutcome::Exit => break,
@@ -186,9 +190,7 @@ impl Channel for CliChannel {
             } else {
                 let mut parts: Vec<crate::provider::ContentPart> = Vec::new();
                 if !text.is_empty() {
-                    parts.push(crate::provider::ContentPart::Text {
-                        text: text.clone(),
-                    });
+                    parts.push(crate::provider::ContentPart::Text { text: text.clone() });
                 }
                 for img_path in &image_paths {
                     // 相对路径解析到 workspace；绝对路径直接用（resolve_within 内部处理）
@@ -318,13 +320,9 @@ async fn build_single_agent(
         .get(prov_id)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("provider.{} not configured", prov_id))?;
-    let model_cfg = prov_cfg
-        .model
-        .get(model_alias)
-        .cloned()
-        .ok_or_else(|| {
-            anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
-        })?;
+    let model_cfg = prov_cfg.model.get(model_alias).cloned().ok_or_else(|| {
+        anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
+    })?;
 
     let provider: Arc<dyn Provider> = Arc::new(OpenAiCompatibleProvider::new(
         &prov_cfg.base_url,
@@ -334,31 +332,29 @@ async fn build_single_agent(
     )?);
 
     // 构建完整工具集
-    let mut all_tools: Vec<Arc<dyn Tool>> = Vec::new();
-    all_tools.push(Arc::new(FileRead::new(workspace.clone())));
-    all_tools.push(Arc::new(FileWrite::new(workspace.clone())));
-    all_tools.push(Arc::new(FileEdit::new(workspace.clone())));
-    all_tools.push(Arc::new(Terminal::new(
-        config.tools.terminal.confirm.clone(),
-        config.tools.terminal.whitelist.clone(),
-        workspace.clone(),
-    )));
-    all_tools.push(Arc::new(WebFetch::new()?));
+    let mut all_tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(FileRead::new(workspace.clone())),
+        Arc::new(FileWrite::new(workspace.clone())),
+        Arc::new(FileEdit::new(workspace.clone())),
+        Arc::new(Terminal::new(
+            config.tools.terminal.confirm.clone(),
+            config.tools.terminal.whitelist.clone(),
+            workspace.clone(),
+        )),
+        Arc::new(WebFetch::new()?),
+        Arc::new(MemoryWrite::new(memory_path.clone())),
+        Arc::new(SendImage::new(workspace.clone())),
+        Arc::new(SendFile::new(workspace.clone())),
+    ];
     if !config.tools.tavily.api_key.is_empty() {
         all_tools.push(Arc::new(TavilySearch::new(
             config.tools.tavily.api_key.clone(),
         )?));
     }
-    all_tools.push(Arc::new(MemoryWrite::new(memory_path.clone())));
-    all_tools.push(Arc::new(SendImage::new(workspace.clone())));
-    all_tools.push(Arc::new(SendFile::new(workspace.clone())));
 
     // 按 denied_tools 过滤
-    let denied: std::collections::HashSet<&str> = agent_cfg
-        .denied_tools
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    let denied: std::collections::HashSet<&str> =
+        agent_cfg.denied_tools.iter().map(|s| s.as_str()).collect();
     let mut delegate_tool: Option<Arc<DelegateTool>> = None;
     let mut registry = ToolRegistry::new();
     for tool in all_tools {
@@ -475,7 +471,11 @@ pub async fn build_agent(config: &Config) -> Result<Arc<AgentRegistry>> {
     Ok(registry)
 }
 
-fn resolve_md_path(explicit: &Option<String>, workspace: &PathBuf, default_name: &str) -> PathBuf {
+fn resolve_md_path(
+    explicit: &Option<String>,
+    workspace: &std::path::Path,
+    default_name: &str,
+) -> PathBuf {
     match explicit {
         Some(s) => {
             let p = PathBuf::from(s);

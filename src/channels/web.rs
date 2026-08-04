@@ -1,10 +1,12 @@
-use crate::agent::sink::{OutputSink, run_turn};
+use crate::agent::sink::{run_turn, OutputSink};
 use crate::agent::{AgentRegistry, MediaKind};
 use crate::channels::Channel;
 use crate::config::{Config, WebConfig};
 use crate::image_utils;
 use crate::provider::{ChatMessage, ContentPart, ImageUrlContent};
-use crate::web::{AppState, TokenQuery, build_system_routes, check_token, generate_token, resolve_within};
+use crate::web::{
+    build_system_routes, check_token, generate_token, resolve_within, AppState, TokenQuery,
+};
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -54,23 +56,51 @@ impl WebSink {
 #[async_trait]
 impl OutputSink for WebSink {
     async fn on_chunk(&mut self, delta: &str) {
-        let _ = self.tx.send(WebEvent::Chunk { delta: delta.into() }).await;
+        let _ = self
+            .tx
+            .send(WebEvent::Chunk {
+                delta: delta.into(),
+            })
+            .await;
     }
     async fn on_tool_start(&mut self, name: &str) {
-        let _ = self.tx.send(WebEvent::ToolStart { id: String::new(), name: name.into() }).await;
+        let _ = self
+            .tx
+            .send(WebEvent::ToolStart {
+                id: String::new(),
+                name: name.into(),
+            })
+            .await;
     }
     async fn on_tool_result(&mut self, output: &str) {
-        let _ = self.tx.send(WebEvent::ToolResult { id: String::new(), output: output.into() }).await;
+        let _ = self
+            .tx
+            .send(WebEvent::ToolResult {
+                id: String::new(),
+                output: output.into(),
+            })
+            .await;
     }
     async fn on_media(&mut self, path: &str, kind: MediaKind) {
-        let _ = self.tx.send(WebEvent::Media { path: path.into(), kind }).await;
+        let _ = self
+            .tx
+            .send(WebEvent::Media {
+                path: path.into(),
+                kind,
+            })
+            .await;
     }
     async fn on_done(&mut self) {
         let _ = self.tx.send(WebEvent::Done).await;
         let _ = self.turn_end_tx.send(TurnEndSignal).await;
     }
     async fn on_error(&mut self, message: &str) {
-        let _ = self.tx.send(WebEvent::Error { message: message.into() }).await;
+        let _ = self
+            .tx
+            .send(WebEvent::Error {
+                message: message.into(),
+            })
+            .await;
         let _ = self.turn_end_tx.send(TurnEndSignal).await;
     }
     async fn on_interrupted(&mut self) {
@@ -112,7 +142,9 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 
     // 发 auth_ok
     let _ = ws_sink
-        .send(Message::Text(serde_json::to_string(&WebEvent::AuthOk).unwrap()))
+        .send(Message::Text(
+            serde_json::to_string(&WebEvent::AuthOk).unwrap(),
+        ))
         .await;
 
     // 写 task：rx → ws_sink
@@ -205,20 +237,28 @@ fn build_user_message(text: &str, images: Option<&[String]>, workspace: &Path) -
         match resolve_within(&uploads_dir, img_rel) {
             Ok(abs) => {
                 if !image_utils::is_image_file(&abs) {
-                    parts.push(ContentPart::Text { text: format!("[not an image: {}]", img_rel) });
+                    parts.push(ContentPart::Text {
+                        text: format!("[not an image: {}]", img_rel),
+                    });
                     continue;
                 }
                 match image_utils::prepare_image_for_vision(&abs) {
                     Ok(data_url) => {
-                        parts.push(ContentPart::ImageUrl { image_url: ImageUrlContent { url: data_url } });
+                        parts.push(ContentPart::ImageUrl {
+                            image_url: ImageUrlContent { url: data_url },
+                        });
                     }
                     Err(e) => {
-                        parts.push(ContentPart::Text { text: format!("[image load failed: {}]", e) });
+                        parts.push(ContentPart::Text {
+                            text: format!("[image load failed: {}]", e),
+                        });
                     }
                 }
             }
             Err(e) => {
-                parts.push(ContentPart::Text { text: format!("[invalid path: {}]", e) });
+                parts.push(ContentPart::Text {
+                    text: format!("[invalid path: {}]", e),
+                });
             }
         }
     }
@@ -245,7 +285,13 @@ impl WebChannel {
         config_path: PathBuf,
         workspace: PathBuf,
     ) -> Self {
-        Self { config: web_config, registry, config_full, config_path, workspace }
+        Self {
+            config: web_config,
+            registry,
+            config_full,
+            config_path,
+            workspace,
+        }
     }
 
     pub fn build_router(&self) -> axum::Router {
@@ -274,13 +320,23 @@ impl WebChannel {
 #[async_trait]
 impl Channel for WebChannel {
     async fn run(self: Arc<Self>, _registry: Arc<AgentRegistry>) -> Result<(), anyhow::Error> {
-        let addr: std::net::SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()
-            .map_err(|e| anyhow::anyhow!("invalid bind addr (host={}, port={}): {}", self.config.host, self.config.port, e))?;
+        let addr: std::net::SocketAddr = format!("{}:{}", self.config.host, self.config.port)
+            .parse()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid bind addr (host={}, port={}): {}",
+                    self.config.host,
+                    self.config.port,
+                    e
+                )
+            })?;
         let router = self.build_router();
-        let listener = tokio::net::TcpListener::bind(addr).await
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
             .map_err(|e| anyhow::anyhow!("bind {}: {}", addr, e))?;
         tracing::info!("WebChannel listening on {}", addr);
-        axum::serve(listener, router).await
+        axum::serve(listener, router)
+            .await
             .map_err(|e| anyhow::anyhow!("web server: {}", e))?;
         Ok(())
     }
@@ -292,7 +348,9 @@ mod tests {
 
     #[test]
     fn test_web_event_chunk_serialization() {
-        let ev = WebEvent::Chunk { delta: "hello".into() };
+        let ev = WebEvent::Chunk {
+            delta: "hello".into(),
+        };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(json, r#"{"type":"chunk","delta":"hello"}"#);
     }
@@ -306,7 +364,10 @@ mod tests {
 
     #[test]
     fn test_web_event_media_serialization() {
-        let ev = WebEvent::Media { path: "out/a.png".into(), kind: MediaKind::Image };
+        let ev = WebEvent::Media {
+            path: "out/a.png".into(),
+            kind: MediaKind::Image,
+        };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains(r#""type":"media""#));
         assert!(json.contains(r#""path":"out/a.png""#));
@@ -314,7 +375,9 @@ mod tests {
 
     #[test]
     fn test_web_event_auth_failed_serialization() {
-        let ev = WebEvent::AuthFailed { reason: "invalid token".into() };
+        let ev = WebEvent::AuthFailed {
+            reason: "invalid token".into(),
+        };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(json, r#"{"type":"auth_failed","reason":"invalid token"}"#);
     }

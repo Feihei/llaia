@@ -47,11 +47,7 @@ pub(crate) fn resolve_within(workspace: &Path, p: &str) -> Result<PathBuf> {
     let norm_joined = normalize_lexical(&joined);
     let norm_ws = normalize_lexical(workspace);
     if !norm_joined.starts_with(&norm_ws) {
-        anyhow::bail!(
-            "path {:?} is outside workspace {:?}",
-            joined,
-            workspace
-        );
+        anyhow::bail!("path {:?} is outside workspace {:?}", joined, workspace);
     }
     Ok(norm_joined)
 }
@@ -141,7 +137,11 @@ impl Tool for FileWrite {
         tokio::fs::write(&resolved, content)
             .await
             .map_err(|e| anyhow!("write {:?}: {}", resolved, e))?;
-        Ok(format!("wrote {} bytes to {}", content.len(), resolved.display()))
+        Ok(format!(
+            "wrote {} bytes to {}",
+            content.len(),
+            resolved.display()
+        ))
     }
 }
 
@@ -212,7 +212,7 @@ impl Tool for FileEdit {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Write;
+
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -240,7 +240,10 @@ mod tests {
             .unwrap();
 
         let read_tool = FileRead::new(ws_path);
-        let result = read_tool.execute(&json!({"path": rel}), "cli").await.unwrap();
+        let result = read_tool
+            .execute(&json!({"path": rel}), "cli")
+            .await
+            .unwrap();
         assert_eq!(result, "new content");
     }
 
@@ -252,9 +255,12 @@ mod tests {
         std::fs::write(ws_path.join(rel), "line1\nline2\nline3").unwrap();
 
         let tool = FileEdit::new(ws_path.clone());
-        tool.execute(&json!({"path": rel, "old_string": "line2", "new_string": "LINE TWO"}), "cli")
-            .await
-            .unwrap();
+        tool.execute(
+            &json!({"path": rel, "old_string": "line2", "new_string": "LINE TWO"}),
+            "cli",
+        )
+        .await
+        .unwrap();
 
         let read = FileRead::new(ws_path);
         let result = read.execute(&json!({"path": rel}), "cli").await.unwrap();
@@ -271,7 +277,10 @@ mod tests {
 
         let tool = FileEdit::new(ws_path);
         let result = tool
-            .execute(&json!({"path": rel, "old_string": "missing", "new_string": "x"}), "cli")
+            .execute(
+                &json!({"path": rel, "old_string": "missing", "new_string": "x"}),
+                "cli",
+            )
             .await;
         assert!(result.is_err());
     }
@@ -332,12 +341,12 @@ mod tests {
         let outside = ws_path.parent().unwrap().join("outside.txt");
         let abs_read = FileRead::new(ws_path);
         let result = abs_read
-            .execute(
-                &json!({"path": outside.to_str().unwrap()}),
-                "cli",
-            )
+            .execute(&json!({"path": outside.to_str().unwrap()}), "cli")
             .await;
-        assert!(result.is_err(), "absolute path outside workspace should be blocked");
+        assert!(
+            result.is_err(),
+            "absolute path outside workspace should be blocked"
+        );
     }
 
     #[tokio::test]
@@ -352,6 +361,10 @@ mod tests {
                 "cli",
             )
             .await;
-        assert!(r.is_ok(), "writing to workspace subdir should succeed: {:?}", r);
+        assert!(
+            r.is_ok(),
+            "writing to workspace subdir should succeed: {:?}",
+            r
+        );
     }
 }

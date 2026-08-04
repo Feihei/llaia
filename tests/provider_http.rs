@@ -28,8 +28,7 @@ async fn test_native_tool_calling() {
         .create_async()
         .await;
 
-    let provider =
-        OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
+    let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
     let msgs = vec![ChatMessage::user("read /tmp/x")];
     let req = ChatRequest {
         messages: &msgs,
@@ -61,8 +60,7 @@ async fn test_text_response() {
         .create_async()
         .await;
 
-    let provider =
-        OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
+    let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
     let msgs = vec![ChatMessage::user("hi")];
     let req = ChatRequest {
         messages: &msgs,
@@ -85,8 +83,7 @@ async fn test_error_response() {
         .create_async()
         .await;
 
-    let provider =
-        OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
+    let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
     let msgs = vec![ChatMessage::user("hi")];
     let req = ChatRequest {
         messages: &msgs,

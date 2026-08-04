@@ -100,30 +100,24 @@ impl Tool for DelegateTool {
         let timeout = self.timeout_secs;
 
         // 子 agent 用独立 channel 标识 "delegate"，不继承主 agent 的 channel。
-        let result = tokio::time::timeout(
-            Duration::from_secs(timeout),
-            async {
-                sub_agent
-                    .lock()
-                    .await
-                    .handle_input_streaming(&task_clone, "delegate", tx)
-                    .await
-            },
-        )
+        let result = tokio::time::timeout(Duration::from_secs(timeout), async {
+            sub_agent
+                .lock()
+                .await
+                .handle_input_streaming(&task_clone, "delegate", tx)
+                .await
+        })
         .await;
 
         // 收集子 Agent 的事件：Chunk 转发给主 channel（让用户看到委派进度），同时累积输出
         let mut output = String::new();
         while let Ok(ev) = rx.try_recv() {
-            match ev {
-                TurnEvent::Chunk { delta } => {
-                    output.push_str(&delta);
-                    if let Some(tx) = event_tx {
-                        let _ = tx.send(TurnEvent::Chunk { delta }).await;
-                    }
+            // 其他事件（ToolStart/ToolResult/Done/Error）不转发，避免主 channel 噪音
+            if let TurnEvent::Chunk { delta } = ev {
+                output.push_str(&delta);
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(TurnEvent::Chunk { delta }).await;
                 }
-                // 其他事件（ToolStart/ToolResult/Done/Error）不转发，避免主 channel 噪音
-                _ => {}
             }
         }
 
@@ -135,10 +129,7 @@ impl Tool for DelegateTool {
                     Ok(output)
                 }
             }
-            Ok(Err(e)) => Ok(format!(
-                "[子 Agent 执行错误: {}]\n部分输出: {}",
-                e, output
-            )),
+            Ok(Err(e)) => Ok(format!("[子 Agent 执行错误: {}]\n部分输出: {}", e, output)),
             Err(_) => Ok(format!(
                 "[子 Agent 超时({}秒)]\n部分输出: {}",
                 timeout, output
@@ -150,8 +141,8 @@ impl Tool for DelegateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::Agent;
     use crate::agent::runner::ToolRegistry;
+    use crate::agent::Agent;
     use crate::config::Config;
     use crate::memory::sqlite::SessionStore;
     use crate::provider::{ChatRequest, ChatResponse, Provider, StreamEvent, ToolCall};
@@ -255,7 +246,11 @@ mod tests {
 
         let args = json!({"agent_name": "slow", "task": "慢任务"});
         let result = tool.execute(&args, "cli").await.unwrap();
-        assert!(result.contains("超时"), "should mention timeout, got: {}", result);
+        assert!(
+            result.contains("超时"),
+            "should mention timeout, got: {}",
+            result
+        );
         assert!(
             result.contains("部分输出"),
             "should preserve partial output, got: {}",

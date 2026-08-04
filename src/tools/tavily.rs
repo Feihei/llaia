@@ -58,7 +58,10 @@ impl Tool for TavilySearch {
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'query'"))?;
-        let max_results = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(5);
+        let max_results = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5);
 
         let body = serde_json::json!({
             "api_key": self.api_key,

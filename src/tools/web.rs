@@ -46,10 +46,7 @@ impl Tool for WebFetch {
         if !resp.status().is_success() {
             return Err(anyhow!("HTTP {}", resp.status()));
         }
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| anyhow!("read body: {}", e))?;
+        let text = resp.text().await.map_err(|e| anyhow!("read body: {}", e))?;
         Ok(text)
     }
 }

@@ -41,10 +41,14 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
             if args.is_empty() {
                 Ok(SlashOutcome::Handled("usage: /remember <text>".into()))
             } else if let Some(tool) = agent.tools.get("memory_write") {
-                let _ = tool.execute(&serde_json::json!({"entry": args}), "cli").await;
+                let _ = tool
+                    .execute(&serde_json::json!({"entry": args}), "cli")
+                    .await;
                 Ok(SlashOutcome::Handled("[remembered]".into()))
             } else {
-                Ok(SlashOutcome::Handled("[memory_write tool not registered]".into()))
+                Ok(SlashOutcome::Handled(
+                    "[memory_write tool not registered]".into(),
+                ))
             }
         }
         "/config" => {
@@ -59,9 +63,6 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
             );
             Ok(SlashOutcome::Handled(info))
         }
-        _ => Ok(SlashOutcome::Handled(format!(
-            "[unknown command: {}]",
-            cmd
-        ))),
+        _ => Ok(SlashOutcome::Handled(format!("[unknown command: {}]", cmd))),
     }
 }

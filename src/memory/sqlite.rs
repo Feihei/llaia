@@ -45,8 +45,8 @@ impl SessionStore {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let conn = Connection::open(db_path)
-            .with_context(|| format!("open sqlite {:?}", db_path))?;
+        let conn =
+            Connection::open(db_path).with_context(|| format!("open sqlite {:?}", db_path))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         Self::init_schema(&conn)?;
         Ok(Self {
@@ -114,9 +114,8 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
 
     pub fn latest_session(&self) -> Result<Option<(i64, String)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, session_uuid FROM sessions ORDER BY last_activity DESC LIMIT 1",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT id, session_uuid FROM sessions ORDER BY last_activity DESC LIMIT 1")?;
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
             Ok(Some((row.get(0)?, row.get(1)?)))
@@ -125,12 +124,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
         }
     }
 
-    pub fn append_message(
-        &self,
-        session_id: i64,
-        role: &Role,
-        content: &str,
-    ) -> Result<i64> {
+    pub fn append_message(&self, session_id: i64, role: &Role, content: &str) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         let role_str = match role {
             Role::System => "system",

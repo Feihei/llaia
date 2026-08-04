@@ -63,7 +63,8 @@ impl Context {
         }
         let to_compress: Vec<ChatMessage> =
             self.history[..self.history.len() - keep_recent].to_vec();
-        let mut to_keep: Vec<ChatMessage> = self.history[self.history.len() - keep_recent..].to_vec();
+        let mut to_keep: Vec<ChatMessage> =
+            self.history[self.history.len() - keep_recent..].to_vec();
 
         let mut dump = String::new();
         for m in &to_compress {

@@ -22,7 +22,10 @@ async fn test_stream_text_deltas() {
 
     let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
     let msgs = vec![ChatMessage::user("hi")];
-    let req = ChatRequest { messages: &msgs, tools: None };
+    let req = ChatRequest {
+        messages: &msgs,
+        tools: None,
+    };
     let mut stream = provider.chat_stream(&req).await;
 
     let mut deltas = Vec::new();
@@ -59,7 +62,10 @@ async fn test_stream_tool_calls_accumulated() {
 
     let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
     let msgs = vec![ChatMessage::user("read /tmp")];
-    let req = ChatRequest { messages: &msgs, tools: None };
+    let req = ChatRequest {
+        messages: &msgs,
+        tools: None,
+    };
     let mut stream = provider.chat_stream(&req).await;
 
     let mut tool_calls = Vec::new();
@@ -91,7 +97,10 @@ async fn test_stream_error_status() {
 
     let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
     let msgs = vec![ChatMessage::user("hi")];
-    let req = ChatRequest { messages: &msgs, tools: None };
+    let req = ChatRequest {
+        messages: &msgs,
+        tools: None,
+    };
     let mut stream = provider.chat_stream(&req).await;
 
     let ev = stream.next().await.unwrap().unwrap();

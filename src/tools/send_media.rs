@@ -186,16 +186,12 @@ mod tests {
         // 非图片文件应报错
         std::fs::write(ws_path.join("doc.txt"), "hello").unwrap();
         let tool = SendImage::new(ws_path.clone());
-        let result = tool
-            .execute(&json!({"path": "doc.txt"}), "cli")
-            .await;
+        let result = tool.execute(&json!({"path": "doc.txt"}), "cli").await;
         assert!(result.is_err());
 
         // 图片文件应成功（仅校验，不发送）
         std::fs::write(ws_path.join("img.jpg"), b"fake jpg").unwrap();
-        let result = tool
-            .execute(&json!({"path": "img.jpg"}), "cli")
-            .await;
+        let result = tool.execute(&json!({"path": "img.jpg"}), "cli").await;
         assert!(result.is_ok());
     }
 
@@ -217,9 +213,7 @@ mod tests {
         std::fs::write(ws_path.join("data.bin"), b"binary").unwrap();
 
         let tool = SendFile::new(ws_path);
-        let result = tool
-            .execute(&json!({"path": "data.bin"}), "cli")
-            .await;
+        let result = tool.execute(&json!({"path": "data.bin"}), "cli").await;
         assert!(result.is_ok());
     }
 

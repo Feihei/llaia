@@ -26,10 +26,7 @@ pub enum TurnEvent {
     /// 工具执行结果
     ToolResult { id: String, output: String },
     /// 工具请求发送媒体给用户（channel 负责实际发送）
-    MediaOutput {
-        path: String,
-        kind: MediaKind,
-    },
+    MediaOutput { path: String, kind: MediaKind },
     /// 整轮结束（所有文本和工具调用完成）
     Done,
     /// 错误（已生成的文本保留，错误追加）
@@ -59,6 +56,7 @@ pub struct Agent {
 }
 
 impl Agent {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         config: &Config,
         provider: Arc<dyn Provider>,
@@ -146,7 +144,11 @@ impl Agent {
             // 达到 max_iterations 前一步：拔掉工具 + 注入强制总结提示词
             let force_summary = i + 1 >= max_iters;
             if force_summary {
-                tracing::warn!(iter = i, max = max_iters, "approaching max_iterations, forcing summary");
+                tracing::warn!(
+                    iter = i,
+                    max = max_iters,
+                    "approaching max_iterations, forcing summary"
+                );
                 self.context.push(ChatMessage::user(
                     "已达工具调用次数上限，请停止调用工具，基于已获取的信息总结任务并直接回复用户。",
                 ));
@@ -178,8 +180,11 @@ impl Agent {
                 if event_tx.is_closed() {
                     tracing::info!(iter = i, "stream aborted by user (tx closed)");
                     if !iter_text.is_empty() {
-                        self.session_store
-                            .append_message(self.session_id, &Role::Assistant, &iter_text)?;
+                        self.session_store.append_message(
+                            self.session_id,
+                            &Role::Assistant,
+                            &iter_text,
+                        )?;
                         self.context.push(ChatMessage::assistant(&iter_text));
                     }
                     return Ok(iter_text);
@@ -205,7 +210,9 @@ impl Agent {
                     StreamEvent::Done => break,
                     StreamEvent::Error(msg) => {
                         let _ = event_tx
-                            .send(TurnEvent::Error { message: msg.clone() })
+                            .send(TurnEvent::Error {
+                                message: msg.clone(),
+                            })
                             .await;
                         return Err(anyhow::anyhow!(msg));
                     }
@@ -215,7 +222,11 @@ impl Agent {
             if !self.provider.native_tool_calling() {
                 let rest = parser.finish();
                 if !rest.is_empty() {
-                    let _ = event_tx.send(TurnEvent::Chunk { delta: rest.clone() }).await;
+                    let _ = event_tx
+                        .send(TurnEvent::Chunk {
+                            delta: rest.clone(),
+                        })
+                        .await;
                     iter_text.push_str(&rest);
                 }
             }
@@ -249,11 +260,9 @@ impl Agent {
             }
 
             let assistant_msg = ChatMessage::assistant_with_tools(iter_text.clone(), calls.clone());
-            let assistant_msg_id = self.session_store.append_message(
-                self.session_id,
-                &Role::Assistant,
-                &iter_text,
-            )?;
+            let assistant_msg_id =
+                self.session_store
+                    .append_message(self.session_id, &Role::Assistant, &iter_text)?;
             self.context.push(assistant_msg);
 
             for tc in &calls {
@@ -374,10 +383,7 @@ mod tests {
         async fn chat(&self, _req: &ChatRequest<'_>) -> Result<ChatResponse> {
             unreachable!()
         }
-        async fn chat_stream(
-            &self,
-            _req: &ChatRequest<'_>,
-        ) -> BoxStream<'_, Result<StreamEvent>> {
+        async fn chat_stream(&self, _req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
             let events = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
             let s = try_stream! {
                 for ev in events {
@@ -391,10 +397,7 @@ mod tests {
         }
     }
 
-    async fn make_agent_with_rounds(
-        native: bool,
-        rounds: Vec<Vec<StreamEvent>>,
-    ) -> Agent {
+    async fn make_agent_with_rounds(native: bool, rounds: Vec<Vec<StreamEvent>>) -> Agent {
         let store = SessionStore::open_in_memory().unwrap();
         let sid = store.create_session("test", "test").unwrap();
         let provider: Arc<dyn Provider> = Arc::new(MockProvider::new(native, rounds));
@@ -514,7 +517,10 @@ mod tests {
         agent.max_iterations = 2;
 
         let (tx, mut rx) = mpsc::channel(64);
-        let result = agent.handle_input_streaming("do task", "cli", tx).await.unwrap();
+        let result = agent
+            .handle_input_streaming("do task", "cli", tx)
+            .await
+            .unwrap();
 
         assert_eq!(result, "总结完成");
 
@@ -544,7 +550,10 @@ mod tests {
         for _ in 0..3 {
             rounds.push(vec![StreamEvent::ToolCall(tc.clone()), StreamEvent::Done]);
         }
-        rounds.push(vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done]);
+        rounds.push(vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::Done,
+        ]);
 
         let mut agent = make_agent_with_rounds(true, rounds).await;
         agent.max_iterations = 10;
@@ -666,9 +675,7 @@ mod tests {
         // delegate 转发子 Agent 的 Chunk，主 Agent 第二轮再加自己的回复
         assert_eq!(chunks.concat(), "子 Agent 完成任务已委派完成");
         assert!(
-            tool_results
-                .iter()
-                .any(|s| s.contains("子 Agent 完成任务")),
+            tool_results.iter().any(|s| s.contains("子 Agent 完成任务")),
             "delegate tool result should contain sub agent output, got: {:?}",
             tool_results
         );
