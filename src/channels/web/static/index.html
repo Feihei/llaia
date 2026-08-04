@@ -43,14 +43,42 @@
     #config-pane .form-row label { display: inline-block; width: 180px; }
     #config-pane .provider-card, #config-pane .agent-card { background: #2d2d2d; padding: 12px; border-radius: 6px; margin: 8px 0; }
     #config-pane .placeholder { color: #888; font-style: italic; }
+    #config-pane .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    #config-pane .card-header h3 { margin: 0; flex: 1; }
+    #config-pane .btn-delete { background: #6b2c2c; padding: 2px 10px; font-size: 12px; }
+    #config-pane .btn-add { background: #2d5a2d; margin: 8px 0; }
+    #config-pane .inline-add { background: #2d5a2d; padding: 2px 10px; font-size: 12px; }
+    #config-pane .model-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+    #config-pane .model-row label { width: auto; min-width: 80px; }
     /* about */
     #about-pane { padding: 24px; overflow-y: auto; }
     #about-pane dl dt { font-weight: bold; color: #0e639c; margin-top: 8px; }
     #about-pane dl dd { margin-left: 16px; }
+    /* 登录遮罩 */
+    #login-overlay { position: fixed; inset: 0; background: #1e1e1e; display: flex; align-items: center; justify-content: center; z-index: 999; }
+    #login-overlay .login-box { background: #252526; padding: 32px; border-radius: 8px; width: 360px; text-align: center; }
+    #login-overlay h2 { margin: 0 0 16px; color: #0e639c; }
+    #login-overlay input { width: 100%; margin: 8px 0; box-sizing: border-box; }
+    #login-overlay button { width: 100%; margin-top: 8px; }
+    #login-overlay .err { color: #f44; font-size: 12px; margin-top: 8px; min-height: 16px; }
+    #login-overlay .hint { color: #888; font-size: 12px; margin-top: 12px; }
   </style>
 </head>
 <body>
 <div id="app" x-data="llaiaApp()" x-init="init()">
+  <!-- 未鉴权时显示登录遮罩 -->
+  <div id="login-overlay" x-show="!authed">
+    <div class="login-box">
+      <h2>Llaia Web</h2>
+      <input type="password" x-model="token" @keydown.enter="saveToken()" placeholder="输入访问 token" :disabled="authing">
+      <button @click="saveToken()" :disabled="authing" x-text="authing ? '校验中...' : '进入'"></button>
+      <div class="err" x-text="authError"></div>
+      <div class="hint">token 在 config.toml 的 [channels.web] 中配置，也可通过 URL ?token=xxx 传入</div>
+    </div>
+  </div>
+  <!-- 鉴权后显示主界面 -->
+  <template x-if="authed">
+    <div>
   <header>
     <h1>Llaia</h1>
     <div class="tabs">
@@ -120,21 +148,27 @@
           <div>
             <template x-for="(p, pid) in cfg.provider" :key="pid">
               <div class="provider-card">
-                <h3 x-text="pid"></h3>
+                <div class="card-header">
+                  <h3 x-text="pid"></h3>
+                  <button class="btn-delete" @click="deleteProvider(pid)">删除</button>
+                </div>
                 <div class="form-row"><label>type</label><input x-model="p.type"></div>
                 <div class="form-row"><label>base_url</label><input x-model="p.base_url" style="width:400px"></div>
                 <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
                 <h4>Models</h4>
                 <template x-for="(m, alias) in p.model" :key="alias">
-                  <div class="form-row">
+                  <div class="model-row">
                     <label x-text="alias"></label>
-                    <input x-model="m.model" style="width:200px">
-                    <label><input type="checkbox" x-model="m.native_tool_calling"> native_tool_calling</label>
-                    <input type="number" placeholder="context_size" x-model="m.context_size">
+                    <input x-model="m.model" style="width:200px" placeholder="model id">
+                    <label><input type="checkbox" x-model="m.native_tool_calling"> native</label>
+                    <input type="number" placeholder="ctx" x-model="m.context_size" style="width:80px">
+                    <button class="btn-delete" @click="deleteModel(pid, alias)">×</button>
                   </div>
                 </template>
+                <button class="inline-add" @click="addModel(pid)">+ 新增 model</button>
               </div>
             </template>
+            <button class="btn-add" @click="addProvider()">+ 新增 provider</button>
             <button @click="saveConfig()">保存</button>
           </div>
         </template>
@@ -142,8 +176,11 @@
           <div>
             <template x-for="(a, alias) in cfg.agent" :key="alias">
               <div class="agent-card">
-                <h3 x-text="alias"></h3>
-                <div class="form-row"><label>model</label><input x-model="a.model"></div>
+                <div class="card-header">
+                  <h3 x-text="alias"></h3>
+                  <button class="btn-delete" @click="deleteAgent(alias)">删除</button>
+                </div>
+                <div class="form-row"><label>model</label><input x-model="a.model" placeholder="provider_id.model_alias"></div>
                 <div class="form-row"><label>workspace</label><input x-model="a.workspace" style="width:400px"></div>
                 <div class="form-row"><label>soul</label><input x-model="a.soul"></div>
                 <div class="form-row"><label>user</label><input x-model="a.user"></div>
@@ -151,6 +188,7 @@
                 <div class="form-row"><label>delegate_timeout</label><input type="number" x-model="a.delegate_timeout"></div>
               </div>
             </template>
+            <button class="btn-add" @click="addAgent()">+ 新增 agent</button>
             <button @click="saveConfig()">保存</button>
           </div>
         </template>
@@ -165,7 +203,8 @@
             <div class="form-row"><label>confirm_mode</label><input x-model="cfg.channels.qq.confirm_mode"></div>
             <h3>Web</h3>
             <div class="form-row"><label><input type="checkbox" x-model="cfg.channels.web.enabled"> enabled</label></div>
-            <div class="form-row"><label>bind</label><input x-model="cfg.channels.web.bind"></div>
+            <div class="form-row"><label>host</label><input x-model="cfg.channels.web.host"></div>
+            <div class="form-row"><label>port</label><input type="number" x-model="cfg.channels.web.port"></div>
             <div class="form-row"><label>token</label><input type="password" x-model="cfg.channels.web.token"></div>
             <button @click="saveConfig()">保存</button>
           </div>
@@ -214,6 +253,8 @@
       </template>
     </div>
   </main>
+    </div>
+  </template>
 </div>
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/vendor/highlight.min.js"></script>

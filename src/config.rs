@@ -174,8 +174,12 @@ fn default_qq_confirm() -> String {
 pub struct WebConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_web_bind")]
-    pub bind: String,
+    /// 监听地址，默认 127.0.0.1（仅本机访问）
+    #[serde(default = "default_web_host")]
+    pub host: String,
+    /// 监听端口，默认 51217（避开 8080 等 llama.cpp/常见服务端口）
+    #[serde(default = "default_web_port")]
+    pub port: u16,
     /// 鉴权 token；留空则启动时随机生成并打印日志
     #[serde(default)]
     pub token: String,
@@ -185,14 +189,19 @@ impl Default for WebConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            bind: default_web_bind(),
+            host: default_web_host(),
+            port: default_web_port(),
             token: String::new(),
         }
     }
 }
 
-fn default_web_bind() -> String {
-    "127.0.0.1:8080".into()
+fn default_web_host() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_web_port() -> u16 {
+    51217
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -714,7 +723,8 @@ workspace = "~/.llaia"
     fn test_web_config_defaults() {
         let config = Config::default_for_workspace("~/.llaia");
         assert!(!config.channels.web.enabled);
-        assert_eq!(config.channels.web.bind, "127.0.0.1:8080");
+        assert_eq!(config.channels.web.host, "127.0.0.1");
+        assert_eq!(config.channels.web.port, 51217);
         assert_eq!(config.channels.web.token, "");
     }
 
@@ -734,7 +744,8 @@ workspace = "~/.llaia"
 
 [channels.web]
 enabled = true
-bind = "0.0.0.0:9000"
+host = "0.0.0.0"
+port = 9000
 token = "secret-token"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -742,7 +753,8 @@ token = "secret-token"
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
         assert!(config.channels.web.enabled);
-        assert_eq!(config.channels.web.bind, "0.0.0.0:9000");
+        assert_eq!(config.channels.web.host, "0.0.0.0");
+        assert_eq!(config.channels.web.port, 9000);
         assert_eq!(config.channels.web.token, "secret-token");
     }
 }

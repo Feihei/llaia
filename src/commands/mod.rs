@@ -65,13 +65,14 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
             workspace,
         ));
         let registry_clone = registry.clone();
-        let bind = config.channels.web.bind.clone();
+        let host = config.channels.web.host.clone();
+        let port = config.channels.web.port;
         tasks.push(tokio::spawn(async move {
             if let Err(e) = crate::channels::Channel::run(web, registry_clone).await {
                 tracing::error!(error = %e, "WebChannel exited with error");
             }
         }));
-        tracing::info!("WebChannel starting on {}", bind);
+        tracing::info!("WebChannel starting on {}:{}", host, port);
     }
 
     if tasks.is_empty() {
