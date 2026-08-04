@@ -76,7 +76,7 @@ jobs:
           sha256sum "llaia-${{ matrix.target }}.exe" > "llaia-${{ matrix.target }}.exe.sha256"
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             llaia-${{ matrix.target }}*
