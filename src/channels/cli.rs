@@ -302,6 +302,15 @@ async fn build_single_agent(
     let soul = load_md(&soul_path).await?;
     let user = load_md(&user_path).await?;
     let memory = load_md(&memory_path).await?;
+    tracing::info!(
+        agent = alias,
+        workspace = %workspace.display(),
+        soul_path = %soul_path.display(),
+        soul_len = soul.len(),
+        user_len = user.len(),
+        memory_len = memory.len(),
+        "loaded soul/user/memory"
+    );
 
     let (prov_id, model_alias) = Config::parse_model_ref(&agent_cfg.model)?;
     let prov_cfg = config

@@ -8,6 +8,11 @@ use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Serialize;
+use std::time::Duration;
+
+/// 流式响应单 chunk 读取超时（秒）。
+/// LLM 生成可能有间隔，但超过此时间无任何数据视为连接挂起。
+const STREAM_CHUNK_TIMEOUT_SECS: u64 = 120;
 
 pub struct OpenAiCompatibleProvider {
     client: Client,
@@ -24,8 +29,11 @@ impl OpenAiCompatibleProvider {
         model: impl Into<String>,
         native_tool_calling: bool,
     ) -> Result<Self> {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .build()?;
         Ok(Self {
-            client: Client::builder().build()?,
+            client,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -173,6 +181,8 @@ impl Provider for OpenAiCompatibleProvider {
             request = request.bearer_auth(&self.api_key);
         }
 
+        tracing::info!(url = %url, model = %self.model, "provider request sending");
+
         let mut resp = match request.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -189,17 +199,30 @@ impl Provider for OpenAiCompatibleProvider {
             });
         }
 
+        tracing::info!("provider stream started");
+
         let s = try_stream! {
             let mut buf = String::new();
             let mut tc_accum: std::collections::HashMap<u32, ToolCallAccum> = std::collections::HashMap::new();
             let mut tc_order: Vec<u32> = Vec::new();
 
             loop {
-                let chunk = match resp.chunk().await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => break,
-                    Err(e) => {
+                // per-chunk 超时：防止 provider 挂起导致 agent 锁永久持有
+                let chunk = match tokio::time::timeout(
+                    Duration::from_secs(STREAM_CHUNK_TIMEOUT_SECS),
+                    resp.chunk(),
+                ).await {
+                    Ok(Ok(Some(c))) => c,
+                    Ok(Ok(None)) => break,
+                    Ok(Err(e)) => {
                         yield StreamEvent::Error(format!("stream chunk error: {}", e));
+                        return;
+                    }
+                    Err(_) => {
+                        yield StreamEvent::Error(format!(
+                            "stream chunk timeout (no data in {}s)",
+                            STREAM_CHUNK_TIMEOUT_SECS
+                        ));
                         return;
                     }
                 };
@@ -228,6 +251,7 @@ impl Provider for OpenAiCompatibleProvider {
                                         });
                                     }
                                 }
+                                tracing::info!("provider stream done ([DONE])");
                                 yield StreamEvent::Done;
                                 return;
                             }
@@ -279,6 +303,7 @@ impl Provider for OpenAiCompatibleProvider {
                     });
                 }
             }
+            tracing::info!("provider stream done (stream ended)");
             yield StreamEvent::Done;
         };
         Box::pin(s)
