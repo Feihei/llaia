@@ -2,6 +2,7 @@ pub mod agent;
 pub mod channels;
 pub mod commands;
 pub mod config;
+pub mod web;
 pub mod image_utils;
 pub mod log;
 pub mod memory;
