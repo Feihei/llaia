@@ -1,6 +1,6 @@
 name: CI
 
-# 触发：推送到 main 分支，或针对 main 的 PR
+# Triggers: push to main, or PRs targeting main
 on:
   push:
     branches: [main]
@@ -15,7 +15,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # 1) 代码格式检查
+  # 1) Code formatting check
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -26,7 +26,7 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  # 2) Clippy 静态检查（视作错误）
+  # 2) Clippy lint (treated as errors)
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -40,14 +40,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
 
-  # 3) 单元测试 / 集成测试（mockito 离线可跑）
+  # 3) Unit / integration tests (mockito runs offline)
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # build.rs 需要 git commit 信息（GIT_HASH）
+          # build.rs needs git commit info (GIT_HASH)
           fetch-depth: 0
       - name: Install Linux build deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
@@ -55,7 +55,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --verbose
 
-  # 4) 跨平台编译校验
+  # 4) Cross-platform build check
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

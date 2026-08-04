@@ -1,6 +1,6 @@
 name: Release
 
-# 触发：推送以 v 开头的 tag，例如 v0.1.0
+# Triggers: push a tag starting with v, e.g. v0.1.0
 on:
   push:
     tags:
@@ -17,9 +17,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 —— 原生 runner
+          # Linux x86_64 -- native runner
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          # Linux aarch64 —— 借助 cross（Docker）交叉编译
+          # Linux aarch64 -- cross-compile via cross (Docker)
           - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, use-cross: true }
           # macOS Intel
           - { os: macos-13, target: x86_64-apple-darwin }
@@ -57,7 +57,7 @@ jobs:
         if: ${{ !matrix.use-cross }}
         run: cargo build --target ${{ matrix.target }} --release --locked
 
-      # ---- 产物打包（Unix）----
+      # ---- Package artifact (Unix) ----
       - name: Prepare artifact (Unix)
         if: matrix.os != 'windows-latest'
         shell: bash
@@ -67,7 +67,7 @@ jobs:
           cp "$BIN" "llaia-${{ matrix.target }}"
           sha256sum "llaia-${{ matrix.target }}" > "llaia-${{ matrix.target }}.sha256"
 
-      # ---- 产物打包（Windows）----
+      # ---- Package artifact (Windows) ----
       - name: Prepare artifact (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
@@ -80,5 +80,5 @@ jobs:
         with:
           files: |
             llaia-${{ matrix.target }}*
-          # 重复推 tag 时直接覆盖同名附件
+          # Overwrite same-named assets when re-pushing a tag
           fail_on_unmatched_files: true

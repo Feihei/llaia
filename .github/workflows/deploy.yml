@@ -1,6 +1,6 @@
 name: Deploy
 
-# 触发：推送到 main，或手动 workflow_dispatch
+# Triggers: push to main, or manual workflow_dispatch
 on:
   push:
     branches: [main]
@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read
-  packages: write # 推送镜像到 GitHub Container Registry (GHCR) 需要
+  packages: write # required to push the image to GitHub Container Registry (GHCR)
 
 jobs:
   docker:
@@ -42,12 +42,13 @@ jobs:
           cache-to: type=gha,mode=max
 
       # ============================================================
-      # 可选：推送到自有服务器后远程拉取并重启容器。
-      # 使用前请在仓库 Settings → Secrets 配置：
-      #   DEPLOY_HOST  (如 1.2.3.4)
-      #   DEPLOY_USER  (如 root)
-      #   DEPLOY_KEY   (SSH 私钥)
-      # 并把下面的 `if: false` 改为 `if: true`。
+      # Optional: after pushing, pull and restart the container on a
+      # self-hosted server. Before enabling, configure these repo secrets
+      # under Settings -> Secrets:
+      #   DEPLOY_HOST  (e.g. 1.2.3.4)
+      #   DEPLOY_USER  (e.g. root)
+      #   DEPLOY_KEY   (SSH private key)
+      # Then change the `if: false` below to `if: true`.
       # ============================================================
       # - name: Deploy to VPS
       #   if: false
@@ -61,5 +62,5 @@ jobs:
       #       docker stop llaia || true
       #       docker rm llaia || true
       #       docker run -d --name llaia --restart unless-stopped \
-      #         -p 9000:9000 -v llaia-data:/data \
+      #         -p 51217:51217 -v llaia-data:/data \
       #         ${{ steps.meta.outputs.image }}:latest

@@ -1,0 +1,10 @@
+# Build cache — already 18G+, never send to the Docker daemon
+target
+
+# VCS / assistant state — not needed for building the image
+.git
+.workbuddy
+
+# Docs and binaries — not required to compile the crate
+docs
+*.pdf
