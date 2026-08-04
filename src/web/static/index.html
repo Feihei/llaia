@@ -129,8 +129,8 @@
       <div class="content">
         <template x-if="configSection==='runtime'">
           <div>
-            <div class="form-row"><label>context_threshold</label><input type="number" step="0.1" min="0" max="1" x-model="cfg.runtime.context_threshold"></div>
-            <div class="form-row"><label>max_iterations</label><input type="number" min="1" x-model="cfg.runtime.max_iterations"></div>
+            <div class="form-row"><label>context_threshold</label><input type="number" step="0.1" min="0" max="1" x-model.number="cfg.runtime.context_threshold"></div>
+            <div class="form-row"><label>max_iterations</label><input type="number" min="1" x-model.number="cfg.runtime.max_iterations"></div>
             <button @click="saveConfig()">Save</button>
           </div>
         </template>
@@ -160,7 +160,7 @@
                     <label x-text="alias"></label>
                     <input x-model="m.model" style="width:200px" placeholder="model id">
                     <label><input type="checkbox" x-model="m.native_tool_calling"> native</label>
-                    <input type="number" placeholder="ctx" x-model="m.context_size" style="width:80px">
+                    <input type="number" placeholder="ctx" x-model.number="m.context_size" style="width:80px">
                     <button class="btn-delete" @click="deleteModel(pid, alias)">×</button>
                   </div>
                 </template>
@@ -184,7 +184,7 @@
                 <div class="form-row"><label>soul</label><input x-model="a.soul"></div>
                 <div class="form-row"><label>user</label><input x-model="a.user"></div>
                 <div class="form-row"><label>memory</label><input x-model="a.memory"></div>
-                <div class="form-row"><label>delegate_timeout</label><input type="number" x-model="a.delegate_timeout"></div>
+                <div class="form-row"><label>delegate_timeout</label><input type="number" x-model.number="a.delegate_timeout"></div>
               </div>
             </template>
             <button class="btn-add" @click="addAgent()">+ Add agent</button>
@@ -203,7 +203,7 @@
             <h3>Web</h3>
             <div class="form-row"><label><input type="checkbox" x-model="cfg.channels.web.enabled"> enabled</label></div>
             <div class="form-row"><label>host</label><input x-model="cfg.channels.web.host"></div>
-            <div class="form-row"><label>port</label><input type="number" x-model="cfg.channels.web.port"></div>
+            <div class="form-row"><label>port</label><input type="number" x-model.number="cfg.channels.web.port"></div>
             <div class="form-row"><label>token</label><input type="password" x-model="cfg.channels.web.token"></div>
             <button @click="saveConfig()">Save</button>
           </div>
