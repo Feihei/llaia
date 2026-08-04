@@ -61,11 +61,18 @@ function llaiaApp() {
 
     // ---- WS ----
     connectWs() {
-      if (this.ws) this.ws.close();
+      if (this.ws) { this.ws.onclose = null; this.ws.close(); }
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       this.ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(this.token)}`);
       this.ws.onmessage = (e) => this.onWsMessage(JSON.parse(e.data));
       this.ws.onclose = () => { if (this.authed) setTimeout(() => this.connectWs(), 3000); };
+      // 心跳保活：每 25 秒发 ping，防止浏览器/代理关闭空闲 WS
+      if (this._pingTimer) clearInterval(this._pingTimer);
+      this._pingTimer = setInterval(() => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 25000);
     },
     onWsMessage(ev) {
       switch (ev.type) {
@@ -158,6 +165,11 @@ function llaiaApp() {
         this._editor = CodeMirror.fromTextArea(this.$refs.rawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
         this._editor.setValue(this.rawToml);
       }
+    },
+    switchRaw() {
+      this.configSection = 'raw';
+      // 等待 x-if 渲染出 textarea 后再初始化编辑器
+      this.$nextTick(() => this.initEditor());
     },
     async saveConfig() {
       if (!confirm('Structured save will rewrite config.toml. Original comments and fields not in the schema (e.g. channels.cli.agent) will be lost.\nTo preserve comments, use the "Raw TOML" editor.\n\nContinue?')) return;

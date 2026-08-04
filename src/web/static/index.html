@@ -124,7 +124,7 @@
         <div :class="{active: configSection==='tools'}" @click="configSection='tools'">Tools</div>
         <div :class="{active: configSection==='mcp'}" @click="configSection='mcp'">MCP (WIP)</div>
         <div :class="{active: configSection==='skills'}" @click="configSection='skills'">Skills (WIP)</div>
-        <div :class="{active: configSection==='raw'}" @click="configSection='raw'">Raw TOML</div>
+        <div :class="{active: configSection==='raw'}" @click="switchRaw()">Raw TOML</div>
       </div>
       <div class="content">
         <template x-if="configSection==='runtime'">
