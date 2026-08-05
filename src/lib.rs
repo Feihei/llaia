@@ -5,6 +5,7 @@ pub mod config;
 pub mod image_utils;
 pub mod log;
 pub mod memory;
+pub mod path_guard;
 pub mod pid;
 pub mod provider;
 pub mod tool_call;
