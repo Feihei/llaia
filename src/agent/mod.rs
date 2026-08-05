@@ -14,7 +14,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 /// Agent turn 事件（推给 channel 消费）
 #[derive(Debug, Clone)]
@@ -41,7 +41,12 @@ pub enum MediaKind {
 }
 
 pub struct Agent {
-    pub provider: Arc<dyn Provider>,
+    /// Provider 实例（可热替换）。
+    /// - `Some(p)`：正常模式
+    /// - `None`：降级模式（无 provider，handle_message_streaming 直接 sink Error）
+    /// RwLock 保护：turn 开始拿 snapshot（读锁），reload_provider 拿写锁替换。
+    /// 正在进行的 turn 持有 snapshot 不受 reload 影响。
+    pub provider: Arc<RwLock<Option<Arc<dyn Provider>>>>,
     pub tools: Arc<ToolRegistry>,
     pub context: Context,
     pub session_store: Arc<SessionStore>,
@@ -77,7 +82,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         config: &Config,
-        provider: Arc<dyn Provider>,
+        provider: Option<Arc<dyn Provider>>,
         tools: Arc<ToolRegistry>,
         session_store: Arc<SessionStore>,
         session_id: i64,
@@ -90,7 +95,7 @@ impl Agent {
         audit: Option<Arc<crate::audit::AuditLog>>,
     ) -> Self {
         Self {
-            provider,
+            provider: Arc::new(RwLock::new(provider)),
             tools,
             context: Context::new(system_prompt),
             session_store,
@@ -106,6 +111,27 @@ impl Agent {
             audit,
             turn_tool_calls: Vec::new(),
         }
+    }
+
+    /// 拿当前 provider 的 snapshot（Arc 克隆）。
+    /// turn 开始时调用一次，整个 turn 用这个 snapshot。
+    /// None 表示降级模式（无 provider）。
+    pub async fn provider_snapshot(&self) -> Option<Arc<dyn Provider>> {
+        self.provider.read().await.clone()
+    }
+
+    /// 热替换 provider。
+    /// - `Some(p)`：切换到新 provider
+    /// - `None`：进入降级模式
+    /// 正在进行的 turn 持有旧 snapshot 不受影响，新 turn 用新 provider。
+    pub async fn reload_provider(&self, new_provider: Option<Arc<dyn Provider>>) {
+        let mut guard = self.provider.write().await;
+        *guard = new_provider;
+    }
+
+    /// 是否处于降级模式（无 provider）。
+    pub async fn has_provider(&self) -> bool {
+        self.provider.read().await.is_some()
     }
 
     /// 非流式版本（保留向后兼容）：内部调 handle_input_streaming + 收集
@@ -153,11 +179,26 @@ impl Agent {
             .append_message(self.session_id, &Role::User, &text_for_store)?;
         self.context.push(user_msg);
 
+        // 拿 provider snapshot：整个 turn 用这个 snapshot，reload 不影响进行中的 turn
+        let provider = match self.provider_snapshot().await {
+            Some(p) => p,
+            None => {
+                // 降级模式：无 provider，直接 sink Error 提示用户配置
+                let msg = "未配置 provider，请先在 WebUI 配置 [provider.default] section 或编辑 config.toml 取消注释".to_string();
+                let _ = event_tx
+                    .send(TurnEvent::Error {
+                        message: msg.clone(),
+                    })
+                    .await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        };
+
         if self
             .context
             .needs_compaction(self.context_size, self.context_threshold)
         {
-            if let Err(e) = self.context.compact(self.provider.as_ref(), 6).await {
+            if let Err(e) = self.context.compact(provider.as_ref(), 6).await {
                 tracing::warn!(error = %e, "auto-compact failed");
             }
         }
@@ -199,7 +240,7 @@ impl Agent {
                 tools: tools_ref,
             };
 
-            let mut stream = self.provider.chat_stream(&req).await;
+            let mut stream = provider.chat_stream(&req).await;
             let mut iter_text = String::new();
             let mut calls: Vec<crate::provider::ToolCall> = Vec::new();
             let mut parser = crate::tool_call::ToolCallStreamParser::new();
@@ -220,7 +261,7 @@ impl Agent {
                 }
                 match ev? {
                     StreamEvent::TextDelta(d) => {
-                        if self.provider.native_tool_calling() {
+                        if provider.native_tool_calling() {
                             let _ = event_tx.send(TurnEvent::Chunk { delta: d.clone() }).await;
                             iter_text.push_str(&d);
                         } else {
@@ -248,7 +289,7 @@ impl Agent {
                 }
             }
 
-            if !self.provider.native_tool_calling() {
+            if !provider.native_tool_calling() {
                 let rest = parser.finish();
                 if !rest.is_empty() {
                     let _ = event_tx
@@ -444,7 +485,7 @@ mod tests {
         let config = Config::default_for_workspace("/tmp/llaia-test");
         Agent::new(
             &config,
-            provider,
+            Some(provider),
             tools,
             Arc::new(store),
             sid,
@@ -635,7 +676,7 @@ mod tests {
         let config = Config::default_for_workspace("/tmp/llaia-test");
         let sub_agent = Agent::new(
             &config,
-            sub_provider,
+            Some(sub_provider),
             sub_tools,
             Arc::new(sub_store),
             sub_sid,
@@ -677,7 +718,7 @@ mod tests {
         let main_workspace = std::path::PathBuf::from("/tmp/llaia-test/workspace");
         let main_agent = Agent::new(
             &config,
-            main_provider,
+            Some(main_provider),
             main_tools,
             Arc::new(main_store),
             main_sid,

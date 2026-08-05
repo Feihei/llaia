@@ -331,22 +331,31 @@ async fn build_single_agent(
         "loaded soul/user/memory"
     );
 
-    let (prov_id, model_alias) = Config::parse_model_ref(&agent_cfg.model)?;
-    let prov_cfg = config
-        .provider
-        .get(prov_id)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("provider.{} not configured", prov_id))?;
-    let model_cfg = prov_cfg.model.get(model_alias).cloned().ok_or_else(|| {
-        anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
-    })?;
+    // 尝试构建 provider：model 为空 → 降级模式（provider = None）
+    // model 非空但 provider/model 配置缺失 → 报错（用户意图配置但配错）
+    let (provider, model_cfg, has_delegate) = if agent_cfg.model.is_empty() {
+        tracing::warn!(agent = alias, "agent.model 未配置，进入降级模式（无 provider）");
+        (None, None, false)
+    } else {
+        let (prov_id, model_alias) = Config::parse_model_ref(&agent_cfg.model)?;
+        let prov_cfg = config
+            .provider
+            .get(prov_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("provider.{} not configured", prov_id))?;
+        let model_cfg = prov_cfg.model.get(model_alias).cloned().ok_or_else(|| {
+            anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
+        })?;
 
-    let provider: Arc<dyn Provider> = Arc::new(OpenAiCompatibleProvider::new(
-        &prov_cfg.base_url,
-        &prov_cfg.api_key,
-        &model_cfg.model,
-        model_cfg.native_tool_calling,
-    )?);
+        let provider: Arc<dyn Provider> = Arc::new(OpenAiCompatibleProvider::new(
+            &prov_cfg.base_url,
+            &prov_cfg.api_key,
+            &model_cfg.model,
+            model_cfg.native_tool_calling,
+        )?);
+        (Some(provider), Some(model_cfg), is_main && config.agent.len() > 1)
+    };
+    let provider_ref = provider.as_ref();
 
     // 构建完整工具集（用新字段）
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
@@ -381,7 +390,6 @@ async fn build_single_agent(
     }
 
     // main Agent 且配置了子 Agent 时挂 delegate 工具
-    let has_delegate = is_main && config.agent.len() > 1;
     if has_delegate {
         let d = Arc::new(DelegateTool::new(agent_cfg.delegate_timeout));
         registry.register(d.clone());
@@ -395,8 +403,10 @@ async fn build_single_agent(
     // 标签降级模式下注入 tool instructions 到 system prompt。
     // 注意：有 delegate 工具时，OnceCell registry 尚未注入（在 build_agent 末尾才注入），
     // 此时 delegate 的 enum 为空。所以推迟到 build_agent 里 set_registry 后再注入。
-    if !provider.native_tool_calling() && !has_delegate {
-        system_prompt.push_str(&build_tool_instructions(&registry.specs()));
+    if let Some(p) = provider_ref {
+        if !p.native_tool_calling() && !has_delegate {
+            system_prompt.push_str(&build_tool_instructions(&registry.specs()));
+        }
     }
     let registry = Arc::new(registry);
 
@@ -412,18 +422,24 @@ async fn build_single_agent(
     };
 
     // context_size: min(配置值, 探测值)，探测不到用配置值，都没有用默认 8192
-    let detected = provider.detect_context_size().await;
-    let context_size = match (model_cfg.context_size, detected) {
-        (Some(cfg), Some(det)) => cfg.min(det),
+    // 降级模式（无 provider）直接用 8192
+    let context_size = match (model_cfg.as_ref().and_then(|m| m.context_size), provider_ref) {
+        (Some(cfg), Some(p)) => {
+            let detected = p.detect_context_size().await;
+            match detected {
+                Some(det) => cfg.min(det),
+                None => cfg,
+            }
+        }
         (Some(cfg), None) => cfg,
-        (None, Some(det)) => det,
+        (None, Some(p)) => p.detect_context_size().await.unwrap_or(8192),
         (None, None) => 8192,
     };
     tracing::info!(
         agent = alias,
-        configured = ?model_cfg.context_size,
-        detected = ?detected,
+        configured = ?model_cfg.as_ref().and_then(|m| m.context_size),
         final = context_size,
+        degraded = provider.is_none(),
         "context_size resolved"
     );
 
@@ -468,11 +484,19 @@ pub async fn build_agent(
     }
 
     // 构建 main Agent
-    let main_cfg = config
-        .agent
-        .get("main")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("agent.main not configured"))?;
+    // 若 [agent.main] 未配置（init 模板默认状态），用空 model 构造降级 agent
+    let main_cfg = config.agent.get("main").cloned().unwrap_or_else(|| {
+        tracing::warn!("[agent.main] 未配置，main agent 进入降级模式（无 provider）");
+        AgentConfig {
+            model: String::new(),
+            workspace: String::new(),
+            soul: None,
+            user: None,
+            memory: None,
+            denied_tools: Vec::new(),
+            delegate_timeout: 120,
+        }
+    });
     let (main_agent, delegate_tool, main_workspace) = build_single_agent(
         config, config_dir, "main", main_cfg, true, Some(audit.clone()),
     ).await?;
@@ -490,9 +514,11 @@ pub async fn build_agent(
         // 标签降级模式下，set_registry 后 delegate 的 enum 才有值，
         // 此时重新生成 tool instructions 追加到 main agent 的 system prompt
         let mut a = registry.main.lock().await;
-        if !a.provider.native_tool_calling() {
-            let instructions = build_tool_instructions(&a.tools.specs());
-            a.context.system.push_str(&instructions);
+        if let Some(p) = a.provider_snapshot().await {
+            if !p.native_tool_calling() {
+                let instructions = build_tool_instructions(&a.tools.specs());
+                a.context.system.push_str(&instructions);
+            }
         }
     }
 

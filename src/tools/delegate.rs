@@ -297,7 +297,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/llaia-test/workspace/subagent").join(sub_alias);
         let agent = Agent::new(
             &config,
-            Arc::new(HangingProvider),
+            Some(Arc::new(HangingProvider)),
             Arc::new(ToolRegistry::new()),
             Arc::new(store),
             sid,
@@ -441,7 +441,7 @@ mod tests {
         let sub_workspace = std::path::PathBuf::from("/tmp/llaia-test/workspace/subagent/coder");
         let sub_agent = Agent::new(
             &config,
-            provider,
+            Some(provider),
             Arc::new(tools),
             Arc::new(store),
             sid,

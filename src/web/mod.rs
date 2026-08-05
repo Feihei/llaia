@@ -1,5 +1,7 @@
 use crate::agent::AgentRegistry;
 use crate::config::Config;
+use crate::provider::openai_compat::OpenAiCompatibleProvider;
+use crate::provider::Provider;
 use axum::body::Body;
 use axum::extract::{Multipart, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -281,7 +283,7 @@ pub async fn get_config(
     axum::Json(mask_sensitive(cfg)).into_response()
 }
 
-/// PUT /api/config → 写盘 + 更新内存
+/// PUT /api/config → 写盘 + 更新内存 + 热加载 provider
 pub async fn put_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -308,16 +310,75 @@ pub async fn put_config(
         Ok(s) => s,
         Err(e) => return json_err(StatusCode::BAD_REQUEST, &format!("serialize: {}", e)),
     };
+
+    // 先尝试构建新 provider：失败则不写盘、不更新内存（回滚到旧 config）
+    if let Err(e) = build_provider_from_config(&merged) {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            &format!("provider 构建失败，配置未保存：{}", e),
+        );
+    }
+
     if let Err(e) = std::fs::write(&state.config_path, &toml_str) {
         return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e));
     }
-    *state.config.write().await = merged;
-    axum::Json(serde_json::json!({ "ok": true, "note": "restart llaia to take effect" }))
+    *state.config.write().await = merged.clone();
+
+    // 热加载 provider（构造已成功，此处只做替换）
+    if let Err(e) = hot_reload_provider(&state, &merged).await {
+        tracing::warn!(error = %e, "hot_reload_provider failed (config saved)");
+        return axum::Json(serde_json::json!({
+            "ok": true,
+            "note": "config saved but provider reload failed: ".to_string() + &e
+        }))
+        .into_response();
+    }
+    axum::Json(serde_json::json!({ "ok": true, "note": "config saved and provider reloaded" }))
         .into_response()
 }
 
 fn json_err(code: StatusCode, msg: &str) -> Response {
     (code, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+/// 根据 config 构建新的 provider 实例（用于热加载）。
+/// - 无 [agent.main] 或 model 为空 → Ok(None)（降级模式）
+/// - 解析或构造失败 → Err（调用方应回滚到旧 config）
+pub fn build_provider_from_config(config: &Config) -> Result<Option<Arc<dyn Provider>>, String> {
+    let main_cfg = match config.agent.get("main") {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    if main_cfg.model.is_empty() {
+        return Ok(None);
+    }
+    let (prov_id, model_alias) = Config::parse_model_ref(&main_cfg.model)
+        .map_err(|e| format!("parse agent.main.model: {}", e))?;
+    let prov_cfg = config
+        .provider
+        .get(prov_id)
+        .ok_or_else(|| format!("provider.{} not configured", prov_id))?;
+    let model_cfg = prov_cfg
+        .model
+        .get(model_alias)
+        .ok_or_else(|| format!("provider.{}.model.{} not configured", prov_id, model_alias))?;
+    let p = OpenAiCompatibleProvider::new(
+        &prov_cfg.base_url,
+        &prov_cfg.api_key,
+        &model_cfg.model,
+        model_cfg.native_tool_calling,
+    )
+    .map_err(|e| format!("build provider: {}", e))?;
+    Ok(Some(Arc::new(p)))
+}
+
+/// 热加载 provider：尝试构建新 provider，成功则替换并返回 true，失败则保留旧 provider 并返回错误信息。
+/// 主 agent 持有 RwLock，正在进行的 turn 不受影响。
+async fn hot_reload_provider(state: &AppState, new_config: &Config) -> Result<(), String> {
+    let new_provider = build_provider_from_config(new_config)?;
+    let agent = state.registry.main.lock().await;
+    agent.reload_provider(new_provider).await;
+    Ok(())
 }
 
 /// GET /api/config/raw → TOML 文本
@@ -367,7 +428,7 @@ pub async fn validate_config(
     }
 }
 
-/// PUT /api/config/raw → 写 TOML 文本到盘
+/// PUT /api/config/raw → 写 TOML 文本到盘 + 热加载 provider
 pub async fn put_config_raw(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -378,29 +439,47 @@ pub async fn put_config_raw(
         return unauthorized();
     }
     // 先校验
-    match toml::from_str::<Config>(&body.toml) {
-        Ok(parsed) => {
-            if let Err(e) = std::fs::write(&state.config_path, &body.toml) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({ "error": format!("write: {}", e) })),
-                )
-                    .into_response();
-            }
-            *state.config.write().await = parsed;
-            axum::Json(serde_json::json!({ "ok": true, "note": "restart llaia to take effect" }))
-                .into_response()
-        }
+    let parsed = match toml::from_str::<Config>(&body.toml) {
+        Ok(p) => p,
         Err(e) => {
             let msg = e.to_string();
             let line = e.span().map(|s| s.start.to_string()).unwrap_or_default();
-            (
+            return (
                 StatusCode::BAD_REQUEST,
                 axum::Json(serde_json::json!({ "error": msg, "line": line })),
             )
-                .into_response()
+                .into_response();
         }
+    };
+
+    // 尝试构建新 provider：失败则不写盘（回滚到旧 config）
+    if let Err(e) = build_provider_from_config(&parsed) {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            &format!("provider 构建失败，配置未保存：{}", e),
+        );
     }
+
+    if let Err(e) = std::fs::write(&state.config_path, &body.toml) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": format!("write: {}", e) })),
+        )
+            .into_response();
+    }
+    *state.config.write().await = parsed.clone();
+
+    // 热加载 provider
+    if let Err(e) = hot_reload_provider(&state, &parsed).await {
+        tracing::warn!(error = %e, "hot_reload_provider failed (config saved)");
+        return axum::Json(serde_json::json!({
+            "ok": true,
+            "note": "config saved but provider reload failed: ".to_string() + &e
+        }))
+        .into_response();
+    }
+    axum::Json(serde_json::json!({ "ok": true, "note": "config saved and provider reloaded" }))
+        .into_response()
 }
 
 #[derive(Serialize)]

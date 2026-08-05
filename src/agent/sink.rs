@@ -206,7 +206,7 @@ mod tests {
         let config = Config::default_for_workspace("/tmp/llaia-test");
         let agent = Agent::new(
             &config,
-            provider,
+            Some(provider),
             tools,
             Arc::new(store),
             sid,
