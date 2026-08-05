@@ -1,6 +1,7 @@
 # (੭aᴗa)੭ LLAIA - Come On~ 来啊~
 
 > **Local Lightweight AI Assistant, in Personal Favor**
+
 > **Llaia: 个人品味极简本地 AI 助手**
 
 There are loads of AI agents there and they are becoming heavier -- most of them are trying to cover more scenarios and users as their community or user group is getting bigger and bigger. But the way we use agent varies, I'm tired of trying to fit the wheels in my way, so I just want my wheel.
