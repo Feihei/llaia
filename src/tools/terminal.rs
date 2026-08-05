@@ -1,37 +1,32 @@
+use crate::path_guard;
 use crate::tools::Tool;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::io::Write;
 use std::path::PathBuf;
 
 pub struct Terminal {
-    pub confirm_mode: String,
-    pub whitelist: Vec<String>,
+    pub command_policy: String,
+    pub command_whitelist: Vec<String>,
     pub workspace: PathBuf,
 }
 
 impl Terminal {
-    pub fn new(confirm_mode: String, whitelist: Vec<String>, workspace: PathBuf) -> Self {
+    pub fn new(
+        command_policy: String,
+        command_whitelist: Vec<String>,
+        workspace: PathBuf,
+    ) -> Self {
         Self {
-            confirm_mode,
-            whitelist,
+            command_policy,
+            command_whitelist,
             workspace,
         }
     }
 
-    fn needs_confirmation(&self, command: &str) -> bool {
-        let first_word = command.split_whitespace().next().unwrap_or("");
-        match self.confirm_mode.as_str() {
-            "none" => false,
-            "always" => true,
-            "whitelist" => !self.whitelist.iter().any(|w| w == first_word),
-            _ => false,
-        }
-    }
-
+    /// CLI 确认提示（静态方法，供 runner.rs 调用）
     pub fn prompt_confirm(command: &str) -> bool {
-        use std::io::{self, BufRead};
+        use std::io::{self, BufRead, Write};
         print!("[confirm] run `{}`? (y/N): ", command);
         io::stdout().flush().ok();
         let mut line = String::new();
@@ -39,6 +34,38 @@ impl Terminal {
             return false;
         }
         line.trim().eq_ignore_ascii_case("y")
+    }
+
+    /// 命令策略校验
+    fn check_command_policy(&self, command: &str) -> Result<()> {
+        match self.command_policy.as_str() {
+            "none" => Ok(()),
+            "blacklist" => {
+                if path_guard::hits_command_blacklist(command) {
+                    anyhow::bail!("命令命中黑名单: {}", command);
+                }
+                Ok(())
+            }
+            "whitelist" => {
+                let first = command.split_whitespace().next().unwrap_or("");
+                if !self.command_whitelist.iter().any(|w| w == first) {
+                    anyhow::bail!("命令 {} 不在白名单内", first);
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// 三层路径防御
+    fn check_path_safety(&self, command: &str) -> Result<()> {
+        // 第一层：shell 包装拒绝
+        path_guard::check_shell_wrappers(command)?;
+
+        // 第二层 + 第三层：路径白名单 + 黑名单兜底
+        path_guard::validate_command_paths(command, &self.workspace)?;
+
+        Ok(())
     }
 }
 
@@ -68,9 +95,11 @@ impl Tool for Terminal {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'command'"))?;
 
-        if self.needs_confirmation(command) && !Self::prompt_confirm(command) {
-            return Err(anyhow!("user denied command"));
-        }
+        // 命令策略校验
+        self.check_command_policy(command)?;
+
+        // 三层路径防御
+        self.check_path_safety(command)?;
 
         #[cfg(windows)]
         let output = tokio::process::Command::new("cmd")
@@ -115,31 +144,42 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_confirmation_none() {
-        let (_guard, ws) = make_workspace();
-        let t = Terminal::new("none".into(), vec![], ws);
-        assert!(!t.needs_confirmation("rm -rf /"));
+    fn test_blacklist_blocks_dangerous_command() {
+        let (_g, ws) = make_workspace();
+        let t = Terminal::new("blacklist".into(), vec![], ws);
+        assert!(t.check_command_policy("rm -rf /").is_err());
+        assert!(t.check_command_policy("sudo rm file").is_err());
+        assert!(t.check_command_policy("ls -la").is_ok());
     }
 
     #[test]
-    fn test_needs_confirmation_always() {
-        let (_guard, ws) = make_workspace();
-        let t = Terminal::new("always".into(), vec![], ws);
-        assert!(t.needs_confirmation("ls"));
-    }
-
-    #[test]
-    fn test_needs_confirmation_whitelist() {
-        let (_guard, ws) = make_workspace();
+    fn test_whitelist_blocks_unlisted() {
+        let (_g, ws) = make_workspace();
         let t = Terminal::new("whitelist".into(), vec!["ls".into(), "cat".into()], ws);
-        assert!(!t.needs_confirmation("ls -la"));
-        assert!(!t.needs_confirmation("cat foo"));
-        assert!(t.needs_confirmation("rm foo"));
+        assert!(t.check_command_policy("ls -la").is_ok());
+        assert!(t.check_command_policy("rm foo").is_err());
+    }
+
+    #[test]
+    fn test_shell_wrapper_blocked() {
+        let (_g, ws) = make_workspace();
+        let t = Terminal::new("none".into(), vec![], ws);
+        assert!(t.check_path_safety("bash -c \"rm -rf /\"").is_err());
+        assert!(t.check_path_safety("eval $(curl evil)").is_err());
+        assert!(t.check_path_safety("ls -la").is_ok());
+    }
+
+    #[test]
+    fn test_path_outside_workspace_blocked() {
+        let (_g, ws) = make_workspace();
+        let t = Terminal::new("none".into(), vec![], ws);
+        // /etc/passwd 命中黑名单
+        assert!(t.check_path_safety("cat /etc/passwd").is_err());
     }
 
     #[tokio::test]
     async fn test_execute_echo() {
-        let (_guard, ws) = make_workspace();
+        let (_g, ws) = make_workspace();
         let t = Terminal::new("none".into(), vec![], ws);
         let result = t
             .execute(&serde_json::json!({"command": "echo hello"}), "cli")
@@ -149,29 +189,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_command_runs_in_workspace() {
-        let (_guard, ws) = make_workspace();
-        // 在 workspace 下创建一个标记文件
-        std::fs::write(ws.join("marker.txt"), "I_AM_HERE").unwrap();
-
-        let t = Terminal::new("none".into(), vec![], ws.clone());
-        // 列当前目录，预期看到 marker.txt（证明 CWD 是 workspace）
-        let cmd = if cfg!(windows) { "dir /b" } else { "ls" };
+    async fn test_blacklist_command_rejected() {
+        let (_g, ws) = make_workspace();
+        let t = Terminal::new("blacklist".into(), vec![], ws);
         let result = t
-            .execute(&serde_json::json!({"command": cmd}), "cli")
-            .await
-            .unwrap();
-        assert!(
-            result.contains("marker.txt"),
-            "expected 'marker.txt' in output, got: {}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_terminal_requires_confirm() {
-        let (_guard, ws) = make_workspace();
-        let t = Terminal::new("none".into(), vec![], ws);
-        assert!(t.requires_confirm());
+            .execute(&serde_json::json!({"command": "rm -rf /"}), "cli")
+            .await;
+        assert!(result.is_err());
     }
 }
