@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLAIA · theme preview</title>
+  <link rel="stylesheet" href="/static/vendor/codemirror/codemirror.css">
+  <link rel="stylesheet" href="/static/vendor/codemirror/material-darker.css">
+  <link rel="stylesheet" href="/static/theme.css">
+</head>
+<body>
+<div id="preview-note" style="background:#111811;border-bottom:1px solid #2f4a2f;color:#6f8467;font-family:'JetBrains Mono',monospace;font-size:12px;padding:6px 16px;letter-spacing:.05em;">
+  &#x276F; PREVIEW — 离线主题预览，无后端 / 无交互，仅供看样式
+</div>
+<div id="app">
+  <header>
+    <h1>Llaia</h1>
+    <div class="tabs">
+      <div class="tab">Chat</div>
+      <div class="tab active">Config</div>
+      <div class="tab">About</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="token-area">
+      Token: <input type="password" placeholder="Enter token">
+      <button>Save</button>
+    </div>
+  </header>
+  <main>
+    <div id="config-pane" class="pane active">
+      <div class="sidebar">
+        <div class="active">Runtime</div>
+        <div>Log</div>
+        <div>Provider</div>
+        <div>Agent</div>
+        <div>Channels</div>
+        <div>Tools</div>
+        <div>MCP (WIP)</div>
+        <div>Skills (WIP)</div>
+        <div>Raw TOML</div>
+      </div>
+      <div class="content">
+        <div class="config-head">&#x276F; CONFIG <span>provider</span></div>
+
+        <h3>CLI</h3>
+        <div class="form-row"><label><input type="checkbox" checked> enabled</label></div>
+
+        <h3>QQ</h3>
+        <div class="form-row"><label><input type="checkbox"> enabled</label></div>
+        <div class="form-row"><label>app_id</label><input value="102xxxx"></div>
+        <div class="form-row"><label>app_secret</label><input type="password" value="********"></div>
+        <div class="form-row"><label>confirm_mode</label><input value="always"></div>
+
+        <h3>Web</h3>
+        <div class="form-row"><label><input type="checkbox" checked> enabled</label></div>
+        <div class="form-row"><label>host</label><input value="127.0.0.1"></div>
+        <div class="form-row"><label>port</label><input type="number" value="8787"></div>
+        <div class="form-row"><label>token</label><input type="password" value="********"></div>
+        <button>Save</button>
+
+        <div class="provider-card">
+          <div class="card-header">
+            <h3>qwen</h3>
+            <button class="btn-delete">Delete</button>
+          </div>
+          <div class="form-row"><label>type</label><input value="openai_compatible"></div>
+          <div class="form-row"><label>base_url</label><input style="width:400px" value="http://127.0.0.1:1234/v1"></div>
+          <div class="form-row"><label>api_key</label><input type="password" value="sk-xxxx"></div>
+          <h4>Models</h4>
+          <div class="model-row">
+            <label>qwen3_6</label>
+            <input style="width:200px" value="qwen3-6b">
+            <label><input type="checkbox" checked> native</label>
+            <input type="number" placeholder="ctx" style="width:80px" value="32768">
+            <button class="btn-delete">×</button>
+          </div>
+          <button class="inline-add">+ Add model</button>
+        </div>
+        <button class="btn-add">+ Add provider</button>
+
+        <h3>Raw TOML</h3>
+        <textarea id="rawEditor" style="width:100%;height:220px;font-family:monospace;display:none;"></textarea>
+        <button>Validate</button>
+        <button>Save</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="/static/vendor/codemirror/codemirror.js"></script>
+<script src="/static/vendor/codemirror/toml.js"></script>
+<script>
+  var toml = [
+    '[runtime]',
+    'context_threshold = 0.7',
+    'max_iterations = 40',
+    '',
+    '[provider.qwen]',
+    'type = "openai_compatible"',
+    'base_url = "http://127.0.0.1:1234/v1"',
+    'api_key = "sk-xxxx"',
+    'qwen3_6 = { model = "qwen3-6b", native_tool_calling = true, context_size = 32768 }',
+    '',
+    '[agent.main]',
+    'model = "qwen.qwen3_6"',
+    'workspace = "~/.llaia"'
+  ].join('\n');
+  window.addEventListener('DOMContentLoaded', function () {
+    var ta = document.getElementById('rawEditor');
+    ta.value = toml;
+    CodeMirror.fromTextArea(ta, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
+  });
+</script>
+</body>
+</html>

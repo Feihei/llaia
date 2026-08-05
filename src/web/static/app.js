@@ -1,6 +1,6 @@
 function llaiaApp() {
   return {
-    tab: 'chat',
+    tab: 'config',
     token: localStorage.getItem('llaia_token') || '',
     // auth state: unchecked / checking / passed / failed
     authed: false,
@@ -31,6 +31,10 @@ function llaiaApp() {
       // verify if token exists, otherwise show login
       if (this.token) {
         await this.verifyToken();
+        // 默认进入 Config 页时，自动拉取配置
+        if (this.authed && this.tab === 'config') {
+          this.switchConfig();
+        }
       }
     },
     async verifyToken() {
