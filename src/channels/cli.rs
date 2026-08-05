@@ -287,19 +287,36 @@ impl Channel for CliChannel {
 /// is_main=true 且 config 有子 Agent 时，挂载 delegate 工具并返回其引用用于后续注入 registry
 async fn build_single_agent(
     config: &Config,
+    config_dir: &std::path::Path,
     alias: &str,
     agent_cfg: AgentConfig,
     is_main: bool,
+    audit: Option<Arc<crate::audit::AuditLog>>,
 ) -> Result<(Arc<Mutex<Agent>>, Option<Arc<DelegateTool>>)> {
-    let workspace = PathBuf::from(&agent_cfg.workspace);
+    // workspace 自动推导（忽略配置中的 workspace 字段）
+    let workspace = agent_cfg.derive_workspace(config_dir, alias);
     std::fs::create_dir_all(&workspace).ok();
 
-    let soul_path = resolve_md_path(&agent_cfg.soul, &workspace, "SOUL.md");
-    let user_path = resolve_md_path(&agent_cfg.user, &workspace, "USER.md");
-    let memory_path = resolve_md_path(&agent_cfg.memory, &workspace, "MEMORY.md");
+    let soul_path = workspace.join("SOUL.md");
+    let user_path = workspace.join("USER.md");
+    let memory_path = workspace.join("MEMORY.md");
+
     ensure_template(&soul_path, SOUL_TEMPLATE).await?;
-    ensure_template(&user_path, USER_TEMPLATE).await?;
     ensure_template(&memory_path, MEMORY_TEMPLATE).await?;
+
+    // USER.md 同步：子 agent 启动时从主 agent 复制覆盖
+    if !is_main {
+        let main_user = config_dir.join("workspace").join("USER.md");
+        if main_user.exists() {
+            ensure_template(&main_user, USER_TEMPLATE).await?;
+            tokio::fs::copy(&main_user, &user_path).await?;
+            tracing::info!(agent = alias, "synced USER.md from main agent");
+        } else {
+            ensure_template(&user_path, USER_TEMPLATE).await?;
+        }
+    } else {
+        ensure_template(&user_path, USER_TEMPLATE).await?;
+    }
 
     let soul = load_md(&soul_path).await?;
     let user = load_md(&user_path).await?;
@@ -331,18 +348,18 @@ async fn build_single_agent(
         model_cfg.native_tool_calling,
     )?);
 
-    // 构建完整工具集
+    // 构建完整工具集（用新字段）
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(FileRead::new(workspace.clone())),
-        Arc::new(FileWrite::new(workspace.clone())),
-        Arc::new(FileEdit::new(workspace.clone())),
+        Arc::new(FileRead::new(workspace.clone(), is_main)),
+        Arc::new(FileWrite::new(workspace.clone(), is_main)),
+        Arc::new(FileEdit::new(workspace.clone(), is_main)),
         Arc::new(Terminal::new(
-            config.tools.terminal.confirm.clone(),
-            config.tools.terminal.whitelist.clone(),
+            config.tools.terminal.command_policy.clone(),
+            config.tools.terminal.command_whitelist.clone(),
             workspace.clone(),
         )),
         Arc::new(WebFetch::new()?),
-        Arc::new(MemoryWrite::new(memory_path.clone())),
+        Arc::new(MemoryWrite::new(memory_path.clone(), user_path.clone(), is_main)),
         Arc::new(SendImage::new(workspace.clone())),
         Arc::new(SendFile::new(workspace.clone())),
     ];
@@ -419,6 +436,10 @@ async fn build_single_agent(
         system_prompt,
         context_size,
         workspace.clone(),
+        config_dir.to_path_buf(),
+        is_main,
+        alias.to_string(),
+        audit,
     )
     .await;
 
@@ -426,14 +447,23 @@ async fn build_single_agent(
 }
 
 /// 构建 AgentRegistry（main + 所有子 Agent）
-pub async fn build_agent(config: &Config) -> Result<Arc<AgentRegistry>> {
+pub async fn build_agent(
+    config: &Config,
+    config_dir: &std::path::Path,
+) -> Result<Arc<AgentRegistry>> {
+    // 审计日志
+    let log_dir = PathBuf::from(&config.log.dir);
+    let audit = Arc::new(crate::audit::AuditLog::new(&log_dir));
+
     // 构建子 Agent（跳过 main）
     let mut sub_agents: Vec<(String, Arc<Mutex<Agent>>)> = Vec::new();
     for (alias, cfg) in &config.agent {
         if alias == "main" {
             continue;
         }
-        let (agent, _) = build_single_agent(config, alias, cfg.clone(), false).await?;
+        let (agent, _) = build_single_agent(
+            config, config_dir, alias, cfg.clone(), false, Some(audit.clone()),
+        ).await?;
         sub_agents.push((alias.clone(), agent));
     }
 
@@ -443,7 +473,9 @@ pub async fn build_agent(config: &Config) -> Result<Arc<AgentRegistry>> {
         .get("main")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("agent.main not configured"))?;
-    let (main_agent, delegate_tool) = build_single_agent(config, "main", main_cfg, true).await?;
+    let (main_agent, delegate_tool) = build_single_agent(
+        config, config_dir, "main", main_cfg, true, Some(audit.clone()),
+    ).await?;
 
     let mut registry = AgentRegistry::new(main_agent);
     for (alias, agent) in sub_agents {
@@ -469,22 +501,4 @@ pub async fn build_agent(config: &Config) -> Result<Arc<AgentRegistry>> {
         "AgentRegistry built"
     );
     Ok(registry)
-}
-
-fn resolve_md_path(
-    explicit: &Option<String>,
-    workspace: &std::path::Path,
-    default_name: &str,
-) -> PathBuf {
-    match explicit {
-        Some(s) => {
-            let p = PathBuf::from(s);
-            if p.is_absolute() {
-                p
-            } else {
-                workspace.join(s)
-            }
-        }
-        None => workspace.join(default_name),
-    }
 }
