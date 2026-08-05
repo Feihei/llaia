@@ -58,6 +58,11 @@ impl Tool for DelegateTool {
                 "task": {
                     "type": "string",
                     "description": "要委派给子 Agent 执行的任务描述"
+                },
+                "file_paths": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "要传递给子 Agent 的文件路径列表（主 agent workspace 内的相对路径），系统会复制到子 agent .inbox/"
                 }
             },
             "required": ["agent_name", "task"]
@@ -89,14 +94,68 @@ impl Tool for DelegateTool {
         let task = args["task"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing task"))?;
+        let file_paths: Vec<String> = args["file_paths"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let sub_agent = match registry.get(agent_name) {
             Ok(a) => a.clone(),
             Err(e) => return Ok(format!("[委派失败: {}]", e)),
         };
 
+        // 获取主 agent 和子 agent 的 workspace
+        // 注意：顺序加锁（不同时持有 main 和 sub_agent 的锁），
+        // 因为测试场景下 main 和 sub_agent 可能指向同一 Arc<Mutex<Agent>>，同时加锁会死锁。
+        let main_workspace = registry.main.lock().await.workspace.clone();
+        let sub_workspace = sub_agent.lock().await.workspace.clone();
+
+        // .inbox 机制：清空后复制主 agent 指定文件到子 agent .inbox/
+        let inbox_dir = sub_workspace.join(".inbox");
+        if !file_paths.is_empty() {
+            // 清空 .inbox
+            if inbox_dir.exists() {
+                tokio::fs::remove_dir_all(&inbox_dir).await.ok();
+            }
+            tokio::fs::create_dir_all(&inbox_dir).await?;
+
+            // 复制文件
+            for fp in &file_paths {
+                let src = match crate::path_guard::validate_path(&main_workspace, fp, None) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(file = %fp, error = %e, "skip file outside workspace");
+                        continue;
+                    }
+                };
+                if !src.exists() {
+                    tracing::warn!(file = %fp, "source file not exist, skip");
+                    continue;
+                }
+                let filename = src.file_name().unwrap_or_default();
+                let dst = inbox_dir.join(filename);
+                tokio::fs::copy(&src, &dst).await?;
+                tracing::info!(file = %fp, dst = %dst.display(), "copied to subagent .inbox");
+            }
+        }
+
+        // task 文本追加 .inbox 提示
+        let full_task = if file_paths.is_empty() {
+            task.to_string()
+        } else {
+            format!(
+                "{}\n\n[输入文件已放在 .inbox/: {}]",
+                task,
+                file_paths.join(", ")
+            )
+        };
+
         let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
-        let task_clone = task.to_string();
+        let task_clone = full_task.clone();
         let timeout = self.timeout_secs;
 
         // 子 agent 用独立 channel 标识 "delegate"，不继承主 agent 的 channel。
@@ -121,20 +180,49 @@ impl Tool for DelegateTool {
             }
         }
 
-        match result {
+        // 从子 agent 本次 turn 的工具调用记录提取产出文件清单
+        let output_files: Vec<String> = {
+            let sub_a = sub_agent.lock().await;
+            sub_a
+                .turn_tool_calls
+                .iter()
+                .filter(|tc| tc.name == "file_write" || tc.name == "file_edit")
+                .filter_map(|tc| {
+                    tc.args
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect()
+        };
+
+        let return_value = match result {
             Ok(Ok(_)) => {
-                if output.is_empty() {
-                    Ok("[子 Agent 无输出]".into())
+                if output.is_empty() && output_files.is_empty() {
+                    "[子 Agent 无输出]".to_string()
                 } else {
-                    Ok(output)
+                    serde_json::json!({
+                        "text": output,
+                        "output_files": output_files,
+                    })
+                    .to_string()
                 }
             }
-            Ok(Err(e)) => Ok(format!("[子 Agent 执行错误: {}]\n部分输出: {}", e, output)),
-            Err(_) => Ok(format!(
-                "[子 Agent 超时({}秒)]\n部分输出: {}",
-                timeout, output
-            )),
-        }
+            Ok(Err(e)) => serde_json::json!({
+                "text": format!("[子 Agent 执行错误: {}]", e),
+                "output_files": output_files,
+            })
+            .to_string(),
+            Err(_) => serde_json::json!({
+                "text": format!("[子 Agent 超时({}秒)]", timeout),
+                "output_files": output_files,
+            })
+            .to_string(),
+        };
+
+        Ok(return_value)
     }
 }
 
@@ -242,7 +330,7 @@ mod tests {
         assert!(result.contains("nonexistent"), "got: {}", result);
     }
 
-    /// 超时：保留已产生的部分输出
+    /// 超时：返回 JSON 含超时提示，部分输出通过 Chunk 事件转发
     #[tokio::test]
     async fn test_timeout_preserves_partial_output() {
         let registry = make_registry_with_sub("slow").await;
@@ -251,16 +339,28 @@ mod tests {
         tool.set_registry(registry);
 
         let args = json!({"agent_name": "slow", "task": "慢任务"});
-        let result = tool.execute(&args, "cli").await.unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = tool
+            .execute_with_events(&args, "cli", Some(&tx))
+            .await
+            .unwrap();
         assert!(
             result.contains("超时"),
             "should mention timeout, got: {}",
             result
         );
+        // 新格式：返回值为 JSON {text, output_files}，text 不再含部分输出
+        // 部分输出通过 Chunk 事件转发给主 channel
+        let mut chunks = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let TurnEvent::Chunk { delta } = ev {
+                chunks.push(delta);
+            }
+        }
         assert!(
-            result.contains("部分输出"),
-            "should preserve partial output, got: {}",
-            result
+            chunks.concat().contains("部分输出"),
+            "partial output should be forwarded via Chunk events, got: {:?}",
+            chunks
         );
     }
 
