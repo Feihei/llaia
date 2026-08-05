@@ -292,7 +292,7 @@ async fn build_single_agent(
     agent_cfg: AgentConfig,
     is_main: bool,
     audit: Option<Arc<crate::audit::AuditLog>>,
-) -> Result<(Arc<Mutex<Agent>>, Option<Arc<DelegateTool>>)> {
+) -> Result<(Arc<Mutex<Agent>>, Option<Arc<DelegateTool>>, PathBuf)> {
     // workspace 自动推导（忽略配置中的 workspace 字段）
     let workspace = agent_cfg.derive_workspace(config_dir, alias);
     std::fs::create_dir_all(&workspace).ok();
@@ -443,7 +443,7 @@ async fn build_single_agent(
     )
     .await;
 
-    Ok((Arc::new(Mutex::new(agent)), delegate_tool))
+    Ok((Arc::new(Mutex::new(agent)), delegate_tool, workspace))
 }
 
 /// 构建 AgentRegistry（main + 所有子 Agent）
@@ -461,7 +461,7 @@ pub async fn build_agent(
         if alias == "main" {
             continue;
         }
-        let (agent, _) = build_single_agent(
+        let (agent, _, _) = build_single_agent(
             config, config_dir, alias, cfg.clone(), false, Some(audit.clone()),
         ).await?;
         sub_agents.push((alias.clone(), agent));
@@ -473,11 +473,11 @@ pub async fn build_agent(
         .get("main")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("agent.main not configured"))?;
-    let (main_agent, delegate_tool) = build_single_agent(
+    let (main_agent, delegate_tool, main_workspace) = build_single_agent(
         config, config_dir, "main", main_cfg, true, Some(audit.clone()),
     ).await?;
 
-    let mut registry = AgentRegistry::new(main_agent);
+    let mut registry = AgentRegistry::new(main_agent, main_workspace);
     for (alias, agent) in sub_agents {
         registry.register_sub_agent(alias, agent);
     }

@@ -674,6 +674,7 @@ mod tests {
         main_tools.register(delegate.clone());
         let main_tools = Arc::new(main_tools);
 
+        let main_workspace = std::path::PathBuf::from("/tmp/llaia-test/workspace");
         let main_agent = Agent::new(
             &config,
             main_provider,
@@ -682,7 +683,7 @@ mod tests {
             main_sid,
             "main soul".into(),
             8192,
-            std::path::PathBuf::from("/tmp/llaia-test/workspace"),
+            main_workspace.clone(),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),
@@ -691,7 +692,7 @@ mod tests {
         .await;
         let main_arc: Arc<TokioMutex<Agent>> = Arc::new(TokioMutex::new(main_agent));
 
-        let mut registry = AgentRegistry::new(main_arc);
+        let mut registry = AgentRegistry::new(main_arc, main_workspace);
         registry.register_sub_agent("coder".into(), sub_arc);
         let registry = Arc::new(registry);
         delegate.set_registry(registry.clone());

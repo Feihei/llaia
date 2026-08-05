@@ -109,9 +109,9 @@ impl Tool for DelegateTool {
         };
 
         // 获取主 agent 和子 agent 的 workspace
-        // 注意：顺序加锁（不同时持有 main 和 sub_agent 的锁），
-        // 因为测试场景下 main 和 sub_agent 可能指向同一 Arc<Mutex<Agent>>，同时加锁会死锁。
-        let main_workspace = registry.main.lock().await.workspace.clone();
+        // main_workspace 从 registry 缓存读取，避免在 main agent 持有锁的调用链中再次 lock main 导致死锁
+        // （tokio::sync::Mutex 不可重入：handle_message_streaming 已持 main 锁 → execute_tool_calls → delegate.execute_with_events）
+        let main_workspace = registry.main_workspace.clone();
         let sub_workspace = sub_agent.lock().await.workspace.clone();
 
         // .inbox 机制：清空后复制主 agent 指定文件到子 agent .inbox/
@@ -303,14 +303,14 @@ mod tests {
             sid,
             "sub soul".into(),
             8192,
-            sub_workspace,
+            sub_workspace.clone(),
             std::path::PathBuf::from("/tmp/llaia-test"),
             false,
             sub_alias.into(),
             None,
         )
         .await;
-        let mut registry = AgentRegistry::new(Arc::new(Mutex::new(agent)));
+        let mut registry = AgentRegistry::new(Arc::new(Mutex::new(agent)), sub_workspace);
         // 把同一个 agent 也注册为子 agent（测试用，避免构造两个）
         let dummy = registry.main.clone();
         registry.register_sub_agent(sub_alias.into(), dummy);
@@ -438,6 +438,7 @@ mod tests {
         }));
         // config 默认 qq.confirm_mode = "none"（P3-a 起），子 agent channel 透传为 "delegate"
         let config = Config::default_for_workspace("/tmp/llaia-test");
+        let sub_workspace = std::path::PathBuf::from("/tmp/llaia-test/workspace/subagent/coder");
         let sub_agent = Agent::new(
             &config,
             provider,
@@ -446,7 +447,7 @@ mod tests {
             sid,
             "sub".into(),
             8192,
-            std::path::PathBuf::from("/tmp/llaia-test/workspace/subagent/coder"),
+            sub_workspace.clone(),
             std::path::PathBuf::from("/tmp/llaia-test"),
             false,
             "coder".into(),
@@ -454,7 +455,7 @@ mod tests {
         )
         .await;
 
-        let mut registry = AgentRegistry::new(Arc::new(Mutex::new(sub_agent)));
+        let mut registry = AgentRegistry::new(Arc::new(Mutex::new(sub_agent)), sub_workspace);
         let sub = registry.main.clone();
         registry.register_sub_agent("coder".into(), sub);
         let registry = Arc::new(registry);
