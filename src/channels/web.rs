@@ -1,7 +1,7 @@
 use crate::agent::sink::{run_turn, OutputSink};
 use crate::agent::{AgentRegistry, MediaKind};
 use crate::channels::Channel;
-use crate::config::{Config, WebConfig};
+use crate::config::{Config, WebUiConfig};
 use crate::image_utils;
 use crate::provider::{ChatMessage, ContentPart, ImageUrlContent};
 use crate::web::{
@@ -270,7 +270,7 @@ fn build_user_message(text: &str, images: Option<&[String]>, workspace: &Path) -
 }
 
 pub struct WebChannel {
-    pub config: WebConfig,
+    pub config: WebUiConfig,
     pub registry: Arc<AgentRegistry>,
     pub config_full: Arc<RwLock<Config>>,
     pub config_path: PathBuf,
@@ -279,7 +279,7 @@ pub struct WebChannel {
 
 impl WebChannel {
     pub fn new(
-        web_config: WebConfig,
+        web_config: WebUiConfig,
         registry: Arc<AgentRegistry>,
         config_full: Arc<RwLock<Config>>,
         config_path: PathBuf,

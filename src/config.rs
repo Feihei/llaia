@@ -17,6 +17,8 @@ pub struct Config {
     #[serde(default)]
     pub agent: HashMap<String, AgentConfig>,
     #[serde(default)]
+    pub webui: WebUiConfig,
+    #[serde(default)]
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -145,17 +147,7 @@ fn default_delegate_timeout() -> u64 {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChannelsConfig {
     #[serde(default)]
-    pub cli: CliChannelConfig,
-    #[serde(default)]
     pub qq: QqConfig,
-    #[serde(default)]
-    pub web: WebConfig,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CliChannelConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,8 +179,8 @@ fn default_qq_confirm() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebConfig {
-    #[serde(default)]
+pub struct WebUiConfig {
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// 监听地址，默认 127.0.0.1（仅本机访问）
     #[serde(default = "default_web_host")]
@@ -201,10 +193,10 @@ pub struct WebConfig {
     pub token: String,
 }
 
-impl Default for WebConfig {
+impl Default for WebUiConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             host: default_web_host(),
             port: default_web_port(),
             token: String::new(),
@@ -287,6 +279,24 @@ impl Config {
             .with_context(|| format!("failed to read config: {:?}", path))?;
         let mut config: Config = toml::from_str(&content)
             .with_context(|| format!("failed to parse config: {:?}", path))?;
+        // 向后兼容：旧 [channels.web] → 新 [webui]
+        // ChannelsConfig 已无 web 字段，serde 会静默忽略 toml 里的 [channels.web]，
+        // 这里用 raw toml 检测并迁移（不覆盖用户已显式设置的 [webui]）
+        if let Ok(raw) = toml::from_str::<toml::Value>(&content) {
+            let has_explicit_webui = raw.get("webui").is_some();
+            if !has_explicit_webui {
+                if let Some(old_web) = raw.get("channels").and_then(|c| c.get("web")) {
+                    if !old_web.as_table().map(|t| t.is_empty()).unwrap_or(false) {
+                        tracing::warn!(
+                            "[channels.web] is deprecated, use [webui] instead. Migrating automatically."
+                        );
+                        if let Ok(old_cfg) = old_web.clone().try_into::<WebUiConfig>() {
+                            config.webui = old_cfg;
+                        }
+                    }
+                }
+            }
+        }
         // log.dir 未显式配置时（仍为 serde 默认值），跟随 config 文件所在目录
         // 注意：必须在 expand_paths 之前比较，因为 expand 后路径会变
         if config.log.dir == default_log_dir() {
@@ -325,7 +335,7 @@ impl Config {
         }
         self.channels.qq.app_id = expand(&self.channels.qq.app_id)?;
         self.channels.qq.app_secret = expand(&self.channels.qq.app_secret)?;
-        self.channels.web.token = expand(&self.channels.web.token)?;
+        self.webui.token = expand(&self.webui.token)?;
         self.tools.tavily.api_key = expand(&self.tools.tavily.api_key)?;
         self.log.dir = expand(&self.log.dir)?;
         Ok(())
@@ -387,6 +397,7 @@ impl Config {
             },
             provider,
             agent,
+            webui: WebUiConfig::default(),
             channels: ChannelsConfig::default(),
             tools: ToolsConfig::default(),
         }
@@ -453,9 +464,6 @@ native_tool_calling = true
 [agent.main]
 model = "default.qwen3"
 workspace = "~/custom-ws"
-
-[channels.cli]
-enabled = true
 
 [tools.terminal]
 confirm = "always"
@@ -776,10 +784,10 @@ workspace = "~/.llaia"
     #[test]
     fn test_web_config_defaults() {
         let config = Config::default_for_workspace("~/.llaia");
-        assert!(!config.channels.web.enabled);
-        assert_eq!(config.channels.web.host, "127.0.0.1");
-        assert_eq!(config.channels.web.port, 51217);
-        assert_eq!(config.channels.web.token, "");
+        assert!(config.webui.enabled);
+        assert_eq!(config.webui.host, "127.0.0.1");
+        assert_eq!(config.webui.port, 51217);
+        assert_eq!(config.webui.token, "");
     }
 
     #[test]
@@ -796,7 +804,7 @@ model = "qwen2.5:7b"
 model = "default.qwen"
 workspace = "~/.llaia"
 
-[channels.web]
+[webui]
 enabled = true
 host = "0.0.0.0"
 port = 9000
@@ -806,10 +814,75 @@ token = "secret-token"
         use std::io::Write;
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
-        assert!(config.channels.web.enabled);
-        assert_eq!(config.channels.web.host, "0.0.0.0");
-        assert_eq!(config.channels.web.port, 9000);
-        assert_eq!(config.channels.web.token, "secret-token");
+        assert!(config.webui.enabled);
+        assert_eq!(config.webui.host, "0.0.0.0");
+        assert_eq!(config.webui.port, 9000);
+        assert_eq!(config.webui.token, "secret-token");
+    }
+
+    #[test]
+    fn test_web_config_migration_from_channels_web() {
+        // 旧 [channels.web] 应自动迁移到 [webui]（向后兼容）
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.llaia"
+
+[channels.web]
+enabled = true
+host = "0.0.0.0"
+port = 9000
+token = "migrated-token"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert!(config.webui.enabled);
+        assert_eq!(config.webui.host, "0.0.0.0");
+        assert_eq!(config.webui.port, 9000);
+        assert_eq!(config.webui.token, "migrated-token");
+    }
+
+    #[test]
+    fn test_web_config_explicit_webui_wins_over_channels_web() {
+        // 同时存在 [webui] 和 [channels.web] 时，[webui] 优先（不迁移）
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.llaia"
+
+[webui]
+enabled = true
+host = "1.2.3.4"
+port = 1111
+token = "new-token"
+
+[channels.web]
+enabled = true
+host = "5.6.7.8"
+port = 9999
+token = "old-token"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert_eq!(config.webui.host, "1.2.3.4");
+        assert_eq!(config.webui.port, 1111);
+        assert_eq!(config.webui.token, "new-token");
     }
 
     #[test]

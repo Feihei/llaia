@@ -237,8 +237,8 @@ pub fn mask_sensitive(mut config: Config) -> Config {
     if !config.channels.qq.app_secret.is_empty() {
         config.channels.qq.app_secret = MASK.into();
     }
-    if !config.channels.web.token.is_empty() {
-        config.channels.web.token = MASK.into();
+    if !config.webui.token.is_empty() {
+        config.webui.token = MASK.into();
     }
     if !config.tools.tavily.api_key.is_empty() {
         config.tools.tavily.api_key = MASK.into();
@@ -259,8 +259,8 @@ pub fn merge_masked(old: &Config, new: &Config) -> Config {
     if merged.channels.qq.app_secret == MASK {
         merged.channels.qq.app_secret = old.channels.qq.app_secret.clone();
     }
-    if merged.channels.web.token == MASK {
-        merged.channels.web.token = old.channels.web.token.clone();
+    if merged.webui.token == MASK {
+        merged.webui.token = old.webui.token.clone();
     }
     if merged.tools.tavily.api_key == MASK {
         merged.tools.tavily.api_key = old.tools.tavily.api_key.clone();
@@ -446,22 +446,14 @@ pub async fn get_status(
         pid: std::process::id(),
         channels: vec![
             ChannelStatus {
-                name: "cli".into(),
-                enabled: cfg.channels.cli.enabled,
-                listening: None,
-            },
-            ChannelStatus {
                 name: "qq".into(),
                 enabled: cfg.channels.qq.enabled,
                 listening: None,
             },
             ChannelStatus {
                 name: "web".into(),
-                enabled: cfg.channels.web.enabled,
-                listening: Some(format!(
-                    "{}:{}",
-                    cfg.channels.web.host, cfg.channels.web.port
-                )),
+                enabled: cfg.webui.enabled,
+                listening: Some(format!("{}:{}", cfg.webui.host, cfg.webui.port)),
             },
         ],
         db_size_bytes: db_size,

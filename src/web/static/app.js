@@ -13,7 +13,7 @@ function llaiaApp() {
     uploaded: [],
     ws: null,
     // config
-    cfg: { runtime:{}, log:{}, provider:{}, agent:{}, channels:{cli:{},qq:{},web:{}}, tools:{terminal:{whitelist:[]},tavily:{}} },
+    cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{}}, tools:{terminal:{whitelist:[]},tavily:{}} },
     configSection: 'runtime',
     rawToml: '',
     rawMsg: '',
@@ -212,7 +212,7 @@ function llaiaApp() {
       this.$nextTick(() => this.initEditor());
     },
     async saveConfig() {
-      if (!confirm('Structured save will rewrite config.toml. Original comments and fields not in the schema (e.g. channels.cli.agent) will be lost.\nTo preserve comments, use the "Raw TOML" editor.\n\nContinue?')) return;
+      if (!confirm('Structured save will rewrite config.toml. Original comments and fields not in the schema will be lost.\nTo preserve comments, use the "Raw TOML" editor.\n\nContinue?')) return;
       // expand model back to provider top level (adapt for serde flatten)
       // strip NaN (empty input[type=number] yields NaN, JSON.stringify turns it to null, backend u32 parse fails)
       const cfgToSend = JSON.parse(JSON.stringify(this.cfg, (key, value) => {

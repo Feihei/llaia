@@ -61,22 +61,22 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         tracing::info!("QqChannel started");
     }
 
-    if config.channels.web.enabled {
+    if config.webui.enabled {
         let workspace = {
             let a = registry.main.lock().await;
             a.workspace.clone()
         };
         let config_path = config_dir.join("config.toml");
         let web = std::sync::Arc::new(crate::channels::web::WebChannel::new(
-            config.channels.web.clone(),
+            config.webui.clone(),
             registry.clone(),
             std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
             config_path,
             workspace,
         ));
         let registry_clone = registry.clone();
-        let host = config.channels.web.host.clone();
-        let port = config.channels.web.port;
+        let host = config.webui.host.clone();
+        let port = config.webui.port;
         tasks.push(tokio::spawn(async move {
             if let Err(e) = crate::channels::Channel::run(web, registry_clone).await {
                 tracing::error!(error = %e, "WebChannel exited with error");
