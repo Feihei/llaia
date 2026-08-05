@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 /// 跨平台危险路径黑名单前缀（canonicalize 失败时兜底）
