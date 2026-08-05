@@ -452,7 +452,7 @@ pub async fn get_status(
             },
             ChannelStatus {
                 name: "web".into(),
-                enabled: cfg.webui.enabled,
+                enabled: true,
                 listening: Some(format!("{}:{}", cfg.webui.host, cfg.webui.port)),
             },
         ],

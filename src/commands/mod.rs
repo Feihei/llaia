@@ -61,7 +61,8 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         tracing::info!("QqChannel started");
     }
 
-    if config.webui.enabled {
+    // webui 随 serve 无条件启动（serve 模式下用户唯一保证可用的交互入口）
+    {
         let workspace = {
             let a = registry.main.lock().await;
             a.workspace.clone()

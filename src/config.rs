@@ -180,8 +180,6 @@ fn default_qq_confirm() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebUiConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     /// 监听地址，默认 127.0.0.1（仅本机访问）
     #[serde(default = "default_web_host")]
     pub host: String,
@@ -196,7 +194,6 @@ pub struct WebUiConfig {
 impl Default for WebUiConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             host: default_web_host(),
             port: default_web_port(),
             token: String::new(),
@@ -784,7 +781,6 @@ workspace = "~/.llaia"
     #[test]
     fn test_web_config_defaults() {
         let config = Config::default_for_workspace("~/.llaia");
-        assert!(config.webui.enabled);
         assert_eq!(config.webui.host, "127.0.0.1");
         assert_eq!(config.webui.port, 51217);
         assert_eq!(config.webui.token, "");
@@ -805,7 +801,6 @@ model = "default.qwen"
 workspace = "~/.llaia"
 
 [webui]
-enabled = true
 host = "0.0.0.0"
 port = 9000
 token = "secret-token"
@@ -814,7 +809,6 @@ token = "secret-token"
         use std::io::Write;
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
-        assert!(config.webui.enabled);
         assert_eq!(config.webui.host, "0.0.0.0");
         assert_eq!(config.webui.port, 9000);
         assert_eq!(config.webui.token, "secret-token");
@@ -836,7 +830,6 @@ model = "default.qwen"
 workspace = "~/.llaia"
 
 [channels.web]
-enabled = true
 host = "0.0.0.0"
 port = 9000
 token = "migrated-token"
@@ -844,7 +837,6 @@ token = "migrated-token"
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
-        assert!(config.webui.enabled);
         assert_eq!(config.webui.host, "0.0.0.0");
         assert_eq!(config.webui.port, 9000);
         assert_eq!(config.webui.token, "migrated-token");
@@ -866,13 +858,11 @@ model = "default.qwen"
 workspace = "~/.llaia"
 
 [webui]
-enabled = true
 host = "1.2.3.4"
 port = 1111
 token = "new-token"
 
 [channels.web]
-enabled = true
 host = "5.6.7.8"
 port = 9999
 token = "old-token"

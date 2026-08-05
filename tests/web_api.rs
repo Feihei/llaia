@@ -53,12 +53,10 @@ fn test_merge_masked_preserves_secret() {
 #[test]
 fn test_web_config_round_trip() {
     let mut c = Config::default_for_workspace("/tmp/x");
-    c.webui.enabled = true;
     c.webui.host = "0.0.0.0".into();
     c.webui.port = 9999;
     let s = toml::to_string(&c).unwrap();
     let parsed: Config = toml::from_str(&s).unwrap();
-    assert!(parsed.webui.enabled);
     assert_eq!(parsed.webui.host, "0.0.0.0");
     assert_eq!(parsed.webui.port, 9999);
 }
