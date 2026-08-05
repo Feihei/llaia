@@ -108,9 +108,12 @@ fn default_true() -> bool {
 pub struct AgentConfig {
     /// 引用 "provider_id.model_alias"，例如 "default.qwen3"
     pub model: String,
-    /// 该 agent 的 md 文件根目录，sessions.db 也在其下
+    /// [deprecated] 该 agent 的 md 文件根目录。P3-a 起自动推导：
+    ///   main → <config_dir>/workspace/
+    ///   子 agent → <config_dir>/workspace/subagent/<alias>/
+    /// 字段保留向后兼容，加载时 warn 并用自动推导值覆盖
     pub workspace: String,
-    /// 以下三项缺省时从 workspace 推导为 <workspace>/SOUL.md 等
+    /// [deprecated] 缺省时从 workspace 推导为 <workspace>/SOUL.md 等
     pub soul: Option<String>,
     pub user: Option<String>,
     pub memory: Option<String>,
@@ -120,6 +123,19 @@ pub struct AgentConfig {
     /// 委派超时秒数（仅子 Agent 生效）。默认 120
     #[serde(default = "default_delegate_timeout")]
     pub delegate_timeout: u64,
+}
+
+impl AgentConfig {
+    /// 推导 agent workspace 根路径
+    /// main → config_dir/workspace/
+    /// 子 agent → config_dir/workspace/subagent/<alias>/
+    pub fn derive_workspace(&self, config_dir: &std::path::Path, alias: &str) -> PathBuf {
+        if alias == "main" {
+            config_dir.join("workspace")
+        } else {
+            config_dir.join("workspace").join("subagent").join(alias)
+        }
+    }
 }
 
 fn default_delegate_timeout() -> u64 {
@@ -167,7 +183,7 @@ impl Default for QqConfig {
 }
 
 fn default_qq_confirm() -> String {
-    "always".into()
+    "none".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +234,12 @@ pub struct TerminalToolConfig {
     pub confirm: String,
     #[serde(default = "default_whitelist")]
     pub whitelist: Vec<String>,
+    /// 命令策略：blacklist（默认）/ whitelist / none
+    #[serde(default = "default_command_policy")]
+    pub command_policy: String,
+    /// 仅 policy=whitelist 时生效
+    #[serde(default = "default_command_whitelist")]
+    pub command_whitelist: Vec<String>,
 }
 
 impl Default for TerminalToolConfig {
@@ -225,6 +247,8 @@ impl Default for TerminalToolConfig {
         Self {
             confirm: default_confirm(),
             whitelist: default_whitelist(),
+            command_policy: default_command_policy(),
+            command_whitelist: default_command_whitelist(),
         }
     }
 }
@@ -241,6 +265,14 @@ fn default_whitelist() -> Vec<String> {
         "pwd".into(),
         "dir".into(),
     ]
+}
+
+fn default_command_policy() -> String {
+    "blacklist".into()
+}
+
+fn default_command_whitelist() -> Vec<String> {
+    Vec::new()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -261,6 +293,13 @@ impl Config {
             if let Some(parent) = path.parent() {
                 config.log.dir = parent.join("logs").to_string_lossy().into_owned();
             }
+        }
+        // whitelist confirm_mode 废弃：warn + fallback 到 none
+        if config.channels.qq.confirm_mode == "whitelist" {
+            tracing::warn!(
+                "channels.qq.confirm_mode = \"whitelist\" is deprecated, falling back to \"none\""
+            );
+            config.channels.qq.confirm_mode = "none".into();
         }
         config.expand_paths()?;
         Ok(config)
@@ -300,8 +339,12 @@ impl Config {
     }
 
     /// 默认配置（首次启动用），结构最小化
-    pub fn default_for_workspace(workspace_dir: &str) -> Self {
-        let ws = shellexpand::tilde(workspace_dir).into_owned();
+    /// config_dir 指向 ~/.llaia/，主 agent workspace 自动推导为 ~/.llaia/workspace/
+    pub fn default_for_workspace(config_dir: &str) -> Self {
+        let config_dir = shellexpand::tilde(config_dir).into_owned();
+        let config_dir_path = std::path::PathBuf::from(&config_dir);
+        let ws = config_dir_path.join("workspace");
+
         let mut provider: HashMap<String, ProviderConfig> = HashMap::new();
         let mut models: HashMap<String, ModelConfig> = HashMap::new();
         models.insert(
@@ -327,7 +370,7 @@ impl Config {
             "main".into(),
             AgentConfig {
                 model: "default.qwen".into(),
-                workspace: ws.clone(),
+                workspace: ws.to_string_lossy().into_owned(),
                 soul: None,
                 user: None,
                 memory: None,
@@ -340,7 +383,7 @@ impl Config {
             runtime: RuntimeConfig::default(),
             log: LogConfig {
                 level: default_level(),
-                dir: format!("{}/logs", ws),
+                dir: format!("{}/logs", config_dir),
             },
             provider,
             agent,
@@ -467,7 +510,9 @@ dir = "~/.llaia-test/logs"
         let a = config.agent.get("main").unwrap();
         assert_eq!(a.model, "default.qwen");
         assert!(a.soul.is_none());
-        assert!(a.workspace.ends_with(".llaia"));
+        // workspace 现在推导为 ~/.llaia/workspace
+        let ws_path = std::path::PathBuf::from(&a.workspace);
+        assert!(ws_path.ends_with(std::path::Path::new(".llaia/workspace")));
         // runtime 默认值
         assert_eq!(config.runtime.context_threshold, 0.7);
         assert_eq!(config.runtime.max_iterations, 10);
@@ -573,7 +618,7 @@ app_secret = "test-secret"
         assert!(!config.channels.qq.enabled); // 默认 false
         assert_eq!(config.channels.qq.app_id, "12345");
         assert_eq!(config.channels.qq.app_secret, "test-secret");
-        assert_eq!(config.channels.qq.confirm_mode, "always"); // 默认 always
+        assert_eq!(config.channels.qq.confirm_mode, "none"); // 默认改为 none
     }
 
     #[test]
@@ -594,7 +639,7 @@ workspace = "~/.llaia"
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
         assert!(!config.channels.qq.enabled);
-        assert_eq!(config.channels.qq.confirm_mode, "always");
+        assert_eq!(config.channels.qq.confirm_mode, "none");
     }
 
     #[test]
@@ -765,5 +810,28 @@ token = "secret-token"
         assert_eq!(config.channels.web.host, "0.0.0.0");
         assert_eq!(config.channels.web.port, 9000);
         assert_eq!(config.channels.web.token, "secret-token");
+    }
+
+    #[test]
+    fn test_whitelist_confirm_mode_deprecated() {
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+
+[agent.main]
+model = "default.qwen"
+workspace = "~/.llaia"
+
+[channels.qq]
+confirm_mode = "whitelist"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert_eq!(config.channels.qq.confirm_mode, "none"); // 废弃后 fallback
     }
 }
