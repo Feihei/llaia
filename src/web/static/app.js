@@ -63,6 +63,27 @@ function llaiaApp() {
       this.verifyToken();
     },
 
+    // 回退到登录页：清除内存/本地 token、断开 WS
+    forceLogin(reason) {
+      if (!this.authed) return; // 已在未登录态，避免重复触发
+      this.authed = false;
+      this.token = '';
+      localStorage.removeItem('llaia_token');
+      this.authError = reason || 'Session expired, please re-enter token';
+      if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null; }
+      if (this._pingTimer) { clearInterval(this._pingTimer); this._pingTimer = null; }
+    },
+    // 统一的带 token 请求封装：任意 401 视为 token 与 config 不符，回退登录
+    async apiFetch(baseUrl, options = {}) {
+      const sep = baseUrl.includes('?') ? '&' : '?';
+      const url = baseUrl + sep + 'token=' + encodeURIComponent(this.token);
+      const r = await fetch(url, options);
+      if (r.status === 401) {
+        this.forceLogin('Token no longer matches config — please re-enter');
+      }
+      return r;
+    },
+
     // ---- WS ----
     connectWs() {
       if (this.ws) { this.ws.onclose = null; this.ws.close(); }
@@ -82,8 +103,7 @@ function llaiaApp() {
       switch (ev.type) {
         case 'auth_ok': break;
         case 'auth_failed':
-          this.authed = false;
-          this.authError = 'WebSocket authentication failed, check token';
+          this.forceLogin('WebSocket authentication failed, check token');
           break;
         case 'chunk':
           if (this.messages.length === 0 || this.messages[this.messages.length-1].role !== 'assistant') {
@@ -127,7 +147,8 @@ function llaiaApp() {
       for (const f of e.target.files) {
         const fd = new FormData();
         fd.append('file', f);
-        const r = await fetch('/upload?token=' + encodeURIComponent(this.token), { method: 'POST', body: fd });
+        const r = await this.apiFetch('/upload', { method: 'POST', body: fd });
+        if (!this.authed) return;
         if (r.ok) { const j = await r.json(); this.uploaded.push(j); }
         else { alert('Upload failed: ' + await r.text()); }
       }
@@ -151,7 +172,8 @@ function llaiaApp() {
     // ---- config ----
     async switchConfig() {
       this.tab = 'config';
-      const r = await fetch('/api/config?token=' + encodeURIComponent(this.token));
+      const r = await this.apiFetch('/api/config');
+      if (!this.authed) return;
       console.log('GET /api/config', r.status, r.ok);
       if (r.ok) {
         const data = await r.json();
@@ -173,7 +195,8 @@ function llaiaApp() {
       } else {
         console.error('Failed to load config:', r.status, await r.text());
       }
-      const rr = await fetch('/api/config/raw?token=' + encodeURIComponent(this.token));
+      const rr = await this.apiFetch('/api/config/raw');
+      if (!this.authed) return;
       if (rr.ok) { this.rawToml = await rr.text(); this.$nextTick(() => this.initEditor()); }
     },
     initEditor() {
@@ -203,7 +226,8 @@ function llaiaApp() {
         }
       }
       console.log('PUT /api/config body:', JSON.stringify(cfgToSend).slice(0, 300));
-      const r = await fetch('/api/config?token=' + encodeURIComponent(this.token), { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(cfgToSend) });
+      const r = await this.apiFetch('/api/config', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(cfgToSend) });
+      if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
       console.log('PUT /api/config response:', r.status, j);
@@ -246,13 +270,15 @@ function llaiaApp() {
     },
     async validateRaw() {
       const toml = this._editor ? this._editor.getValue() : this.rawToml;
-      const r = await fetch('/api/config/validate?token=' + encodeURIComponent(this.token), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ toml }) });
+      const r = await this.apiFetch('/api/config/validate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ toml }) });
+      if (!this.authed) return;
       const j = await r.json();
       this.rawMsg = j.ok ? '✓ Valid' : '✗ ' + j.error;
     },
     async saveRaw() {
       const toml = this._editor ? this._editor.getValue() : this.rawToml;
-      const r = await fetch('/api/config/raw?token=' + encodeURIComponent(this.token), { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ toml }) });
+      const r = await this.apiFetch('/api/config/raw', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ toml }) });
+      if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
       if (r.ok) { alert('Saved, restart llaia to take effect'); this.switchConfig(); }
@@ -262,7 +288,8 @@ function llaiaApp() {
     // ---- about ----
     async switchAbout() {
       this.tab = 'about';
-      const r = await fetch('/api/status?token=' + encodeURIComponent(this.token));
+      const r = await this.apiFetch('/api/status');
+      if (!this.authed) return;
       if (r.ok) { this.status = await r.json(); }
     },
     formatBytes(n) { if (n < 1024) return n + ' B'; if (n < 1048576) return (n/1024).toFixed(1)+' KB'; return (n/1048576).toFixed(1)+' MB'; },

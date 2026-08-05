@@ -12,7 +12,7 @@
   <!-- show login overlay when not authenticated -->
   <div id="login-overlay" x-show="!authed">
     <div class="login-box">
-      <h2>Llaia Web</h2>
+      <h2>Llaia(੭aᴗa)੭</h2>
       <input type="password" x-model="token" @keydown.enter="saveToken()" placeholder="Enter access token" :disabled="authing">
       <button @click="saveToken()" :disabled="authing" x-text="authing ? 'Verifying...' : 'Enter'"></button>
       <div class="err" x-text="authError"></div>
@@ -23,16 +23,11 @@
   <template x-if="authed">
     <div>
   <header>
-    <h1>Llaia</h1>
+    <h1>Llaia(੭aᴗa)੭</h1>
     <div class="tabs">
       <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
       <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">Config</div>
       <div class="tab" :class="{active: tab==='about'}" @click="switchAbout()">About</div>
-    </div>
-    <div class="spacer"></div>
-    <div class="token-area">
-      Token: <input type="password" x-model="token" @keydown.enter="saveToken()" placeholder="Enter token">
-      <button @click="saveToken()">Save</button>
     </div>
   </header>
   <main>
