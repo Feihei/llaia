@@ -89,10 +89,17 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         anyhow::bail!("no service channel enabled in config (QQ/WebUI/...)");
     }
 
-    tracing::info!(channels = tasks.len(), "serve mode: channels running");
+    tracing::info!(channels = tasks.len(), "serve mode: channels running, press Ctrl+C to stop");
 
-    for t in tasks {
-        let _ = t.await;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("received Ctrl+C, shutting down gracefully...");
+        }
+        _ = async {
+            for t in tasks {
+                let _ = t.await;
+            }
+        } => {}
     }
     Ok(())
 }
