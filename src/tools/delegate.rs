@@ -205,6 +205,8 @@ mod tests {
         let store = SessionStore::open_in_memory().unwrap();
         let sid = store.create_session("sub", "test").unwrap();
         let config = Config::default_for_workspace("/tmp/llaia-test");
+        let sub_workspace =
+            std::path::PathBuf::from("/tmp/llaia-test/workspace/subagent").join(sub_alias);
         let agent = Agent::new(
             &config,
             Arc::new(HangingProvider),
@@ -213,7 +215,11 @@ mod tests {
             sid,
             "sub soul".into(),
             8192,
+            sub_workspace,
             std::path::PathBuf::from("/tmp/llaia-test"),
+            false,
+            sub_alias.into(),
+            None,
         )
         .await;
         let mut registry = AgentRegistry::new(Arc::new(Mutex::new(agent)));
@@ -330,7 +336,7 @@ mod tests {
         tools.register(Arc::new(ConfirmRequiredTool {
             called: called.clone(),
         }));
-        // config 默认 qq.confirm_mode = "always"，若 channel 被透传为 "qq" 则工具会被拦
+        // config 默认 qq.confirm_mode = "none"（P3-a 起），子 agent channel 透传为 "delegate"
         let config = Config::default_for_workspace("/tmp/llaia-test");
         let sub_agent = Agent::new(
             &config,
@@ -340,7 +346,11 @@ mod tests {
             sid,
             "sub".into(),
             8192,
+            std::path::PathBuf::from("/tmp/llaia-test/workspace/subagent/coder"),
             std::path::PathBuf::from("/tmp/llaia-test"),
+            false,
+            "coder".into(),
+            None,
         )
         .await;
 

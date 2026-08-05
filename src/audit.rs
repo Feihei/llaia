@@ -1,8 +1,8 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 /// 审计日志写入器：追加写入 ~/.llaia/logs/audit.log
 pub struct AuditLog {
@@ -37,7 +37,7 @@ impl AuditLog {
         result: &str,
         reason: Option<&str>,
     ) -> Result<()> {
-        let _g = self.lock.lock().unwrap();
+        let _g = self.lock.lock().await;
         let timestamp = chrono::Local::now().to_rfc3339();
         let mut line = format!(
             "{} agent={} channel={} tool={} args={} result={}",

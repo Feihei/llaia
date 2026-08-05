@@ -212,7 +212,11 @@ mod tests {
             sid,
             "test".into(),
             8192,
+            std::path::PathBuf::from("/tmp/llaia-test/workspace"),
             std::path::PathBuf::from("/tmp/llaia-test"),
+            true,
+            "main".into(),
+            None,
         )
         .await;
         Arc::new(Mutex::new(agent))
