@@ -10,6 +10,11 @@ use crate::config::Config;
 pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
     let config = load_config_or_init(config_dir)?;
 
+    // 目录结构迁移
+    if crate::migrate::migrate_if_needed(config_dir)? {
+        tracing::info!("directory migrated, reloading config");
+    }
+
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
 
@@ -17,7 +22,7 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
     pid_file.acquire()?;
     let _pid_guard = PidGuard(pid_file);
 
-    let registry = crate::channels::cli::build_agent(&config).await?;
+    let registry = crate::channels::cli::build_agent(&config, config_dir).await?;
 
     let cli = std::sync::Arc::new(crate::channels::CliChannel::new());
     crate::channels::Channel::run(cli, registry).await
@@ -27,6 +32,11 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
 pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     let config = load_config_or_init(config_dir)?;
 
+    // 目录结构迁移
+    if crate::migrate::migrate_if_needed(config_dir)? {
+        tracing::info!("directory migrated, reloading config");
+    }
+
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
 
@@ -34,7 +44,7 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     pid_file.acquire()?;
     let _pid_guard = PidGuard(pid_file);
 
-    let registry = crate::channels::cli::build_agent(&config).await?;
+    let registry = crate::channels::cli::build_agent(&config, config_dir).await?;
 
     let mut tasks = Vec::new();
 
@@ -111,9 +121,11 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
             return Ok(());
         }
     };
+    // 自动推导 workspace
+    let workspace = agent_cfg.derive_workspace(config_dir, "main");
     println!("\nagent.main:");
     println!("  model: {}", agent_cfg.model);
-    println!("  workspace: {}", agent_cfg.workspace);
+    println!("  workspace (derived): {}", workspace.display());
 
     // 解析 model 引用，展示 provider 端点
     match Config::parse_model_ref(&agent_cfg.model) {
@@ -156,19 +168,8 @@ pub async fn remember_cmd(text: &str, config_dir: &Path) -> Result<()> {
         .get("main")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("agent.main not configured"))?;
-    let workspace = PathBuf::from(&agent_cfg.workspace);
-    // memory 路径：显式 > workspace 推导
-    let memory_path = match &agent_cfg.memory {
-        Some(s) => {
-            let p = PathBuf::from(s);
-            if p.is_absolute() {
-                p
-            } else {
-                workspace.join(s)
-            }
-        }
-        None => workspace.join("MEMORY.md"),
-    };
+    let workspace = agent_cfg.derive_workspace(config_dir, "main");
+    let memory_path = workspace.join("MEMORY.md");
     crate::memory::ensure_template(&memory_path, crate::memory::MEMORY_TEMPLATE).await?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let line = format!("- [{}] {}\n", today, text);
