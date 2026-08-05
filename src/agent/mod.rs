@@ -50,9 +50,27 @@ pub struct Agent {
     pub context_size: usize,
     pub context_threshold: f64,
     pub max_iterations: u32,
-    pub qq_confirm_mode: String,
-    /// Agent 工作目录（用于附件下载等）
+    /// 全局 confirm_mode（none / always / session），不再 per-channel
+    pub confirm_mode: String,
+    /// Agent 工作区根（工具能访问的"挂载根"）
     pub workspace: std::path::PathBuf,
+    /// 配置根目录（~/.llaia/），agent 工具不可访问，但用于推导路径
+    pub config_dir: std::path::PathBuf,
+    /// 是否主 agent（决定能否读 subagent/）
+    pub is_main: bool,
+    /// agent 别名（main / 子 agent alias）
+    pub alias: String,
+    /// 审计日志（可选，测试时为 None）
+    pub audit: Option<Arc<crate::audit::AuditLog>>,
+    /// 本次 turn 的工具调用历史（供 delegate 提取产出文件清单）
+    pub turn_tool_calls: Vec<TurnToolCall>,
+}
+
+/// 单次工具调用记录（用于 delegate 提取产出文件）
+#[derive(Debug, Clone)]
+pub struct TurnToolCall {
+    pub name: String,
+    pub args: serde_json::Value,
 }
 
 impl Agent {
@@ -66,6 +84,10 @@ impl Agent {
         system_prompt: String,
         context_size: usize,
         workspace: std::path::PathBuf,
+        config_dir: std::path::PathBuf,
+        is_main: bool,
+        alias: String,
+        audit: Option<Arc<crate::audit::AuditLog>>,
     ) -> Self {
         Self {
             provider,
@@ -76,8 +98,13 @@ impl Agent {
             context_size,
             context_threshold: config.runtime.context_threshold,
             max_iterations: config.runtime.max_iterations,
-            qq_confirm_mode: config.channels.qq.confirm_mode.clone(),
+            confirm_mode: config.channels.qq.confirm_mode.clone(),
             workspace,
+            config_dir,
+            is_main,
+            alias,
+            audit,
+            turn_tool_calls: Vec::new(),
         }
     }
 
@@ -118,6 +145,8 @@ impl Agent {
         channel: &str,
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<String> {
+        // 清空本次 turn 的工具调用历史
+        self.turn_tool_calls.clear();
         // 持久化：只存文本部分（图片 base64 太大不存 sqlite）
         let text_for_store = user_msg.content.as_text();
         self.session_store
@@ -287,11 +316,21 @@ impl Agent {
                     .await;
             }
 
+            // 记录工具调用到 turn_tool_calls（供 delegate 提取产出文件）
+            for tc in &calls {
+                self.turn_tool_calls.push(TurnToolCall {
+                    name: tc.name.clone(),
+                    args: tc.arguments.clone(),
+                });
+            }
+
             let tool_msgs = execute_tool_calls(
                 &self.tools,
                 &calls,
                 channel,
-                &self.qq_confirm_mode,
+                &self.confirm_mode,
+                &self.alias,
+                self.audit.clone(),
                 Some(&event_tx),
             )
             .await?;
@@ -411,7 +450,11 @@ mod tests {
             sid,
             "test system".into(),
             8192,
+            std::path::PathBuf::from("/tmp/llaia-test/workspace"),
             std::path::PathBuf::from("/tmp/llaia-test"),
+            true,
+            "main".into(),
+            None,
         )
         .await
     }
@@ -598,7 +641,11 @@ mod tests {
             sub_sid,
             "sub soul".into(),
             8192,
+            std::path::PathBuf::from("/tmp/llaia-test/workspace/subagent/coder"),
             std::path::PathBuf::from("/tmp/llaia-test"),
+            false,
+            "coder".into(),
+            None,
         )
         .await;
         let sub_arc: Arc<TokioMutex<Agent>> = Arc::new(TokioMutex::new(sub_agent));
@@ -635,7 +682,11 @@ mod tests {
             main_sid,
             "main soul".into(),
             8192,
+            std::path::PathBuf::from("/tmp/llaia-test/workspace"),
             std::path::PathBuf::from("/tmp/llaia-test"),
+            true,
+            "main".into(),
+            None,
         )
         .await;
         let main_arc: Arc<TokioMutex<Agent>> = Arc::new(TokioMutex::new(main_agent));
