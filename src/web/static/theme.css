@@ -146,7 +146,6 @@ option { background: var(--bg-input); color: var(--text); }
 .msg.assistant { background: var(--bg-panel);          border-left-color: var(--border-bright); }
 .msg.tool      { background: rgba(79, 214, 201, .05);  color: var(--cyan);
                  font-family: var(--mono); font-size: 12px; border-left-color: var(--cyan); }
-.msg pre { background: #070a07; padding: 10px; border: 1px solid var(--border); border-radius: 0; overflow-x: auto; }
 .msg img { max-width: 400px; border-radius: 0; border: 1px solid var(--border-bright); }
 
 #chat-pane .composer {
@@ -327,3 +326,58 @@ option { background: var(--bg-input); color: var(--text); }
 .hljs-title, .hljs-section, .hljs-function .hljs-title { color: var(--green); }
 .hljs-attribute { color: var(--green); }
 .hljs-type, .hljs-class .hljs-title { color: var(--cyan); }
+
+/* ============================================================
+   聊天内渲染的 markdown（作用域 .messages，不污染 CodeMirror）
+   ============================================================ */
+.messages { font-size: 14px; line-height: 1.6; }
+.messages > .msg, .messages .msg { margin-bottom: 16px; }
+.messages p { margin: 0 0 10px; }
+.messages h1, .messages h2, .messages h3, .messages h4 {
+  color: var(--green-bright); font-weight: 600; margin: 14px 0 8px; line-height: 1.3;
+}
+.messages h1 { font-size: 1.4em; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.messages h2 { font-size: 1.25em; }
+.messages h3 { font-size: 1.1em; }
+.messages a { color: var(--cyan); text-decoration: underline; }
+.messages ul, .messages ol { margin: 0 0 10px; padding-left: 22px; }
+.messages li { margin: 3px 0; }
+.messages blockquote {
+  margin: 0 0 10px; padding: 4px 12px; color: var(--text-dim);
+  border-left: 2px solid var(--green); background: rgba(56, 224, 123, .04);
+}
+.messages hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+.messages table { border-collapse: collapse; margin: 0 0 10px; width: 100%; }
+.messages th, .messages td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.messages th { background: rgba(56, 224, 123, .08); color: var(--green-bright); }
+
+/* 行内代码（不在 pre 内） */
+.messages code {
+  font-family: var(--mono);
+  background: rgba(56, 224, 123, .10);
+  color: var(--green-bright);
+  padding: 1px 5px;
+  border-radius: 0;
+}
+
+/* 代码块容器：深色底 + 绿边 + 横向滚动 + 长块限高 */
+.messages pre {
+  margin: 0 0 12px;
+  background: #070a07;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--green);
+  padding: 12px 14px;
+  border-radius: 0;
+  overflow: auto;
+  max-height: 380px;
+}
+.messages pre code {
+  font-family: var(--mono);
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+  border-radius: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre;
+}

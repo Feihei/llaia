@@ -132,7 +132,20 @@ function llaiaApp() {
         else { alert('Upload failed: ' + await r.text()); }
       }
     },
-    renderMd(text) { try { return marked.parse(text || ''); } catch { return text; } },
+    renderMd(text) {
+      try {
+        const html = marked.parse(text || '');
+        if (window.hljs) {
+          // 后处理：对渲染出的代码块做语法高亮（不依赖 marked 版本 API）
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          doc.querySelectorAll('pre code').forEach(block => {
+            try { window.hljs.highlightElement(block); } catch (_) {}
+          });
+          return doc.body.innerHTML;
+        }
+        return html;
+      } catch { return text; }
+    },
     scrollBottom() { this.$nextTick(() => { const el = this.$refs.messages; if (el) el.scrollTop = el.scrollHeight; }); },
 
     // ---- config ----
