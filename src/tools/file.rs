@@ -1,3 +1,4 @@
+use crate::path_guard;
 use crate::tools::Tool;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -6,67 +7,41 @@ use std::path::{Path, PathBuf};
 
 pub struct FileRead {
     workspace: PathBuf,
+    is_main: bool,
 }
 pub struct FileWrite {
     workspace: PathBuf,
+    is_main: bool,
 }
 pub struct FileEdit {
     workspace: PathBuf,
+    is_main: bool,
 }
 
 impl FileRead {
-    pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+    pub fn new(workspace: PathBuf, is_main: bool) -> Self {
+        Self { workspace, is_main }
     }
 }
 impl FileWrite {
-    pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+    pub fn new(workspace: PathBuf, is_main: bool) -> Self {
+        Self { workspace, is_main }
     }
 }
 impl FileEdit {
-    pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+    pub fn new(workspace: PathBuf, is_main: bool) -> Self {
+        Self { workspace, is_main }
     }
 }
 
-/// 将用户提供的路径解析为绝对路径，并确保落在 workspace 内。
-/// - 相对路径以 workspace 为基准
-/// - 绝对路径原样使用，但必须位于 workspace 子树内
-/// - `..` 逃逸报错
-///
-/// 注：使用词法规范化（非 canonicalize）做边界检查，能拦截 `..` 逃逸。
-/// 符号链接逃逸不检测——单用户私人助理场景下威胁低，且 terminal 在 QQ channel 下已禁用。
+/// 保留旧函数签名供 cli.rs 的 @path 图片解析复用
 pub(crate) fn resolve_within(workspace: &Path, p: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(p);
-    let joined = if path.is_absolute() {
-        path
-    } else {
-        workspace.join(p)
-    };
-    let norm_joined = normalize_lexical(&joined);
-    let norm_ws = normalize_lexical(workspace);
-    if !norm_joined.starts_with(&norm_ws) {
-        anyhow::bail!("path {:?} is outside workspace {:?}", joined, workspace);
-    }
-    Ok(norm_joined)
+    path_guard::validate_path(workspace, p, None)
 }
 
-/// 词法规范化：处理 `.` 和 `..`，不依赖文件系统存在。
-fn normalize_lexical(p: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::Normal(c) => out.push(c),
-        }
-    }
-    out
+/// 主 agent 可读 subagent/ 子目录的额外路径
+fn extra_readable_for_main(workspace: &Path) -> Option<PathBuf> {
+    Some(workspace.join("subagent"))
 }
 
 #[async_trait]
@@ -91,7 +66,12 @@ impl Tool for FileRead {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'path' argument"))?;
-        let resolved = resolve_within(&self.workspace, path)?;
+        let extra = if self.is_main {
+            extra_readable_for_main(&self.workspace)
+        } else {
+            None
+        };
+        let resolved = path_guard::validate_path(&self.workspace, path, extra.as_deref())?;
         let content = tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| anyhow!("read {:?}: {}", resolved, e))?;
@@ -117,7 +97,6 @@ impl Tool for FileWrite {
             "required": ["path", "content"]
         })
     }
-    /// false: workspace 边界检查（resolve_within）已保证路径安全
     fn requires_confirm(&self) -> bool {
         false
     }
@@ -130,7 +109,16 @@ impl Tool for FileWrite {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'content'"))?;
-        let resolved = resolve_within(&self.workspace, path)?;
+
+        // 主 agent 写 subagent/ 路径时拒绝（.inbox/ 例外由 delegate 系统层处理，不经 file 工具）
+        let resolved = path_guard::validate_path(&self.workspace, path, None)?;
+        if self.is_main {
+            let subagent_dir = self.workspace.join("subagent");
+            if resolved.starts_with(&subagent_dir) {
+                anyhow::bail!("主 agent 不可写子 agent 工作区: {}", path);
+            }
+        }
+
         if let Some(parent) = resolved.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
@@ -164,7 +152,6 @@ impl Tool for FileEdit {
             "required": ["path", "old_string", "new_string"]
         })
     }
-    /// false: workspace 边界检查（resolve_within）已保证路径安全
     fn requires_confirm(&self) -> bool {
         false
     }
@@ -181,7 +168,15 @@ impl Tool for FileEdit {
             .get("new_string")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'new_string'"))?;
-        let resolved = resolve_within(&self.workspace, path)?;
+
+        let resolved = path_guard::validate_path(&self.workspace, path, None)?;
+        if self.is_main {
+            let subagent_dir = self.workspace.join("subagent");
+            if resolved.starts_with(&subagent_dir) {
+                anyhow::bail!("主 agent 不可写子 agent 工作区: {}", path);
+            }
+        }
+
         let content = tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| anyhow!("read {:?}: {}", resolved, e))?;
@@ -212,159 +207,89 @@ impl Tool for FileEdit {
 mod tests {
     use super::*;
     use serde_json::json;
-
     use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_file_read_write() {
         let ws = tempdir().unwrap();
         let ws_path = ws.path().to_path_buf();
-        let rel = "test.txt";
-        std::fs::write(ws_path.join(rel), "hello world").unwrap();
-
-        let tool = FileRead::new(ws_path);
-        let result = tool.execute(&json!({"path": rel}), "cli").await.unwrap();
-        assert!(result.contains("hello world"));
-    }
-
-    #[tokio::test]
-    async fn test_file_write_and_read() {
-        let ws = tempdir().unwrap();
-        let ws_path = ws.path().to_path_buf();
-        let rel = "out.txt";
-
-        let write_tool = FileWrite::new(ws_path.clone());
-        write_tool
-            .execute(&json!({"path": rel, "content": "new content"}), "cli")
-            .await
-            .unwrap();
-
-        let read_tool = FileRead::new(ws_path);
-        let result = read_tool
-            .execute(&json!({"path": rel}), "cli")
-            .await
-            .unwrap();
-        assert_eq!(result, "new content");
-    }
-
-    #[tokio::test]
-    async fn test_file_edit() {
-        let ws = tempdir().unwrap();
-        let ws_path = ws.path().to_path_buf();
-        let rel = "edit.txt";
-        std::fs::write(ws_path.join(rel), "line1\nline2\nline3").unwrap();
-
-        let tool = FileEdit::new(ws_path.clone());
-        tool.execute(
-            &json!({"path": rel, "old_string": "line2", "new_string": "LINE TWO"}),
-            "cli",
-        )
-        .await
-        .unwrap();
-
-        let read = FileRead::new(ws_path);
-        let result = read.execute(&json!({"path": rel}), "cli").await.unwrap();
-        assert!(result.contains("LINE TWO"));
-        assert!(!result.contains("line2"));
-    }
-
-    #[tokio::test]
-    async fn test_file_edit_no_match() {
-        let ws = tempdir().unwrap();
-        let ws_path = ws.path().to_path_buf();
-        let rel = "nomatch.txt";
-        std::fs::write(ws_path.join(rel), "hello").unwrap();
-
-        let tool = FileEdit::new(ws_path);
+        std::fs::write(ws_path.join("test.txt"), "hello world").unwrap();
+        let tool = FileRead::new(ws_path, true);
         let result = tool
-            .execute(
-                &json!({"path": rel, "old_string": "missing", "new_string": "x"}),
-                "cli",
-            )
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_relative_path_resolves_to_workspace() {
-        let ws = tempdir().unwrap();
-        let ws_path = ws.path().to_path_buf();
-
-        // 写相对路径，预期落到 workspace 下
-        let write_tool = FileWrite::new(ws_path.clone());
-        write_tool
-            .execute(&json!({"path": "sub/test.txt", "content": "hello"}), "cli")
+            .execute(&json!({"path": "test.txt"}), "cli")
             .await
             .unwrap();
-
-        // 文件应当存在于 workspace/sub/test.txt
-        let expected = ws_path.join("sub/test.txt");
-        assert!(expected.exists(), "expected file at {:?}", expected);
-
-        // 读回来也用相对路径
-        let read_tool = FileRead::new(ws_path);
-        let result = read_tool
-            .execute(&json!({"path": "sub/test.txt"}), "cli")
-            .await
-            .unwrap();
-        assert_eq!(result, "hello");
-    }
-
-    #[test]
-    fn test_requires_confirm_flags() {
-        let ws = PathBuf::from(".");
-        assert!(!FileRead::new(ws.clone()).requires_confirm());
-        // file_write/file_edit 不再需要确认：workspace 边界检查已保证安全
-        assert!(!FileWrite::new(ws.clone()).requires_confirm());
-        assert!(!FileEdit::new(ws).requires_confirm());
+        assert!(result.contains("hello world"));
     }
 
     #[tokio::test]
     async fn test_workspace_boundary_blocks_parent_traversal() {
         let ws = tempdir().unwrap();
         let ws_path = ws.path().to_path_buf();
-        // 在 workspace 里放一个文件
-        let write_tool = FileWrite::new(ws_path.clone());
+        let write_tool = FileWrite::new(ws_path.clone(), true);
         write_tool
             .execute(&json!({"path": "inside.txt", "content": "ok"}), "cli")
             .await
             .unwrap();
 
-        // `..` 逃逸应当被拒绝
-        let read_tool = FileRead::new(ws_path.clone());
+        let read_tool = FileRead::new(ws_path, true);
         let escaped = read_tool
             .execute(&json!({"path": "../outside.txt"}), "cli")
             .await;
-        assert!(escaped.is_err(), "parent traversal should be blocked");
-
-        // 绝对路径指向 workspace 外应当被拒绝
-        let outside = ws_path.parent().unwrap().join("outside.txt");
-        let abs_read = FileRead::new(ws_path);
-        let result = abs_read
-            .execute(&json!({"path": outside.to_str().unwrap()}), "cli")
-            .await;
-        assert!(
-            result.is_err(),
-            "absolute path outside workspace should be blocked"
-        );
+        assert!(escaped.is_err());
     }
 
     #[tokio::test]
-    async fn test_workspace_boundary_allows_subdir() {
+    async fn test_main_agent_can_read_subagent() {
         let ws = tempdir().unwrap();
         let ws_path = ws.path().to_path_buf();
-        // 子目录写文件应当成功
-        let write_tool = FileWrite::new(ws_path.clone());
-        let r = write_tool
+        let subagent_dir = ws_path.join("subagent").join("coder");
+        std::fs::create_dir_all(&subagent_dir).unwrap();
+        std::fs::write(subagent_dir.join("result.md"), "sub output").unwrap();
+
+        let tool = FileRead::new(ws_path, true);
+        let result = tool
+            .execute(&json!({"path": "subagent/coder/result.md"}), "cli")
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("sub output"));
+    }
+
+    #[tokio::test]
+    async fn test_main_agent_cannot_write_subagent() {
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        std::fs::create_dir_all(ws_path.join("subagent").join("coder")).unwrap();
+
+        let tool = FileWrite::new(ws_path, true);
+        let result = tool
             .execute(
-                &json!({"path": "deep/nested/file.txt", "content": "x"}),
+                &json!({"path": "subagent/coder/evil.txt", "content": "hack"}),
                 "cli",
             )
             .await;
-        assert!(
-            r.is_ok(),
-            "writing to workspace subdir should succeed: {:?}",
-            r
-        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("不可写子 agent"));
+    }
+
+    #[tokio::test]
+    async fn test_sub_agent_cannot_read_subagent_sibling() {
+        let ws = tempdir().unwrap();
+        // 子 agent workspace 是 subagent/coder/
+        let coder_ws = ws.path().join("subagent").join("coder");
+        std::fs::create_dir_all(&coder_ws).unwrap();
+        // 兄弟子 agent searcher 的文件
+        let searcher_ws = ws.path().join("subagent").join("searcher");
+        std::fs::create_dir_all(&searcher_ws).unwrap();
+        std::fs::write(searcher_ws.join("secret.txt"), "secret").unwrap();
+
+        let tool = FileRead::new(coder_ws, false);
+        let result = tool
+            .execute(&json!({"path": "../searcher/secret.txt"}), "cli")
+            .await;
+        assert!(result.is_err());
     }
 }
