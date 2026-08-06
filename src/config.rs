@@ -405,30 +405,25 @@ impl Config {
 /// - `~` / `~/path` → 用户 home 目录（shellexpand::tilde）
 /// - `${VAR}` → 环境变量值（变量名须匹配 `[A-Z_][A-Z0-9_]*`）
 ///
-/// 未定义的环境变量会报错（fail fast），避免用空字符串当 api_key。
+/// 未定义的环境变量替换为空字符串并 warn，让 serve 能进入降级模式（WebUI 配置可用），
+/// 而不是直接挂掉。用户在 WebUI 里补全 key 后热加载即可恢复。
 /// 先展开 env，再展开 tilde（env 值里的 `~` 不会被二次展开）。
 fn expand_string(s: &str) -> Result<String> {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}").unwrap());
 
-    let mut err: Option<anyhow::Error> = None;
     let expanded = re.replace_all(s, |caps: &regex::Captures| match std::env::var(&caps[1]) {
         Ok(v) => v,
         Err(e) => {
-            if err.is_none() {
-                err = Some(anyhow::anyhow!(
-                    "environment variable '{}' referenced in config but not set: {}",
-                    &caps[1],
-                    e
-                ));
-            }
+            tracing::warn!(
+                var = &caps[1],
+                error = %e,
+                "environment variable referenced in config but not set, replacing with empty string (degraded mode)"
+            );
             String::new()
         }
     });
-    if let Some(e) = err {
-        return Err(e);
-    }
     let result = shellexpand::tilde(&expanded).into_owned();
     Ok(result)
 }
@@ -742,13 +737,13 @@ workspace = "~/.llaia"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
-        let result = Config::load(&tmp.path().to_path_buf());
-        assert!(result.is_err(), "should error on undefined env var");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("LLAIA_NONEXISTENT_VAR_2026"),
-            "error should mention the missing var: {}",
-            err
+        let config = Config::load(&tmp.path().to_path_buf()).expect(
+            "missing env var should NOT error; instead replace with empty string (degraded mode)",
+        );
+        // 未定义的 env var 替换为空字符串，让 serve 能进降级模式
+        assert_eq!(
+            config.provider.get("default").unwrap().api_key, "",
+            "missing env var should be replaced with empty string"
         );
     }
 
