@@ -1,12 +1,12 @@
-# (੭aᴗa)੭ LLAIA — Come On~
+# (੭aᴗa)੭ LLAIA — Come On~ 来啊~
 
-> **Local Lightweight AI Assistant, in Personal Favor**
+> **Llaia: Local Lightweight AI Assistant, in Personal Favor**
 >
-> **Llaia: a minimal, local-first personal AI assistant**
+> **Llaia: 符合个人品味的本地轻量AI助手**
 
 There are loads of AI agents out there and they keep getting heavier — most are trying to cover more scenarios and more users as their communities grow. But the way we each use an agent is different. I got tired of forcing my workflow into someone else's wheels, so I just built my own.
 
-### ✔️ What it's for
+### ✔️ What for
 
 - Local-first: your data stays on your own machine, no cloud required
 - Personal use, single user
