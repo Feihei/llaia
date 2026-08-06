@@ -154,6 +154,34 @@ impl Agent {
         Ok(text)
     }
 
+    /// 跑一轮独立 turn：用临时 session_id 和全新 context（不复用用户会话历史），
+    /// 跑完后恢复原 session_id 和 context。供 cron agent 模式使用。
+    ///
+    /// - `prompt`：注入到 agent 上下文的用户消息
+    /// - `channel`：触发渠道（用于审计 + 工具 confirm 判断），cron 用 "cron"
+    /// - `session_id`：独立会话 id（由调用方通过 session_store.create_session 创建）
+    ///
+    /// 返回 agent 最终回复文本。无论成功失败，原 session_id 和 context 都会恢复。
+    pub async fn run_isolated_turn(
+        &mut self,
+        prompt: &str,
+        channel: &str,
+        session_id: i64,
+    ) -> Result<String> {
+        let saved_session_id = self.session_id;
+        let saved_system = self.context.system.clone();
+        let saved_context = std::mem::replace(
+            &mut self.context,
+            crate::agent::context::Context::new(saved_system),
+        );
+        self.session_id = session_id;
+        let result = self.handle_input(prompt, channel).await;
+        // 无论成功失败都恢复原状态
+        self.session_id = saved_session_id;
+        self.context = saved_context;
+        result
+    }
+
     /// 流式版本：通过 event_tx 推送 TurnEvent
     pub async fn handle_input_streaming(
         &mut self,
@@ -525,6 +553,45 @@ mod tests {
         }
         assert_eq!(chunks.concat(), "hello world");
         assert!(done);
+    }
+
+    #[tokio::test]
+    async fn test_run_isolated_turn_restores_session_and_context() {
+        let rounds = vec![vec![
+            StreamEvent::TextDelta("cron reply".into()),
+            StreamEvent::Done,
+        ]];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+
+        // 模拟用户已有会话历史
+        agent.context.push(ChatMessage::user("prior user msg"));
+        agent
+            .context
+            .push(ChatMessage::assistant("prior assistant msg"));
+        let original_session_id = agent.session_id;
+        let original_history_len = agent.context.history.len();
+
+        // 创建独立 session
+        let cron_sid = agent
+            .session_store
+            .create_session("cron-uuid", "cron:test")
+            .unwrap();
+
+        // 跑独立 turn
+        let reply = agent
+            .run_isolated_turn("do the task", "cron", cron_sid)
+            .await;
+        assert!(reply.is_ok(), "run_isolated_turn failed: {:?}", reply.err());
+        assert_eq!(reply.unwrap(), "cron reply");
+
+        // 验证恢复：session_id 和 context 都回到原状
+        assert_eq!(agent.session_id, original_session_id);
+        assert_eq!(agent.context.history.len(), original_history_len);
+        assert_eq!(agent.context.history[0].content.as_text(), "prior user msg");
+        assert_eq!(
+            agent.context.history[1].content.as_text(),
+            "prior assistant msg"
+        );
     }
 
     #[tokio::test]
