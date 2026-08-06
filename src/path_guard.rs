@@ -34,7 +34,11 @@ pub fn dangerous_prefixes() -> Vec<&'static str> {
 pub fn hits_blacklist(path: &str) -> bool {
     let lower = path.to_lowercase().replace('/', "\\");
     for prefix in dangerous_prefixes() {
-        let prefix_lower = prefix.to_lowercase();
+        // Normalize prefix the same way as the path: lowercase and unify separators
+        // to '\' so Linux/macOS prefixes (written with '/') match paths whose '/' was
+        // also rewritten to '\'. Without this, `hits_blacklist("/etc/passwd")` returned
+        // false on Linux because "\etc\passwd" didn't start with "/etc".
+        let prefix_lower = prefix.to_lowercase().replace('/', "\\");
         if lower.starts_with(&prefix_lower) {
             return true;
         }
