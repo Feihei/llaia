@@ -62,6 +62,23 @@ impl TokenState {
     }
 }
 
+/// 从 USER.md 的 `- qq: <openid>` 行解析 owner openid（cron 主动推送兜底）。
+/// 找不到返回 None。
+fn parse_openid_from_user_md(workspace: &Path) -> Option<String> {
+    let user_path = workspace.join("USER.md");
+    let content = std::fs::read_to_string(&user_path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("- qq:") {
+            let id = rest.trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub struct QqChannel {
     config: QqConfig,
     http: Client,
@@ -74,6 +91,10 @@ pub struct QqChannel {
     /// 每个 user 正在执行的 turn 的中断信号。
     /// key: user_openid，value: Notify。/stop 时 notify 对应 turn 使其中断。
     running_stops: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    /// owner openid：从收到的 C2C 消息中跟踪，用于 cron 主动推送
+    owner_openid: Arc<Mutex<Option<String>>>,
+    /// 主 agent workspace（用于读 USER.md 解析 owner openid 兜底）
+    workspace: Option<PathBuf>,
 }
 
 impl QqChannel {
@@ -86,6 +107,8 @@ impl QqChannel {
             token: Arc::new(Mutex::new(TokenState::default())),
             msg_seq_counter: AtomicU32::new(1),
             running_stops: Arc::new(Mutex::new(HashMap::new())),
+            owner_openid: Arc::new(Mutex::new(None)),
+            workspace: None,
         }
     }
 
@@ -99,7 +122,42 @@ impl QqChannel {
             token: Arc::new(Mutex::new(TokenState::default())),
             msg_seq_counter: AtomicU32::new(1),
             running_stops: Arc::new(Mutex::new(HashMap::new())),
+            owner_openid: Arc::new(Mutex::new(None)),
+            workspace: None,
         }
+    }
+
+    /// 注入主 agent workspace（用于 cron 主动推送时读 USER.md 解析 owner openid）。
+    /// serve_cmd 构造 QqChannel 后调用。
+    pub fn with_workspace(mut self, ws: PathBuf) -> Self {
+        self.workspace = Some(ws);
+        self
+    }
+
+    /// 主动推送消息：用于 cron 任务结果推送。
+    /// openid 来源：① 已跟踪的 owner openid（用户发过消息）② USER.md 的 `- qq:` 字段。
+    /// 都没有则 log + 返回 Ok（不报错，cron 不因此失败）。
+    pub async fn send_proactive(&self, message: &str) -> Result<()> {
+        let openid = self.resolve_owner_openid().await;
+        match openid {
+            Some(id) => self.send_c2c_message(&id, message, None).await,
+            None => {
+                tracing::warn!(
+                    "cron push to qq skipped: no owner openid (no incoming message tracked, no USER.md binding)"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// 解析 owner openid：优先用已跟踪的，其次读 USER.md 的 `- qq:` 字段。
+    async fn resolve_owner_openid(&self) -> Option<String> {
+        if let Some(id) = self.owner_openid.lock().await.clone() {
+            return Some(id);
+        }
+        self.workspace
+            .as_ref()
+            .and_then(|ws| parse_openid_from_user_md(ws))
     }
 
     /// 取下一个递增的 msg_seq（用于被动回复去重）
@@ -831,6 +889,8 @@ impl QqChannel {
                                 // C2C 消息（文本 + 可能的附件）
                                 if let Some(incoming) = Self::extract_c2c_message(&payload) {
                                     let user_openid = incoming.user_id.clone();
+                                    // 跟踪 owner openid（用于 cron 主动推送）
+                                    *self.owner_openid.lock().await = Some(user_openid.clone());
                                     let this = self.clone();
                                     let agent = agent.clone();
                                     tokio::spawn(async move {
@@ -1035,6 +1095,13 @@ pub fn split_reply(text: &str, max: usize) -> Vec<String> {
     chunks
 }
 
+#[async_trait]
+impl crate::cron::ProactivePusher for QqChannel {
+    async fn push(&self, message: &str) -> Result<()> {
+        self.send_proactive(message).await
+    }
+}
+
 #[cfg(test)]
 mod split_reply_tests {
     use super::*;
@@ -1092,5 +1159,59 @@ mod split_reply_tests {
             parts[1].starts_with("```rust"),
             "second chunk should start with ```rust"
         );
+    }
+}
+
+#[cfg(test)]
+mod proactive_tests {
+    use super::*;
+    use crate::config::QqConfig;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_parse_openid_from_user_md_found() {
+        let dir = tempdir().unwrap();
+        let user_md = "# 基本信息\n\n- 姓名：测试\n- qq: OPENID_ABC123\n- email: x@y\n";
+        std::fs::write(dir.path().join("USER.md"), user_md).unwrap();
+        let openid = parse_openid_from_user_md(dir.path());
+        assert_eq!(openid.as_deref(), Some("OPENID_ABC123"));
+    }
+
+    #[test]
+    fn test_parse_openid_from_user_md_missing() {
+        let dir = tempdir().unwrap();
+        let user_md = "# 基本信息\n\n- 姓名：测试\n- email: x@y\n";
+        std::fs::write(dir.path().join("USER.md"), user_md).unwrap();
+        assert!(parse_openid_from_user_md(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_parse_openid_from_user_md_no_file() {
+        let dir = tempdir().unwrap();
+        assert!(parse_openid_from_user_md(dir.path()).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_send_proactive_no_openid_returns_ok() {
+        // 无 owner openid 且无 workspace：应 log + 返回 Ok（不报错）
+        let qq = QqChannel::new(QqConfig::default());
+        let result = qq.send_proactive("cron result").await;
+        assert!(
+            result.is_ok(),
+            "send_proactive without openid should not error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_owner_openid_from_workspace() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("USER.md"),
+            "# 基本信息\n\n- qq: WS_OPENID\n",
+        )
+        .unwrap();
+        let qq = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
+        let openid = qq.resolve_owner_openid().await;
+        assert_eq!(openid.as_deref(), Some("WS_OPENID"));
     }
 }
