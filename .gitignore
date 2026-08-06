@@ -1,4 +1,7 @@
+# 编译目录
 /target
+
+# 测试目录
 .test/
 
 # 本助手的项目记忆目录
@@ -16,3 +19,9 @@ uploads/
 
 # 文档：PDF 等二进制不纳入版本控制
 *.pdf
+
+# 本地issue文档
+docs/issues
+
+# 参考项目代码
+.ref/
