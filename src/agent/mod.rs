@@ -44,6 +44,7 @@ pub struct Agent {
     /// Provider 实例（可热替换）。
     /// - `Some(p)`：正常模式
     /// - `None`：降级模式（无 provider，handle_message_streaming 直接 sink Error）
+    ///
     /// RwLock 保护：turn 开始拿 snapshot（读锁），reload_provider 拿写锁替换。
     /// 正在进行的 turn 持有 snapshot 不受 reload 影响。
     pub provider: Arc<RwLock<Option<Arc<dyn Provider>>>>,
@@ -123,6 +124,7 @@ impl Agent {
     /// 热替换 provider。
     /// - `Some(p)`：切换到新 provider
     /// - `None`：进入降级模式
+    ///
     /// 正在进行的 turn 持有旧 snapshot 不受影响，新 turn 用新 provider。
     pub async fn reload_provider(&self, new_provider: Option<Arc<dyn Provider>>) {
         let mut guard = self.provider.write().await;

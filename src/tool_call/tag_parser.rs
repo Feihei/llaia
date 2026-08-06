@@ -48,11 +48,7 @@ pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
 /// 剥离 think 标签：删除完整的 think 块及未闭合的 think 开标签（防泄漏）。
 fn strip_think_tags(text: &str) -> String {
     // 删除完整的 think / thinking 块
-    let re_closed = concat!(
-        r"(?is)<",
-        r"think(?:ing)?>.*?<",
-        r"/think(?:ing)?>"
-    );
+    let re_closed = concat!(r"(?is)<", r"think(?:ing)?>.*?<", r"/think(?:ing)?>");
     let re = regex::Regex::new(re_closed).unwrap();
     let mut result = re.replace_all(text, "").to_string();
     // 删除未闭合的 think 开标签（防泄漏推理内容）
@@ -110,7 +106,11 @@ fn value_to_tool_call(value: &Value) -> Option<ToolCall> {
         _ => Value::Null,
     };
     let id = format!("tag_{}", uuid::Uuid::new_v4().simple());
-    Some(ToolCall { id, name, arguments })
+    Some(ToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 #[cfg(test)]

@@ -334,7 +334,10 @@ async fn build_single_agent(
     // 尝试构建 provider：model 为空 → 降级模式（provider = None）
     // model 非空但 provider/model 配置缺失 → 报错（用户意图配置但配错）
     let (provider, model_cfg, has_delegate) = if agent_cfg.model.is_empty() {
-        tracing::warn!(agent = alias, "agent.model 未配置，进入降级模式（无 provider）");
+        tracing::warn!(
+            agent = alias,
+            "agent.model 未配置，进入降级模式（无 provider）"
+        );
         (None, None, false)
     } else {
         let (prov_id, model_alias) = Config::parse_model_ref(&agent_cfg.model)?;
@@ -353,7 +356,11 @@ async fn build_single_agent(
             &model_cfg.model,
             model_cfg.native_tool_calling,
         )?);
-        (Some(provider), Some(model_cfg), is_main && config.agent.len() > 1)
+        (
+            Some(provider),
+            Some(model_cfg),
+            is_main && config.agent.len() > 1,
+        )
     };
     let provider_ref = provider.as_ref();
 
@@ -368,7 +375,11 @@ async fn build_single_agent(
             workspace.clone(),
         )),
         Arc::new(WebFetch::new()?),
-        Arc::new(MemoryWrite::new(memory_path.clone(), user_path.clone(), is_main)),
+        Arc::new(MemoryWrite::new(
+            memory_path.clone(),
+            user_path.clone(),
+            is_main,
+        )),
         Arc::new(SendImage::new(workspace.clone())),
         Arc::new(SendFile::new(workspace.clone())),
     ];
@@ -423,7 +434,10 @@ async fn build_single_agent(
 
     // context_size: min(配置值, 探测值)，探测不到用配置值，都没有用默认 8192
     // 降级模式（无 provider）直接用 8192
-    let context_size = match (model_cfg.as_ref().and_then(|m| m.context_size), provider_ref) {
+    let context_size = match (
+        model_cfg.as_ref().and_then(|m| m.context_size),
+        provider_ref,
+    ) {
         (Some(cfg), Some(p)) => {
             let detected = p.detect_context_size().await;
             match detected {
@@ -478,8 +492,14 @@ pub async fn build_agent(
             continue;
         }
         let (agent, _, _) = build_single_agent(
-            config, config_dir, alias, cfg.clone(), false, Some(audit.clone()),
-        ).await?;
+            config,
+            config_dir,
+            alias,
+            cfg.clone(),
+            false,
+            Some(audit.clone()),
+        )
+        .await?;
         sub_agents.push((alias.clone(), agent));
     }
 
@@ -498,8 +518,14 @@ pub async fn build_agent(
         }
     });
     let (main_agent, delegate_tool, main_workspace) = build_single_agent(
-        config, config_dir, "main", main_cfg, true, Some(audit.clone()),
-    ).await?;
+        config,
+        config_dir,
+        "main",
+        main_cfg,
+        true,
+        Some(audit.clone()),
+    )
+    .await?;
 
     let mut registry = AgentRegistry::new(main_agent, main_workspace);
     for (alias, agent) in sub_agents {

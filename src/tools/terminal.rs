@@ -12,11 +12,7 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    pub fn new(
-        command_policy: String,
-        command_whitelist: Vec<String>,
-        workspace: PathBuf,
-    ) -> Self {
+    pub fn new(command_policy: String, command_whitelist: Vec<String>, workspace: PathBuf) -> Self {
         Self {
             command_policy,
             command_whitelist,

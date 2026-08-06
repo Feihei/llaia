@@ -269,10 +269,7 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("不可写子 agent"));
+        assert!(result.unwrap_err().to_string().contains("不可写子 agent"));
     }
 
     #[tokio::test]

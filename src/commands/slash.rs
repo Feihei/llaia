@@ -33,17 +33,15 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
             agent.context.summary = None;
             Ok(SlashOutcome::Handled("[context cleared]".into()))
         }
-        "/compact" => {
-            match agent.provider_snapshot().await {
-                Some(p) => match agent.context.compact(p.as_ref(), 6).await {
-                    Ok(_) => Ok(SlashOutcome::Handled("[compacted]".into())),
-                    Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
-                },
-                None => Ok(SlashOutcome::Handled(
-                    "[compact failed: 未配置 provider]".into(),
-                )),
-            }
-        }
+        "/compact" => match agent.provider_snapshot().await {
+            Some(p) => match agent.context.compact(p.as_ref(), 6).await {
+                Ok(_) => Ok(SlashOutcome::Handled("[compacted]".into())),
+                Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
+            },
+            None => Ok(SlashOutcome::Handled(
+                "[compact failed: 未配置 provider]".into(),
+            )),
+        },
         "/remember" => {
             if args.is_empty() {
                 Ok(SlashOutcome::Handled("usage: /remember <text>".into()))

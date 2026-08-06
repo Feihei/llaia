@@ -7,22 +7,24 @@ pub fn dangerous_prefixes() -> Vec<&'static str> {
     #[cfg(target_os = "linux")]
     {
         v.extend_from_slice(&[
-            "/root", "/usr", "/bin", "/sbin", "/etc", "/var", "/boot",
-            "/proc", "/sys", "/dev", "/lib", "/lib64",
+            "/root", "/usr", "/bin", "/sbin", "/etc", "/var", "/boot", "/proc", "/sys", "/dev",
+            "/lib", "/lib64",
         ]);
     }
     #[cfg(target_os = "macos")]
     {
         v.extend_from_slice(&[
-            "/System", "/Library", "/usr", "/private", "/bin", "/sbin",
-            "/etc", "/var", "/dev",
+            "/System", "/Library", "/usr", "/private", "/bin", "/sbin", "/etc", "/var", "/dev",
         ]);
     }
     #[cfg(windows)]
     {
         v.extend_from_slice(&[
-            r"C:\Windows", r"C:\Program Files", r"C:\Program Files (x86)",
-            r"C:\ProgramData", r"C:\System Volume Information",
+            r"C:\Windows",
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+            r"C:\ProgramData",
+            r"C:\System Volume Information",
         ]);
     }
     v
@@ -63,7 +65,9 @@ fn normalize_lexical(p: &Path) -> PathBuf {
         match comp {
             Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
             Component::CurDir => {}
-            Component::ParentDir => { out.pop(); }
+            Component::ParentDir => {
+                out.pop();
+            }
             Component::Normal(c) => out.push(c),
         }
     }
@@ -141,7 +145,9 @@ pub fn validate_path(
 
     anyhow::bail!(
         "path {:?} (canonicalized {:?}) is outside workspace {:?}",
-        joined, canon_to_check, norm_ws
+        joined,
+        canon_to_check,
+        norm_ws
     )
 }
 
@@ -174,7 +180,7 @@ pub fn check_shell_wrappers(command: &str) -> Result<()> {
     // 首 token 是 bash/sh/zsh/fish 且含 -c
     let first = tokens[0];
     let shell_names = ["bash", "sh", "zsh", "fish"];
-    if shell_names.contains(&first) && tokens.iter().any(|t| *t == "-c") {
+    if shell_names.contains(&first) && tokens.contains(&"-c") {
         anyhow::bail!("shell wrapper with -c is blocked: {}", command);
     }
 
@@ -292,7 +298,7 @@ mod tests {
         std::fs::write(extra.join("result.md"), "content").unwrap();
 
         // 主 agent 读 subagent/ 下文件
-        let path = format!("subagent/coder/result.md");
+        let path = "subagent/coder/result.md".to_string();
         let r = validate_path(ws_path, &path, Some(&extra)).unwrap();
         assert!(r.starts_with(ws_path));
     }

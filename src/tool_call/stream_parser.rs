@@ -45,14 +45,8 @@ const CLOSE_TAGS: &[&str] = &[
     concat!("<", "/tool-call>"),
     concat!("<", "/invoke>"),
 ];
-const THINK_OPEN_TAGS: &[&str] = &[
-    concat!("<", "think>"),
-    concat!("<", "thinking>"),
-];
-const THINK_CLOSE_TAGS: &[&str] = &[
-    concat!("<", "/think>"),
-    concat!("<", "/thinking>"),
-];
+const THINK_OPEN_TAGS: &[&str] = &[concat!("<", "think>"), concat!("<", "thinking>")];
+const THINK_CLOSE_TAGS: &[&str] = &[concat!("<", "/think>"), concat!("<", "/thinking>")];
 
 impl Default for ToolCallStreamParser {
     fn default() -> Self {
@@ -254,7 +248,11 @@ fn value_to_tool_call(value: &Value) -> Option<ToolCall> {
         _ => Value::Null,
     };
     let id = format!("tag_{}", uuid::Uuid::new_v4().simple());
-    Some(ToolCall { id, name, arguments })
+    Some(ToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 #[cfg(test)]
@@ -279,10 +277,7 @@ mod tests {
     #[test]
     fn test_thinking_tag_stripped() {
         let mut p = ToolCallStreamParser::new();
-        let input = format!(
-            "{}thoughts{}hello",
-            THINK_OPEN_TAGS[1], THINK_CLOSE_TAGS[1]
-        );
+        let input = format!("{}thoughts{}hello", THINK_OPEN_TAGS[1], THINK_CLOSE_TAGS[1]);
         assert_eq!(p.feed(&input), "hello");
         assert_eq!(p.take_tool_calls().len(), 0);
     }

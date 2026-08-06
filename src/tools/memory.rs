@@ -101,9 +101,6 @@ mod tests {
             .execute(&serde_json::json!({"entry": "test"}), "cli")
             .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("子 agent"));
+        assert!(result.unwrap_err().to_string().contains("子 agent"));
     }
 }

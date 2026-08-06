@@ -147,6 +147,23 @@ confirm_mode = "always"       # always / whitelist / none
 - 不加"先占着"的 config key 或 feature flag——没有具体用例就不写。
 - 生产路径不用 `unwrap()` / `expect()`——传播错误，或注释说明为何不可能 panic。
 
+### 提交前检查（对齐 CI 质量门）
+
+CI 在 `push` / PR 时对 `main` 跑三道门：`cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → `cargo test`。本地未跑这些检查，是 CI 频繁变红的主因。约定如下：
+
+- **每次 commit 前**：跑 `cargo fmt --all`（写，自动格式化，保持提交历史干净）。
+- **每次 push 前**：跑与 CI 完全一致的检查，确认能绿再推：
+  ```bash
+  cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+  ```
+- 平台相关测试（依赖 Windows / Linux / macOS 特有行为）必须用 `#[cfg(target_os = "...")]` 门控，避免在非目标平台误报失败。
+- 推荐把上面两步接入 git hook（`pre-commit` 跑 fmt、`pre-push` 跑 clippy+test），或封装成 `cargo xtask ci` / `make check`，避免手动记忆。
+
+### 发版
+
+- 打 `v*` 形式的 tag（如 `v0.1.0`）并 `git push origin <tag>` 触发 `release.yml`，自动构建多平台二进制并上传到 GitHub Releases。
+- tag 必须带 `v` 前缀，否则 release 工作流不触发。
+
 ## 设计文档索引
 
 - [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 到 ADR-0010）

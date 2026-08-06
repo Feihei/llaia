@@ -219,7 +219,10 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         anyhow::bail!("no service channel enabled in config (QQ/WebUI/...)");
     }
 
-    tracing::info!(channels = tasks.len(), "serve mode: channels running, press Ctrl+C to stop");
+    tracing::info!(
+        channels = tasks.len(),
+        "serve mode: channels running, press Ctrl+C to stop"
+    );
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
@@ -254,7 +257,10 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
     // provider 配置检查：无 [provider.<id>] section 时 warn（不 error，serve 可降级启动）
     if cfg.provider.is_empty() {
         println!("\n[warn] 未配置任何 provider，llaia serve 将以降级模式启动（聊天不可用，WebUI 配置可用）");
-        println!("       建议：运行 `llaia init` 后编辑 {}/config.toml 取消 [provider.default] 注释", config_dir.display());
+        println!(
+            "       建议：运行 `llaia init` 后编辑 {}/config.toml 取消 [provider.default] 注释",
+            config_dir.display()
+        );
     } else {
         for (pid, p) in &cfg.provider {
             println!("\nprovider.{}: {}", pid, p.base_url);
@@ -275,10 +281,16 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
             let workspace = config_dir.join("workspace");
             let db_path = workspace.join("sessions.db");
             if !db_path.exists() {
-                println!("[warn] sessions.db 不存在：{}（首次启动自动创建）", db_path.display());
+                println!(
+                    "[warn] sessions.db 不存在：{}（首次启动自动创建）",
+                    db_path.display()
+                );
             } else {
-                println!("sessions.db: {} ({} bytes)", db_path.display(),
-                    std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0));
+                println!(
+                    "sessions.db: {} ({} bytes)",
+                    db_path.display(),
+                    std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0)
+                );
             }
             return Ok(());
         }
@@ -292,7 +304,10 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
     // sessions.db 存在性检查
     let db_path = workspace.join("sessions.db");
     if !db_path.exists() {
-        println!("[warn] sessions.db 不存在：{}（首次启动自动创建）", db_path.display());
+        println!(
+            "[warn] sessions.db 不存在：{}（首次启动自动创建）",
+            db_path.display()
+        );
     } else {
         println!(
             "sessions.db: {} ({} bytes)",
