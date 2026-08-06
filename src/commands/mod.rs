@@ -345,6 +345,35 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         }
     }
 
+    // cron.toml 检查
+    let cron_path = config_dir.join("cron.toml");
+    if cron_path.exists() {
+        match crate::cron::CronConfig::load(&cron_path) {
+            Ok(c) => {
+                let enabled = c.task.iter().filter(|t| t.enabled).count();
+                println!(
+                    "\ncron.toml: {} ({} tasks, {} enabled)",
+                    cron_path.display(),
+                    c.task.len(),
+                    enabled
+                );
+                for t in &c.task {
+                    println!(
+                        "  - {} [{:?}] schedule={} channel={} {}",
+                        t.id,
+                        t.mode,
+                        t.schedule,
+                        t.channel,
+                        if t.enabled { "enabled" } else { "disabled" }
+                    );
+                }
+            }
+            Err(e) => println!("\n[warn] cron.toml 解析失败: {}", e),
+        }
+    } else {
+        println!("\ncron.toml: 不存在（无 cron 任务，运行 `llaia init` 生成模板）");
+    }
+
     let agent_cfg = match cfg.agent.get("main") {
         Some(a) => a,
         None => {

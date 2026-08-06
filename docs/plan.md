@@ -219,17 +219,17 @@
 
 ### P3-c：cron 定时任务
 
-**状态**：⏳ 计划中
+**状态**：✅ 已完成
 
 **目标**：用户配置定时任务，到点后自动执行。双模式：直接跑工具链 / 唤醒 agent 跑一轮对话。
 
-- [ ] cron 配置：`~/.llaia/cron.toml` 或 `[cron.<id>]` section，含 `schedule`（5 字段 cron 表达式）、`mode`（`tools` / `agent`）、`task`（工具链 JSON / agent 提示词）、`channel`（结果推送目标）
-- [ ] cron 调度器：`tokio_cron_scheduler` 或自实现，进程启动时加载所有任务
-- [ ] tools 模式：到点后直接按预定义工具链顺序执行（如 `tavily_search` → `memory_write` → `send_message`），不消耗 LLM token
-- [ ] agent 模式：到点后唤醒主 agent，注入系统消息（"8:00 到了，按计划执行 X"），agent 自主调工具完成任务并回复用户
-- [ ] 结果推送：通过指定 channel（QQ/CLI/Web）回推结果
-- [ ] 持久化：cron 任务定义在 config 文件，进程重启后自动恢复
-- [ ] WebUI 管理：在配置面板加 cron tab，可视化增删改查
+- [x] cron 配置：`~/.llaia/cron.toml` 或 `[cron.<id>]` section，含 `schedule`（5 字段 cron 表达式）、`mode`（`tools` / `agent`）、`task`（工具链 JSON / agent 提示词）、`channel`（结果推送目标）
+- [x] cron 调度器：`tokio_cron_scheduler` 或自实现，进程启动时加载所有任务
+- [x] tools 模式：到点后直接按预定义工具链顺序执行（如 `tavily_search` → `memory_write` → `send_message`），不消耗 LLM token
+- [x] agent 模式：到点后唤醒主 agent，注入系统消息（"8:00 到了，按计划执行 X"），agent 自主调工具完成任务并回复用户
+- [x] 结果推送：通过指定 channel（QQ/CLI/Web）回推结果
+- [x] 持久化：cron 任务定义在 config 文件，进程重启后自动恢复
+- [x] WebUI 管理：在配置面板加 cron tab，可视化增删改查
 
 **参考**：[ADR-0013](adr/0013-cron-scheduling.md)
 
