@@ -27,6 +27,7 @@
     <div class="tabs">
       <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
       <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">Config</div>
+      <div class="tab" :class="{active: tab==='cron'}" @click="switchCron()">Cron</div>
       <div class="tab" :class="{active: tab==='about'}" @click="switchAbout()">About</div>
     </div>
   </header>
@@ -163,6 +164,89 @@
             <button @click="validateRaw()">Validate</button>
             <button @click="saveRaw()">Save</button>
             <span x-text="rawMsg"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div id="cron-pane" class="pane" :class="{active: tab==='cron'}">
+      <div class="sidebar">
+        <div :class="{active: cronSection==='tasks'}" @click="switchCronSection('tasks')">Tasks</div>
+        <div :class="{active: cronSection==='history'}" @click="switchCronSection('history')">History</div>
+        <div :class="{active: cronSection==='raw'}" @click="switchCronSection('raw')">Raw TOML</div>
+      </div>
+      <div class="content">
+        <div class="config-head">&#x276F; CRON <span x-text="cronSection"></span></div>
+
+        <template x-if="cronSection==='tasks'">
+          <div>
+            <template x-if="!cronTasks || cronTasks.length === 0">
+              <div class="placeholder">No cron tasks. Edit cron.toml or run <code>llaia init</code>.</div>
+            </template>
+            <template x-if="cronTasks && cronTasks.length > 0">
+              <table class="cron-table">
+                <thead>
+                  <tr><th>id</th><th>schedule</th><th>mode</th><th>channel</th><th>enabled</th><th>actions</th></tr>
+                </thead>
+                <tbody>
+                  <template x-for="t in cronTasks" :key="t.id">
+                    <tr>
+                      <td x-text="t.id"></td>
+                      <td x-text="t.schedule"></td>
+                      <td x-text="t.mode"></td>
+                      <td x-text="t.channel"></td>
+                      <td x-text="t.enabled ? '✓' : '✗'"></td>
+                      <td><button @click="triggerCron(t.id)">Trigger</button></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </template>
+            <div class="cron-toolbar">
+              <button @click="loadCron()">Refresh</button>
+              <span class="cron-msg" x-text="cronMsg"></span>
+            </div>
+            <div class="hint">Triggered tasks run in the background; results push to the configured channel.</div>
+          </div>
+        </template>
+
+        <template x-if="cronSection==='history'">
+          <div>
+            <template x-if="!cronHistory || cronHistory.length === 0">
+              <div class="placeholder">No cron-triggered sessions yet.</div>
+            </template>
+            <template x-if="cronHistory && cronHistory.length > 0">
+              <table class="cron-table">
+                <thead>
+                  <tr><th>channel</th><th>created</th><th>last activity</th><th>tokens</th><th>state</th></tr>
+                </thead>
+                <tbody>
+                  <template x-for="s in cronHistory" :key="s.session_uuid">
+                    <tr>
+                      <td x-text="s.channel"></td>
+                      <td x-text="s.created_at"></td>
+                      <td x-text="s.last_activity"></td>
+                      <td x-text="s.token_count"></td>
+                      <td x-text="s.state"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </template>
+            <div class="cron-toolbar">
+              <button @click="loadCronHistory()">Refresh</button>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="cronSection==='raw'">
+          <div>
+            <textarea x-ref="cronRawEditor" x-model="cronRaw" style="width:100%;height:500px;font-family:monospace"></textarea>
+            <div class="cron-toolbar">
+              <button @click="saveCronRaw()">Save</button>
+              <span class="cron-msg" x-text="cronRawMsg"></span>
+            </div>
+            <div class="hint">Saving cron.toml requires restarting <code>llaia serve</code> to take effect.</div>
           </div>
         </template>
       </div>

@@ -19,6 +19,14 @@ function llaiaApp() {
     rawMsg: '',
     // about
     status: null,
+    // cron
+    cronSection: 'tasks',
+    cronTasks: [],
+    cronHistory: [],
+    cronRaw: '',
+    cronMsg: '',
+    cronRawMsg: '',
+    _cronEditor: null,
 
     async init() {
       // prefer URL query token, then localStorage
@@ -130,6 +138,11 @@ function llaiaApp() {
           if (ev.type === 'interrupted') this.messages.push({ role: 'tool', text: '[Interrupted]' });
           break;
         case 'busy': alert(ev.reason); break;
+        case 'proactive':
+          // cron 任务结果等主动推送：插入 chat 流便于用户查看
+          this.messages.push({ role: 'tool', text: `[cron] ${ev.message}` });
+          this.scrollBottom();
+          break;
         case 'pong': break;
       }
     },
@@ -283,6 +296,61 @@ function llaiaApp() {
       try { j = await r.json(); } catch { j = {}; }
       if (r.ok) { alert('Saved, restart llaia to take effect'); this.switchConfig(); }
       else { alert('Save failed: ' + (j.error || r.status) + (j.line ? '\nPosition (char offset): ' + j.line : '')); }
+    },
+
+    // ---- cron ----
+    async switchCron() {
+      this.tab = 'cron';
+      if (this.cronSection === 'tasks') await this.loadCron();
+      else if (this.cronSection === 'history') await this.loadCronHistory();
+      else if (this.cronSection === 'raw') await this.loadCronRaw();
+    },
+    async switchCronSection(name) {
+      this.cronSection = name;
+      if (name === 'tasks') await this.loadCron();
+      else if (name === 'history') await this.loadCronHistory();
+      else if (name === 'raw') { await this.loadCronRaw(); this.$nextTick(() => this.initCronEditor()); }
+    },
+    async loadCron() {
+      this.cronMsg = '';
+      const r = await this.apiFetch('/api/cron');
+      if (!this.authed) return;
+      if (r.ok) { this.cronTasks = await r.json(); }
+      else if (r.status === 503) { this.cronTasks = []; this.cronMsg = 'Cron scheduler not running'; }
+      else { this.cronMsg = 'Load failed: ' + r.status; }
+    },
+    async loadCronHistory() {
+      const r = await this.apiFetch('/api/cron/history');
+      if (!this.authed) return;
+      if (r.ok) { this.cronHistory = await r.json(); }
+    },
+    async loadCronRaw() {
+      const r = await this.apiFetch('/api/cron/raw');
+      if (!this.authed) return;
+      if (r.ok) { const j = await r.json(); this.cronRaw = j.raw || ''; this.cronRawMsg = ''; }
+    },
+    initCronEditor() {
+      if (this._cronEditor) { this._cronEditor.setValue(this.cronRaw); return; }
+      if (this.$refs.cronRawEditor && window.CodeMirror) {
+        this._cronEditor = CodeMirror.fromTextArea(this.$refs.cronRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
+        this._cronEditor.setValue(this.cronRaw);
+      }
+    },
+    async saveCronRaw() {
+      const toml = this._cronEditor ? this._cronEditor.getValue() : this.cronRaw;
+      const r = await this.apiFetch('/api/cron/raw', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ raw: toml }) });
+      if (!this.authed) return;
+      let j;
+      try { j = await r.json(); } catch { j = {}; }
+      if (r.ok) { this.cronRawMsg = '✓ Saved (restart serve to apply)'; }
+      else { this.cronRawMsg = '✗ ' + (j.error || r.status) + (j.line ? ' (char: ' + j.line + ')' : ''); }
+    },
+    async triggerCron(id) {
+      this.cronMsg = `Triggering ${id}...`;
+      const r = await this.apiFetch(`/api/cron/${encodeURIComponent(id)}/trigger`, { method: 'POST' });
+      if (!this.authed) return;
+      if (r.ok) { this.cronMsg = `✓ Task ${id} triggered`; }
+      else { let j; try { j = await r.json(); } catch { j = {}; } this.cronMsg = '✗ Trigger failed: ' + (j.error || r.status); }
     },
 
     // ---- about ----
