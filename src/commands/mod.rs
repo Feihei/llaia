@@ -37,8 +37,8 @@ dir = "~/.llaia/logs"
 
 [channels.qq]
 enabled = false
-app_id = "${QQ_APP_ID}"
-app_secret = "${QQ_APP_SECRET}"
+app_id = ""                    # 支持 "${QQ_APP_ID}" 环境变量引用
+app_secret = ""                # 支持 "${QQ_APP_SECRET}" 环境变量引用
 confirm_mode = "none"        # none / always / session
 
 [webui]
@@ -52,7 +52,7 @@ command_policy = "blacklist"
 command_whitelist = []
 
 [tools.tavily]
-api_key = "${TAVILY_API_KEY}"
+api_key = ""                   # 支持 "${TAVILY_API_KEY}" 环境变量引用
 "#;
 
 /// llaia init：生成 ~/.llaia/ 目录骨架 + 基础模板，提示进入 WebUI 完成配置。
