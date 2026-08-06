@@ -3,6 +3,7 @@ pub mod audit;
 pub mod channels;
 pub mod commands;
 pub mod config;
+pub mod cron;
 pub mod image_utils;
 pub mod log;
 pub mod memory;
