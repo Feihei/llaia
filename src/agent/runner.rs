@@ -65,7 +65,11 @@ pub async fn execute_tool_calls(
         if tool.requires_confirm() && confirm_mode != "none" {
             // always / session 模式下，非 CLI channel 无法弹确认，拒绝
             if channel != "cli" {
-                let msg = format!("该操作需在 CLI 确认：{}", call.name);
+                let msg = format!(
+                    "工具 {} 需要确认后执行，但当前渠道（{}）不支持交互确认，已跳过。\
+如需放行，请在 config.toml 设置 [channels.qq] confirm_mode = \"none\"，或改用 CLI 渠道。",
+                    call.name, channel
+                );
                 tracing::warn!(tool = %call.name, mode = confirm_mode, channel, "blocked by confirm_mode");
                 if let Some(a) = &audit {
                     let _ = a
@@ -238,7 +242,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.as_text().contains("需在 CLI 确认"));
+        assert!(msgs[0].content.as_text().contains("confirm_mode"));
 
         // qq + none：应执行
         let msgs = execute_tool_calls(&reg, &calls, "qq", "none", "main", None, None)
