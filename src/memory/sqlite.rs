@@ -198,6 +198,32 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
     pub fn all_messages(&self, session_id: i64) -> Result<Vec<MessageRow>> {
         self.recent_messages(session_id, i64::MAX)
     }
+
+    /// 按 channel 前缀查询会话（用于 cron 历史过滤，channel LIKE 'cron:%'）。
+    /// 按 last_activity 降序，最多 200 条。
+    pub fn list_sessions_by_channel_prefix(&self, prefix: &str) -> Result<Vec<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_uuid, channel, created_at, last_activity, token_count, state
+             FROM sessions WHERE channel LIKE ?1 ORDER BY last_activity DESC LIMIT 200",
+        )?;
+        let pattern = format!("{}%", prefix);
+        let rows = stmt.query_map(rusqlite::params![pattern], |row| {
+            Ok(SessionRow {
+                session_uuid: row.get(0)?,
+                channel: row.get(1)?,
+                created_at: row.get(2)?,
+                last_activity: row.get(3)?,
+                token_count: row.get(4)?,
+                state: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -264,5 +290,52 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_list_sessions_by_channel_prefix() {
+        let store = SessionStore::open_in_memory().unwrap();
+        store.create_session("uuid1", "qq").unwrap();
+        store.create_session("uuid2", "cron:morning_news").unwrap();
+        store.create_session("uuid3", "web").unwrap();
+        store.create_session("uuid4", "cron:health_check").unwrap();
+
+        let rows = store.list_sessions_by_channel_prefix("cron:").unwrap();
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            assert!(
+                r.channel.starts_with("cron:"),
+                "expected channel starting with 'cron:', got {}",
+                r.channel
+            );
+        }
+        // 按 last_activity 降序：uuid4 后创建应排在前
+        assert_eq!(rows[0].session_uuid, "uuid4");
+        assert_eq!(rows[1].session_uuid, "uuid2");
+        // 验证字段完整
+        assert_eq!(rows[0].channel, "cron:health_check");
+        assert_eq!(rows[0].state, "idle");
+        assert_eq!(rows[0].token_count, 0);
+    }
+
+    #[test]
+    fn test_list_sessions_by_channel_prefix_no_match() {
+        let store = SessionStore::open_in_memory().unwrap();
+        store.create_session("uuid1", "qq").unwrap();
+        let rows = store.list_sessions_by_channel_prefix("cron:").unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_list_sessions_by_channel_prefix_qq() {
+        let store = SessionStore::open_in_memory().unwrap();
+        store.create_session("u1", "qq").unwrap();
+        store.create_session("u2", "qq").unwrap();
+        store.create_session("u3", "web").unwrap();
+        let rows = store.list_sessions_by_channel_prefix("qq").unwrap();
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            assert_eq!(r.channel, "qq");
+        }
     }
 }
