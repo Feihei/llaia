@@ -742,7 +742,8 @@ workspace = "~/.llaia"
         );
         // 未定义的 env var 替换为空字符串，让 serve 能进降级模式
         assert_eq!(
-            config.provider.get("default").unwrap().api_key, "",
+            config.provider.get("default").unwrap().api_key,
+            "",
             "missing env var should be replaced with empty string"
         );
     }

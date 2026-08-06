@@ -9,7 +9,7 @@ pub struct SessionStore {
     conn: Mutex<Connection>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionRow {
     pub session_uuid: String,
     pub channel: String,

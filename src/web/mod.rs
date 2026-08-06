@@ -1,4 +1,5 @@
 use crate::agent::AgentRegistry;
+use crate::channels::web::WebEvent;
 use crate::config::Config;
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
 use crate::provider::Provider;
@@ -21,6 +22,16 @@ pub struct AppState {
     pub config_path: std::path::PathBuf,
     pub workspace: std::path::PathBuf,
     pub token: Arc<String>,
+    /// active WS 连接注册表：id → event sender，用于主动推送（cron 任务结果等）
+    pub active_ws: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<WebEvent>>>,
+    >,
+    /// WS 连接 id 自增计数器
+    pub next_ws_id: Arc<std::sync::atomic::AtomicU64>,
+    /// cron.toml 路径（供 raw 编辑接口读写）
+    pub cron_path: std::path::PathBuf,
+    /// CronScheduler 实例（None 时 cron API 返回 503）
+    pub cron_scheduler: Option<Arc<crate::cron::CronScheduler>>,
 }
 
 /// 生成 32 字节随机 hex token
@@ -542,6 +553,125 @@ pub async fn get_status(
     axum::Json(info).into_response()
 }
 
+/// GET /api/cron → 列出所有 cron 任务定义（含 disabled）
+pub async fn list_cron(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    match &state.cron_scheduler {
+        Some(s) => {
+            let tasks = s.list_tasks().await;
+            axum::Json(tasks).into_response()
+        }
+        None => json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cron scheduler not running",
+        ),
+    }
+}
+
+/// GET /api/cron/history → cron 触发的会话历史（channel LIKE 'cron:%'）
+pub async fn cron_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    match agent.session_store.list_sessions_by_channel_prefix("cron:") {
+        Ok(rows) => axum::Json(rows).into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("query: {}", e)),
+    }
+}
+
+/// POST /api/cron/:id/trigger → 手动触发一个任务
+pub async fn trigger_cron(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    match &state.cron_scheduler {
+        Some(s) => match s.trigger(&id).await {
+            Ok(()) => axum::Json(serde_json::json!({ "ok": true })).into_response(),
+            Err(e) => json_err(StatusCode::NOT_FOUND, &format!("trigger: {}", e)),
+        },
+        None => json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cron scheduler not running",
+        ),
+    }
+}
+
+/// GET /api/cron/raw → cron.toml 原始文本
+pub async fn get_cron_raw(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    if !state.cron_path.exists() {
+        return axum::Json(serde_json::json!({ "raw": "" })).into_response();
+    }
+    match std::fs::read_to_string(&state.cron_path) {
+        Ok(content) => axum::Json(serde_json::json!({ "raw": content })).into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("read: {}", e)),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CronRawBody {
+    pub raw: String,
+}
+
+/// PUT /api/cron/raw → 写 cron.toml 文本（先校验可解析，不热加载，需重启 serve 生效）
+pub async fn put_cron_raw(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::Json(body): axum::Json<CronRawBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    // 先校验能解析
+    let cfg: crate::cron::CronConfig = match toml::from_str(&body.raw) {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = e.to_string();
+            let line = e.span().map(|s| s.start.to_string()).unwrap_or_default();
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": msg, "line": line })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = std::fs::write(&state.cron_path, &body.raw) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e));
+    }
+    tracing::info!(
+        tasks = cfg.task.len(),
+        "cron.toml updated (reload requires restart)"
+    );
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "note": "cron.toml saved (restart serve to apply)"
+    }))
+    .into_response()
+}
+
 /// 构建系统级 Web 路由（不含 WS）。
 /// 返回 `Router<AppState>`，由调用方合并 WS 路由后统一 `with_state`。
 pub fn build_system_routes() -> axum::Router<AppState> {
@@ -560,6 +690,14 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         )
         .route("/api/config/validate", axum::routing::post(validate_config))
         .route("/api/status", axum::routing::get(get_status))
+        // cron API
+        .route("/api/cron", axum::routing::get(list_cron))
+        .route(
+            "/api/cron/raw",
+            axum::routing::get(get_cron_raw).put(put_cron_raw),
+        )
+        .route("/api/cron/history", axum::routing::get(cron_history))
+        .route("/api/cron/:id/trigger", axum::routing::post(trigger_cron))
 }
 
 #[cfg(test)]

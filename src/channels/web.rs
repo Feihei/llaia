@@ -22,18 +22,39 @@ use tokio::sync::{mpsc, Notify, RwLock};
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebEvent {
-    Chunk { delta: String },
-    ToolStart { id: String, name: String },
-    ToolResult { id: String, output: String },
-    Media { path: String, kind: MediaKind },
+    Chunk {
+        delta: String,
+    },
+    ToolStart {
+        id: String,
+        name: String,
+    },
+    ToolResult {
+        id: String,
+        output: String,
+    },
+    Media {
+        path: String,
+        kind: MediaKind,
+    },
     Done,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     Interrupted,
     // 协议层
     Pong,
     AuthOk,
-    AuthFailed { reason: String },
-    Busy { reason: String },
+    AuthFailed {
+        reason: String,
+    },
+    Busy {
+        reason: String,
+    },
+    /// 主动推送（cron 任务结果等，非 turn 事件）
+    Proactive {
+        message: String,
+    },
 }
 
 /// turn 结束信号：on_done/on_error/on_interrupted 三个终态都发送
@@ -140,6 +161,12 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<WebEvent>(64);
     let (end_tx, mut end_rx) = tokio::sync::mpsc::channel::<TurnEndSignal>(4);
 
+    // 注册到 active_ws（用于 cron 主动推送广播）
+    let ws_id = state
+        .next_ws_id
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.active_ws.lock().await.insert(ws_id, tx.clone());
+
     // 发 auth_ok
     let _ = ws_sink
         .send(Message::Text(
@@ -220,6 +247,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         stop.notify_one();
         let _ = h.await;
     }
+    // 从 active_ws 注销（避免向已关闭连接广播）
+    state.active_ws.lock().await.remove(&ws_id);
     write_task.abort();
 }
 
@@ -275,6 +304,13 @@ pub struct WebChannel {
     pub config_full: Arc<RwLock<Config>>,
     pub config_path: PathBuf,
     pub workspace: PathBuf,
+    /// active WS 连接注册表：id → event sender，用于主动推送（cron 任务结果等）
+    pub active_ws: Arc<tokio::sync::Mutex<std::collections::HashMap<u64, mpsc::Sender<WebEvent>>>>,
+    /// cron.toml 路径（供 raw 编辑接口读写）
+    pub cron_path: PathBuf,
+    /// CronScheduler 共享槽（serve_cmd 启动 cron 后通过 set_cron_scheduler 注入；
+    /// build_router 时读取快照填 AppState）。启动失败保持 None，cron API 返回 503。
+    pub cron_scheduler: Arc<std::sync::Mutex<Option<Arc<crate::cron::CronScheduler>>>>,
 }
 
 impl WebChannel {
@@ -285,13 +321,22 @@ impl WebChannel {
         config_path: PathBuf,
         workspace: PathBuf,
     ) -> Self {
+        let cron_path = config_path.with_file_name("cron.toml");
         Self {
             config: web_config,
             registry,
             config_full,
             config_path,
             workspace,
+            active_ws: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            cron_path,
+            cron_scheduler: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// 注入 CronScheduler（serve_cmd 在 CronScheduler::start 成功后调用，spawn 前）
+    pub fn set_cron_scheduler(&self, s: Arc<crate::cron::CronScheduler>) {
+        *self.cron_scheduler.lock().unwrap() = Some(s);
     }
 
     pub fn build_router(&self) -> axum::Router {
@@ -303,17 +348,52 @@ impl WebChannel {
         } else {
             self.config.token.clone()
         };
+        // 读取 cron_scheduler 快照（短锁，clone Arc）
+        let cron_scheduler = self.cron_scheduler.lock().unwrap().clone();
         let state = AppState {
             registry: self.registry.clone(),
             config: self.config_full.clone(),
             config_path: self.config_path.clone(),
             workspace: self.workspace.clone(),
             token: Arc::new(token),
+            active_ws: self.active_ws.clone(),
+            next_ws_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            cron_path: self.cron_path.clone(),
+            cron_scheduler,
         };
         // 系统级路由 + WS 路由，共享同一个 state
         build_system_routes()
             .route("/ws", axum::routing::get(ws_handler))
             .with_state(state)
+    }
+
+    /// 主动推送：向所有 active WS 连接广播 Proactive 事件。
+    /// 断开（closed）的连接在推送时顺带清理。
+    pub async fn send_proactive(&self, message: &str) {
+        let mut to_remove = Vec::new();
+        {
+            let mut ws = self.active_ws.lock().await;
+            for (id, sender) in ws.iter() {
+                if sender.is_closed() {
+                    to_remove.push(*id);
+                    continue;
+                }
+                let _ = sender.try_send(WebEvent::Proactive {
+                    message: message.to_string(),
+                });
+            }
+            for id in to_remove {
+                ws.remove(&id);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl crate::cron::ProactivePusher for WebChannel {
+    async fn push(&self, message: &str) -> anyhow::Result<()> {
+        self.send_proactive(message).await;
+        Ok(())
     }
 }
 
