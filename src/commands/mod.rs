@@ -55,6 +55,39 @@ command_whitelist = []
 api_key = ""                   # 支持 "${TAVILY_API_KEY}" 环境变量引用
 "#;
 
+/// init 默认 cron.toml 模板：所有任务注释，仅作文档。
+const CRON_TEMPLATE: &str = r#"# LLAIA cron 定时任务配置
+# 字段说明见 docs/adr/0013-cron-scheduling.md
+# schedule: 5 字段 cron 表达式（分 时 日 月 周），内部自动转 6 字段供调度器使用
+# mode: agent（唤醒主 agent）/ tools（直接跑工具链）
+# channel: qq / cli / web（结果推送目标；cli 无持久连接用 NoopPusher 丢弃结果）
+# enabled: 默认 true；false 则调度器不注册
+
+# 示例：每天 8:00 唤醒 agent 查新闻推送
+# [[task]]
+# id = "morning_news"
+# schedule = "0 8 * * *"
+# mode = "agent"
+# channel = "qq"
+# enabled = true
+# prompt = """
+# 现在是早上 8:00。请查今天的 AI 科技热点，
+# 整理成 3-5 条简讯推送给我。
+# """
+
+# 示例：每 30 分钟跑工具链（不消耗 LLM token）
+# [[task]]
+# id = "health_check"
+# schedule = "*/30 * * * *"
+# mode = "tools"
+# channel = "web"
+# enabled = true
+# steps = [
+#   { tool = "tavily_search", args = { query = "llaia" } },
+#   { tool = "memory_write", args = { text = "checked at {{now}}" } },
+# ]
+"#;
+
 /// llaia init：生成 ~/.llaia/ 目录骨架 + 基础模板，提示进入 WebUI 完成配置。
 /// 幂等：已存在的文件不覆盖（除非 force）。
 pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
@@ -87,7 +120,12 @@ pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     write_file_if_needed(&memory_path, crate::memory::MEMORY_TEMPLATE, force)?;
     println!("✓ 已生成 SOUL.md / USER.md / MEMORY.md 模板");
 
-    // 4. 终端输出引导
+    // 4. 生成 cron.toml 模板
+    let cron_path = config_dir.join("cron.toml");
+    write_file_if_needed(&cron_path, CRON_TEMPLATE, force)?;
+    println!("✓ 已生成 cron.toml（定时任务模板，默认全部注释）");
+
+    // 5. 终端输出引导
     println!();
     println!("下一步：");
     println!("  1. 编辑 ~/.llaia/config.toml，取消 [provider.default] / [agent.main] 注释并填入你的 LLM 端点");
@@ -177,33 +215,43 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
 
     let mut tasks = Vec::new();
 
-    if config.channels.qq.enabled {
-        let qq = std::sync::Arc::new(crate::channels::qq::QqChannel::new(
-            config.channels.qq.clone(),
-        ));
-        let registry = registry.clone();
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = crate::channels::Channel::run(qq, registry).await {
-                tracing::error!(error = %e, "QqChannel exited with error");
-            }
-        }));
-        tracing::info!("QqChannel started");
-    }
+    // 主 agent workspace（QQ channel 需注入用于 cron 主动推送时读 USER.md）
+    let workspace = {
+        let a = registry.main.lock().await;
+        a.workspace.clone()
+    };
+
+    // QQ channel：启用时构造并 spawn，同时克隆一份 Arc 给 cron pusher
+    let qq_pusher_for_cron: Option<std::sync::Arc<dyn crate::cron::ProactivePusher>> =
+        if config.channels.qq.enabled {
+            let qq = std::sync::Arc::new(
+                crate::channels::qq::QqChannel::new(config.channels.qq.clone())
+                    .with_workspace(workspace.clone()),
+            );
+            let pusher: std::sync::Arc<dyn crate::cron::ProactivePusher> = qq.clone();
+            let registry = registry.clone();
+            tasks.push(tokio::spawn(async move {
+                if let Err(e) = crate::channels::Channel::run(qq, registry).await {
+                    tracing::error!(error = %e, "QqChannel exited with error");
+                }
+            }));
+            tracing::info!("QqChannel started");
+            Some(pusher)
+        } else {
+            None
+        };
 
     // webui 随 serve 无条件启动（serve 模式下用户唯一保证可用的交互入口）
-    {
-        let workspace = {
-            let a = registry.main.lock().await;
-            a.workspace.clone()
-        };
+    let web_pusher_for_cron: std::sync::Arc<dyn crate::cron::ProactivePusher> = {
         let config_path = config_dir.join("config.toml");
         let web = std::sync::Arc::new(crate::channels::web::WebChannel::new(
             config.webui.clone(),
             registry.clone(),
             std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
             config_path,
-            workspace,
+            workspace.clone(),
         ));
+        let pusher: std::sync::Arc<dyn crate::cron::ProactivePusher> = web.clone();
         let registry_clone = registry.clone();
         let host = config.webui.host.clone();
         let port = config.webui.port;
@@ -213,11 +261,35 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
             }
         }));
         tracing::info!("WebChannel starting on {}:{}", host, port);
-    }
+        pusher
+    };
 
     if tasks.is_empty() {
         anyhow::bail!("no service channel enabled in config (QQ/WebUI/...)");
     }
+
+    // 启动 cron 调度器（仅 serve 模式）
+    let cron_path = config_dir.join("cron.toml");
+    let mut pushers: std::collections::HashMap<
+        String,
+        std::sync::Arc<dyn crate::cron::ProactivePusher>,
+    > = std::collections::HashMap::new();
+    if let Some(p) = qq_pusher_for_cron {
+        pushers.insert("qq".into(), p);
+    }
+    pushers.insert("web".into(), web_pusher_for_cron);
+    // cli：无持久连接，不注册 pusher（channel="cli" 的任务会用 NoopPusher 丢弃结果）
+    let _cron = match crate::cron::CronScheduler::start(&cron_path, registry.clone(), pushers).await
+    {
+        Ok(s) => {
+            tracing::info!("CronScheduler started");
+            Some(s)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "CronScheduler start failed, cron disabled");
+            None
+        }
+    };
 
     tracing::info!(
         channels = tasks.len(),
