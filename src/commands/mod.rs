@@ -193,7 +193,9 @@ pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     println!();
     println!("Next steps:");
     println!("  1. edit ~/.llaia/.env and fill in API keys and other secrets");
-    println!("  2. edit ~/.llaia/config.toml, set model reference in [agent.main] (e.g. default.qwen)");
+    println!(
+        "  2. edit ~/.llaia/config.toml, set model reference in [agent.main] (e.g. default.qwen)"
+    );
     println!("     or run llaia serve and configure via WebUI at http://127.0.0.1:51217");
     println!("  3. start the service: llaia serve");
     println!("  4. CLI debug: llaia chat");
@@ -484,6 +486,31 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         }
     } else {
         println!("\nmcp.toml: not found (no MCP server; run `llaia init` to generate a template)");
+    }
+
+    // skills 检查（只扫描不种子，doctor 不创建目录）
+    let skills_dir = config_dir.join("skills");
+    if skills_dir.exists() {
+        let skills = crate::skill::loader::scan_skills(&skills_dir);
+        let active = skills.iter().filter(|s| s.active).count();
+        println!(
+            "\nskills/: {} ({} skills, {} active)",
+            skills_dir.display(),
+            skills.len(),
+            active
+        );
+        for s in &skills {
+            println!(
+                "  - {} [{}] {}",
+                s.name,
+                if s.active { "active" } else { "inactive" },
+                s.description
+            );
+        }
+    } else {
+        println!(
+            "\nskills/: not found (built-in example skills are seeded on first chat/serve start)"
+        );
     }
 
     let agent_cfg = match cfg.agent.get("main") {

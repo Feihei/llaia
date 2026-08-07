@@ -370,6 +370,7 @@ impl WebChannel {
             cron_scheduler,
             mcp_path: self.cron_path.with_file_name("mcp.toml"),
             mcp_registry: self.mcp_registry.lock().unwrap().clone(),
+            skills_dir: self.cron_path.with_file_name("skills"),
         };
         // 系统级路由 + WS 路由，共享同一个 state
         build_system_routes()

@@ -288,6 +288,7 @@ impl Channel for CliChannel {
 /// 构建单个 Agent 实例。返回 (Agent, 可能的 delegate 工具, 可能的 cron 工具)
 /// is_main=true 且 config 有子 Agent 时，挂载 delegate 工具并返回其引用用于后续注入 registry
 /// is_main=true 时挂载 cron_task 工具并返回其引用用于后续注入 scheduler
+#[allow(clippy::too_many_arguments)]
 async fn build_single_agent(
     config: &Config,
     config_dir: &std::path::Path,
@@ -296,6 +297,7 @@ async fn build_single_agent(
     is_main: bool,
     audit: Option<Arc<crate::audit::AuditLog>>,
     mcp_tools: Vec<Arc<dyn Tool>>,
+    skills: &[crate::skill::SkillManifest],
 ) -> Result<(
     Arc<Mutex<Agent>>,
     Option<Arc<DelegateTool>>,
@@ -387,8 +389,13 @@ async fn build_single_agent(
     };
 
     // 构建完整工具集（用新字段）
+    let skills_dir = config_dir.join("skills");
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(FileRead::new(workspace.clone(), is_main)),
+        Arc::new(FileRead::new(
+            workspace.clone(),
+            is_main,
+            Some(skills_dir.clone()),
+        )),
         Arc::new(FileWrite::new(workspace.clone(), is_main)),
         Arc::new(FileEdit::new(workspace.clone(), is_main)),
         Arc::new(Terminal::new(
@@ -443,6 +450,12 @@ async fn build_single_agent(
         "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}\n\n# WORKSPACE\n{}\n\n工作目录说明：所有工具的相对路径都相对于 WORKSPACE 解析；terminal 命令在 WORKSPACE 下执行。需要写到其它位置时请使用绝对路径。",
         soul, user, memory, workspace.display()
     );
+    // Skills（P3-e）：Progressive Disclosure，只注入 active skill 的 name + description + 路径
+    let skills_prompt = crate::skill::prompt::build_skills_prompt(skills);
+    if !skills_prompt.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&skills_prompt);
+    }
     // 标签降级模式下注入 tool instructions 到 system prompt。
     // 注意：有 delegate 工具时，OnceCell registry 尚未注入（在 build_agent 末尾才注入），
     // 此时 delegate 的 enum 为空。所以推迟到 build_agent 里 set_registry 后再注入。
@@ -546,6 +559,17 @@ pub async fn build_agent(
         tracing::info!(tools = mcp_tools.len(), "MCP tools loaded");
     }
 
+    // Skills（P3-e）：扫描 <config_dir>/skills/，首次运行时种子内置示例并同步 skills.json
+    let skills = crate::skill::loader::load_skills(&config_dir.join("skills"));
+    let active_skills = skills.iter().filter(|s| s.active).count();
+    if !skills.is_empty() {
+        tracing::info!(
+            total = skills.len(),
+            active = active_skills,
+            "skills loaded"
+        );
+    }
+
     // 构建子 Agent（跳过 main）
     let mut sub_agents: Vec<(String, Arc<Mutex<Agent>>)> = Vec::new();
     for (alias, cfg) in &config.agent {
@@ -560,6 +584,7 @@ pub async fn build_agent(
             false,
             Some(audit.clone()),
             mcp_tools.clone(),
+            &skills,
         )
         .await?;
         sub_agents.push((alias.clone(), agent));
@@ -587,6 +612,7 @@ pub async fn build_agent(
         true,
         Some(audit.clone()),
         mcp_tools,
+        &skills,
     )
     .await?;
 

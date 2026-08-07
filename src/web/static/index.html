@@ -64,7 +64,7 @@
         <div :class="{active: configSection==='channels'}" @click="configSection='channels'">Channels</div>
         <div :class="{active: configSection==='tools'}" @click="configSection='tools'">Tools</div>
         <div @click="switchMcp()">MCP ↗</div>
-        <div :class="{active: configSection==='skills'}" @click="configSection='skills'">Skills (WIP)</div>
+        <div :class="{active: configSection==='skills'}" @click="switchSkills()">Skills</div>
         <div :class="{active: configSection==='raw'}" @click="switchRaw()">Raw TOML</div>
       </div>
       <div class="content">
@@ -157,7 +157,56 @@
             <button @click="saveConfig()">Save</button>
           </div>
         </template>
-        <template x-if="configSection==='skills'"><div class="placeholder">Skills config is under development.</div></template>
+        <template x-if="configSection==='skills'">
+          <div>
+            <!-- SKILL.md 编辑视图 -->
+            <template x-if="skillEditing">
+              <div>
+                <h3 x-text="'SKILL.md — ' + skillEditing"></h3>
+                <textarea x-model="skillContent" spellcheck="false" style="width:100%;height:420px;font-family:monospace"></textarea>
+                <div class="cron-toolbar">
+                  <button @click="saveSkillContent()">Save</button>
+                  <button @click="skillEditing=null">Back</button>
+                  <span class="cron-msg" x-text="skillContentMsg"></span>
+                </div>
+                <div class="hint">frontmatter 需含 name 与 description（YAML，用 --- 包裹）。</div>
+              </div>
+            </template>
+            <!-- skill 列表视图 -->
+            <template x-if="!skillEditing">
+              <div>
+                <template x-if="!skills || skills.length === 0">
+                  <div class="placeholder">No skills found. Start <code>llaia serve</code>/<code>llaia chat</code> once to seed built-in examples, or create one below.</div>
+                </template>
+                <template x-for="s in skills" :key="s.name">
+                  <div class="provider-card">
+                    <div class="card-header">
+                      <h3>
+                        <label><input type="checkbox" :checked="s.active" @change="toggleSkill(s.name, $event.target.checked)"> <span x-text="s.name"></span></label>
+                        <span class="hint" x-text="' [' + s.duration + ']'"></span>
+                      </h3>
+                      <div>
+                        <button @click="editSkill(s.name)">Edit</button>
+                        <button class="btn-delete" @click="deleteSkill(s.name)">Delete</button>
+                      </div>
+                    </div>
+                    <div x-text="s.description"></div>
+                    <div class="hint" x-text="s.path"></div>
+                    <template x-if="s.tools && s.tools.length > 0">
+                      <div class="hint" x-text="'suggested tools: ' + s.tools.join(', ')"></div>
+                    </template>
+                  </div>
+                </template>
+                <div class="cron-toolbar">
+                  <button @click="loadSkills()">Refresh</button>
+                  <button class="btn-add" @click="newSkill()">+ New skill</button>
+                  <span class="cron-msg" x-text="skillMsg"></span>
+                </div>
+                <div class="hint">Skills 在启动时注入 system prompt，修改后需重启 <code>llaia serve</code>/<code>llaia chat</code> 生效。</div>
+              </div>
+            </template>
+          </div>
+        </template>
         <template x-if="configSection==='raw'">
           <div>
             <textarea x-ref="rawEditor" x-model="rawToml" style="width:100%;height:500px;font-family:monospace"></textarea>

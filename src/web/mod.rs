@@ -36,6 +36,8 @@ pub struct AppState {
     pub mcp_path: std::path::PathBuf,
     /// McpRegistry 实例（None 时 MCP 状态 API 返回 503；raw 编辑不受影响）
     pub mcp_registry: Option<Arc<crate::mcp::client::McpRegistry>>,
+    /// skills 目录（<config_dir>/skills，供 Skills API 读写）
+    pub skills_dir: std::path::PathBuf,
 }
 
 /// 生成 32 字节随机 hex token
@@ -843,6 +845,192 @@ pub async fn test_mcp(
     }
 }
 
+// ───────────────────────── Skills API ─────────────────────────
+
+/// 校验 URL 路径中的 skill name（防路径穿越）
+fn skill_name_or_err(name: &str) -> Result<(), Box<Response>> {
+    if crate::skill::is_valid_skill_name(name) {
+        Ok(())
+    } else {
+        Err(Box::new(json_err(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid skill name: {}", name),
+        )))
+    }
+}
+
+/// GET /api/skills → skill 列表（name / description / duration / tools / active / path）
+pub async fn list_skills(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let skills = crate::skill::loader::scan_skills(&state.skills_dir);
+    axum::Json(serde_json::json!({ "skills": skills })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct CreateSkillBody {
+    pub name: String,
+    /// SKILL.md 内容；缺省时用默认模板
+    pub content: Option<String>,
+}
+
+/// POST /api/skills → 创建 skill（写 SKILL.md + skills.json 记为 active）
+pub async fn create_skill(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::Json(body): axum::Json<CreateSkillBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    if let Err(r) = skill_name_or_err(&body.name) {
+        return *r;
+    }
+    let dir = state.skills_dir.join(&body.name);
+    if dir.exists() {
+        return json_err(
+            StatusCode::CONFLICT,
+            &format!("skill already exists: {}", body.name),
+        );
+    }
+    let content = match body.content {
+        Some(c) => {
+            if let Err(e) = crate::skill::loader::validate_skill_md(&c) {
+                return json_err(StatusCode::BAD_REQUEST, &format!("invalid SKILL.md: {}", e));
+            }
+            c
+        }
+        None => crate::skill::loader::default_skill_template(&body.name),
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {}", e));
+    }
+    if let Err(e) = std::fs::write(dir.join("SKILL.md"), &content) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e));
+    }
+    let _ = crate::skill::loader::set_active(&state.skills_dir, &body.name, true);
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "note": "skill created (restart serve to inject into system prompt)"
+    }))
+    .into_response()
+}
+
+/// DELETE /api/skills/:name → 删除 skill 目录 + skills.json 条目
+pub async fn delete_skill(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    if let Err(r) = skill_name_or_err(&name) {
+        return *r;
+    }
+    let dir = state.skills_dir.join(&name);
+    if !dir.exists() {
+        return json_err(StatusCode::NOT_FOUND, &format!("skill not found: {}", name));
+    }
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("remove: {}", e));
+    }
+    let _ = crate::skill::loader::remove_entry(&state.skills_dir, &name);
+    axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SkillActiveBody {
+    pub active: bool,
+}
+
+/// PUT /api/skills/:name/active → 切换 active 开关（写 skills.json）
+pub async fn set_skill_active(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<SkillActiveBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    if let Err(r) = skill_name_or_err(&name) {
+        return *r;
+    }
+    match crate::skill::loader::set_active(&state.skills_dir, &name, body.active) {
+        Ok(()) => axum::Json(serde_json::json!({
+            "ok": true,
+            "note": "restart serve to apply"
+        }))
+        .into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("save: {}", e)),
+    }
+}
+
+/// GET /api/skills/:name/content → 读 SKILL.md 原文
+pub async fn get_skill_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    if let Err(r) = skill_name_or_err(&name) {
+        return *r;
+    }
+    let path = state.skills_dir.join(&name).join("SKILL.md");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => axum::Json(serde_json::json!({ "content": content })).into_response(),
+        Err(_) => json_err(StatusCode::NOT_FOUND, &format!("skill not found: {}", name)),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SkillContentBody {
+    pub content: String,
+}
+
+/// PUT /api/skills/:name/content → 写 SKILL.md（先校验 frontmatter 可解析）
+pub async fn put_skill_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<SkillContentBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    if let Err(r) = skill_name_or_err(&name) {
+        return *r;
+    }
+    if let Err(e) = crate::skill::loader::validate_skill_md(&body.content) {
+        return json_err(StatusCode::BAD_REQUEST, &format!("invalid SKILL.md: {}", e));
+    }
+    let dir = state.skills_dir.join(&name);
+    if !dir.exists() {
+        return json_err(StatusCode::NOT_FOUND, &format!("skill not found: {}", name));
+    }
+    if let Err(e) = std::fs::write(dir.join("SKILL.md"), &body.content) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e));
+    }
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "note": "SKILL.md saved (restart serve to inject into system prompt)"
+    }))
+    .into_response()
+}
+
 /// 构建系统级 Web 路由（不含 WS）。
 /// 返回 `Router<AppState>`，由调用方合并 WS 路由后统一 `with_state`。
 pub fn build_system_routes() -> axum::Router<AppState> {
@@ -876,6 +1064,20 @@ pub fn build_system_routes() -> axum::Router<AppState> {
             axum::routing::get(get_mcp_raw).put(put_mcp_raw),
         )
         .route("/api/mcp/:id/test", axum::routing::post(test_mcp))
+        // Skills API
+        .route(
+            "/api/skills",
+            axum::routing::get(list_skills).post(create_skill),
+        )
+        .route("/api/skills/:name", axum::routing::delete(delete_skill))
+        .route(
+            "/api/skills/:name/active",
+            axum::routing::put(set_skill_active),
+        )
+        .route(
+            "/api/skills/:name/content",
+            axum::routing::get(get_skill_content).put(put_skill_content),
+        )
 }
 
 #[cfg(test)]

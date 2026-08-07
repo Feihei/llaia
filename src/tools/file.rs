@@ -286,7 +286,10 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot write to sub-agent"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cannot write to sub-agent"));
     }
 
     #[tokio::test]
@@ -316,29 +319,38 @@ mod tests {
         std::fs::create_dir_all(&ws_path).unwrap();
         let skill_dir = skills_dir.join("demo");
         std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: demo\n---\nskill body").unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\n---\nskill body",
+        )
+        .unwrap();
         std::fs::write(skill_dir.join("secret.txt"), "secret").unwrap();
 
         let tool = FileRead::new(ws_path, true, Some(skills_dir.clone()));
         // SKILL.md 可读（绝对路径）
         let result = tool
-            .execute(&json!({"path": skill_dir.join("SKILL.md").to_str().unwrap()}), "cli")
+            .execute(
+                &json!({"path": skill_dir.join("SKILL.md").to_str().unwrap()}),
+                "cli",
+            )
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("skill body"));
         // 同目录非 SKILL.md 文件仍拒绝
         let result = tool
-            .execute(&json!({"path": skill_dir.join("secret.txt").to_str().unwrap()}), "cli")
+            .execute(
+                &json!({"path": skill_dir.join("secret.txt").to_str().unwrap()}),
+                "cli",
+            )
             .await;
         assert!(result.is_err());
         // 未配 skills_dir 时 SKILL.md 也拒绝
-        let tool_no_skills = FileRead::new(
-            root.path().join("workspace"),
-            true,
-            None,
-        );
+        let tool_no_skills = FileRead::new(root.path().join("workspace"), true, None);
         let result = tool_no_skills
-            .execute(&json!({"path": skill_dir.join("SKILL.md").to_str().unwrap()}), "cli")
+            .execute(
+                &json!({"path": skill_dir.join("SKILL.md").to_str().unwrap()}),
+                "cli",
+            )
             .await;
         assert!(result.is_err());
     }

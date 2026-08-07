@@ -62,7 +62,7 @@ fn canonicalize_ancestor(path: &Path) -> Option<PathBuf> {
 }
 
 /// 词法规范化（处理 . 和 ..，不依赖文件系统）
-fn normalize_lexical(p: &Path) -> PathBuf {
+pub(crate) fn normalize_lexical(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for comp in p.components() {
@@ -81,7 +81,7 @@ fn normalize_lexical(p: &Path) -> PathBuf {
 /// 去除 Windows canonicalize 返回的 `\\?\` verbatim 前缀
 /// 使 canonical 路径与词法路径（norm_ws 等）通过 starts_with 可比
 /// Unix 上为 no-op（canonicalize 不带此前缀）
-fn strip_verbatim_prefix(p: &Path) -> PathBuf {
+pub(crate) fn strip_verbatim_prefix(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     if let Some(rest) = s.strip_prefix(r"\\?\") {
         // UNC verbatim: \\?\UNC\server\share -> \\server\share

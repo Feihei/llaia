@@ -166,7 +166,7 @@
 
 ## P3 — 能力扩展与生态接入
 
-**状态**：🚧 进行中（仅剩 P3-e）
+**状态**：✅ 已完成
 
 **目标**：在 P2 已完成的 channel/provider/agent 基础设施上，补齐"能让 agent 真正干活"的能力：QQ 工具边界、初始化引导、定时任务、MCP 工具生态、Skill 技能框架。
 
@@ -252,19 +252,20 @@
 
 ### P3-e：Skill 技能框架
 
-**状态**：⏳ 计划中（依赖 P3-d 完成）
+**状态**：✅ 已完成
 
 **目标**：在 MCP 工具之上封装"提示词 + 工具集"的技能包，让用户可以快速给 agent 加能力。对齐 OpenAI Codex CLI / Anthropic Claude Skills / AstrBot 的业界标准 SKILL.md 格式。
 
-- [ ] Skill 定义：`~/.llaia/skills/<name>/SKILL.md`（markdown + YAML frontmatter，对齐业界标准），frontmatter 含 `name` / `description` / `duration`（turn / session，默认 turn）/ `tools`（可选，提示 LLM 推荐用的工具列表，不实际控制挂载）
-- [ ] Progressive Disclosure：启动时扫描 `~/.llaia/skills/*/SKILL.md`，解析 frontmatter 拿 `name` + `description`，在 system prompt 追加"## Skills"段列出所有 active skill 的 name + description + SKILL.md 路径；规则提示 LLM "用 skill 前必须先 file_read 它的 SKILL.md"
-- [ ] 触发机制：agent 判断为主（LLM 看 name+description 自行决定），用户显式提到 skill 名也算触发（LLM 自然语言理解，无特殊语法）。不做关键词匹配
-- [ ] 工具挂载：方案 C — skill 的 `tools` 字段只是 prompt 提示，不实际控制工具挂载。内置工具始终全挂载，MCP 工具按 server 挂载（与 skill 解耦）
-- [ ] active 开关：`~/.llaia/skills.json` 控制每个 skill 是否激活（类似 AstrBot）
-- [ ] WebUI 管理：配置面板加 Skill tab，可视化增删改查 + SKILL.md 编辑器
-- [ ] 内置示例 Skill：todoist（提醒）、news-digest（新闻摘要）、code-review（代码审查）
-- [ ] 路径安全：skill name / path 注入到 prompt 时过滤危险字符（借鉴 AstrBot `_SAFE_PATH_RE`），防 prompt injection
+- [x] Skill 定义：`~/.llaia/skills/<name>/SKILL.md`（markdown + YAML frontmatter，对齐业界标准），frontmatter 含 `name` / `description` / `duration`（turn / session，默认 turn）/ `tools`（可选，提示 LLM 推荐用的工具列表，不实际控制挂载）
+- [x] Progressive Disclosure：启动时扫描 `~/.llaia/skills/*/SKILL.md`，解析 frontmatter 拿 `name` + `description`，在 system prompt 追加"## Skills"段列出所有 active skill 的 name + description + SKILL.md 路径；规则提示 LLM "用 skill 前必须先 file_read 它的 SKILL.md"
+- [x] 触发机制：agent 判断为主（LLM 看 name+description 自行决定），用户显式提到 skill 名也算触发（LLM 自然语言理解，无特殊语法）。不做关键词匹配
+- [x] 工具挂载：方案 C — skill 的 `tools` 字段只是 prompt 提示，不实际控制工具挂载。内置工具始终全挂载，MCP 工具按 server 挂载（与 skill 解耦）
+- [x] active 开关：`~/.llaia/skills.json` 控制每个 skill 是否激活（类似 AstrBot）
+- [x] WebUI 管理：配置面板加 Skill tab，可视化增删改查 + SKILL.md 编辑器
+- [x] 内置示例 Skill：todoist（提醒）、news-digest（新闻摘要）、code-review（代码审查）
+- [x] 路径安全：skill name / path 注入到 prompt 时过滤危险字符（借鉴 AstrBot `_SAFE_PATH_RE`），防 prompt injection
 
+**详细计划**：[plans/2026-08-07-skill-framework.md](plans/2026-08-07-skill-framework.md)
 **参考**：[ADR-0015](adr/0015-skill-framework.md)
 
 ---

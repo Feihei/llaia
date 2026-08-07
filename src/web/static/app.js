@@ -35,6 +35,12 @@ function llaiaApp() {
     mcpRawMsg: '',
     mcpTesting: null,
     _mcpEditor: null,
+    // skills
+    skills: [],
+    skillMsg: '',
+    skillEditing: null,
+    skillContent: '',
+    skillContentMsg: '',
 
     async init() {
       // prefer URL query token, then localStorage
@@ -418,6 +424,63 @@ function llaiaApp() {
       } finally {
         this.mcpTesting = null;
       }
+    },
+
+    // ---- skills ----
+    async switchSkills() {
+      this.configSection = 'skills';
+      this.tab = 'config';
+      await this.loadSkills();
+    },
+    async loadSkills() {
+      this.skillMsg = '';
+      const r = await this.apiFetch('/api/skills');
+      if (!this.authed) return;
+      if (r.ok) { const j = await r.json(); this.skills = j.skills || []; }
+      else { this.skillMsg = 'Load failed: ' + r.status; }
+    },
+    async toggleSkill(name, active) {
+      const r = await this.apiFetch(`/api/skills/${encodeURIComponent(name)}/active`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ active }) });
+      if (!this.authed) return;
+      if (r.ok) { this.skillMsg = `✓ ${name} ${active ? 'enabled' : 'disabled'} (restart to apply)`; }
+      else { let j; try { j = await r.json(); } catch { j = {}; } this.skillMsg = '✗ ' + (j.error || r.status); await this.loadSkills(); }
+    },
+    async editSkill(name) {
+      const r = await this.apiFetch(`/api/skills/${encodeURIComponent(name)}/content`);
+      if (!this.authed) return;
+      if (r.ok) {
+        const j = await r.json();
+        this.skillEditing = name;
+        this.skillContent = j.content || '';
+        this.skillContentMsg = '';
+      } else { this.skillMsg = 'Load SKILL.md failed: ' + r.status; }
+    },
+    async saveSkillContent() {
+      const name = this.skillEditing;
+      if (!name) return;
+      const r = await this.apiFetch(`/api/skills/${encodeURIComponent(name)}/content`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ content: this.skillContent }) });
+      if (!this.authed) return;
+      let j;
+      try { j = await r.json(); } catch { j = {}; }
+      if (r.ok) { this.skillContentMsg = '✓ Saved (restart to apply)'; }
+      else { this.skillContentMsg = '✗ ' + (j.error || r.status); }
+    },
+    async newSkill() {
+      const name = prompt('Enter new skill name (letters / digits / - _ .):');
+      if (!name || !name.trim()) return;
+      const r = await this.apiFetch('/api/skills', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: name.trim() }) });
+      if (!this.authed) return;
+      let j;
+      try { j = await r.json(); } catch { j = {}; }
+      if (r.ok) { this.skillMsg = '✓ Created ' + name.trim(); await this.loadSkills(); }
+      else { alert('Create failed: ' + (j.error || r.status)); }
+    },
+    async deleteSkill(name) {
+      if (!confirm('Delete skill ' + name + '? The whole skill directory will be removed.')) return;
+      const r = await this.apiFetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      if (!this.authed) return;
+      if (r.ok) { this.skillMsg = '✓ Deleted ' + name; await this.loadSkills(); }
+      else { let j; try { j = await r.json(); } catch { j = {}; } this.skillMsg = '✗ ' + (j.error || r.status); }
     },
 
     // ---- about ----
