@@ -328,6 +328,10 @@ impl Provider for OpenAiCompatibleProvider {
         }
         None
     }
+
+    fn label(&self) -> String {
+        self.model.clone()
+    }
 }
 
 impl OpenAiCompatibleProvider {

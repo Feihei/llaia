@@ -35,6 +35,8 @@ rust-embed = "8"
 rand = "0.8"
 tokio-cron-scheduler = "0.15"
 dotenvy = "0.15"
+aes = "0.8"
+md-5 = "0.10"
 
 [dev-dependencies]
 mockito = "1"

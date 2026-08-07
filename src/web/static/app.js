@@ -19,6 +19,8 @@ function llaiaApp() {
     rawMsg: '',
     // about
     status: null,
+    restarting: false,
+    restartMsg: '',
     // cron
     cronSection: 'tasks',
     cronTasks: [],
@@ -492,6 +494,38 @@ function llaiaApp() {
       const r = await this.apiFetch('/api/status');
       if (!this.authed) return;
       if (r.ok) { this.status = await r.json(); }
+    },
+    // restart serve process; poll /api/status until the replacement process is up, then reload
+    async restartService() {
+      if (!confirm('Restart the llaia serve process now?')) return;
+      this.restarting = true;
+      this.restartMsg = 'Restarting…';
+      try {
+        const r = await this.apiFetch('/api/restart', { method: 'POST' });
+        if (!r.ok) {
+          this.restartMsg = 'Restart failed: HTTP ' + r.status;
+          this.restarting = false;
+          return;
+        }
+      } catch (e) {
+        // old process may have exited before response landed; keep polling
+      }
+      this.restartMsg = 'Waiting for service to come back…';
+      const t0 = Date.now();
+      const poll = async () => {
+        if (Date.now() - t0 > 30000) {
+          this.restartMsg = 'Service did not come back in 30s; check the terminal.';
+          this.restarting = false;
+          return;
+        }
+        try {
+          const r = await fetch('/api/status?token=' + encodeURIComponent(this.token));
+          if (r.ok) { location.reload(); return; }
+        } catch (e) { /* still down, retry */ }
+        setTimeout(poll, 1500);
+      };
+      // replacement process starts ~1s after old one exits
+      setTimeout(poll, 3000);
     },
     formatBytes(n) { if (n < 1024) return n + ' B'; if (n < 1048576) return (n/1024).toFixed(1)+' KB'; return (n/1048576).toFixed(1)+' MB'; },
   };

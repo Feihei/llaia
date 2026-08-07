@@ -74,6 +74,9 @@ pub struct Agent {
     pub audit: Option<Arc<crate::audit::AuditLog>>,
     /// 本次 turn 的工具调用历史（供 delegate 提取产出文件清单）
     pub turn_tool_calls: Vec<TurnToolCall>,
+    /// 启动时配置快照（供 /provider 等运行时命令枚举/构建 provider；
+    /// 不随 config.toml 热加载更新——运行时切换本身就是临时态）
+    pub config: Arc<Config>,
 }
 
 /// 单次工具调用记录（用于 delegate 提取产出文件）
@@ -117,6 +120,7 @@ impl Agent {
             alias,
             audit,
             turn_tool_calls: Vec::new(),
+            config: Arc::new(config.clone()),
         }
     }
 

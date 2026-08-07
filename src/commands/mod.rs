@@ -314,6 +314,56 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
             None
         };
 
+    // Telegram channel：启用时构造并 spawn（long polling 免公网）
+    // 注：v1 未接 cron ProactivePusher（单用户推送目标尚不明确），被动回复完整可用
+    if config.channels.telegram.enabled {
+        match crate::channels::telegram::TelegramChannel::new(config.channels.telegram.clone()) {
+            Ok(tg) => {
+                let tg = std::sync::Arc::new(tg);
+                let registry = registry.clone();
+                tasks.push(tokio::spawn(async move {
+                    if let Err(e) = crate::channels::Channel::run(tg, registry).await {
+                        tracing::error!(error = %e, "TelegramChannel exited with error");
+                    }
+                }));
+                tracing::info!("TelegramChannel started");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "TelegramChannel init failed, disabled");
+            }
+        }
+    }
+
+    // 钉钉 channel：启用时构造并 spawn（Stream Mode WS 免公网）
+    if config.channels.dingtalk.enabled {
+        let dt = std::sync::Arc::new(crate::channels::dingtalk::DingtalkChannel::new(
+            config.channels.dingtalk.clone(),
+        ));
+        let registry = registry.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = crate::channels::Channel::run(dt, registry).await {
+                tracing::error!(error = %e, "DingtalkChannel exited with error");
+            }
+        }));
+        tracing::info!("DingtalkChannel started");
+    }
+
+    // 微信 ClawBot channel：启用时构造并 spawn（扫码登录 + 长轮询免公网）
+    // 登录态持久化在 <config_dir>/wechat_state.json
+    if config.channels.wechat.enabled {
+        let wx = std::sync::Arc::new(crate::channels::wechat::WechatChannel::new(
+            config.channels.wechat.clone(),
+            config_dir.to_path_buf(),
+        ));
+        let registry = registry.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = crate::channels::Channel::run(wx, registry).await {
+                tracing::error!(error = %e, "WechatChannel exited with error");
+            }
+        }));
+        tracing::info!("WechatChannel started");
+    }
+
     // webui 随 serve 无条件启动（serve 模式下用户唯一保证可用的交互入口）
     // 注意：WebChannel 先创建，但不立即 spawn —— 需要在 CronScheduler 启动后注入 cron_scheduler，
     // 再 spawn WebChannel::run（build_router 在 run 内调用，此时 cron_scheduler 已就位）

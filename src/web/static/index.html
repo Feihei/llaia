@@ -373,6 +373,13 @@
                 <dd><a href="https://github.com/Feihei/llaia" target="_blank" rel="noopener">github.com/Feihei/llaia</a></dd>
               </dl>
             </template>
+            <div style="margin-top:16px;">
+              <button @click="restartService()" x-bind:disabled="restarting">
+                <span x-show="!restarting">Restart Service</span>
+                <span x-show="restarting">Restarting…</span>
+              </button>
+              <span class="cron-msg" x-text="restartMsg"></span>
+            </div>
           </div>
         </template>
       </div>

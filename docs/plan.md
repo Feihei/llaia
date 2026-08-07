@@ -157,10 +157,9 @@
 
 ### P2-e：能力扩展（部分完成）
 
-- [ ] 群聊支持（@ 机器人、群消息事件）
 - [x] 图片 / 文件消息收发（QQ 收发图/文件、CLI `@path`、`send_image`/`send_file` 工具）—— 见 [specs/2026-07-24-multimedia-design.md](specs/2026-07-24-multimedia-design.md)
-- [ ] 主动消息推送（与 P3 cron 一并实现）
-- [ ] 邮箱 channel
+- [x] 主动消息推送（与 P3 cron 一并实现）
+- [ ] 邮箱 channel（IMAP 轮询 + SMTP，`lettre` + `async-imap` 生态成熟）—— 见 [specs/2026-08-07-provider-channel-expansion.md](specs/2026-08-07-provider-channel-expansion.md)
 
 ---
 
@@ -270,19 +269,49 @@
 
 ---
 
-## P3+ — 交互增强与未来计划（待规划）
+## P3+ — 交互增强与生态扩展（已完成）
 
-**状态**：⏳ 计划中（P3 主线完成后的增量项）
+**状态**：✅ 已完成（2026-08-07）
 
-> 来源：[docs/issues/](issues/) 收集的反馈，已实现的见各阶段完成清单，此处仅列未实现的未来计划。
+> 完整评估见 [specs/2026-08-07-provider-channel-expansion.md](specs/2026-08-07-provider-channel-expansion.md)；实施计划见 [plans/2026-08-07-quickwins.md](plans/2026-08-07-quickwins.md)。
+
+### 快赢项
+
+- [x] `/provider` 斜杠命令：`/provider` 列出可用 provider/模型（当前标记 `*`）、`/provider <序号>` 或 `/provider <id.alias>` 运行时切换（不写 config.toml）
+- [x] model fallback：主模型不可用时自动降级备用模型（`[agent.main].fallback` + `FallbackProvider`）
+- [x] WebUI 重启按钮：Config > About 页 Restart Service 按钮，serve 自重启
+
+### Provider 直连（参考 zeroclaw-providers 移植，不引依赖）
+
+- [x] Anthropic Messages API：system 顶层 + tool_use/tool_result blocks + SSE（`src/provider/anthropic.rs`，`[provider.<id>].type = "anthropic"` 分发；ModelConfig 新增 `max_tokens`）
+
+### Channel 扩展（好实现的）
+
+- [x] Telegram：官方 Bot API + long polling，免公网回调（`src/channels/telegram.rs`；`allow_chat_id` 单用户安全锁；媒体 sendPhoto/sendDocument）
+- [x] 钉钉：Stream Mode WS 免公网（`src/channels/dingtalk.rs`，参考 zeroclaw 554 行移植；sessionWebhook markdown 回复；`allow_staff_id` 安全锁）
+- [x] 微信 ClawBot：腾讯官方 `openclaw-weixin`（ilink bot）接口（`src/channels/wechat.rs`；扫码登录 + getupdates 长轮询；登录态存 `wechat_state.json`；CDN AES-128-ECB 媒体上传；v1 媒体接收仅文本占位）
+
+---
+
+## P4 — 未来计划（待排期）
+
+**状态**：⏳ 计划中
+
+> 来源：[docs/issues/](issues/) 收集的反馈与扩展评估，已实现的见各阶段完成清单。
 > 已取消：cron.toml 移入 agent workspace（10#）—— CronTool 已让 agent 动态管理任务，无需文件层编辑。
+
+### Provider / Channel 继续扩展
+
+- [ ] Google Gemini REST provider（generateContent + functionDeclarations，★★☆）
+- [ ] OpenAI Responses API（缓做，聚合网关可用 OpenAI 兼容协议绕过）
+- [ ] 邮箱 channel：IMAP 轮询 + SMTP（还 P2-e 欠账，★★☆）
+- [ ] 飞书 / Lark：事件订阅长连接模式（★★☆）
+- [ ] Slack Socket Mode / Discord / LINE（★★★）
+- [ ] 明确不做：WhatsApp 自实现、微信个人号非官方协议（封号风险，与 ClawBot 官方路线是两回事）
 
 ### 交互增强
 
-- [ ] `/provider` 斜杠命令：`/provider` 列出可用 provider/模型（当前标记 `*`）、`/provider <序号>` 运行时切换、`/provider <id>.<alias>` 按全名切换（参考 AstrBot，不写 config.toml）
 - [ ] `/move` 或 `/cd` 斜杠命令：允许把 CWD 从默认 workspace 移动到用户指定位置，提醒风险并要求确认（扩展 P3-a 的 workspace 边界模型）
-- [ ] WebUI 重启后台服务：配置面板加"重启 serve"按钮，配置更改需重启时免手动 Ctrl+C
-- [ ] `llaia chat` → `llaia cli` 重命名：与 `llaia config` / `llaia doctor` 命名对齐（需保留 `chat` 别名向后兼容，讨论后再定）
 
 ### 权限管理系统
 
@@ -296,7 +325,6 @@
 
 ### 模型与工具调用
 
-- [ ] model fallback：主模型不可用时自动降级到备用模型（参考 AstrBot 的 provider 链）
 - [ ] image 描述模型单独设置：主模型无多模态时，用独立模型描述图片，避免能力缺失
 - [ ] 工具调用格式优化：解决 think 内容 / `<tool_call>` 标签泄露到用户回复的问题（agen 系模型偶发），研究 jinja 模板调用格式，参考 AstrBot `core/agent/tool.py` 与 zeroclaw `zeroclaw-tool-call-parser`
 
@@ -307,7 +335,7 @@
 
 ### 生态复用
 
-- [ ] 评估借用 zeroclaw 代码：provider / channel 实现是否可直接复用，减少从头开发工作量（`e:\apps\zeroclaw\zeroclaw\crates\zeroclaw-providers\` / `zeroclaw-channels\` / `zeroclaw-tool-call-parser`）
+- [x] 评估借用 zeroclaw 代码：结论——**值得借鉴、不值得依赖**。许可（Apache-2.0/MIT）允许复制，但引 crate 会拖进 zeroclaw-api/config 依赖树且实现过于全功能（单用户场景可砍 70%）；正确姿势是单文件 vendor + 裁剪适配（dingtalk.rs 仅 554 行可直接移植）。详见 [specs/2026-08-07-provider-channel-expansion.md](specs/2026-08-07-provider-channel-expansion.md)
 
 ---
 

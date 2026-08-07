@@ -1,11 +1,17 @@
 pub mod cli;
+pub mod dingtalk;
 pub mod qq;
+pub mod telegram;
 pub mod web;
+pub mod wechat;
 
 // 重新导出，方便外部使用
 pub use cli::CliChannel;
+pub use dingtalk::DingtalkChannel;
 pub use qq::QqChannel;
+pub use telegram::TelegramChannel;
 pub use web::WebChannel;
+pub use wechat::WechatChannel;
 
 use anyhow::Result;
 use async_trait::async_trait;

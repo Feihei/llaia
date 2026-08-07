@@ -2,7 +2,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
+pub mod anthropic;
+pub mod fallback;
 pub mod openai_compat;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,6 +179,81 @@ pub trait Provider: Send + Sync {
     async fn detect_context_size(&self) -> Option<usize> {
         None
     }
+    /// 可读标识（模型名），用于 `/provider` 列表标记当前模型。默认 "unknown"。
+    fn label(&self) -> String {
+        "unknown".into()
+    }
+}
+
+/// 从 model ref（"provider_id.model_alias"）构建单个 provider 实例。
+pub fn provider_from_ref(
+    config: &crate::config::Config,
+    model_ref: &str,
+) -> Result<Arc<dyn Provider>> {
+    let (prov_id, model_alias) = crate::config::Config::parse_model_ref(model_ref)?;
+    let prov_cfg = config
+        .provider
+        .get(prov_id)
+        .ok_or_else(|| anyhow::anyhow!("provider.{} not configured", prov_id))?;
+    let model_cfg = prov_cfg.model.get(model_alias).ok_or_else(|| {
+        anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
+    })?;
+    match prov_cfg.provider_type.as_str() {
+        "anthropic" => {
+            let base_url = if prov_cfg.base_url.is_empty() {
+                "https://api.anthropic.com"
+            } else {
+                &prov_cfg.base_url
+            };
+            Ok(Arc::new(anthropic::AnthropicProvider::new(
+                base_url,
+                &prov_cfg.api_key,
+                &model_cfg.model,
+                model_cfg.max_tokens.unwrap_or(0),
+            )?))
+        }
+        // openai_compatible 及未知 type 都走 OpenAI 兼容协议（存量配置无 type 也能跑）
+        _ => Ok(Arc::new(openai_compat::OpenAiCompatibleProvider::new(
+            &prov_cfg.base_url,
+            &prov_cfg.api_key,
+            &model_cfg.model,
+            model_cfg.native_tool_calling,
+        )?)),
+    }
+}
+
+/// 构建主 provider 链：主 model + fallback 备用链。
+/// - main_ref 为空 → Ok(None)（降级模式）
+/// - 主 model 构建失败 → Err（配置错误应暴露）
+/// - fallback 项构建失败 → warn 跳过（备用链是容错手段，不应阻塞启动）
+/// - fallback 全部不可用/未配置 → 返回裸主 provider
+pub fn build_provider_chain(
+    main_ref: &str,
+    fallback: &[String],
+    config: &crate::config::Config,
+) -> Result<Option<Arc<dyn Provider>>> {
+    if main_ref.is_empty() {
+        return Ok(None);
+    }
+    let main = provider_from_ref(config, main_ref)?;
+    if fallback.is_empty() {
+        return Ok(Some(main));
+    }
+    let mut chain = vec![main];
+    for f in fallback {
+        match provider_from_ref(config, f) {
+            Ok(p) => chain.push(p),
+            Err(e) => tracing::warn!(
+                model = f.as_str(),
+                error = %e,
+                "fallback provider build failed, skipped"
+            ),
+        }
+    }
+    if chain.len() == 1 {
+        return Ok(Some(chain.remove(0)));
+    }
+    Ok(Some(Arc::new(fallback::FallbackProvider::new(chain))))
 }
 
 #[cfg(test)]

@@ -7,7 +7,6 @@ use crate::commands::slash::{try_handle, SlashOutcome};
 use crate::config::{AgentConfig, Config};
 use crate::memory::sqlite::SessionStore;
 use crate::memory::{ensure_template, load_md, MEMORY_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE};
-use crate::provider::openai_compat::OpenAiCompatibleProvider;
 use crate::provider::Provider;
 use crate::tool_call::build_tool_instructions;
 use crate::tools::cron::CronTool;
@@ -344,6 +343,7 @@ async fn build_single_agent(
 
     // 尝试构建 provider：model 为空 → 降级模式（provider = None）
     // model 非空但 provider/model 配置缺失 → 报错（用户意图配置但配错）
+    // fallback 链：主模型失败时按序降级（fallback 项缺失仅 warn 不阻塞）
     let (provider, model_cfg, has_delegate) = if agent_cfg.model.is_empty() {
         tracing::warn!(
             agent = alias,
@@ -352,26 +352,18 @@ async fn build_single_agent(
         (None, None, false)
     } else {
         let (prov_id, model_alias) = Config::parse_model_ref(&agent_cfg.model)?;
-        let prov_cfg = config
+        let model_cfg = config
             .provider
             .get(prov_id)
+            .and_then(|p| p.model.get(model_alias))
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("provider.{} not configured", prov_id))?;
-        let model_cfg = prov_cfg.model.get(model_alias).cloned().ok_or_else(|| {
-            anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
-        })?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
+            })?;
 
-        let provider: Arc<dyn Provider> = Arc::new(OpenAiCompatibleProvider::new(
-            &prov_cfg.base_url,
-            &prov_cfg.api_key,
-            &model_cfg.model,
-            model_cfg.native_tool_calling,
-        )?);
-        (
-            Some(provider),
-            Some(model_cfg),
-            is_main && config.agent.len() > 1,
-        )
+        let provider =
+            crate::provider::build_provider_chain(&agent_cfg.model, &agent_cfg.fallback, config)?;
+        (provider, Some(model_cfg), is_main && config.agent.len() > 1)
     };
     let provider_ref = provider.as_ref();
 
@@ -602,6 +594,7 @@ pub async fn build_agent(
             memory: None,
             denied_tools: Vec::new(),
             delegate_timeout: 120,
+            fallback: Vec::new(),
         }
     });
     let (main_agent, delegate_tool, cron_tool, main_workspace) = build_single_agent(
@@ -650,19 +643,5 @@ fn build_compact_provider(
     config: &Config,
     model_ref: &str,
 ) -> anyhow::Result<Option<Arc<dyn Provider>>> {
-    let (prov_id, model_alias) = Config::parse_model_ref(model_ref)?;
-    let prov_cfg = config
-        .provider
-        .get(prov_id)
-        .ok_or_else(|| anyhow::anyhow!("provider.{} not configured", prov_id))?;
-    let model_cfg = prov_cfg.model.get(model_alias).ok_or_else(|| {
-        anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
-    })?;
-    let p = OpenAiCompatibleProvider::new(
-        &prov_cfg.base_url,
-        &prov_cfg.api_key,
-        &model_cfg.model,
-        model_cfg.native_tool_calling,
-    )?;
-    Ok(Some(Arc::new(p)))
+    Ok(Some(crate::provider::provider_from_ref(config, model_ref)?))
 }

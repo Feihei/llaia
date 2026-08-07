@@ -106,6 +106,10 @@ pub struct ModelConfig {
     /// 探测失败回退默认 8192。取 min(配置值, 探测值)。
     #[serde(default)]
     pub context_size: Option<usize>,
+    /// 单次生成最大 token 数。Anthropic Messages API 必传 max_tokens，
+    /// 未配置时默认 4096；OpenAI 兼容 provider 忽略此项。
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
 }
 
 fn default_true() -> bool {
@@ -131,6 +135,10 @@ pub struct AgentConfig {
     /// 委派超时秒数（仅子 Agent 生效）。默认 120
     #[serde(default = "default_delegate_timeout")]
     pub delegate_timeout: u64,
+    /// 备用模型链（model ref 列表）：主模型请求失败时按序降级。
+    /// 例：fallback = ["local.small", "cloud.big"]
+    #[serde(default)]
+    pub fallback: Vec<String>,
 }
 
 impl AgentConfig {
@@ -154,6 +162,12 @@ fn default_delegate_timeout() -> u64 {
 pub struct ChannelsConfig {
     #[serde(default)]
     pub qq: QqConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub dingtalk: DingtalkConfig,
+    #[serde(default)]
+    pub wechat: WechatConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +196,107 @@ impl Default for QqConfig {
 
 fn default_qq_confirm() -> String {
     "none".into()
+}
+
+/// Telegram 频道：官方 Bot API + long polling，免公网回调。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// BotFather 颁发的 token，支持 ${VAR} 引用 .env
+    #[serde(default)]
+    pub bot_token: String,
+    /// 只响应此 chat 的消息（单用户安全锁）；0 = 不限制
+    #[serde(default)]
+    pub allow_chat_id: i64,
+    /// API base（测试可指到 mock），默认官方地址
+    #[serde(default = "default_telegram_api_base")]
+    pub api_base: String,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: String::new(),
+            allow_chat_id: 0,
+            api_base: default_telegram_api_base(),
+        }
+    }
+}
+
+fn default_telegram_api_base() -> String {
+    "https://api.telegram.org".into()
+}
+
+/// 钉钉频道：开放平台机器人 + Stream Mode WebSocket，免公网回调。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DingtalkConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 应用凭证（开发者后台 client_id / client_secret），支持 ${VAR} 引用 .env
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+    /// 只响应此 staffId 的消息（单用户安全锁）；空 = 不限制
+    #[serde(default)]
+    pub allow_staff_id: String,
+    /// gateway API base（测试可指到 mock），默认官方地址
+    #[serde(default = "default_dingtalk_api_base")]
+    pub api_base: String,
+}
+
+impl Default for DingtalkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            client_id: String::new(),
+            client_secret: String::new(),
+            allow_staff_id: String::new(),
+            api_base: default_dingtalk_api_base(),
+        }
+    }
+}
+
+fn default_dingtalk_api_base() -> String {
+    "https://api.dingtalk.com".into()
+}
+
+/// 微信 ClawBot 频道：腾讯官方 openclaw-weixin（ilink bot）接口，扫码登录 + 长轮询免公网。
+/// 登录态（token / sync_buf / context_tokens）不落 config，持久化在 <config_dir>/wechat_state.json。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WechatConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 只响应此 ilink_user_id 的消息（单用户安全锁）；空 = 不限制
+    #[serde(default)]
+    pub allow_user_id: String,
+    /// ilink API base（测试可指到 mock），默认官方地址
+    #[serde(default = "default_wechat_base_url")]
+    pub base_url: String,
+    /// 媒体 CDN base
+    #[serde(default = "default_wechat_cdn_base_url")]
+    pub cdn_base_url: String,
+}
+
+impl Default for WechatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_user_id: String::new(),
+            base_url: default_wechat_base_url(),
+            cdn_base_url: default_wechat_cdn_base_url(),
+        }
+    }
+}
+
+fn default_wechat_base_url() -> String {
+    "https://ilinkai.weixin.qq.com".into()
+}
+
+fn default_wechat_cdn_base_url() -> String {
+    "https://novac2c.cdn.weixin.qq.com/c2c".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +447,27 @@ impl Config {
                 config.runtime.compact_model = None;
             }
         }
+        // agent fallback 链引用校验：无效项移除（备用链是容错手段，不应阻塞启动）
+        for (alias, agent_cfg) in config.agent.iter_mut() {
+            let before = agent_cfg.fallback.len();
+            agent_cfg
+                .fallback
+                .retain(|m| match Self::parse_model_ref(m) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            agent = alias.as_str(),
+                            model = m.as_str(),
+                            error = %e,
+                            "agent fallback entry is not a valid 'provider_id.model_alias' reference, removed"
+                        );
+                        false
+                    }
+                });
+            if agent_cfg.fallback.len() != before {
+                tracing::debug!(agent = alias.as_str(), "fallback chain sanitized");
+            }
+        }
         config.expand_paths()?;
         Ok(config)
     }
@@ -356,6 +492,9 @@ impl Config {
         }
         self.channels.qq.app_id = expand(&self.channels.qq.app_id)?;
         self.channels.qq.app_secret = expand(&self.channels.qq.app_secret)?;
+        self.channels.telegram.bot_token = expand(&self.channels.telegram.bot_token)?;
+        self.channels.dingtalk.client_id = expand(&self.channels.dingtalk.client_id)?;
+        self.channels.dingtalk.client_secret = expand(&self.channels.dingtalk.client_secret)?;
         self.webui.token = expand(&self.webui.token)?;
         self.tools.tavily.api_key = expand(&self.tools.tavily.api_key)?;
         self.log.dir = expand(&self.log.dir)?;
@@ -384,6 +523,7 @@ impl Config {
                 model: "qwen2.5:7b".into(),
                 native_tool_calling: true,
                 context_size: None,
+                max_tokens: None,
             },
         );
         provider.insert(
@@ -407,6 +547,7 @@ impl Config {
                 memory: None,
                 denied_tools: Vec::new(),
                 delegate_timeout: default_delegate_timeout(),
+                fallback: Vec::new(),
             },
         );
 

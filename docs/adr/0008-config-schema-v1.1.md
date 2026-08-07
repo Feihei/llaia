@@ -127,3 +127,38 @@ api_key = ""
 - `src/agent/mod.rs`：`Agent` 新增 `max_iterations` 字段，从 `config.runtime` 读取而非硬编码
 - `src/commands/slash.rs`：`/config` 命令展示 `max_iterations`
 - `C:\Users\THAD\.llaia\config.toml`：用户需手动迁移到新格式
+
+## P3+ 增量（2026-08-07）
+
+P3+ provider/channel 扩展引入的 schema 变更（见 [specs/2026-08-07-provider-channel-expansion.md](../specs/2026-08-07-provider-channel-expansion.md)）：
+
+**ModelConfig 新增 `max_tokens`**：`Option<usize>`，Anthropic Messages API 必传，未配置默认 4096；OpenAI 兼容 provider 忽略。
+
+**AgentConfig 新增 `fallback`**：`Vec<String>` model ref 链（如 `["local.small", "cloud.big"]`），主模型失败时依序降级，构建为 `FallbackProvider`。
+
+**`[provider.<id>]` 新增 `type` 分发**：`type = "anthropic"` 走 `AnthropicProvider`（base_url 默认 `https://api.anthropic.com`），未知/缺省回退 OpenAI 兼容（存量配置不受影响）。
+
+**新增 channel sections**：
+
+```toml
+[channels.telegram]
+enabled = false
+bot_token = ""              # BotFather 颁发，支持 ${VAR} 引用 .env
+allow_chat_id = 0           # 单用户安全锁，0 = 不限制
+api_base = "https://api.telegram.org"
+
+[channels.dingtalk]
+enabled = false
+client_id = ""              # 开发者后台凭证，支持 ${VAR}
+client_secret = ""
+allow_staff_id = ""         # 单用户安全锁，空 = 不限制
+api_base = "https://api.dingtalk.com"
+
+[channels.wechat]
+enabled = false
+allow_user_id = ""          # ilink_user_id 安全锁，空 = 不限制
+base_url = "https://ilinkai.weixin.qq.com"
+cdn_base_url = "https://novac2c.cdn.weixin.qq.com/c2c"
+```
+
+微信登录态（bot_token / sync_buf / context_tokens）不入 config.toml，持久化在 config 目录下独立文件 `wechat_state.json`，避免敏感凭证与配置混写。

@@ -1,7 +1,6 @@
 use crate::agent::AgentRegistry;
 use crate::channels::web::WebEvent;
 use crate::config::Config;
-use crate::provider::openai_compat::OpenAiCompatibleProvider;
 use crate::provider::Provider;
 use axum::body::Body;
 use axum::extract::{Multipart, Query, State};
@@ -370,6 +369,8 @@ fn json_err(code: StatusCode, msg: &str) -> Response {
 /// 根据 config 构建新的 provider 实例（用于热加载）。
 /// - 无 [agent.main] 或 model 为空 → Ok(None)（降级模式）
 /// - 解析或构造失败 → Err（调用方应回滚到旧 config）
+///
+/// fallback 链：主模型失败时按序降级（fallback 项缺失仅 warn）
 pub fn build_provider_from_config(config: &Config) -> Result<Option<Arc<dyn Provider>>, String> {
     let main_cfg = match config.agent.get("main") {
         Some(c) => c,
@@ -378,24 +379,8 @@ pub fn build_provider_from_config(config: &Config) -> Result<Option<Arc<dyn Prov
     if main_cfg.model.is_empty() {
         return Ok(None);
     }
-    let (prov_id, model_alias) = Config::parse_model_ref(&main_cfg.model)
-        .map_err(|e| format!("parse agent.main.model: {}", e))?;
-    let prov_cfg = config
-        .provider
-        .get(prov_id)
-        .ok_or_else(|| format!("provider.{} not configured", prov_id))?;
-    let model_cfg = prov_cfg
-        .model
-        .get(model_alias)
-        .ok_or_else(|| format!("provider.{}.model.{} not configured", prov_id, model_alias))?;
-    let p = OpenAiCompatibleProvider::new(
-        &prov_cfg.base_url,
-        &prov_cfg.api_key,
-        &model_cfg.model,
-        model_cfg.native_tool_calling,
-    )
-    .map_err(|e| format!("build provider: {}", e))?;
-    Ok(Some(Arc::new(p)))
+    crate::provider::build_provider_chain(&main_cfg.model, &main_cfg.fallback, config)
+        .map_err(|e| format!("build provider: {}", e))
 }
 
 /// 热加载 provider + compact_provider：
@@ -419,19 +404,8 @@ fn build_compact_provider_from_config(config: &Config) -> Option<Arc<dyn Provide
     if m.is_empty() {
         return None;
     }
-    let (prov_id, model_alias) = match Config::parse_model_ref(m) {
-        Ok(r) => r,
-        Err(_) => return None,
-    };
-    let prov_cfg = config.provider.get(prov_id)?;
-    let model_cfg = prov_cfg.model.get(model_alias)?;
-    match OpenAiCompatibleProvider::new(
-        &prov_cfg.base_url,
-        &prov_cfg.api_key,
-        &model_cfg.model,
-        model_cfg.native_tool_calling,
-    ) {
-        Ok(p) => Some(Arc::new(p)),
+    match crate::provider::provider_from_ref(config, m) {
+        Ok(p) => Some(p),
         Err(e) => {
             tracing::warn!(error = %e, model = m.as_str(), "build compact_provider failed");
             None
@@ -484,6 +458,77 @@ pub async fn validate_config(
                 .into_response()
         }
     }
+}
+
+/// POST /api/restart → 自重启 serve 进程：spawn 替代进程后退出。
+/// 替代进程延迟 ~1s 启动，等旧进程释放端口。pid 文件仅警告不阻止，新进程可正常接管。
+pub async fn restart_service(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let config_dir = match state.config_path.parent() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot derive config_dir from config_path",
+            )
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("current_exe: {}", e),
+            )
+        }
+    };
+    if let Err(e) = spawn_replacement(&exe, &config_dir) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    tracing::info!("restart requested: replacement process spawned, exiting");
+    // 先把响应送达浏览器，再延迟退出（给 axum 刷出响应的时间）
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        std::process::exit(0);
+    });
+    axum::Json(serde_json::json!({ "restarting": true })).into_response()
+}
+
+/// spawn 替代进程：Windows 用 cmd（ping 延时），Unix 用 sh（sleep 延时）。
+fn spawn_replacement(exe: &Path, config_dir: &Path) -> Result<(), String> {
+    let exe_s = exe.display().to_string();
+    let dir_s = config_dir.display().to_string();
+    let spawn_result = {
+        #[cfg(windows)]
+        {
+            let script = format!(
+                "ping -n 2 127.0.0.1 >nul & \"{}\" --config-dir \"{}\" serve",
+                exe_s, dir_s
+            );
+            std::process::Command::new("cmd")
+                .args(["/C", &script])
+                .spawn()
+        }
+        #[cfg(not(windows))]
+        {
+            let script = format!(
+                "sleep 1 && exec \"{}\" --config-dir \"{}\" serve",
+                exe_s, dir_s
+            );
+            std::process::Command::new("sh")
+                .args(["-c", &script])
+                .spawn()
+        }
+    };
+    spawn_result
+        .map(|_| ())
+        .map_err(|e| format!("spawn replacement process: {}", e))
 }
 
 /// PUT /api/config/raw → 写 TOML 文本到盘 + 热加载 provider
@@ -1048,6 +1093,7 @@ pub fn build_system_routes() -> axum::Router<AppState> {
             axum::routing::get(get_config_raw).put(put_config_raw),
         )
         .route("/api/config/validate", axum::routing::post(validate_config))
+        .route("/api/restart", axum::routing::post(restart_service))
         .route("/api/status", axum::routing::get(get_status))
         // cron API
         .route("/api/cron", axum::routing::get(list_cron))
