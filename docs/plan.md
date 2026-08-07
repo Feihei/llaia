@@ -180,40 +180,40 @@
 
 ### P3-a：Agent 能力边界重塑
 
-**状态**：⏳ 计划中
+**状态**：✅ 已完成
 
 **目标**：把所有 channel 从"主 agent 只能聊天 + 子 agent 全放开"升级为"按 agent 隔离 workspace + 命令拦截"，channel 不再决定工具权限。
 
 **核心思路**：参考 AstrBot 的 workspace 隔离 + 命令拦截路线（详见 ADR-0011），不引入 OS 沙箱（单用户私人助理场景过重）。
 
-- [ ] 目录结构重构：`~/.llaia/` 根只放配置 + 敏感信息，主 agent 工作区移到 `~/.llaia/workspace/`，子 agent 在 `~/.llaia/workspace/subagent/<name>/`
-- [ ] workspace 按 agent 隔离：file/terminal 工具只能在自己 workspace 内操作（类似容器挂载目录）；主 agent `file_read` 可读 `subagent/`（整合子 agent 产出），`file_write`/`file_edit` 不可写 `subagent/`
-- [ ] 跨 workspace 协作：① 主→子用 delegate 的 `file_paths` 参数复制到子 agent `.inbox/`（每次委派先清空再复制）② 子→主用 delegate 返回值 `{text, output_files}`（output_files 从子 agent 工具调用记录提取 file_write/file_edit 路径）③ USER.md 启动时从主 agent 同步覆盖到子 agent（子 agent memory_write 拒写 USER.md），SOUL.md 各自独立
-- [ ] terminal cwd 固定为当前 agent workspace 根
-- [ ] terminal 命令拦截（全局，不区分 channel）：`command_policy = blacklist`（默认）/ `whitelist` / `none`；内置黑名单（rm -rf /、sudo、shutdown、reboot、kill -9、dd、mkfs、curl|sh 等）+ 可配白名单
-- [ ] terminal 路径防御三层（防 LLM 误操作，不防恶意用户）：① shell 包装拒绝（拦截 `bash -c`/`eval`/`$()`/反引号等任意代码执行）② 路径白名单（canonicalize `starts_with` workspace，含不存在路径回溯祖先）③ 路径黑名单兜底（跨平台危险目录前缀：Linux `/root`/`/usr`/`/etc`、macOS `/System`/`/Library`、Windows `C:\Windows`/`C:\Program Files` 等）
-- [ ] file 工具路径校验复用 terminal 的第二三层（canonicalize `starts_with` workspace + 黑名单兜底），不需要 shell 词法解析
-- [ ] confirm_mode 重定义为全局开关（不再 per-channel）：`none`（新默认）/ `always` / `session`；`whitelist` 废弃，加载时 warn + fallback 到 `none`
-- [ ] 危险动作审计：`~/.llaia/logs/audit.log` 记录所有 `requires_confirm == true` 工具调用（timestamp / agent / channel / tool / args / result）
-- [ ] 目录迁移：启动时检测旧结构（SOUL.md/USER.md/MEMORY.md/sessions.db 在 `~/.llaia/` 根），自动迁移到 `workspace/`，写 `.migrated_v0.2` 标记
-- [ ] `AgentConfig.workspace` / `soul` / `user` / `memory` 字段废弃（自动推导），加载时 warn
+- [x] 目录结构重构：`~/.llaia/` 根只放配置 + 敏感信息，主 agent 工作区移到 `~/.llaia/workspace/`，子 agent 在 `~/.llaia/workspace/subagent/<name>/`
+- [x] workspace 按 agent 隔离：file/terminal 工具只能在自己 workspace 内操作（类似容器挂载目录）；主 agent `file_read` 可读 `subagent/`（整合子 agent 产出），`file_write`/`file_edit` 不可写 `subagent/`
+- [x] 跨 workspace 协作：① 主→子用 delegate 的 `file_paths` 参数复制到子 agent `.inbox/`（每次委派先清空再复制）② 子→主用 delegate 返回值 `{text, output_files}`（output_files 从子 agent 工具调用记录提取 file_write/file_edit 路径）③ USER.md 启动时从主 agent 同步覆盖到子 agent（子 agent memory_write 拒写 USER.md），SOUL.md 各自独立
+- [x] terminal cwd 固定为当前 agent workspace 根
+- [x] terminal 命令拦截（全局，不区分 channel）：`command_policy = blacklist`（默认）/ `whitelist` / `none`；内置黑名单（rm -rf /、sudo、shutdown、reboot、kill -9、dd、mkfs、curl|sh 等）+ 可配白名单
+- [x] terminal 路径防御三层（防 LLM 误操作，不防恶意用户）：① shell 包装拒绝（拦截 `bash -c`/`eval`/`$()`/反引号等任意代码执行）② 路径白名单（canonicalize `starts_with` workspace，含不存在路径回溯祖先）③ 路径黑名单兜底（跨平台危险目录前缀：Linux `/root`/`/usr`/`/etc`、macOS `/System`/`/Library`、Windows `C:\Windows`/`C:\Program Files` 等）
+- [x] file 工具路径校验复用 terminal 的第二三层（canonicalize `starts_with` workspace + 黑名单兜底），不需要 shell 词法解析
+- [x] confirm_mode 重定义为全局开关（不再 per-channel）：`none`（新默认）/ `always` / `session`；`whitelist` 废弃，加载时 warn + fallback 到 `none`
+- [x] 危险动作审计：`~/.llaia/logs/audit.log` 记录所有 `requires_confirm == true` 工具调用（timestamp / agent / channel / tool / args / result）
+- [x] 目录迁移：启动时检测旧结构（SOUL.md/USER.md/MEMORY.md/sessions.db 在 `~/.llaia/` 根），自动迁移到 `workspace/`，写 `.migrated_v0.2` 标记
+- [x] `AgentConfig.workspace` / `soul` / `user` / `memory` 字段废弃（自动推导），加载时 warn
 
 **参考**：[ADR-0011](adr/0011-qq-capability-boundary.md)
 
 ### P3-b：llaia init 引导命令
 
-**状态**：⏳ 计划中
+**状态**：✅ 已完成
 
 **目标**：新用户运行 `llaia init` 后，生成 `~/.llaia/` 目录骨架 + 基础模板，提示进入 WebUI 完成配置。支持"init → serve → WebUI 配置"流程，无 provider 也能启动 serve。
 
-- [ ] `llaia init [--config-dir <path>] [--force]` 子命令：创建 `~/.llaia/`、`logs/`、`workspace/`（含 `uploads/`、`subagent/` 空目录）
-- [ ] 生成 `config.toml` 默认模板（CLI enabled、QQ/Web disabled、provider/agent 注释占位）
-- [ ] 生成 `~/.llaia/workspace/SOUL.md` / `USER.md` / `MEMORY.md` 默认模板（内嵌常量）
-- [ ] 终端输出引导：提示运行 `llaia serve` 后浏览器访问 WebUI 完成 provider/agent/channel 配置
-- [ ] 幂等：已存在的文件不覆盖，只创建缺失项
-- [ ] **无 provider 启动支持**：`llaia serve` 无 provider 时 warn 但正常启动，WebUI 配置功能可用，聊天功能降级（返回提示而非报错）；`llaia chat` 无 provider 报错退出并引导
-- [ ] **provider 热加载**：WebUI `PUT /api/config` 保存后触发 `Agent::reload_provider()`，无需重启 serve；正在进行的 turn 用旧 provider 完成后切换；失败回滚
-- [ ] **doctor 检查项**：provider 配置检查（无则 warn）+ sessions.db 存在性检查（无则 warn）
+- [x] `llaia init [--config-dir <path>] [--force]` 子命令：创建 `~/.llaia/`、`logs/`、`workspace/`（含 `uploads/`、`subagent/` 空目录）
+- [x] 生成 `config.toml` 默认模板（CLI enabled、QQ/Web disabled、provider/agent 注释占位）
+- [x] 生成 `~/.llaia/workspace/SOUL.md` / `USER.md` / `MEMORY.md` 默认模板（内嵌常量）
+- [x] 终端输出引导：提示运行 `llaia serve` 后浏览器访问 WebUI 完成 provider/agent/channel 配置
+- [x] 幂等：已存在的文件不覆盖，只创建缺失项
+- [x] **无 provider 启动支持**：`llaia serve` 无 provider 时 warn 但正常启动，WebUI 配置功能可用，聊天功能降级（返回提示而非报错）；`llaia chat` 无 provider 报错退出并引导
+- [x] **provider 热加载**：WebUI `PUT /api/config` 保存后触发 `Agent::reload_provider()`，无需重启 serve；正在进行的 turn 用旧 provider 完成后切换；失败回滚
+- [x] **doctor 检查项**：provider 配置检查（无则 warn）+ sessions.db 存在性检查（无则 warn）
 
 **参考**：[ADR-0012](adr/0012-llaia-init.md)
 
