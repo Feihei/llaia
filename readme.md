@@ -31,7 +31,7 @@ LLAIA operates in your workspace directory only by default, **ALWAYS** backup yo
 
 - **A provider / LLM endpoint.** LLAIA does not bundle a model — you must point it at one:
   - **Local (recommended for privacy):** [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or [llama.cpp](https://github.com/ggerganov/llama.cpp) — each can expose an OpenAI-compatible server on your machine.
-  - **Cloud API:** [OpenRouter](https://openrouter.ai) or any other OpenAI-compatible endpoint. Needs an API key; conversation text is sent off-machine.
+  - **Cloud API:** [OpenRouter](https://openrouter.ai) or any other OpenAI-compatible endpoint, plus **Anthropic** natively (Messages API). Needs an API key; conversation text is sent off-machine.
 - **Bash toolchain — strongly recommended.** LLAIA's `terminal` tool runs shell commands, and it inherits the shell environment it was launched from. For consistent behavior we strongly recommend running LLAIA under **bash**. On **Windows, launch it from Git Bash** (not `cmd.exe` or PowerShell) — this avoids shell-incompatibility issues when the agent runs commands. (Ollama/LM Studio GUIs work fine regardless; this only affects the agent's own terminal tool.)
 - **Build toolchain (only if building from source):** a Rust toolchain (`cargo`). Otherwise just download the prebuilt binary from the Release page.
 
@@ -111,6 +111,8 @@ context_size = 32768
 model = "default.qwen"             # references provider.<id>.<model_alias> above
 ```
 
+For cloud Anthropic, use `type = "anthropic"` and add `max_tokens` on the model entry (see the commented example in the generated template). Optional: set `fallback = [...]` under `[agent.main]` to auto-degrade to backup models when the primary fails.
+
 ### Step 3: Start using it
 
 - **Web UI (recommended)**:
@@ -132,13 +134,26 @@ model = "default.qwen"             # references provider.<id>.<model_alias> abov
 | Command | What it does |
 |---|---|
 | `llaia chat` | Enter terminal chat mode (default, can be omitted) |
-| `llaia serve` | Start background services: built-in Web UI (and optional QQ channel); no terminal chat |
+| `llaia serve` | Start background services: built-in Web UI (and optional messaging channels); no terminal chat |
 | `llaia init [--force]` | Initialize the data directory: scaffold + default templates |
 | `llaia config` | Print the currently effective config |
 | `llaia doctor` | Diagnose provider connectivity and file integrity (troubleshooting) |
 | `llaia remember "<a sentence>"` | Write a line of long-term memory into MEMORY.md directly |
 
-In-session slash commands (in chat or Web UI): `/new` `/exit` `/compact` `/clear` `/remember` `/config` `/help`.
+In-session slash commands (in chat or Web UI): `/new` `/exit` `/compact` `/clear` `/remember` `/config` `/provider` (list & switch models at runtime) `/help`.
+
+### Messaging channels
+
+LLAIA can reach you beyond the Web UI. All channels are **disabled by default**; enable them in `config.toml` (credentials go in `.env` via `${VAR}` references — the init template has commented examples):
+
+| Channel | Config section | Credentials |
+|---|---|---|
+| QQ (official bot platform, C2C) | `[channels.qq]` | app_id / app_secret |
+| Telegram | `[channels.telegram]` | bot token from @BotFather (long polling, no public IP needed) |
+| DingTalk | `[channels.dingtalk]` | client_id / client_secret (Stream Mode, no public IP needed) |
+| WeChat (ClawBot / ilink) | `[channels.wechat]` | first launch prints a QR-code link — scan with your phone to log in |
+
+Each channel has an `allow_*` field as a single-user safety lock (only your own messages are answered).
 
 ---
 

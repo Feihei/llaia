@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 
-/// init 默认配置模板：provider/agent 注释占位，QQ/WebUI 默认关闭。
+/// init 默认配置模板：provider/agent 注释占位，各 channel 默认关闭。
 /// 模板内路径用 ~/.llaia 占位，加载时 Config::load 会展开 ~。
 const CONFIG_TEMPLATE: &str = r#"# LLAIA 配置文件
 # 字段说明见 docs/adr/0008-config-schema-v1.1.md
@@ -32,8 +32,18 @@ dir = "~/.llaia/logs"
 # native_tool_calling = false
 # context_size = 32768
 
+# 云端 Anthropic 示例（也兼容指向网关的 base_url）：
+# [provider.claude]
+# type = "anthropic"
+# api_key = "${ANTHROPIC_API_KEY}"
+#
+# [provider.claude.sonnet]
+# model = "claude-sonnet-4-20250514"
+# max_tokens = 8192              # Anthropic 必传，未配置默认 4096
+
 # 主 Agent：model 留空进入降级模式（无 provider，仅可配置 WebUI）
 # 配好上面的 provider 后填 "default.qwen" 等引用即可启用聊天
+# fallback = ["default.qwen"]    # 可选：主模型请求失败时依序降级的 model ref 链
 # workspace / soul / user / memory 字段已废弃，自动推导到 ~/.llaia/workspace/
 [agent.main]
 model = ""
@@ -49,6 +59,21 @@ enabled = false
 app_id = ""                    # 支持 "${QQ_APP_ID}" 环境变量引用
 app_secret = ""                # 支持 "${QQ_APP_SECRET}" 环境变量引用
 confirm_mode = "none"        # none / always / session
+
+# [channels.telegram]
+# enabled = false
+# bot_token = "${TELEGRAM_BOT_TOKEN}"  # @BotFather 颁发
+# allow_chat_id = 0            # 只响应此 chat 的消息（单用户锁），0 = 不限制
+
+# [channels.dingtalk]
+# enabled = false
+# client_id = "${DINGTALK_CLIENT_ID}"
+# client_secret = "${DINGTALK_CLIENT_SECRET}"
+# allow_staff_id = ""          # 只响应此 staffId 的消息，空 = 不限制
+
+# [channels.wechat]
+# enabled = false              # 微信 ClawBot（ilink bot），首次启动打印二维码链接，手机扫码登录
+# allow_user_id = ""           # 只响应此 ilink_user_id 的消息，空 = 不限制
 
 [webui]
 host = "127.0.0.1"
@@ -70,8 +95,12 @@ const ENV_TEMPLATE: &str = r#"# LLAIA 环境变量（本文件不要提交到 gi
 # config.toml 中可用 "${VAR_NAME}" 引用此处定义的变量
 
 # OLLAMA_API_KEY=
+# ANTHROPIC_API_KEY=
 # QQ_APP_ID=
 # QQ_APP_SECRET=
+# TELEGRAM_BOT_TOKEN=
+# DINGTALK_CLIENT_ID=
+# DINGTALK_CLIENT_SECRET=
 # TAVILY_API_KEY=
 "#;
 
