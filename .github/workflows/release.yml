@@ -29,7 +29,7 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -76,7 +76,7 @@ jobs:
           sha256sum "llaia-${{ matrix.target }}.exe" > "llaia-${{ matrix.target }}.exe.sha256"
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             llaia-${{ matrix.target }}*
