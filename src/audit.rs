@@ -54,6 +54,9 @@ impl AuditLog {
             .open(&self.path)
             .await?;
         file.write_all(line.as_bytes()).await?;
+        // tokio 的 File 在 drop 时不保证数据落盘，必须显式 flush，
+        // 否则调用方紧接着读文件时可能读到空/不完整内容（CI 上偶发竞态）。
+        file.flush().await?;
         Ok(())
     }
 }
