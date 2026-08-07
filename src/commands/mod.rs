@@ -162,8 +162,8 @@ pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     // 2. 生成 config.toml
     let config_path = config_dir.join("config.toml");
     write_file_if_needed(&config_path, CONFIG_TEMPLATE, force)?;
-    println!("✓ 已创建 {} 目录结构", config_dir.display());
-    println!("✓ 已生成 config.toml（含注释模板）");
+    println!("✓ created directory structure at {}", config_dir.display());
+    println!("✓ generated config.toml (with commented template)");
 
     // 3. 生成 SOUL.md / USER.md / MEMORY.md 模板（同步阻塞，文件小）
     let soul_path = workspace.join("SOUL.md");
@@ -172,31 +172,31 @@ pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     write_file_if_needed(&soul_path, crate::memory::SOUL_TEMPLATE, force)?;
     write_file_if_needed(&user_path, crate::memory::USER_TEMPLATE, force)?;
     write_file_if_needed(&memory_path, crate::memory::MEMORY_TEMPLATE, force)?;
-    println!("✓ 已生成 SOUL.md / USER.md / MEMORY.md 模板");
+    println!("✓ generated SOUL.md / USER.md / MEMORY.md templates");
 
     // 4. 生成 cron.toml 模板
     let cron_path = config_dir.join("cron.toml");
     write_file_if_needed(&cron_path, CRON_TEMPLATE, force)?;
-    println!("✓ 已生成 cron.toml（定时任务模板，默认全部注释）");
+    println!("✓ generated cron.toml (cron template, all commented by default)");
 
     // 5. 生成 mcp.toml 模板
     let mcp_path = config_dir.join("mcp.toml");
     write_file_if_needed(&mcp_path, MCP_TEMPLATE, force)?;
-    println!("✓ 已生成 mcp.toml（MCP server 模板，默认全部注释）");
+    println!("✓ generated mcp.toml (MCP server template, all commented by default)");
 
     // 6. 生成 .env 模板（敏感凭据集中存放，config.toml 用 ${VAR} 引用）
     let env_path = config_dir.join(".env");
     write_file_if_needed(&env_path, ENV_TEMPLATE, force)?;
-    println!("✓ 已生成 .env（敏感凭据模板，编辑后填入实际值，不要提交到 git）");
+    println!("✓ generated .env (secret template; fill in real values, do not commit to git)");
 
     // 7. 终端输出引导
     println!();
-    println!("下一步：");
-    println!("  1. 编辑 ~/.llaia/.env 填入 API key 等敏感凭据");
-    println!("  2. 编辑 ~/.llaia/config.toml，在 [agent.main] 填入 model 引用（如 default.qwen）");
-    println!("     或运行 llaia serve 后在浏览器访问 http://127.0.0.1:51217 通过 WebUI 配置");
-    println!("  3. 启动服务：llaia serve");
-    println!("  4. CLI 调试：llaia chat");
+    println!("Next steps:");
+    println!("  1. edit ~/.llaia/.env and fill in API keys and other secrets");
+    println!("  2. edit ~/.llaia/config.toml, set model reference in [agent.main] (e.g. default.qwen)");
+    println!("     or run llaia serve and configure via WebUI at http://127.0.0.1:51217");
+    println!("  3. start the service: llaia serve");
+    println!("  4. CLI debug: llaia chat");
     Ok(())
 }
 
@@ -237,7 +237,7 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
         let a = registry.main.lock().await;
         if !a.has_provider().await {
             anyhow::bail!(
-                "未配置 provider，无法启动聊天。\n请先运行 `llaia serve`，在浏览器访问 http://{}:{} 通过 WebUI 配置 provider，\n或手动编辑 {}/config.toml 取消 [provider.default] / [agent.main] 注释。",
+                "No provider configured, cannot start chat.\nRun `llaia serve` first and configure the provider via WebUI at http://{}:{}, \nor edit {}/config.toml to uncomment [provider.default] / [agent.main].",
                 config.webui.host,
                 config.webui.port,
                 config_dir.display()
@@ -263,7 +263,7 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
 
     // 与 chat 共用同一份欢迎 billboard（见 crate::banner）
     print!("{}", crate::banner::billboard());
-    println!("  后台服务模式：QQ / WebUI 等频道，Ctrl+C 退出\n");
+    println!("  background service mode: QQ / WebUI channels, press Ctrl+C to quit\n");
 
     let pid_file = crate::pid::PidFile::new(config_dir);
     pid_file.acquire()?;
@@ -277,7 +277,7 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         let a = registry.main.lock().await;
         if !a.has_provider().await {
             tracing::warn!(
-                "未配置 provider，聊天功能不可用，请在 WebUI (http://{}:{}) 配置 [provider.default] section",
+                "No provider configured; chat is unavailable. Configure [provider.default] in WebUI (http://{}:{})",
                 config.webui.host,
                 config.webui.port
             );
@@ -413,9 +413,9 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
 
     // provider 配置检查：无 [provider.<id>] section 时 warn（不 error，serve 可降级启动）
     if cfg.provider.is_empty() {
-        println!("\n[warn] 未配置任何 provider，llaia serve 将以降级模式启动（聊天不可用，WebUI 配置可用）");
+        println!("\n[warn] No provider configured; llaia serve will start in degraded mode (chat unavailable, WebUI config usable)");
         println!(
-            "       建议：运行 `llaia init` 后编辑 {}/config.toml 取消 [provider.default] 注释",
+            "       suggestion: run `llaia init`, then edit {}/config.toml to uncomment [provider.default]",
             config_dir.display()
         );
     } else {
@@ -453,10 +453,10 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
                     );
                 }
             }
-            Err(e) => println!("\n[warn] cron.toml 解析失败: {}", e),
+            Err(e) => println!("\n[warn] failed to parse cron.toml: {}", e),
         }
     } else {
-        println!("\ncron.toml: 不存在（无 cron 任务，运行 `llaia init` 生成模板）");
+        println!("\ncron.toml: not found (no cron tasks; run `llaia init` to generate a template)");
     }
 
     // mcp.toml 检查
@@ -480,10 +480,10 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
                     );
                 }
             }
-            Err(e) => println!("\n[warn] mcp.toml 解析失败: {}", e),
+            Err(e) => println!("\n[warn] failed to parse mcp.toml: {}", e),
         }
     } else {
-        println!("\nmcp.toml: 不存在（无 MCP server，运行 `llaia init` 生成模板）");
+        println!("\nmcp.toml: not found (no MCP server; run `llaia init` to generate a template)");
     }
 
     let agent_cfg = match cfg.agent.get("main") {
@@ -495,7 +495,7 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
             let db_path = workspace.join("sessions.db");
             if !db_path.exists() {
                 println!(
-                    "[warn] sessions.db 不存在：{}（首次启动自动创建）",
+                    "[warn] sessions.db not found: {} (created automatically on first start)",
                     db_path.display()
                 );
             } else {
@@ -518,7 +518,7 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
     let db_path = workspace.join("sessions.db");
     if !db_path.exists() {
         println!(
-            "[warn] sessions.db 不存在：{}（首次启动自动创建）",
+            "[warn] sessions.db not found: {} (created automatically on first start)",
             db_path.display()
         );
     } else {

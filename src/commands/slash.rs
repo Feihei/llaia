@@ -40,7 +40,7 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
                 Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
             },
             None => Ok(SlashOutcome::Handled(
-                "[compact failed: 未配置 provider]".into(),
+                "[compact failed: provider not configured]".into(),
             )),
         },
         "/stats" => {

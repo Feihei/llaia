@@ -94,8 +94,6 @@ impl Channel for CliChannel {
         };
         // 欢迎 billboard 与 serve 共用同一份文案（见 crate::banner）
         print!("{}", crate::banner::billboard());
-        println!("  /help 查看命令 · /exit 退出 · /stop 中断生成 · Ctrl+C 紧急中断");
-        println!("  生成中可继续输入，回车即排队\n");
 
         // 后台读 stdin 的 task：把每行输入送到 mpsc，EOF 时发 None
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Option<String>>(16);

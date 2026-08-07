@@ -54,7 +54,7 @@ impl Tool for MemoryWrite {
         // 子 agent 不允许写 USER.md（身份绑定统一在主 agent 管理）
         // memory_write 本身写 MEMORY.md，但检查 is_main 防止子 agent 误用
         if !self.is_main {
-            anyhow::bail!("子 agent 不可写长期记忆，身份绑定统一在主 agent 管理");
+            anyhow::bail!("sub-agent cannot write long-term memory; identity binding is managed by the main agent");
         }
 
         let _g = self.lock.lock().await;
@@ -101,6 +101,6 @@ mod tests {
             .execute(&serde_json::json!({"entry": "test"}), "cli")
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("子 agent"));
+        assert!(result.unwrap_err().to_string().contains("sub-agent"));
     }
 }

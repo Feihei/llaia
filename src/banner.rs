@@ -7,7 +7,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 退出语：chat 与 serve 共用，保证两处退出体验一致。
-pub const GOODBYE: &str = "(੭aᴗa)੭  bye~ 下次见";
+pub const GOODBYE: &str = "(੭aᴗa)੭  Bye~";
 
 /// 横幅中央标语：上下两道横线包裹这一行。
 const SLOGAN: &str = "LLAIA  (੭aᴗa)੭  Come On~";
@@ -37,8 +37,8 @@ pub fn billboard() -> String {
     s.push_str(&format!("llaia v{VERSION}\n"));
     s.push_str(SUBTITLE);
     s.push('\n');
-    s.push_str("  /help 查看命令 · /exit 退出 · /stop 中断生成 · Ctrl+C 紧急中断\n");
-    s.push_str("  生成中可继续输入，回车即排队\n");
+    s.push_str("  /help for commands · /exit to quit · /stop to interrupt · Ctrl+C to abort\n");
+    s.push_str("  type while generating to queue; press Enter to send\n");
     s
 }
 

@@ -135,7 +135,7 @@ impl Tool for CronTool {
             Some(s) => s,
             None => {
                 return Ok("error: cron scheduler not running. \
-                     定时任务仅在 'llaia serve' 模式下可用，请用 serve 启动后再操作 cron 任务。"
+                     cron tasks are only available in 'llaia serve' mode; start with serve first, then operate cron tasks."
                     .into());
             }
         };

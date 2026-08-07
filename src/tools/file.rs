@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 pub struct FileRead {
     workspace: PathBuf,
     is_main: bool,
+    /// skills 目录（<config_dir>/skills）：SKILL.md 特殊放行用，None 时不放行
+    skills_dir: Option<PathBuf>,
 }
 pub struct FileWrite {
     workspace: PathBuf,
@@ -19,8 +21,12 @@ pub struct FileEdit {
 }
 
 impl FileRead {
-    pub fn new(workspace: PathBuf, is_main: bool) -> Self {
-        Self { workspace, is_main }
+    pub fn new(workspace: PathBuf, is_main: bool, skills_dir: Option<PathBuf>) -> Self {
+        Self {
+            workspace,
+            is_main,
+            skills_dir,
+        }
     }
 }
 impl FileWrite {
@@ -66,6 +72,17 @@ impl Tool for FileRead {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'path' argument"))?;
+        // 特殊放行：skills 目录内的 SKILL.md（位于 agent workspace 之外，ADR-0015）
+        if let Some(skills_dir) = &self.skills_dir {
+            if let Some(skill_path) =
+                crate::skill::loader::resolve_skill_path(skills_dir, &self.workspace, path)
+            {
+                let content = tokio::fs::read_to_string(&skill_path)
+                    .await
+                    .map_err(|e| anyhow!("read {:?}: {}", skill_path, e))?;
+                return Ok(content);
+            }
+        }
         let extra = if self.is_main {
             extra_readable_for_main(&self.workspace)
         } else {
@@ -115,7 +132,7 @@ impl Tool for FileWrite {
         if self.is_main {
             let subagent_dir = self.workspace.join("subagent");
             if resolved.starts_with(&subagent_dir) {
-                anyhow::bail!("主 agent 不可写子 agent 工作区: {}", path);
+                anyhow::bail!("main agent cannot write to sub-agent workspace: {}", path);
             }
         }
 
@@ -173,7 +190,7 @@ impl Tool for FileEdit {
         if self.is_main {
             let subagent_dir = self.workspace.join("subagent");
             if resolved.starts_with(&subagent_dir) {
-                anyhow::bail!("主 agent 不可写子 agent 工作区: {}", path);
+                anyhow::bail!("main agent cannot write to sub-agent workspace: {}", path);
             }
         }
 
@@ -214,7 +231,7 @@ mod tests {
         let ws = tempdir().unwrap();
         let ws_path = ws.path().to_path_buf();
         std::fs::write(ws_path.join("test.txt"), "hello world").unwrap();
-        let tool = FileRead::new(ws_path, true);
+        let tool = FileRead::new(ws_path, true, None);
         let result = tool
             .execute(&json!({"path": "test.txt"}), "cli")
             .await
@@ -232,7 +249,7 @@ mod tests {
             .await
             .unwrap();
 
-        let read_tool = FileRead::new(ws_path, true);
+        let read_tool = FileRead::new(ws_path, true, None);
         let escaped = read_tool
             .execute(&json!({"path": "../outside.txt"}), "cli")
             .await;
@@ -247,7 +264,7 @@ mod tests {
         std::fs::create_dir_all(&subagent_dir).unwrap();
         std::fs::write(subagent_dir.join("result.md"), "sub output").unwrap();
 
-        let tool = FileRead::new(ws_path, true);
+        let tool = FileRead::new(ws_path, true, None);
         let result = tool
             .execute(&json!({"path": "subagent/coder/result.md"}), "cli")
             .await;
@@ -269,7 +286,7 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("不可写子 agent"));
+        assert!(result.unwrap_err().to_string().contains("cannot write to sub-agent"));
     }
 
     #[tokio::test]
@@ -283,9 +300,45 @@ mod tests {
         std::fs::create_dir_all(&searcher_ws).unwrap();
         std::fs::write(searcher_ws.join("secret.txt"), "secret").unwrap();
 
-        let tool = FileRead::new(coder_ws, false);
+        let tool = FileRead::new(coder_ws, false, None);
         let result = tool
             .execute(&json!({"path": "../searcher/secret.txt"}), "cli")
+            .await;
+        assert!(result.is_err());
+    }
+
+    /// SKILL.md 特殊放行：workspace 外的 skills 目录内 SKILL.md 可读，其他文件仍拒绝
+    #[tokio::test]
+    async fn test_file_read_skill_md_special_allow() {
+        let root = tempdir().unwrap();
+        let ws_path = root.path().join("workspace");
+        let skills_dir = root.path().join("skills");
+        std::fs::create_dir_all(&ws_path).unwrap();
+        let skill_dir = skills_dir.join("demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: demo\n---\nskill body").unwrap();
+        std::fs::write(skill_dir.join("secret.txt"), "secret").unwrap();
+
+        let tool = FileRead::new(ws_path, true, Some(skills_dir.clone()));
+        // SKILL.md 可读（绝对路径）
+        let result = tool
+            .execute(&json!({"path": skill_dir.join("SKILL.md").to_str().unwrap()}), "cli")
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("skill body"));
+        // 同目录非 SKILL.md 文件仍拒绝
+        let result = tool
+            .execute(&json!({"path": skill_dir.join("secret.txt").to_str().unwrap()}), "cli")
+            .await;
+        assert!(result.is_err());
+        // 未配 skills_dir 时 SKILL.md 也拒绝
+        let tool_no_skills = FileRead::new(
+            root.path().join("workspace"),
+            true,
+            None,
+        );
+        let result = tool_no_skills
+            .execute(&json!({"path": skill_dir.join("SKILL.md").to_str().unwrap()}), "cli")
             .await;
         assert!(result.is_err());
     }

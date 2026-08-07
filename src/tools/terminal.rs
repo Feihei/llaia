@@ -38,14 +38,14 @@ impl Terminal {
             "none" => Ok(()),
             "blacklist" => {
                 if path_guard::hits_command_blacklist(command) {
-                    anyhow::bail!("命令命中黑名单: {}", command);
+                    anyhow::bail!("command matches blocklist: {}", command);
                 }
                 Ok(())
             }
             "whitelist" => {
                 let first = command.split_whitespace().next().unwrap_or("");
                 if !self.command_whitelist.iter().any(|w| w == first) {
-                    anyhow::bail!("命令 {} 不在白名单内", first);
+                    anyhow::bail!("command {} is not in the whitelist", first);
                 }
                 Ok(())
             }
