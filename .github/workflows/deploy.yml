@@ -30,7 +30,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push (default: curl/git/python3)
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -38,6 +38,18 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}:latest
             ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (full: + static node)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          build-args: |
+            EXTRAS=full
+          tags: |
+            ${{ steps.meta.outputs.image }}:full
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

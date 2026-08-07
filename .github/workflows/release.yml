@@ -57,23 +57,26 @@ jobs:
         if: ${{ !matrix.use-cross }}
         run: cargo build --target ${{ matrix.target }} --release --locked
 
-      # ---- Package artifact (Unix) ----
+      # ---- Package artifact (Unix: tar.gz) ----
       - name: Prepare artifact (Unix)
         if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           BIN="target/${{ matrix.target }}/release/llaia"
           strip "$BIN"
-          cp "$BIN" "llaia-${{ matrix.target }}"
-          sha256sum "llaia-${{ matrix.target }}" > "llaia-${{ matrix.target }}.sha256"
+          ARCHIVE="llaia-${{ matrix.target }}.tar.gz"
+          tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" llaia
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
-      # ---- Package artifact (Windows) ----
+      # ---- Package artifact (Windows: zip) ----
       - name: Prepare artifact (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          cp "target/${{ matrix.target }}/release/llaia.exe" "llaia-${{ matrix.target }}.exe"
-          sha256sum "llaia-${{ matrix.target }}.exe" > "llaia-${{ matrix.target }}.exe.sha256"
+          SRC="target/${{ matrix.target }}/release/llaia.exe"
+          ARCHIVE="llaia-${{ matrix.target }}.zip"
+          powershell -NoProfile -Command "Compress-Archive -Path '$SRC' -DestinationPath '$ARCHIVE' -Force"
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
