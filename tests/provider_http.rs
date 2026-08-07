@@ -2,8 +2,16 @@ use llaia::provider::openai_compat::OpenAiCompatibleProvider;
 use llaia::provider::{ChatMessage, ChatRequest, Provider};
 use serde_json::json;
 
+/// Windows 系统代理（注册表配置，如 Clash）常不 bypass loopback，
+/// reqwest 默认读取系统代理，导致对 mockito 本地 server 的请求被代理截断。
+fn bypass_proxy() {
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    std::env::set_var("no_proxy", "127.0.0.1,localhost");
+}
+
 #[tokio::test]
 async fn test_native_tool_calling() {
+    bypass_proxy();
     let mut server = mockito::Server::new_async().await;
     let delta = json!({
         "choices": [{
@@ -45,6 +53,7 @@ async fn test_native_tool_calling() {
 
 #[tokio::test]
 async fn test_text_response() {
+    bypass_proxy();
     let mut server = mockito::Server::new_async().await;
     let delta = json!({
         "choices": [{
@@ -75,6 +84,7 @@ async fn test_text_response() {
 
 #[tokio::test]
 async fn test_error_response() {
+    bypass_proxy();
     let mut server = mockito::Server::new_async().await;
     let m = server
         .mock("POST", "/chat/completions")

@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 pub mod cron;
 pub mod delegate;
 pub mod file;
+pub mod mcp;
 pub mod memory;
 pub mod send_media;
 pub mod tavily;

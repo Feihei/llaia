@@ -92,8 +92,10 @@ impl Channel for CliChannel {
             let a = agent.lock().await;
             a.workspace.clone()
         };
-        println!("(੭aᴗa)੭ Llaia - Come On~\nllaia v0.1.0 - type /help for commands, /exit to quit, /stop to interrupt\n");
-        println!("生成中可继续输入，/stop 立即中断，Ctrl+C 紧急中断\n");
+        // 欢迎 billboard 与 serve 共用同一份文案（见 crate::banner）
+        print!("{}", crate::banner::billboard());
+        println!("  /help 查看命令 · /exit 退出 · /stop 中断生成 · Ctrl+C 紧急中断");
+        println!("  生成中可继续输入，回车即排队\n");
 
         // 后台读 stdin 的 task：把每行输入送到 mpsc，EOF 时发 None
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Option<String>>(16);
@@ -141,9 +143,8 @@ impl Channel for CliChannel {
                         Some(Some(l)) => l,
                         Some(None) | None => break, // EOF
                     },
-                    // 空闲态 Ctrl+C：等价于 /exit，优雅退出
+                    // 空闲态 Ctrl+C：等价于 /exit，优雅退出（退出语在循环结束后统一打印）
                     _ = tokio::signal::ctrl_c() => {
-                        println!("\n[goodbye]");
                         break;
                     }
                 }
@@ -280,6 +281,8 @@ impl Channel for CliChannel {
                 }
             }
         }
+        // /exit、EOF、空闲 Ctrl+C 等所有退出路径统一在此打印退出语
+        println!("\n{}", crate::banner::GOODBYE);
         Ok(())
     }
 }
@@ -294,6 +297,7 @@ async fn build_single_agent(
     agent_cfg: AgentConfig,
     is_main: bool,
     audit: Option<Arc<crate::audit::AuditLog>>,
+    mcp_tools: Vec<Arc<dyn Tool>>,
 ) -> Result<(
     Arc<Mutex<Agent>>,
     Option<Arc<DelegateTool>>,
@@ -408,6 +412,8 @@ async fn build_single_agent(
             config.tools.tavily.api_key.clone(),
         )?));
     }
+    // MCP 工具（共享 registry，受下方 denied_tools 过滤）
+    all_tools.extend(mcp_tools);
 
     // 按 denied_tools 过滤
     let denied: std::collections::HashSet<&str> =
@@ -516,10 +522,31 @@ async fn build_single_agent(
 pub async fn build_agent(
     config: &Config,
     config_dir: &std::path::Path,
-) -> Result<(Arc<AgentRegistry>, Option<Arc<CronTool>>)> {
+) -> Result<(
+    Arc<AgentRegistry>,
+    Option<Arc<CronTool>>,
+    Arc<crate::mcp::client::McpRegistry>,
+)> {
     // 审计日志
     let log_dir = PathBuf::from(&config.log.dir);
     let audit = Arc::new(crate::audit::AuditLog::new(&log_dir));
+
+    // MCP：加载 mcp.toml，连接所有 enabled server（单个失败 log + 跳过，不阻塞启动）
+    let mcp_path = config_dir.join("mcp.toml");
+    let mcp_cfg = crate::mcp::McpConfig::load(&mcp_path)?;
+    let mcp_registry =
+        Arc::new(crate::mcp::client::McpRegistry::connect_all(&mcp_cfg.server).await);
+    let mut mcp_tools: Vec<Arc<dyn Tool>> = Vec::new();
+    for (prefixed, def) in mcp_registry.tool_defs().await {
+        mcp_tools.push(Arc::new(crate::tools::mcp::McpTool::new(
+            prefixed,
+            def,
+            mcp_registry.clone(),
+        )));
+    }
+    if !mcp_tools.is_empty() {
+        tracing::info!(tools = mcp_tools.len(), "MCP tools loaded");
+    }
 
     // 构建子 Agent（跳过 main）
     let mut sub_agents: Vec<(String, Arc<Mutex<Agent>>)> = Vec::new();
@@ -534,6 +561,7 @@ pub async fn build_agent(
             cfg.clone(),
             false,
             Some(audit.clone()),
+            mcp_tools.clone(),
         )
         .await?;
         sub_agents.push((alias.clone(), agent));
@@ -560,6 +588,7 @@ pub async fn build_agent(
         main_cfg,
         true,
         Some(audit.clone()),
+        mcp_tools,
     )
     .await?;
 
@@ -588,7 +617,7 @@ pub async fn build_agent(
         sub_agents = registry.available_sub_agents().len(),
         "AgentRegistry built"
     );
-    Ok((registry, cron_tool))
+    Ok((registry, cron_tool, mcp_registry))
 }
 
 /// 根据 "provider_id.model_alias" 引用从 config 构建 compact_provider。

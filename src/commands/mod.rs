@@ -108,6 +108,40 @@ const CRON_TEMPLATE: &str = r#"# LLAIA cron 定时任务配置
 # ]
 "#;
 
+/// init 默认 mcp.toml 模板：所有 server 注释，仅作文档。
+const MCP_TEMPLATE: &str = r#"# LLAIA MCP server 配置（修改后需重启 llaia serve/chat 生效）
+# 字段说明见 docs/adr/0014-mcp-client.md
+# 工具命名：<server id>__<tool_name>（如 filesystem__read_file）
+# MCP 工具默认 requires_confirm = true，safe_tools 里的工具免确认
+
+# 示例：stdio transport（本地子进程）
+# [[server]]
+# id = "filesystem"
+# enabled = true
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+# safe_tools = ["read_file", "list_directory"]
+# # tool_timeout_secs = 180
+
+# 示例：streamable HTTP transport（远程 server）
+# [[server]]
+# id = "remote"
+# enabled = true
+# transport = "http"
+# url = "https://internal-mcp.corp/mcp"
+#
+# [server.headers]
+# Authorization = "Bearer ${MCP_TOKEN}"   # secret 放 .env，不落盘
+
+# 示例：旧版 SSE transport
+# [[server]]
+# id = "legacy-sse"
+# enabled = true
+# transport = "sse"
+# url = "https://legacy-mcp.corp/sse"
+"#;
+
 /// llaia init：生成 ~/.llaia/ 目录骨架 + 基础模板，提示进入 WebUI 完成配置。
 /// 幂等：已存在的文件不覆盖（除非 force）。
 pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
@@ -145,12 +179,17 @@ pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     write_file_if_needed(&cron_path, CRON_TEMPLATE, force)?;
     println!("✓ 已生成 cron.toml（定时任务模板，默认全部注释）");
 
-    // 5. 生成 .env 模板（敏感凭据集中存放，config.toml 用 ${VAR} 引用）
+    // 5. 生成 mcp.toml 模板
+    let mcp_path = config_dir.join("mcp.toml");
+    write_file_if_needed(&mcp_path, MCP_TEMPLATE, force)?;
+    println!("✓ 已生成 mcp.toml（MCP server 模板，默认全部注释）");
+
+    // 6. 生成 .env 模板（敏感凭据集中存放，config.toml 用 ${VAR} 引用）
     let env_path = config_dir.join(".env");
     write_file_if_needed(&env_path, ENV_TEMPLATE, force)?;
     println!("✓ 已生成 .env（敏感凭据模板，编辑后填入实际值，不要提交到 git）");
 
-    // 6. 终端输出引导
+    // 7. 终端输出引导
     println!();
     println!("下一步：");
     println!("  1. 编辑 ~/.llaia/.env 填入 API key 等敏感凭据");
@@ -190,7 +229,8 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
     pid_file.acquire()?;
     let _pid_guard = PidGuard(pid_file);
 
-    let (registry, _cron_tool) = crate::channels::cli::build_agent(&config, config_dir).await?;
+    let (registry, _cron_tool, _mcp_registry) =
+        crate::channels::cli::build_agent(&config, config_dir).await?;
 
     // chat 模式必须有 provider：纯 CLI 无法配置，无 provider 直接报错引导
     {
@@ -221,11 +261,16 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
 
+    // 与 chat 共用同一份欢迎 billboard（见 crate::banner）
+    print!("{}", crate::banner::billboard());
+    println!("  后台服务模式：QQ / WebUI 等频道，Ctrl+C 退出\n");
+
     let pid_file = crate::pid::PidFile::new(config_dir);
     pid_file.acquire()?;
     let _pid_guard = PidGuard(pid_file);
 
-    let (registry, cron_tool) = crate::channels::cli::build_agent(&config, config_dir).await?;
+    let (registry, cron_tool, mcp_registry) =
+        crate::channels::cli::build_agent(&config, config_dir).await?;
 
     // serve 模式：无 provider 时 warn 但继续启动（WebUI 配置功能不依赖 provider，聊天降级提示）
     {
@@ -278,6 +323,7 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         config_path,
         workspace.clone(),
     ));
+    web.set_mcp_registry(mcp_registry);
     let web_pusher_for_cron: std::sync::Arc<dyn crate::cron::ProactivePusher> = web.clone();
     let web_host = config.webui.host.clone();
     let web_port = config.webui.port;
@@ -335,7 +381,9 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("received Ctrl+C, shutting down gracefully...");
+            tracing::info!("received Ctrl+C, shutting down");
+            // 与 chat 共用同一句退出语
+            println!("\n{}", crate::banner::GOODBYE);
         }
         _ = async {
             for t in tasks {
@@ -409,6 +457,33 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         }
     } else {
         println!("\ncron.toml: 不存在（无 cron 任务，运行 `llaia init` 生成模板）");
+    }
+
+    // mcp.toml 检查
+    let mcp_path = config_dir.join("mcp.toml");
+    if mcp_path.exists() {
+        match crate::mcp::McpConfig::load(&mcp_path) {
+            Ok(c) => {
+                let enabled = c.server.iter().filter(|s| s.enabled).count();
+                println!(
+                    "\nmcp.toml: {} ({} servers, {} enabled)",
+                    mcp_path.display(),
+                    c.server.len(),
+                    enabled
+                );
+                for s in &c.server {
+                    println!(
+                        "  - {} [{:?}] {}",
+                        s.id,
+                        s.transport,
+                        if s.enabled { "enabled" } else { "disabled" }
+                    );
+                }
+            }
+            Err(e) => println!("\n[warn] mcp.toml 解析失败: {}", e),
+        }
+    } else {
+        println!("\nmcp.toml: 不存在（无 MCP server，运行 `llaia init` 生成模板）");
     }
 
     let agent_cfg = match cfg.agent.get("main") {

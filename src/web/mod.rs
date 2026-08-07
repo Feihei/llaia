@@ -32,6 +32,10 @@ pub struct AppState {
     pub cron_path: std::path::PathBuf,
     /// CronScheduler 实例（None 时 cron API 返回 503）
     pub cron_scheduler: Option<Arc<crate::cron::CronScheduler>>,
+    /// mcp.toml 路径（供 raw 编辑 / 测试连接接口读写）
+    pub mcp_path: std::path::PathBuf,
+    /// McpRegistry 实例（None 时 MCP 状态 API 返回 503；raw 编辑不受影响）
+    pub mcp_registry: Option<Arc<crate::mcp::client::McpRegistry>>,
 }
 
 /// 生成 32 字节随机 hex token
@@ -721,6 +725,124 @@ pub async fn put_cron_raw(
     .into_response()
 }
 
+// ───────────────────────── MCP API ─────────────────────────
+
+/// GET /api/mcp → MCP server 状态列表（含每个 server 的工具清单）
+pub async fn list_mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let Some(registry) = state.mcp_registry.clone() else {
+        return json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MCP registry not available",
+        );
+    };
+    axum::Json(serde_json::json!({ "servers": registry.status().await })).into_response()
+}
+
+/// GET /api/mcp/raw → 读 mcp.toml 文本
+pub async fn get_mcp_raw(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    if !state.mcp_path.exists() {
+        return axum::Json(serde_json::json!({ "raw": "" })).into_response();
+    }
+    match std::fs::read_to_string(&state.mcp_path) {
+        Ok(content) => axum::Json(serde_json::json!({ "raw": content })).into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("read: {}", e)),
+    }
+}
+
+/// PUT /api/mcp/raw → 写 mcp.toml 文本（先校验可解析，不热加载，需重启 serve 生效）
+pub async fn put_mcp_raw(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::Json(body): axum::Json<CronRawBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let cfg = match crate::mcp::McpConfig::from_str_validate(&body.raw) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = std::fs::write(&state.mcp_path, &body.raw) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e));
+    }
+    tracing::info!(
+        servers = cfg.server.len(),
+        "mcp.toml updated (reload requires restart)"
+    );
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "note": "mcp.toml saved (restart serve to apply)"
+    }))
+    .into_response()
+}
+
+/// POST /api/mcp/:id/test → 现场连接指定 server（initialize + tools/list），返回工具列表
+pub async fn test_mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let cfg = match crate::mcp::McpConfig::load(&state.mcp_path) {
+        Ok(c) => c,
+        Err(e) => return json_err(StatusCode::BAD_REQUEST, &format!("load mcp.toml: {}", e)),
+    };
+    let server_cfg = match cfg.server.into_iter().find(|s| s.id == id) {
+        Some(s) => s,
+        None => {
+            return json_err(
+                StatusCode::NOT_FOUND,
+                &format!("mcp server not found: {}", id),
+            )
+        }
+    };
+    match crate::mcp::client::McpServer::connect(server_cfg).await {
+        Ok(server) => {
+            let tools = server
+                .tools_snapshot()
+                .await
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "name": d.name,
+                        "description": d.description.clone().unwrap_or_default(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            axum::Json(serde_json::json!({ "ok": true, "tools": tools })).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// 构建系统级 Web 路由（不含 WS）。
 /// 返回 `Router<AppState>`，由调用方合并 WS 路由后统一 `with_state`。
 pub fn build_system_routes() -> axum::Router<AppState> {
@@ -747,6 +869,13 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         )
         .route("/api/cron/history", axum::routing::get(cron_history))
         .route("/api/cron/:id/trigger", axum::routing::post(trigger_cron))
+        // MCP API
+        .route("/api/mcp", axum::routing::get(list_mcp))
+        .route(
+            "/api/mcp/raw",
+            axum::routing::get(get_mcp_raw).put(put_mcp_raw),
+        )
+        .route("/api/mcp/:id/test", axum::routing::post(test_mcp))
 }
 
 #[cfg(test)]

@@ -3,8 +3,16 @@ use llaia::provider::openai_compat::OpenAiCompatibleProvider;
 use llaia::provider::{ChatMessage, ChatRequest, Provider, StreamEvent};
 use serde_json::json;
 
+/// Windows 系统代理（注册表配置，如 Clash）常不 bypass loopback，
+/// reqwest 默认读取系统代理，导致对 mockito 本地 server 的请求被代理截断。
+fn bypass_proxy() {
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    std::env::set_var("no_proxy", "127.0.0.1,localhost");
+}
+
 #[tokio::test]
 async fn test_stream_text_deltas() {
+    bypass_proxy();
     let mut server = mockito::Server::new_async().await;
     let sse_body = concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
@@ -44,6 +52,7 @@ async fn test_stream_text_deltas() {
 
 #[tokio::test]
 async fn test_stream_tool_calls_accumulated() {
+    bypass_proxy();
     let mut server = mockito::Server::new_async().await;
     let sse_body = concat!(
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"file_read\",\"arguments\":\"\"}}]}}]}\n\n",
@@ -87,6 +96,7 @@ async fn test_stream_tool_calls_accumulated() {
 
 #[tokio::test]
 async fn test_stream_error_status() {
+    bypass_proxy();
     let mut server = mockito::Server::new_async().await;
     let m = server
         .mock("POST", "/chat/completions")

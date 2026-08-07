@@ -11,8 +11,16 @@ fn test_config() -> QqConfig {
     }
 }
 
+/// Windows 系统代理（注册表配置，如 Clash）常不 bypass loopback，
+/// reqwest 默认读取系统代理，导致对 mockito 本地 server 的请求被代理截断。
+fn bypass_proxy() {
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    std::env::set_var("no_proxy", "127.0.0.1,localhost");
+}
+
 /// 在 mockito server 上 mock getAppAccessToken 接口
 async fn mock_access_token(server: &mut Server) -> mockito::Mock {
+    bypass_proxy();
     server
         .mock("POST", "/app/getAppAccessToken")
         .match_body(mockito::Matcher::JsonString(

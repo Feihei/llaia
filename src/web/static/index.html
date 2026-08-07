@@ -28,6 +28,7 @@
       <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
       <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">Config</div>
       <div class="tab" :class="{active: tab==='cron'}" @click="switchCron()">Cron</div>
+      <div class="tab" :class="{active: tab==='mcp'}" @click="switchMcp()">MCP</div>
       <div class="tab" :class="{active: tab==='about'}" @click="switchAbout()">About</div>
     </div>
   </header>
@@ -62,7 +63,7 @@
         <div :class="{active: configSection==='agent'}" @click="configSection='agent'">Agent</div>
         <div :class="{active: configSection==='channels'}" @click="configSection='channels'">Channels</div>
         <div :class="{active: configSection==='tools'}" @click="configSection='tools'">Tools</div>
-        <div :class="{active: configSection==='mcp'}" @click="configSection='mcp'">MCP (WIP)</div>
+        <div @click="switchMcp()">MCP ↗</div>
         <div :class="{active: configSection==='skills'}" @click="configSection='skills'">Skills (WIP)</div>
         <div :class="{active: configSection==='raw'}" @click="switchRaw()">Raw TOML</div>
       </div>
@@ -156,7 +157,6 @@
             <button @click="saveConfig()">Save</button>
           </div>
         </template>
-        <template x-if="configSection==='mcp'"><div class="placeholder">MCP config is under development.</div></template>
         <template x-if="configSection==='skills'"><div class="placeholder">Skills config is under development.</div></template>
         <template x-if="configSection==='raw'">
           <div>
@@ -247,6 +247,71 @@
               <span class="cron-msg" x-text="cronRawMsg"></span>
             </div>
             <div class="hint">Saving cron.toml requires restarting <code>llaia serve</code> to take effect.</div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div id="mcp-pane" class="pane" :class="{active: tab==='mcp'}">
+      <div class="sidebar">
+        <div :class="{active: mcpSection==='servers'}" @click="switchMcpSection('servers')">Servers</div>
+        <div :class="{active: mcpSection==='raw'}" @click="switchMcpSection('raw')">Raw TOML</div>
+      </div>
+      <div class="content">
+        <div class="config-head">&#x276F; MCP <span x-text="mcpSection"></span></div>
+
+        <template x-if="mcpSection==='servers'">
+          <div>
+            <template x-if="!mcpServers || mcpServers.length === 0">
+              <div class="placeholder">No MCP servers configured. Edit mcp.toml in the Raw TOML section or run <code>llaia init</code>.</div>
+            </template>
+            <template x-for="s in mcpServers" :key="s.id">
+              <div class="provider-card">
+                <div class="card-header">
+                  <h3>
+                    <span x-text="s.id"></span>
+                    <span x-show="s.transport" x-text="' [' + s.transport + ']'"></span>
+                    <span x-text="s.status === 'connected' ? ' ✓' : ' ✗'"></span>
+                  </h3>
+                  <button @click="testMcp(s.id)" :disabled="mcpTesting === s.id"
+                          x-text="mcpTesting === s.id ? 'Testing...' : 'Test'"></button>
+                </div>
+                <div x-show="s.status !== 'connected'" class="err" x-text="s.error"></div>
+                <template x-if="s.tools && s.tools.length > 0">
+                  <table class="cron-table">
+                    <thead>
+                      <tr><th>tool</th><th>description</th><th>confirm</th></tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="t in s.tools" :key="t.name">
+                        <tr>
+                          <td x-text="t.name"></td>
+                          <td x-text="t.description"></td>
+                          <td x-text="t.requires_confirm ? 'required' : 'safe'"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </template>
+                <div x-show="s.status === 'connected' && (!s.tools || s.tools.length === 0)" class="hint">Server connected but exposes no tools.</div>
+              </div>
+            </template>
+            <div class="cron-toolbar">
+              <button @click="loadMcp()">Refresh</button>
+              <span class="cron-msg" x-text="mcpMsg"></span>
+            </div>
+            <div class="hint">Tools are named <code>&lt;server&gt;__&lt;tool&gt;</code>. Restart <code>llaia serve</code> after editing mcp.toml.</div>
+          </div>
+        </template>
+
+        <template x-if="mcpSection==='raw'">
+          <div>
+            <textarea x-ref="mcpRawEditor" x-model="mcpRaw" style="width:100%;height:500px;font-family:monospace"></textarea>
+            <div class="cron-toolbar">
+              <button @click="saveMcpRaw()">Save</button>
+              <span class="cron-msg" x-text="mcpRawMsg"></span>
+            </div>
+            <div class="hint">Saving mcp.toml requires restarting <code>llaia serve</code> to take effect.</div>
           </div>
         </template>
       </div>

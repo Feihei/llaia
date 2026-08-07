@@ -27,6 +27,14 @@ function llaiaApp() {
     cronMsg: '',
     cronRawMsg: '',
     _cronEditor: null,
+    // mcp
+    mcpSection: 'servers',
+    mcpServers: [],
+    mcpRaw: '',
+    mcpMsg: '',
+    mcpRawMsg: '',
+    mcpTesting: null,
+    _mcpEditor: null,
 
     async init() {
       // prefer URL query token, then localStorage
@@ -351,6 +359,65 @@ function llaiaApp() {
       if (!this.authed) return;
       if (r.ok) { this.cronMsg = `✓ Task ${id} triggered`; }
       else { let j; try { j = await r.json(); } catch { j = {}; } this.cronMsg = '✗ Trigger failed: ' + (j.error || r.status); }
+    },
+
+    // ---- mcp ----
+    async switchMcp() {
+      this.tab = 'mcp';
+      if (this.mcpSection === 'servers') await this.loadMcp();
+      else if (this.mcpSection === 'raw') { await this.loadMcpRaw(); this.$nextTick(() => this.initMcpEditor()); }
+    },
+    async switchMcpSection(name) {
+      this.mcpSection = name;
+      if (name === 'servers') await this.loadMcp();
+      else if (name === 'raw') { await this.loadMcpRaw(); this.$nextTick(() => this.initMcpEditor()); }
+    },
+    async loadMcp() {
+      this.mcpMsg = '';
+      const r = await this.apiFetch('/api/mcp');
+      if (!this.authed) return;
+      if (r.ok) { const j = await r.json(); this.mcpServers = j.servers || []; }
+      else if (r.status === 503) { this.mcpServers = []; this.mcpMsg = 'MCP registry not available'; }
+      else { this.mcpMsg = 'Load failed: ' + r.status; }
+    },
+    async loadMcpRaw() {
+      const r = await this.apiFetch('/api/mcp/raw');
+      if (!this.authed) return;
+      if (r.ok) { const j = await r.json(); this.mcpRaw = j.raw || ''; this.mcpRawMsg = ''; }
+    },
+    initMcpEditor() {
+      if (this._mcpEditor) { this._mcpEditor.setValue(this.mcpRaw); return; }
+      if (this.$refs.mcpRawEditor && window.CodeMirror) {
+        this._mcpEditor = CodeMirror.fromTextArea(this.$refs.mcpRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
+        this._mcpEditor.setValue(this.mcpRaw);
+      }
+    },
+    async saveMcpRaw() {
+      const toml = this._mcpEditor ? this._mcpEditor.getValue() : this.mcpRaw;
+      const r = await this.apiFetch('/api/mcp/raw', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ raw: toml }) });
+      if (!this.authed) return;
+      let j;
+      try { j = await r.json(); } catch { j = {}; }
+      if (r.ok) { this.mcpRawMsg = '✓ Saved (restart serve to apply)'; }
+      else { this.mcpRawMsg = '✗ ' + (j.error || r.status); }
+    },
+    async testMcp(id) {
+      this.mcpTesting = id;
+      this.mcpMsg = `Testing ${id}...`;
+      try {
+        const r = await this.apiFetch(`/api/mcp/${encodeURIComponent(id)}/test`, { method: 'POST' });
+        if (!this.authed) return;
+        let j;
+        try { j = await r.json(); } catch { j = {}; }
+        if (r.ok && j.ok) {
+          this.mcpMsg = `✓ ${id} connected, ${(j.tools || []).length} tools`;
+          await this.loadMcp();
+        } else {
+          this.mcpMsg = `✗ ${id}: ${j.error || r.status}`;
+        }
+      } finally {
+        this.mcpTesting = null;
+      }
     },
 
     // ---- about ----

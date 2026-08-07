@@ -311,6 +311,8 @@ pub struct WebChannel {
     /// CronScheduler 共享槽（serve_cmd 启动 cron 后通过 set_cron_scheduler 注入；
     /// build_router 时读取快照填 AppState）。启动失败保持 None，cron API 返回 503。
     pub cron_scheduler: Arc<std::sync::Mutex<Option<Arc<crate::cron::CronScheduler>>>>,
+    /// McpRegistry 共享槽（serve_cmd 通过 set_mcp_registry 注入，供 MCP API 展示状态）
+    pub mcp_registry: Arc<std::sync::Mutex<Option<Arc<crate::mcp::client::McpRegistry>>>>,
 }
 
 impl WebChannel {
@@ -331,12 +333,18 @@ impl WebChannel {
             active_ws: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             cron_path,
             cron_scheduler: Arc::new(std::sync::Mutex::new(None)),
+            mcp_registry: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     /// 注入 CronScheduler（serve_cmd 在 CronScheduler::start 成功后调用，spawn 前）
     pub fn set_cron_scheduler(&self, s: Arc<crate::cron::CronScheduler>) {
         *self.cron_scheduler.lock().unwrap() = Some(s);
+    }
+
+    /// 注入 McpRegistry（serve_cmd 在 build_agent 后调用，spawn 前）
+    pub fn set_mcp_registry(&self, r: Arc<crate::mcp::client::McpRegistry>) {
+        *self.mcp_registry.lock().unwrap() = Some(r);
     }
 
     pub fn build_router(&self) -> axum::Router {
@@ -360,6 +368,8 @@ impl WebChannel {
             next_ws_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             cron_path: self.cron_path.clone(),
             cron_scheduler,
+            mcp_path: self.cron_path.with_file_name("mcp.toml"),
+            mcp_registry: self.mcp_registry.lock().unwrap().clone(),
         };
         // 系统级路由 + WS 路由，共享同一个 state
         build_system_routes()

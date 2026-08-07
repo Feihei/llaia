@@ -166,7 +166,7 @@
 
 ## P3 — 能力扩展与生态接入
 
-**状态**：⏳ 计划中
+**状态**：🚧 进行中（仅剩 P3-e）
 
 **目标**：在 P2 已完成的 channel/provider/agent 基础设施上，补齐"能让 agent 真正干活"的能力：QQ 工具边界、初始化引导、定时任务、MCP 工具生态、Skill 技能框架。
 
@@ -235,18 +235,19 @@
 
 ### P3-d：MCP Client 接入
 
-**状态**：⏳ 计划中
+**状态**：✅ 已完成
 
 **目标**：作为 MCP client 消费外部 MCP server 提供的工具，扩展 LLAIA 的工具生态（不作为 MCP server 暴露自身能力）。
 
-- [ ] MCP client 实现：支持 stdio transport（启动子进程）和 HTTP transport（远程 MCP server）
-- [ ] 配置：`[mcp.<id>]` section，含 `command` / `args` / `env`（stdio）或 `url` / `headers`（HTTP）
-- [ ] 工具适配：MCP `tools/list` 返回的工具，通过 adapter 包装成 LLAIA `Tool` trait 实现，注册到主 agent
-- [ ] 工具调用：MCP `tools/call` 协议，结果转成 LLAIA 工具返回格式
-- [ ] 启动时连接：进程启动时初始化所有配置的 MCP server，失败的不阻塞启动（log + 跳过）
-- [ ] WebUI 配置：配置面板加 MCP tab，可视化增删 MCP server
-- [ ] 安全：MCP 工具默认走 QQ confirm_mode 策略（受 P3-a 边界约束）
+- [x] MCP client 实现：协议层自实现（JSON-RPC 2.0），支持 stdio / streamable HTTP / SSE 三种 transport
+- [x] 配置：`~/.llaia/mcp.toml` 独立文件，`[[server]]` section，含 `command` / `args` / `env`（stdio）或 `url` / `headers`（HTTP/SSE），支持 `${VAR}` 环境变量插值
+- [x] 工具适配：MCP `tools/list` 返回的工具，通过 McpTool adapter 包装成 LLAIA `Tool` trait 实现，以 `<server_id>__<tool_name>` 双下划线命名注册到主 agent
+- [x] 工具调用：MCP `tools/call` 协议 + isError envelope 处理（secret scrubbing + 500 字符截断）+ bounded reconnect
+- [x] 启动时连接：进程启动时初始化所有配置的 MCP server，失败的不阻塞启动（log + 跳过）
+- [x] WebUI 配置：配置面板加 MCP tab，状态列表 + raw TOML 编辑 + 测试连接
+- [x] 安全：MCP 工具默认 requires_confirm，`safe_tools` 白名单免确认；受 agent 边界（denied_tools / confirm_mode / audit）约束
 
+**详细计划**：[plans/2026-08-07-mcp-client.md](plans/2026-08-07-mcp-client.md)
 **参考**：[ADR-0014](adr/0014-mcp-client.md)
 
 ### P3-e：Skill 技能框架

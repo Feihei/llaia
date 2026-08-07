@@ -432,7 +432,7 @@ impl Config {
 /// 未定义的环境变量替换为空字符串并 warn，让 serve 能进入降级模式（WebUI 配置可用），
 /// 而不是直接挂掉。用户在 WebUI 里补全 key 后热加载即可恢复。
 /// 先展开 env，再展开 tilde（env 值里的 `~` 不会被二次展开）。
-fn expand_string(s: &str) -> Result<String> {
+pub(crate) fn expand_string(s: &str) -> Result<String> {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}").unwrap());

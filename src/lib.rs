@@ -1,11 +1,13 @@
 pub mod agent;
 pub mod audit;
+pub mod banner;
 pub mod channels;
 pub mod commands;
 pub mod config;
 pub mod cron;
 pub mod image_utils;
 pub mod log;
+pub mod mcp;
 pub mod memory;
 pub mod migrate;
 pub mod path_guard;
