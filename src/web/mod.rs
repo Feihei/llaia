@@ -317,6 +317,15 @@ pub async fn put_config(
     };
     let old = state.config.read().await.clone();
     let merged = merge_masked(&old, &new_config);
+
+    // main agent 不可删除：[agent.main] 是系统必需 section
+    if !merged.agent.contains_key("main") {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "[agent.main] 不可删除：main agent 是系统必需配置",
+        );
+    }
+
     let toml_str = match toml::to_string_pretty(&merged) {
         Ok(s) => s,
         Err(e) => return json_err(StatusCode::BAD_REQUEST, &format!("serialize: {}", e)),
@@ -335,9 +344,9 @@ pub async fn put_config(
     }
     *state.config.write().await = merged.clone();
 
-    // 热加载 provider（构造已成功，此处只做替换）
-    if let Err(e) = hot_reload_provider(&state, &merged).await {
-        tracing::warn!(error = %e, "hot_reload_provider failed (config saved)");
+    // 热加载 provider + compact_provider
+    if let Err(e) = hot_reload_providers(&state, &merged).await {
+        tracing::warn!(error = %e, "hot_reload_providers failed (config saved)");
         return axum::Json(serde_json::json!({
             "ok": true,
             "note": "config saved but provider reload failed: ".to_string() + &e
@@ -383,13 +392,45 @@ pub fn build_provider_from_config(config: &Config) -> Result<Option<Arc<dyn Prov
     Ok(Some(Arc::new(p)))
 }
 
-/// 热加载 provider：尝试构建新 provider，成功则替换并返回 true，失败则保留旧 provider 并返回错误信息。
+/// 热加载 provider + compact_provider：
+/// - 主 provider 按 [agent.main].model 构建
+/// - compact_provider 按 runtime.compact_model 构建（未配置/失败则 None，回退到主 provider）
+///
 /// 主 agent 持有 RwLock，正在进行的 turn 不受影响。
-async fn hot_reload_provider(state: &AppState, new_config: &Config) -> Result<(), String> {
+async fn hot_reload_providers(state: &AppState, new_config: &Config) -> Result<(), String> {
     let new_provider = build_provider_from_config(new_config)?;
+    let new_compact = build_compact_provider_from_config(new_config);
     let agent = state.registry.main.lock().await;
     agent.reload_provider(new_provider).await;
+    agent.reload_compact_provider(new_compact).await;
     Ok(())
+}
+
+/// 根据 runtime.compact_model 构建 compact_provider。
+/// 未配置 / provider 缺失 / 构建失败 → None（回退到主 provider）。
+fn build_compact_provider_from_config(config: &Config) -> Option<Arc<dyn Provider>> {
+    let m = config.runtime.compact_model.as_ref()?;
+    if m.is_empty() {
+        return None;
+    }
+    let (prov_id, model_alias) = match Config::parse_model_ref(m) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+    let prov_cfg = config.provider.get(prov_id)?;
+    let model_cfg = prov_cfg.model.get(model_alias)?;
+    match OpenAiCompatibleProvider::new(
+        &prov_cfg.base_url,
+        &prov_cfg.api_key,
+        &model_cfg.model,
+        model_cfg.native_tool_calling,
+    ) {
+        Ok(p) => Some(Arc::new(p)),
+        Err(e) => {
+            tracing::warn!(error = %e, model = m.as_str(), "build compact_provider failed");
+            None
+        }
+    }
 }
 
 /// GET /api/config/raw → TOML 文本
@@ -463,6 +504,14 @@ pub async fn put_config_raw(
         }
     };
 
+    // main agent 不可删除：[agent.main] 是系统必需 section
+    if !parsed.agent.contains_key("main") {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "[agent.main] 不可删除：main agent 是系统必需配置",
+        );
+    }
+
     // 尝试构建新 provider：失败则不写盘（回滚到旧 config）
     if let Err(e) = build_provider_from_config(&parsed) {
         return json_err(
@@ -480,9 +529,9 @@ pub async fn put_config_raw(
     }
     *state.config.write().await = parsed.clone();
 
-    // 热加载 provider
-    if let Err(e) = hot_reload_provider(&state, &parsed).await {
-        tracing::warn!(error = %e, "hot_reload_provider failed (config saved)");
+    // 热加载 provider + compact_provider
+    if let Err(e) = hot_reload_providers(&state, &parsed).await {
+        tracing::warn!(error = %e, "hot_reload_providers failed (config saved)");
         return axum::Json(serde_json::json!({
             "ok": true,
             "note": "config saved but provider reload failed: ".to_string() + &e

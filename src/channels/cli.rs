@@ -10,6 +10,7 @@ use crate::memory::{ensure_template, load_md, MEMORY_TEMPLATE, SOUL_TEMPLATE, US
 use crate::provider::openai_compat::OpenAiCompatibleProvider;
 use crate::provider::Provider;
 use crate::tool_call::build_tool_instructions;
+use crate::tools::cron::CronTool;
 use crate::tools::delegate::DelegateTool;
 use crate::tools::file::{FileEdit, FileRead, FileWrite};
 use crate::tools::memory::MemoryWrite;
@@ -283,8 +284,9 @@ impl Channel for CliChannel {
     }
 }
 
-/// 构建单个 Agent 实例。返回 (Agent, 可能的 delegate 工具)
+/// 构建单个 Agent 实例。返回 (Agent, 可能的 delegate 工具, 可能的 cron 工具)
 /// is_main=true 且 config 有子 Agent 时，挂载 delegate 工具并返回其引用用于后续注入 registry
+/// is_main=true 时挂载 cron_task 工具并返回其引用用于后续注入 scheduler
 async fn build_single_agent(
     config: &Config,
     config_dir: &std::path::Path,
@@ -292,7 +294,12 @@ async fn build_single_agent(
     agent_cfg: AgentConfig,
     is_main: bool,
     audit: Option<Arc<crate::audit::AuditLog>>,
-) -> Result<(Arc<Mutex<Agent>>, Option<Arc<DelegateTool>>, PathBuf)> {
+) -> Result<(
+    Arc<Mutex<Agent>>,
+    Option<Arc<DelegateTool>>,
+    Option<Arc<CronTool>>,
+    PathBuf,
+)> {
     // workspace 自动推导（忽略配置中的 workspace 字段）
     let workspace = agent_cfg.derive_workspace(config_dir, alias);
     std::fs::create_dir_all(&workspace).ok();
@@ -364,6 +371,19 @@ async fn build_single_agent(
     };
     let provider_ref = provider.as_ref();
 
+    // 构建 compact_provider（独立于主 provider，用更便宜的模型跑上下文压缩）
+    // compact_model 未配置 / 解析失败 / provider 不存在 → None（回退到主 provider）
+    let compact_provider: Option<Arc<dyn Provider>> = match &config.runtime.compact_model {
+        Some(m) if !m.is_empty() => match build_compact_provider(config, m) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(model = m.as_str(), error = %e, "build compact_provider failed, falling back to main provider");
+                None
+            }
+        },
+        _ => None,
+    };
+
     // 构建完整工具集（用新字段）
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(FileRead::new(workspace.clone(), is_main)),
@@ -393,6 +413,7 @@ async fn build_single_agent(
     let denied: std::collections::HashSet<&str> =
         agent_cfg.denied_tools.iter().map(|s| s.as_str()).collect();
     let mut delegate_tool: Option<Arc<DelegateTool>> = None;
+    let mut cron_tool: Option<Arc<CronTool>> = None;
     let mut registry = ToolRegistry::new();
     for tool in all_tools {
         if !denied.contains(tool.name()) {
@@ -405,6 +426,13 @@ async fn build_single_agent(
         let d = Arc::new(DelegateTool::new(agent_cfg.delegate_timeout));
         registry.register(d.clone());
         delegate_tool = Some(d);
+    }
+
+    // main Agent 挂载 cron_task 工具（动态管理定时任务，scheduler 在 serve_cmd 启动后注入）
+    if is_main {
+        let c = Arc::new(CronTool::new());
+        registry.register(c.clone());
+        cron_tool = Some(c);
     }
 
     let mut system_prompt = format!(
@@ -460,6 +488,7 @@ async fn build_single_agent(
     let agent = Agent::new(
         config,
         provider,
+        compact_provider,
         registry,
         session_store,
         session_id,
@@ -473,14 +502,21 @@ async fn build_single_agent(
     )
     .await;
 
-    Ok((Arc::new(Mutex::new(agent)), delegate_tool, workspace))
+    Ok((
+        Arc::new(Mutex::new(agent)),
+        delegate_tool,
+        cron_tool,
+        workspace,
+    ))
 }
 
 /// 构建 AgentRegistry（main + 所有子 Agent）
+/// 返回 (registry, 可能的 cron 工具引用)。
+/// cron_tool 在 serve_cmd 启动 CronScheduler 后通过 set_scheduler 注入。
 pub async fn build_agent(
     config: &Config,
     config_dir: &std::path::Path,
-) -> Result<Arc<AgentRegistry>> {
+) -> Result<(Arc<AgentRegistry>, Option<Arc<CronTool>>)> {
     // 审计日志
     let log_dir = PathBuf::from(&config.log.dir);
     let audit = Arc::new(crate::audit::AuditLog::new(&log_dir));
@@ -491,7 +527,7 @@ pub async fn build_agent(
         if alias == "main" {
             continue;
         }
-        let (agent, _, _) = build_single_agent(
+        let (agent, _, _, _) = build_single_agent(
             config,
             config_dir,
             alias,
@@ -517,7 +553,7 @@ pub async fn build_agent(
             delegate_timeout: 120,
         }
     });
-    let (main_agent, delegate_tool, main_workspace) = build_single_agent(
+    let (main_agent, delegate_tool, cron_tool, main_workspace) = build_single_agent(
         config,
         config_dir,
         "main",
@@ -552,5 +588,28 @@ pub async fn build_agent(
         sub_agents = registry.available_sub_agents().len(),
         "AgentRegistry built"
     );
-    Ok(registry)
+    Ok((registry, cron_tool))
+}
+
+/// 根据 "provider_id.model_alias" 引用从 config 构建 compact_provider。
+/// compact_model 未配置 / provider 不存在 / model 不存在 → Err（调用方降级处理）
+fn build_compact_provider(
+    config: &Config,
+    model_ref: &str,
+) -> anyhow::Result<Option<Arc<dyn Provider>>> {
+    let (prov_id, model_alias) = Config::parse_model_ref(model_ref)?;
+    let prov_cfg = config
+        .provider
+        .get(prov_id)
+        .ok_or_else(|| anyhow::anyhow!("provider.{} not configured", prov_id))?;
+    let model_cfg = prov_cfg.model.get(model_alias).ok_or_else(|| {
+        anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
+    })?;
+    let p = OpenAiCompatibleProvider::new(
+        &prov_cfg.base_url,
+        &prov_cfg.api_key,
+        &model_cfg.model,
+        model_cfg.native_tool_calling,
+    )?;
+    Ok(Some(Arc::new(p)))
 }

@@ -46,6 +46,15 @@ async fn main() -> Result<()> {
             .expect("no home dir")
             .join(".llaia")
     });
+
+    // 加载 .env：先 CWD（标准 dotenv 位置），再 config_dir/.env
+    // 两者都不存在时静默跳过；config.toml 中的 ${VAR} 引用依赖此处先加载
+    let _ = dotenvy::dotenv();
+    let env_path = config_dir.join(".env");
+    if env_path.exists() {
+        let _ = dotenvy::from_path(&env_path);
+    }
+
     let command = cli.command.unwrap_or(Commands::Chat);
     match command {
         Commands::Chat => llaia::commands::chat_cmd(&config_dir).await,

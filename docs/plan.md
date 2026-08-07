@@ -268,12 +268,44 @@
 
 ---
 
-## P3+ — 交互增强（待规划）
+## P3+ — 交互增强与未来计划（待规划）
 
 **状态**：⏳ 计划中（P3 主线完成后的增量项）
 
+> 来源：[docs/issues/](issues/) 收集的反馈，已实现的见各阶段完成清单，此处仅列未实现的未来计划。
+> 已取消：cron.toml 移入 agent workspace（10#）—— CronTool 已让 agent 动态管理任务，无需文件层编辑。
+
+### 交互增强
+
 - [ ] `/provider` 斜杠命令：`/provider` 列出可用 provider/模型（当前标记 `*`）、`/provider <序号>` 运行时切换、`/provider <id>.<alias>` 按全名切换（参考 AstrBot，不写 config.toml）
-- [ ] 主动消息推送（与 P3-c cron 一并实现）
+- [ ] `/move` 或 `/cd` 斜杠命令：允许把 CWD 从默认 workspace 移动到用户指定位置，提醒风险并要求确认（扩展 P3-a 的 workspace 边界模型）
+- [ ] WebUI 重启后台服务：配置面板加"重启 serve"按钮，配置更改需重启时免手动 Ctrl+C
+- [ ] `llaia chat` → `llaia cli` 重命名：与 `llaia config` / `llaia doctor` 命名对齐（需保留 `chat` 别名向后兼容，讨论后再定）
+
+### 权限管理系统
+
+- [ ] 三档权限 profile：`read-only` / `default` / `yolo`，对齐 opencode 的 plan/build 双模式思路
+  - 双维度判定：① 操作是否风险 ② 是否在 workspace 内
+  - `read-only`：所有写操作都审批
+  - `default`：仅 workspace 外的风险操作审批
+  - `yolo`：全放行
+  - 审批流程：发消息提示操作内容 + 目录，加 `/ok` `/deny` 斜杠命令，所有频道一致
+  - 在 P3-a 的 `confirm_mode`（none/always/session）之上演进，不破坏现有边界
+
+### 模型与工具调用
+
+- [ ] model fallback：主模型不可用时自动降级到备用模型（参考 AstrBot 的 provider 链）
+- [ ] image 描述模型单独设置：主模型无多模态时，用独立模型描述图片，避免能力缺失
+- [ ] 工具调用格式优化：解决 think 内容 / `<tool_call>` 标签泄露到用户回复的问题（agen 系模型偶发），研究 jinja 模板调用格式，参考 AstrBot `core/agent/tool.py` 与 zeroclaw `zeroclaw-tool-call-parser`
+
+### 上下文管理
+
+- [ ] 更聪明的上下文压缩：防止重要信息丢失、提高缓存命中、减少对 LLM 压缩的依赖（参考《深入理解 AI Agent》李博杰 v1.2 §2.7.2）
+- [ ] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界
+
+### 生态复用
+
+- [ ] 评估借用 zeroclaw 代码：provider / channel 实现是否可直接复用，减少从头开发工作量（`e:\apps\zeroclaw\zeroclaw\crates\zeroclaw-providers\` / `zeroclaw-channels\` / `zeroclaw-tool-call-parser`）
 
 ---
 

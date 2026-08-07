@@ -14,6 +14,7 @@ const CONFIG_TEMPLATE: &str = r#"# LLAIA 配置文件
 [runtime]
 context_threshold = 0.7
 max_iterations = 10
+# compact_model = "default.qwen"  # 可选：用更便宜的模型跑上下文压缩，未设置时复用主模型
 
 [log]
 level = "info"
@@ -31,9 +32,17 @@ dir = "~/.llaia/logs"
 # native_tool_calling = false
 # context_size = 32768
 
-# 主 Agent（workspace / soul / user / memory 字段已废弃，自动推导到 ~/.llaia/workspace/）
-# [agent.main]
-# model = "default.qwen"        # 引用 provider.<id>.<model_alias>
+# 主 Agent：model 留空进入降级模式（无 provider，仅可配置 WebUI）
+# 配好上面的 provider 后填 "default.qwen" 等引用即可启用聊天
+# workspace / soul / user / memory 字段已废弃，自动推导到 ~/.llaia/workspace/
+[agent.main]
+model = ""
+
+# 子 Agent 示例（取消注释启用；workspace 自动推导到 ~/.llaia/workspace/subagent/<alias>/）
+# [agent.coder]
+# model = "default.qwen"
+# denied_tools = ["memory_write"]
+# delegate_timeout = 180
 
 [channels.qq]
 enabled = false
@@ -53,6 +62,17 @@ command_whitelist = []
 
 [tools.tavily]
 api_key = ""                   # 支持 "${TAVILY_API_KEY}" 环境变量引用
+"#;
+
+/// init 默认 .env 模板：敏感凭据集中存放，避免写进 config.toml 明文。
+/// .env 与 config.toml 同目录，启动时自动加载（CWD 下的 .env 也会被读取）。
+const ENV_TEMPLATE: &str = r#"# LLAIA 环境变量（本文件不要提交到 git）
+# config.toml 中可用 "${VAR_NAME}" 引用此处定义的变量
+
+# OLLAMA_API_KEY=
+# QQ_APP_ID=
+# QQ_APP_SECRET=
+# TAVILY_API_KEY=
 "#;
 
 /// init 默认 cron.toml 模板：所有任务注释，仅作文档。
@@ -125,13 +145,19 @@ pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     write_file_if_needed(&cron_path, CRON_TEMPLATE, force)?;
     println!("✓ 已生成 cron.toml（定时任务模板，默认全部注释）");
 
-    // 5. 终端输出引导
+    // 5. 生成 .env 模板（敏感凭据集中存放，config.toml 用 ${VAR} 引用）
+    let env_path = config_dir.join(".env");
+    write_file_if_needed(&env_path, ENV_TEMPLATE, force)?;
+    println!("✓ 已生成 .env（敏感凭据模板，编辑后填入实际值，不要提交到 git）");
+
+    // 6. 终端输出引导
     println!();
     println!("下一步：");
-    println!("  1. 编辑 ~/.llaia/config.toml，取消 [provider.default] / [agent.main] 注释并填入你的 LLM 端点");
+    println!("  1. 编辑 ~/.llaia/.env 填入 API key 等敏感凭据");
+    println!("  2. 编辑 ~/.llaia/config.toml，在 [agent.main] 填入 model 引用（如 default.qwen）");
     println!("     或运行 llaia serve 后在浏览器访问 http://127.0.0.1:51217 通过 WebUI 配置");
-    println!("  2. 启动服务：llaia serve");
-    println!("  3. CLI 调试：llaia chat");
+    println!("  3. 启动服务：llaia serve");
+    println!("  4. CLI 调试：llaia chat");
     Ok(())
 }
 
@@ -164,7 +190,7 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
     pid_file.acquire()?;
     let _pid_guard = PidGuard(pid_file);
 
-    let registry = crate::channels::cli::build_agent(&config, config_dir).await?;
+    let (registry, _cron_tool) = crate::channels::cli::build_agent(&config, config_dir).await?;
 
     // chat 模式必须有 provider：纯 CLI 无法配置，无 provider 直接报错引导
     {
@@ -199,7 +225,7 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     pid_file.acquire()?;
     let _pid_guard = PidGuard(pid_file);
 
-    let registry = crate::channels::cli::build_agent(&config, config_dir).await?;
+    let (registry, cron_tool) = crate::channels::cli::build_agent(&config, config_dir).await?;
 
     // serve 模式：无 provider 时 warn 但继续启动（WebUI 配置功能不依赖 provider，聊天降级提示）
     {
@@ -242,31 +268,19 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         };
 
     // webui 随 serve 无条件启动（serve 模式下用户唯一保证可用的交互入口）
-    let web_pusher_for_cron: std::sync::Arc<dyn crate::cron::ProactivePusher> = {
-        let config_path = config_dir.join("config.toml");
-        let web = std::sync::Arc::new(crate::channels::web::WebChannel::new(
-            config.webui.clone(),
-            registry.clone(),
-            std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
-            config_path,
-            workspace.clone(),
-        ));
-        let pusher: std::sync::Arc<dyn crate::cron::ProactivePusher> = web.clone();
-        let registry_clone = registry.clone();
-        let host = config.webui.host.clone();
-        let port = config.webui.port;
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = crate::channels::Channel::run(web, registry_clone).await {
-                tracing::error!(error = %e, "WebChannel exited with error");
-            }
-        }));
-        tracing::info!("WebChannel starting on {}:{}", host, port);
-        pusher
-    };
-
-    if tasks.is_empty() {
-        anyhow::bail!("no service channel enabled in config (QQ/WebUI/...)");
-    }
+    // 注意：WebChannel 先创建，但不立即 spawn —— 需要在 CronScheduler 启动后注入 cron_scheduler，
+    // 再 spawn WebChannel::run（build_router 在 run 内调用，此时 cron_scheduler 已就位）
+    let config_path = config_dir.join("config.toml");
+    let web = std::sync::Arc::new(crate::channels::web::WebChannel::new(
+        config.webui.clone(),
+        registry.clone(),
+        std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
+        config_path,
+        workspace.clone(),
+    ));
+    let web_pusher_for_cron: std::sync::Arc<dyn crate::cron::ProactivePusher> = web.clone();
+    let web_host = config.webui.host.clone();
+    let web_port = config.webui.port;
 
     // 启动 cron 调度器（仅 serve 模式）
     let cron_path = config_dir.join("cron.toml");
@@ -283,6 +297,15 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     {
         Ok(s) => {
             tracing::info!("CronScheduler started");
+            let s = std::sync::Arc::new(s);
+            // 注入给 WebChannel（共享槽，build_router 读取快照填 AppState）
+            web.set_cron_scheduler(s.clone());
+            tracing::info!("CronScheduler injected into WebChannel");
+            // 注入给 CronTool，让 agent 能通过工具管理 cron 任务
+            if let Some(ct) = &cron_tool {
+                ct.set_scheduler(s.clone());
+                tracing::info!("CronScheduler injected into CronTool");
+            }
             Some(s)
         }
         Err(e) => {
@@ -290,6 +313,20 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
             None
         }
     };
+
+    // cron 注入完成后再 spawn WebChannel（确保 build_router 时 cron_scheduler 已就位）
+    let registry_clone = registry.clone();
+    let web_for_spawn = web.clone();
+    tasks.push(tokio::spawn(async move {
+        if let Err(e) = crate::channels::Channel::run(web_for_spawn, registry_clone).await {
+            tracing::error!(error = %e, "WebChannel exited with error");
+        }
+    }));
+    tracing::info!("WebChannel starting on {}:{}", web_host, web_port);
+
+    if tasks.is_empty() {
+        anyhow::bail!("no service channel enabled in config (QQ/WebUI/...)");
+    }
 
     tracing::info!(
         channels = tasks.len(),

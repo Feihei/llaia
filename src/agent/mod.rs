@@ -45,9 +45,13 @@ pub struct Agent {
     /// - `Some(p)`：正常模式
     /// - `None`：降级模式（无 provider，handle_message_streaming 直接 sink Error）
     ///
-    /// RwLock 保护：turn 开始拿 snapshot（读锁），reload_provider 拿写锁替换。
+    /// RwLock 保护：turn 开始时拿 snapshot（读锁），reload_provider 拿写锁替换。
     /// 正在进行的 turn 持有 snapshot 不受 reload 影响。
     pub provider: Arc<RwLock<Option<Arc<dyn Provider>>>>,
+    /// 压缩上下文用的独立 provider（可选）。
+    /// 未配置时复用 `provider`（兼容旧行为）；配置后用更便宜的模型跑 compact。
+    /// 与 `provider` 一样支持热替换。
+    pub compact_provider: Arc<RwLock<Option<Arc<dyn Provider>>>>,
     pub tools: Arc<ToolRegistry>,
     pub context: Context,
     pub session_store: Arc<SessionStore>,
@@ -84,6 +88,7 @@ impl Agent {
     pub async fn new(
         config: &Config,
         provider: Option<Arc<dyn Provider>>,
+        compact_provider: Option<Arc<dyn Provider>>,
         tools: Arc<ToolRegistry>,
         session_store: Arc<SessionStore>,
         session_id: i64,
@@ -97,6 +102,7 @@ impl Agent {
     ) -> Self {
         Self {
             provider: Arc::new(RwLock::new(provider)),
+            compact_provider: Arc::new(RwLock::new(compact_provider)),
             tools,
             context: Context::new(system_prompt),
             session_store,
@@ -121,6 +127,20 @@ impl Agent {
         self.provider.read().await.clone()
     }
 
+    /// 拿 compact provider 的 snapshot：未配置时返回 None，调用方应回退到主 provider。
+    pub async fn compact_provider_snapshot(&self) -> Option<Arc<dyn Provider>> {
+        self.compact_provider.read().await.clone()
+    }
+
+    /// 拿用于压缩的 provider：优先 compact_provider，否则回退到主 provider。
+    /// 两者都为 None（降级模式）时返回 None。
+    pub async fn provider_for_compact(&self) -> Option<Arc<dyn Provider>> {
+        if let Some(p) = self.compact_provider_snapshot().await {
+            return Some(p);
+        }
+        self.provider_snapshot().await
+    }
+
     /// 热替换 provider。
     /// - `Some(p)`：切换到新 provider
     /// - `None`：进入降级模式
@@ -128,6 +148,12 @@ impl Agent {
     /// 正在进行的 turn 持有旧 snapshot 不受影响，新 turn 用新 provider。
     pub async fn reload_provider(&self, new_provider: Option<Arc<dyn Provider>>) {
         let mut guard = self.provider.write().await;
+        *guard = new_provider;
+    }
+
+    /// 热替换 compact_provider（仅 compact_model 变更时调用）。
+    pub async fn reload_compact_provider(&self, new_provider: Option<Arc<dyn Provider>>) {
+        let mut guard = self.compact_provider.write().await;
         *guard = new_provider;
     }
 
@@ -228,8 +254,15 @@ impl Agent {
             .context
             .needs_compaction(self.context_size, self.context_threshold)
         {
-            if let Err(e) = self.context.compact(provider.as_ref(), 6).await {
-                tracing::warn!(error = %e, "auto-compact failed");
+            // 优先用 compact_provider，未配置时回退到主 provider
+            let compact_provider = self.provider_for_compact().await;
+            match compact_provider.as_ref() {
+                Some(p) => {
+                    if let Err(e) = self.context.compact(p.as_ref(), 6).await {
+                        tracing::warn!(error = %e, "auto-compact failed");
+                    }
+                }
+                None => tracing::warn!("skip auto-compact: no provider available"),
             }
         }
 
@@ -516,6 +549,7 @@ mod tests {
         Agent::new(
             &config,
             Some(provider),
+            None,
             tools,
             Arc::new(store),
             sid,
@@ -746,6 +780,7 @@ mod tests {
         let sub_agent = Agent::new(
             &config,
             Some(sub_provider),
+            None,
             sub_tools,
             Arc::new(sub_store),
             sub_sid,
@@ -788,6 +823,7 @@ mod tests {
         let main_agent = Agent::new(
             &config,
             Some(main_provider),
+            None,
             main_tools,
             Arc::new(main_store),
             main_sid,

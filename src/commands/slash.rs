@@ -21,7 +21,8 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /clear /remember <text> /config /help".into(),
+            "commands: /new /exit /stop /compact /clear /stats /remember <text> /config /help"
+                .into(),
         )),
         "/new" => {
             agent.context.clear();
@@ -33,7 +34,7 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
             agent.context.summary = None;
             Ok(SlashOutcome::Handled("[context cleared]".into()))
         }
-        "/compact" => match agent.provider_snapshot().await {
+        "/compact" => match agent.provider_for_compact().await {
             Some(p) => match agent.context.compact(p.as_ref(), 6).await {
                 Ok(_) => Ok(SlashOutcome::Handled("[compacted]".into())),
                 Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
@@ -42,6 +43,41 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
                 "[compact failed: 未配置 provider]".into(),
             )),
         },
+        "/stats" => {
+            let tokens = agent.context.estimate_tokens();
+            let threshold_tokens = (agent.context_size as f64 * agent.context_threshold) as usize;
+            let usage = if agent.context_size > 0 {
+                (tokens as f64 / agent.context_size as f64 * 100.0) as u32
+            } else {
+                0
+            };
+            let summary_status = if agent.context.summary.is_some() {
+                "yes"
+            } else {
+                "no"
+            };
+            let info = format!(
+                "context_size: {}\ncontext_threshold: {} ({} tokens)\n\
+                 current tokens (est.): {} ({}% used)\n\
+                 history msgs: {}\nsession_id: {}\nsummary: {}\ntools: {:?}\n\
+                 compact_provider: {}",
+                agent.context_size,
+                agent.context_threshold,
+                threshold_tokens,
+                tokens,
+                usage,
+                agent.context.history.len(),
+                agent.session_id,
+                summary_status,
+                agent.tools.names(),
+                if agent.compact_provider_snapshot().await.is_some() {
+                    "configured"
+                } else {
+                    "fallback to main"
+                },
+            );
+            Ok(SlashOutcome::Handled(info))
+        }
         "/remember" => {
             if args.is_empty() {
                 Ok(SlashOutcome::Handled("usage: /remember <text>".into()))

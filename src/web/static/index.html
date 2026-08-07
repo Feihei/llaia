@@ -118,7 +118,7 @@
               <div class="agent-card">
                 <div class="card-header">
                   <h3 x-text="alias"></h3>
-                  <button class="btn-delete" @click="deleteAgent(alias)">Delete</button>
+                  <button class="btn-delete" @click="deleteAgent(alias)" x-show="alias !== 'main'" title="main agent 不可删除">Delete</button>
                 </div>
                 <div class="form-row"><label>model</label><input x-model="a.model" placeholder="provider_id.model_alias"></div>
                 <div class="form-row"><label>workspace</label><input x-model="a.workspace" style="width:400px"></div>

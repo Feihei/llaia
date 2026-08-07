@@ -31,6 +31,11 @@ pub struct RuntimeConfig {
     pub context_threshold: f64,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
+    /// 上下文压缩用的模型引用 "provider_id.model_alias"。
+    /// 未设置时复用 agent 自身的 provider（兼容旧行为）。
+    /// 设置后会构建独立的 compact provider，可用更便宜的模型做压缩。
+    #[serde(default)]
+    pub compact_model: Option<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -38,6 +43,7 @@ impl Default for RuntimeConfig {
         Self {
             context_threshold: default_threshold(),
             max_iterations: default_max_iterations(),
+            compact_model: None,
         }
     }
 }
@@ -307,6 +313,24 @@ impl Config {
                 "channels.qq.confirm_mode = \"whitelist\" is deprecated, falling back to \"none\""
             );
             config.channels.qq.confirm_mode = "none".into();
+        }
+        // [agent.main] 是系统必需 section：缺失时 warn（保留降级启动能力，
+        // 让 `llaia init` 模板和空配置仍可进入 serve 配置 WebUI）
+        if !config.agent.contains_key("main") {
+            tracing::warn!(
+                "[agent.main] missing in config.toml — main agent will start in degraded mode"
+            );
+        }
+        // compact_model 引用校验：避免拼写错误到运行时才暴露
+        if let Some(m) = &config.runtime.compact_model {
+            if let Err(e) = Self::parse_model_ref(m) {
+                tracing::warn!(
+                    model = m.as_str(),
+                    error = %e,
+                    "runtime.compact_model is not a valid 'provider_id.model_alias' reference, will be ignored"
+                );
+                config.runtime.compact_model = None;
+            }
         }
         config.expand_paths()?;
         Ok(config)

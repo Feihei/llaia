@@ -207,6 +207,7 @@ mod tests {
         let agent = Agent::new(
             &config,
             Some(provider),
+            None,
             tools,
             Arc::new(store),
             sid,
