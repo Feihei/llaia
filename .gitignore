@@ -17,6 +17,9 @@
 # 上传/媒体产物
 uploads/
 
+# 本地分析产物（cargo metadata 等手动导出的快照）
+cargo_meta.json
+
 # 文档：PDF 等二进制不纳入版本控制
 *.pdf
 
