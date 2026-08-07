@@ -25,11 +25,8 @@
   <header>
     <h1>Llaia (੭aᴗa)੭</h1>
     <div class="tabs">
-      <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
       <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">Config</div>
-      <div class="tab" :class="{active: tab==='cron'}" @click="switchCron()">Cron</div>
-      <div class="tab" :class="{active: tab==='mcp'}" @click="switchMcp()">MCP</div>
-      <div class="tab" :class="{active: tab==='about'}" @click="switchAbout()">About</div>
+      <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
     </div>
   </header>
   <main>
@@ -63,9 +60,11 @@
         <div :class="{active: configSection==='agent'}" @click="configSection='agent'">Agent</div>
         <div :class="{active: configSection==='channels'}" @click="configSection='channels'">Channels</div>
         <div :class="{active: configSection==='tools'}" @click="configSection='tools'">Tools</div>
-        <div @click="switchMcp()">MCP ↗</div>
+        <div :class="{active: configSection==='cron'}" @click="switchCron()">Cron</div>
+        <div :class="{active: configSection==='mcp'}" @click="switchMcp()">MCP</div>
         <div :class="{active: configSection==='skills'}" @click="switchSkills()">Skills</div>
         <div :class="{active: configSection==='raw'}" @click="switchRaw()">Raw TOML</div>
+        <div :class="{active: configSection==='about'}" @click="switchAbout()">About</div>
       </div>
       <div class="content">
         <div class="config-head">&#x276F; CONFIG <span x-text="configSection"></span></div>
@@ -215,176 +214,168 @@
             <span x-text="rawMsg"></span>
           </div>
         </template>
-      </div>
-    </div>
 
-    <div id="cron-pane" class="pane" :class="{active: tab==='cron'}">
-      <div class="sidebar">
-        <div :class="{active: cronSection==='tasks'}" @click="switchCronSection('tasks')">Tasks</div>
-        <div :class="{active: cronSection==='history'}" @click="switchCronSection('history')">History</div>
-        <div :class="{active: cronSection==='raw'}" @click="switchCronSection('raw')">Raw TOML</div>
-      </div>
-      <div class="content">
-        <div class="config-head">&#x276F; CRON <span x-text="cronSection"></span></div>
-
-        <template x-if="cronSection==='tasks'">
+        <template x-if="configSection==='cron'">
           <div>
-            <template x-if="!cronTasks || cronTasks.length === 0">
-              <div class="placeholder">No cron tasks. Edit cron.toml or run <code>llaia init</code>.</div>
-            </template>
-            <template x-if="cronTasks && cronTasks.length > 0">
-              <table class="cron-table">
-                <thead>
-                  <tr><th>id</th><th>schedule</th><th>mode</th><th>channel</th><th>enabled</th><th>actions</th></tr>
-                </thead>
-                <tbody>
-                  <template x-for="t in cronTasks" :key="t.id">
-                    <tr>
-                      <td x-text="t.id"></td>
-                      <td x-text="t.schedule"></td>
-                      <td x-text="t.mode"></td>
-                      <td x-text="t.channel"></td>
-                      <td x-text="t.enabled ? '✓' : '✗'"></td>
-                      <td><button @click="triggerCron(t.id)">Trigger</button></td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
-            </template>
-            <div class="cron-toolbar">
-              <button @click="loadCron()">Refresh</button>
-              <span class="cron-msg" x-text="cronMsg"></span>
+            <div class="tabs subtabs">
+              <div class="tab" :class="{active: cronSection==='tasks'}" @click="switchCronSection('tasks')">Tasks</div>
+              <div class="tab" :class="{active: cronSection==='history'}" @click="switchCronSection('history')">History</div>
+              <div class="tab" :class="{active: cronSection==='raw'}" @click="switchCronSection('raw')">Raw TOML</div>
             </div>
-            <div class="hint">Triggered tasks run in the background; results push to the configured channel.</div>
-          </div>
-        </template>
 
-        <template x-if="cronSection==='history'">
-          <div>
-            <template x-if="!cronHistory || cronHistory.length === 0">
-              <div class="placeholder">No cron-triggered sessions yet.</div>
-            </template>
-            <template x-if="cronHistory && cronHistory.length > 0">
-              <table class="cron-table">
-                <thead>
-                  <tr><th>channel</th><th>created</th><th>last activity</th><th>tokens</th><th>state</th></tr>
-                </thead>
-                <tbody>
-                  <template x-for="s in cronHistory" :key="s.session_uuid">
-                    <tr>
-                      <td x-text="s.channel"></td>
-                      <td x-text="s.created_at"></td>
-                      <td x-text="s.last_activity"></td>
-                      <td x-text="s.token_count"></td>
-                      <td x-text="s.state"></td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
-            </template>
-            <div class="cron-toolbar">
-              <button @click="loadCronHistory()">Refresh</button>
-            </div>
-          </div>
-        </template>
-
-        <template x-if="cronSection==='raw'">
-          <div>
-            <textarea x-ref="cronRawEditor" x-model="cronRaw" style="width:100%;height:500px;font-family:monospace"></textarea>
-            <div class="cron-toolbar">
-              <button @click="saveCronRaw()">Save</button>
-              <span class="cron-msg" x-text="cronRawMsg"></span>
-            </div>
-            <div class="hint">Saving cron.toml requires restarting <code>llaia serve</code> to take effect.</div>
-          </div>
-        </template>
-      </div>
-    </div>
-
-    <div id="mcp-pane" class="pane" :class="{active: tab==='mcp'}">
-      <div class="sidebar">
-        <div :class="{active: mcpSection==='servers'}" @click="switchMcpSection('servers')">Servers</div>
-        <div :class="{active: mcpSection==='raw'}" @click="switchMcpSection('raw')">Raw TOML</div>
-      </div>
-      <div class="content">
-        <div class="config-head">&#x276F; MCP <span x-text="mcpSection"></span></div>
-
-        <template x-if="mcpSection==='servers'">
-          <div>
-            <template x-if="!mcpServers || mcpServers.length === 0">
-              <div class="placeholder">No MCP servers configured. Edit mcp.toml in the Raw TOML section or run <code>llaia init</code>.</div>
-            </template>
-            <template x-for="s in mcpServers" :key="s.id">
-              <div class="provider-card">
-                <div class="card-header">
-                  <h3>
-                    <span x-text="s.id"></span>
-                    <span x-show="s.transport" x-text="' [' + s.transport + ']'"></span>
-                    <span x-text="s.status === 'connected' ? ' ✓' : ' ✗'"></span>
-                  </h3>
-                  <button @click="testMcp(s.id)" :disabled="mcpTesting === s.id"
-                          x-text="mcpTesting === s.id ? 'Testing...' : 'Test'"></button>
-                </div>
-                <div x-show="s.status !== 'connected'" class="err" x-text="s.error"></div>
-                <template x-if="s.tools && s.tools.length > 0">
+            <template x-if="cronSection==='tasks'">
+              <div>
+                <template x-if="!cronTasks || cronTasks.length === 0">
+                  <div class="placeholder">No cron tasks. Edit cron.toml or run <code>llaia init</code>.</div>
+                </template>
+                <template x-if="cronTasks && cronTasks.length > 0">
                   <table class="cron-table">
                     <thead>
-                      <tr><th>tool</th><th>description</th><th>confirm</th></tr>
+                      <tr><th>id</th><th>schedule</th><th>mode</th><th>channel</th><th>enabled</th><th>actions</th></tr>
                     </thead>
                     <tbody>
-                      <template x-for="t in s.tools" :key="t.name">
+                      <template x-for="t in cronTasks" :key="t.id">
                         <tr>
-                          <td x-text="t.name"></td>
-                          <td x-text="t.description"></td>
-                          <td x-text="t.requires_confirm ? 'required' : 'safe'"></td>
+                          <td x-text="t.id"></td>
+                          <td x-text="t.schedule"></td>
+                          <td x-text="t.mode"></td>
+                          <td x-text="t.channel"></td>
+                          <td x-text="t.enabled ? '✓' : '✗'"></td>
+                          <td><button @click="triggerCron(t.id)">Trigger</button></td>
                         </tr>
                       </template>
                     </tbody>
                   </table>
                 </template>
-                <div x-show="s.status === 'connected' && (!s.tools || s.tools.length === 0)" class="hint">Server connected but exposes no tools.</div>
+                <div class="cron-toolbar">
+                  <button @click="loadCron()">Refresh</button>
+                  <span class="cron-msg" x-text="cronMsg"></span>
+                </div>
+                <div class="hint">Triggered tasks run in the background; results push to the configured channel.</div>
               </div>
             </template>
-            <div class="cron-toolbar">
-              <button @click="loadMcp()">Refresh</button>
-              <span class="cron-msg" x-text="mcpMsg"></span>
-            </div>
-            <div class="hint">Tools are named <code>&lt;server&gt;__&lt;tool&gt;</code>. Restart <code>llaia serve</code> after editing mcp.toml.</div>
+
+            <template x-if="cronSection==='history'">
+              <div>
+                <template x-if="!cronHistory || cronHistory.length === 0">
+                  <div class="placeholder">No cron-triggered sessions yet.</div>
+                </template>
+                <template x-if="cronHistory && cronHistory.length > 0">
+                  <table class="cron-table">
+                    <thead>
+                      <tr><th>channel</th><th>created</th><th>last activity</th><th>tokens</th><th>state</th></tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="s in cronHistory" :key="s.session_uuid">
+                        <tr>
+                          <td x-text="s.channel"></td>
+                          <td x-text="s.created_at"></td>
+                          <td x-text="s.last_activity"></td>
+                          <td x-text="s.token_count"></td>
+                          <td x-text="s.state"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </template>
+                <div class="cron-toolbar">
+                  <button @click="loadCronHistory()">Refresh</button>
+                </div>
+              </div>
+            </template>
+
+            <template x-if="cronSection==='raw'">
+              <div>
+                <textarea x-ref="cronRawEditor" x-model="cronRaw" style="width:100%;height:500px;font-family:monospace"></textarea>
+                <div class="cron-toolbar">
+                  <button @click="saveCronRaw()">Save</button>
+                  <span class="cron-msg" x-text="cronRawMsg"></span>
+                </div>
+                <div class="hint">Saving cron.toml requires restarting <code>llaia serve</code> to take effect.</div>
+              </div>
+            </template>
           </div>
         </template>
 
-        <template x-if="mcpSection==='raw'">
+        <template x-if="configSection==='mcp'">
           <div>
-            <textarea x-ref="mcpRawEditor" x-model="mcpRaw" style="width:100%;height:500px;font-family:monospace"></textarea>
-            <div class="cron-toolbar">
-              <button @click="saveMcpRaw()">Save</button>
-              <span class="cron-msg" x-text="mcpRawMsg"></span>
+            <div class="tabs subtabs">
+              <div class="tab" :class="{active: mcpSection==='servers'}" @click="switchMcpSection('servers')">Servers</div>
+              <div class="tab" :class="{active: mcpSection==='raw'}" @click="switchMcpSection('raw')">Raw TOML</div>
             </div>
-            <div class="hint">Saving mcp.toml requires restarting <code>llaia serve</code> to take effect.</div>
+
+            <template x-if="mcpSection==='servers'">
+              <div>
+                <template x-if="!mcpServers || mcpServers.length === 0">
+                  <div class="placeholder">No MCP servers configured. Edit mcp.toml in the Raw TOML section or run <code>llaia init</code>.</div>
+                </template>
+                <template x-for="s in mcpServers" :key="s.id">
+                  <div class="provider-card">
+                    <div class="card-header">
+                      <h3>
+                        <span x-text="s.id"></span>
+                        <span x-show="s.transport" x-text="' [' + s.transport + ']'"></span>
+                        <span x-text="s.status === 'connected' ? ' ✓' : ' ✗'"></span>
+                      </h3>
+                      <button @click="testMcp(s.id)" :disabled="mcpTesting === s.id"
+                              x-text="mcpTesting === s.id ? 'Testing...' : 'Test'"></button>
+                    </div>
+                    <div x-show="s.status !== 'connected'" class="err" x-text="s.error"></div>
+                    <template x-if="s.tools && s.tools.length > 0">
+                      <table class="cron-table">
+                        <thead>
+                          <tr><th>tool</th><th>description</th><th>confirm</th></tr>
+                        </thead>
+                        <tbody>
+                          <template x-for="t in s.tools" :key="t.name">
+                            <tr>
+                              <td x-text="t.name"></td>
+                              <td x-text="t.description"></td>
+                              <td x-text="t.requires_confirm ? 'required' : 'safe'"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </template>
+                    <div x-show="s.status === 'connected' && (!s.tools || s.tools.length === 0)" class="hint">Server connected but exposes no tools.</div>
+                  </div>
+                </template>
+                <div class="cron-toolbar">
+                  <button @click="loadMcp()">Refresh</button>
+                  <span class="cron-msg" x-text="mcpMsg"></span>
+                </div>
+                <div class="hint">Tools are named <code>&lt;server&gt;__&lt;tool&gt;</code>. Restart <code>llaia serve</code> after editing mcp.toml.</div>
+              </div>
+            </template>
+
+            <template x-if="mcpSection==='raw'">
+              <div>
+                <textarea x-ref="mcpRawEditor" x-model="mcpRaw" style="width:100%;height:500px;font-family:monospace"></textarea>
+                <div class="cron-toolbar">
+                  <button @click="saveMcpRaw()">Save</button>
+                  <span class="cron-msg" x-text="mcpRawMsg"></span>
+                </div>
+                <div class="hint">Saving mcp.toml requires restarting <code>llaia serve</code> to take effect.</div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <template x-if="configSection==='about'">
+          <div>
+            <template x-if="status">
+              <dl class="about-list">
+                <dt>Version</dt><dd x-text="status.version"></dd>
+                <dt>Build</dt><dd x-text="status.build_hash"></dd>
+                <dt>PID</dt><dd x-text="status.pid"></dd>
+                <dt>DB Size</dt><dd x-text="formatBytes(status.db_size_bytes)"></dd>
+                <dt>Repository</dt>
+                <dd><a href="https://github.com/Feihei/llaia" target="_blank" rel="noopener">github.com/Feihei/llaia</a></dd>
+              </dl>
+            </template>
           </div>
         </template>
       </div>
-    </div>
-
-    <div id="about-pane" class="pane" :class="{active: tab==='about'}">
-      <template x-if="status">
-        <dl>
-          <dt>Version</dt><dd x-text="status.version"></dd>
-          <dt>Build</dt><dd x-text="status.build_hash"></dd>
-          <dt>Workspace</dt><dd x-text="status.workspace"></dd>
-          <dt>Config</dt><dd x-text="status.config_path"></dd>
-          <dt>PID</dt><dd x-text="status.pid"></dd>
-          <dt>Channels</dt>
-          <dd>
-            <template x-for="c in status.channels" :key="c.name">
-              <div x-text="(c.enabled?'✓':'✗')+' '+c.name+(c.listening?' ('+c.listening+')':'')"></div>
-            </template>
-          </dd>
-          <dt>DB Size</dt><dd x-text="formatBytes(status.db_size_bytes)"></dd>
-          <dt>Log Dir</dt><dd x-text="status.log_dir"></dd>
-          <dt>Uploads</dt><dd x-text="status.uploads_count+' files'"></dd>
-        </dl>
-      </template>
     </div>
   </main>
     </div>

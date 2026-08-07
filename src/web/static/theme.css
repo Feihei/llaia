@@ -248,32 +248,17 @@ option { background: var(--bg-input); color: var(--text); }
 }
 #config-pane .model-row label { width: auto; min-width: 90px; color: var(--text-dim); }
 
-/* ---------- Cron ---------- */
-#cron-pane { flex-direction: row; }
-#cron-pane .sidebar {
-  width: 200px;
-  background: var(--bg-panel);
-  padding: 10px 8px;
-  overflow-y: auto;
-  border-right: 1px solid var(--border-bright);
-}
-#cron-pane .sidebar div {
-  padding: 7px 10px;
-  cursor: pointer;
-  color: var(--text-dim);
-  border-left: 2px solid transparent;
-}
-#cron-pane .sidebar div:hover { color: var(--text); background: rgba(56, 224, 123, .04); }
-#cron-pane .sidebar div.active {
-  color: var(--green);
-  background: rgba(56, 224, 123, .08);
-  border-left-color: var(--green);
-}
-#cron-pane .sidebar div.active::before { content: "\276F "; }
-#cron-pane .content { flex: 1; overflow-y: auto; padding: 18px 24px; }
-#cron-pane .placeholder { color: var(--text-faint); font-style: italic; }
-#cron-pane .hint { color: var(--text-faint); font-size: 12px; margin-top: 10px; }
-#cron-pane code { color: var(--green-bright); }
+/* ---------- Cron / MCP（Config 内嵌 section） ---------- */
+.subtabs { margin-bottom: 14px; }
+
+#config-pane .hint { color: var(--text-faint); font-size: 12px; margin-top: 10px; }
+#config-pane code { color: var(--green-bright); }
+#config-pane .err { color: var(--red); font-size: 12px; }
+
+/* ---------- About（Config 内嵌 section） ---------- */
+.about-list dt { font-weight: bold; color: var(--green); margin-top: 10px; }
+.about-list dd { margin-left: 16px; color: var(--text); }
+.about-list a { color: var(--cyan); text-decoration: underline; }
 
 .cron-table {
   width: 100%;
@@ -302,11 +287,6 @@ option { background: var(--bg-input); color: var(--text); }
   margin-top: 6px;
 }
 .cron-msg { color: var(--text-dim); font-size: 13px; }
-
-/* ---------- About ---------- */
-#about-pane { padding: 24px; overflow-y: auto; }
-#about-pane dl dt { font-weight: bold; color: var(--green); margin-top: 10px; }
-#about-pane dl dd { margin-left: 16px; color: var(--text); }
 
 /* ---------- 登录遮罩 ---------- */
 #login-overlay {

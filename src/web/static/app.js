@@ -314,10 +314,11 @@ function llaiaApp() {
 
     // ---- cron ----
     async switchCron() {
-      this.tab = 'cron';
+      this.tab = 'config';
+      this.configSection = 'cron';
       if (this.cronSection === 'tasks') await this.loadCron();
       else if (this.cronSection === 'history') await this.loadCronHistory();
-      else if (this.cronSection === 'raw') await this.loadCronRaw();
+      else if (this.cronSection === 'raw') { await this.loadCronRaw(); this.$nextTick(() => this.initCronEditor()); }
     },
     async switchCronSection(name) {
       this.cronSection = name;
@@ -369,7 +370,8 @@ function llaiaApp() {
 
     // ---- mcp ----
     async switchMcp() {
-      this.tab = 'mcp';
+      this.tab = 'config';
+      this.configSection = 'mcp';
       if (this.mcpSection === 'servers') await this.loadMcp();
       else if (this.mcpSection === 'raw') { await this.loadMcpRaw(); this.$nextTick(() => this.initMcpEditor()); }
     },
@@ -485,7 +487,8 @@ function llaiaApp() {
 
     // ---- about ----
     async switchAbout() {
-      this.tab = 'about';
+      this.tab = 'config';
+      this.configSection = 'about';
       const r = await this.apiFetch('/api/status');
       if (!this.authed) return;
       if (r.ok) { this.status = await r.json(); }
