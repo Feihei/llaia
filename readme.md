@@ -1,4 +1,4 @@
-# (੭aᴗa)੭ LLAIA — Come On~ 来啊~
+# LLAIA (੭aᴗa)੭ — Come On~ 来啊~
 
 > **Llaia: Local Lightweight AI Assistant, in Personal Favor**
 >
@@ -10,21 +10,22 @@ There are loads of AI agents out there and they keep getting heavier — most ar
 
 - Local-first: your data stays on your own machine, no cloud required
 - Personal use, single user
-- Only ONE main agent assists you, with the help of other subagents
+- Only one main agent helps you, delegating to a few internal subagents when needed
 
 ### ❌ NOT for
 
 - Cloud / SaaS hosting
 - Multi-user or team collaboration
 - Multi-agent orchestration swarms
+- Public-facing bots (customer-service, group-chat bot, etc.)
 
 ---
 
 ### Risk Notes
 
-LLAIA is a real assistant with **file and terminal access** — it can read/write files and run shell commands on your machine. That power comes with risk.
+LLAIA is an AI assistant with file and terminal access — LLMs can read/write files and run shell commands on your machine. That power comes with risk. LLMs do **NOT** always generate outcomes as you espect. **It's you who owns the actions.** Double-check destructive operations (deletes, overwrites, `git` pushes, etc.) before approving.
 
-**It's you who owns the actions.** LLAIA does what you ask; double-check destructive operations (deletes, overwrites, `git` pushes, etc.) before approving.
+LLAIA operates in your workspace directory only by default, **ALWAYS** backup your important data before letting it operate on, or you can use **git** to retrieve histroy.
 
 ### Prerequisites
 
@@ -71,12 +72,12 @@ It creates LLAIA's data structure under your home directory (default `~/.llaia/`
 ~/.llaia/
  ├─ config.toml        # main config file (commented template; most sections commented out)
  ├─ logs/              # runtime logs
- └─ workspace/         # working directory (also where the agent reads/writes files by default)
-     ├─ SOUL.md        # agent personality (what character you want it to have)
+ └─ workspace/         # main agent workspace (also where the agent reads/writes files by default)
+     ├─ SOUL.md        # agent persona
      ├─ USER.md        # your basic info and preferences
      ├─ MEMORY.md      # long-term memory (the agent writes here)
      ├─ uploads/       # uploaded-file staging
-     ├─ subagent/      # sub-agent working directory
+     ├─ subagent/      # sub-agent workspaces
      └─ sessions.db    # conversation history (auto-created on first launch)
 ```
 
@@ -89,7 +90,7 @@ Notes:
 
 ### Step 2: Connect a model (pick one)
 
-LLAIA needs at least one LLM endpoint before chat works (the Web UI config screen still opens without one).
+LLAIA needs at least one LLM endpoint before chat works.
 
 **A. Web UI config (recommended for beginners)** — skip manual editing, go to Step 3 to start the service, then fill it in from the browser.
 
@@ -109,8 +110,6 @@ context_size = 32768
 [agent.main]
 model = "default.qwen"             # references provider.<id>.<model_alias> above
 ```
-
-(Full field reference: `docs/adr/0008-config-schema-v1.1.md`.)
 
 ### Step 3: Start using it
 
