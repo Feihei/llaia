@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # Tag name that triggered the release, e.g. v0.1.0. Used in artifact names.
+  VERSION: ${{ github.ref_name }}
+
 jobs:
   release:
     name: ${{ matrix.target }}
@@ -21,8 +25,10 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           # Linux aarch64 -- cross-compile via cross (Docker)
           - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, use-cross: true }
-          # macOS Intel
-          - { os: macos-13, target: x86_64-apple-darwin }
+          # macOS x86_64 -- cross-compile on an Apple Silicon runner.
+          # macos-13 (Intel) runners queue for many hours; macos-14 (arm64)
+          # builds x86_64-apple-darwin fine, and rustls removes system-TLS deps.
+          - { os: macos-14, target: x86_64-apple-darwin }
           # macOS Apple Silicon
           - { os: macos-14, target: aarch64-apple-darwin }
           # Windows x86_64
@@ -32,10 +38,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      - name: Install Linux build deps
-        if: matrix.os == 'ubuntu-latest' && !matrix.use-cross
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
 
       - name: Install cross
         if: matrix.use-cross
@@ -64,9 +66,14 @@ jobs:
         run: |
           BIN="target/${{ matrix.target }}/release/llaia"
           strip "$BIN"
-          ARCHIVE="llaia-${{ matrix.target }}.tar.gz"
+          ARCHIVE="llaia-${{ env.VERSION }}-${{ matrix.target }}.tar.gz"
           tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" llaia
-          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          # macOS lacks sha256sum; fall back to shasum (present on Linux & macOS)
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          fi
 
       # ---- Package artifact (Windows: zip) ----
       - name: Prepare artifact (Windows)
@@ -74,7 +81,7 @@ jobs:
         shell: bash
         run: |
           SRC="target/${{ matrix.target }}/release/llaia.exe"
-          ARCHIVE="llaia-${{ matrix.target }}.zip"
+          ARCHIVE="llaia-${{ env.VERSION }}-${{ matrix.target }}.zip"
           powershell -NoProfile -Command "Compress-Archive -Path '$SRC' -DestinationPath '$ARCHIVE' -Force"
           sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
@@ -82,6 +89,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            llaia-${{ matrix.target }}*
+            llaia-${{ env.VERSION }}-${{ matrix.target }}*
           # Overwrite same-named assets when re-pushing a tag
           fail_on_unmatched_files: true

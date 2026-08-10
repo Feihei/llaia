@@ -5,7 +5,11 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+# native-tls → rustls: drops the system OpenSSL dependency so cross-compile
+# targets (e.g. aarch64-unknown-linux-gnu via `cross`) build without a matching
+# libssl-dev. default-features=false removes default-tls; charset/http2/
+# system-proxy are re-added to preserve prior runtime behaviour.
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls", "charset", "http2", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -22,7 +26,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 shellexpand = "3"
-tokio-tungstenite = { version = "0.23", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 async-stream = "0.3"
 sysinfo = "0.30"
