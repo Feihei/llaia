@@ -4,9 +4,9 @@
 FROM rust:1-bookworm AS builder
 WORKDIR /build
 
-# rusqlite (bundled) needs a C compiler; native-tls needs OpenSSL dev libs on Linux
+# rusqlite (bundled) needs a C compiler. TLS is rustls, so no system OpenSSL needed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev \
+    && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
@@ -37,6 +37,7 @@ RUN apt-get update \
         libstdc++6 \
         python3 \
         python3-pip \
+        xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Optional static Node.js (no npm) — only when EXTRAS contains "full".
