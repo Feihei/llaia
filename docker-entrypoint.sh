@@ -16,4 +16,4 @@ port = ${WEB_PORT:-51217}
 EOF
 fi
 
-exec llaia serve --config_dir "$WS"
+exec llaia serve --config-dir "$WS"
