@@ -65,7 +65,6 @@ jobs:
         shell: bash
         run: |
           BIN="target/${{ matrix.target }}/release/llaia"
-          strip "$BIN"
           ARCHIVE="llaia-${{ env.VERSION }}-${{ matrix.target }}.tar.gz"
           tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" llaia
           # macOS lacks sha256sum; fall back to shasum (present on Linux & macOS)

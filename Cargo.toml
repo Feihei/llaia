@@ -46,3 +46,11 @@ md-5 = "0.10"
 mockito = "1"
 tempfile = "3"
 tower = { version = "0.4", features = ["util"] }
+
+# Strip release binaries at link time via the Rust toolchain's bundled
+# `llvm-strip` (multi-architecture aware). This replaces the per-platform
+# `strip` shell call in release.yml, which failed on cross-compiled targets
+# (e.g. aarch64-unknown-linux-gnu) because the host's GNU strip can't read
+# the foreign-arch ELF.
+[profile.release]
+strip = true

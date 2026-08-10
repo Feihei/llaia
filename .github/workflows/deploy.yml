@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   docker:
-    name: Build & Push Image
+    name: Build and Push Image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -30,7 +30,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push (default: curl/git/python3)
+      - name: "Build and push (default: curl/git/python3)"
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -41,7 +41,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build and push (full: + static node)
+      - name: "Build and push (full: + static node)"
         uses: docker/build-push-action@v7
         with:
           context: .
