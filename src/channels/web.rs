@@ -422,9 +422,26 @@ impl Channel for WebChannel {
                 )
             })?;
         let router = self.build_router();
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|e| anyhow::anyhow!("bind {}: {}", addr, e))?;
+        // bind 重试：自重启场景下旧进程端口可能尚未完全释放，
+        // 或 systemd/docker restart 策略与新进程并发拉起，重试兜底竞态。
+        let mut listener = None;
+        let mut last_err = anyhow::anyhow!("bind attempts exhausted");
+        for attempt in 1..=10 {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => {
+                    listener = Some(l);
+                    break;
+                }
+                Err(e) => {
+                    if attempt == 1 {
+                        tracing::warn!("bind {} failed ({}), retrying up to 10s", addr, e);
+                    }
+                    last_err = anyhow::anyhow!("{}", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+        let listener = listener.ok_or_else(|| anyhow::anyhow!("bind {}: {}", addr, last_err))?;
         tracing::info!("WebChannel listening on {}", addr);
         axum::serve(listener, router)
             .await

@@ -461,7 +461,8 @@ pub async fn validate_config(
 }
 
 /// POST /api/restart → 自重启 serve 进程：spawn 替代进程后退出。
-/// 替代进程延迟 ~1s 启动，等旧进程释放端口。pid 文件仅警告不阻止，新进程可正常接管。
+/// 替代进程延迟 ~1s 启动，等旧进程释放端口（web channel bind 带重试兜底竞态）。
+/// 容器内拒绝：exit(0) 会终止 PID 1 导致容器整体退出，替代进程无从接管。
 pub async fn restart_service(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -469,6 +470,12 @@ pub async fn restart_service(
 ) -> Response {
     if !authorize(&state, &headers, &q) {
         return unauthorized();
+    }
+    if in_container() {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "running inside a container: self-restart would stop the container; restart the container instead",
+        );
     }
     let config_dir = match state.config_path.parent() {
         Some(d) => d.to_path_buf(),
@@ -488,10 +495,16 @@ pub async fn restart_service(
             )
         }
     };
-    if let Err(e) = spawn_replacement(&exe, &config_dir) {
-        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    let log_path = config_dir.join("logs").join("restart.log");
+    match spawn_replacement(&exe, &config_dir, &log_path) {
+        Ok(path) => {
+            tracing::info!(
+                "restart requested: replacement process spawned (output -> {}), exiting",
+                path.display()
+            );
+        }
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
-    tracing::info!("restart requested: replacement process spawned, exiting");
     // 先把响应送达浏览器，再延迟退出（给 axum 刷出响应的时间）
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -500,10 +513,30 @@ pub async fn restart_service(
     axum::Json(serde_json::json!({ "restarting": true })).into_response()
 }
 
+/// 容器环境探测：docker/podman 会建 /.dockerenv 或设 container 环境变量。
+fn in_container() -> bool {
+    std::path::Path::new("/.dockerenv").exists() || std::env::var_os("container").is_some()
+}
+
 /// spawn 替代进程：Windows 用 cmd（ping 延时），Unix 用 sh（sleep 延时）。
-fn spawn_replacement(exe: &Path, config_dir: &Path) -> Result<(), String> {
+/// stdout/stderr 重定向到 logs/restart.log——否则替代进程启动失败时错误无人可见
+/// （serve 常无控制台，且旧进程 300ms 后就退出）。
+/// 返回 Ok(log_path) 表示 spawn 成功。
+fn spawn_replacement(exe: &Path, config_dir: &Path, log_path: &Path) -> Result<PathBuf, String> {
     let exe_s = exe.display().to_string();
     let dir_s = config_dir.display().to_string();
+    // 确保 logs 目录存在（serve 正常启动时 log::init 已建，这里防御性兜底）
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| format!("open restart log {}: {}", log_path.display(), e))?;
+    let stderr = log_file
+        .try_clone()
+        .map_err(|e| format!("clone restart log handle: {}", e))?;
     let spawn_result = {
         #[cfg(windows)]
         {
@@ -518,6 +551,8 @@ fn spawn_replacement(exe: &Path, config_dir: &Path) -> Result<(), String> {
             let mut c = std::process::Command::new("cmd");
             c.raw_arg("/C");
             c.raw_arg(&script);
+            c.stdout(std::process::Stdio::from(log_file))
+                .stderr(std::process::Stdio::from(stderr));
             c.spawn()
         }
         #[cfg(not(windows))]
@@ -528,11 +563,13 @@ fn spawn_replacement(exe: &Path, config_dir: &Path) -> Result<(), String> {
             );
             std::process::Command::new("sh")
                 .args(["-c", &script])
+                .stdout(std::process::Stdio::from(log_file))
+                .stderr(std::process::Stdio::from(stderr))
                 .spawn()
         }
     };
     spawn_result
-        .map(|_| ())
+        .map(|_| log_path.to_path_buf())
         .map_err(|e| format!("spawn replacement process: {}", e))
 }
 
