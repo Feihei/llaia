@@ -507,13 +507,18 @@ fn spawn_replacement(exe: &Path, config_dir: &Path) -> Result<(), String> {
     let spawn_result = {
         #[cfg(windows)]
         {
+            // 必须用 raw_arg 直传命令行：std 的 args() 会给整个 script 再包一层引号，
+            // cmd /c 首尾有引号时只剥最外层、内部引号保留为字面量，
+            // 导致把 "E:\...\llaia.exe"（带引号）当可执行名查找而报错。
+            use std::os::windows::process::CommandExt;
             let script = format!(
                 "ping -n 2 127.0.0.1 >nul & \"{}\" --config-dir \"{}\" serve",
                 exe_s, dir_s
             );
-            std::process::Command::new("cmd")
-                .args(["/C", &script])
-                .spawn()
+            let mut c = std::process::Command::new("cmd");
+            c.raw_arg("/C");
+            c.raw_arg(&script);
+            c.spawn()
         }
         #[cfg(not(windows))]
         {
