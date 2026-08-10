@@ -1,0 +1,34 @@
+# cargo-release configuration for LLAIA
+# Docs: https://release.crates.io/
+#
+# One-time install:
+#   cargo install cargo-release
+# (or, if you have cargo-binstall: cargo binstall cargo-release)
+#
+# Typical flow (Feihei pushes manually):
+#   1. Bump the working copy to the next dev version:
+#        cargo set-version 0.1.2
+#        git add Cargo.toml Cargo.lock
+#        git commit -m "chore: bump version to 0.1.2"
+#   2. Cut a release from the current dev version:
+#        cargo release 0.1.1 --execute --no-publish --no-push
+#        git push --follow-tags
+#      -> creates commit "chore: release 0.1.1" + tag v0.1.1
+#      -> tag push triggers .github/workflows/release.yml (multi-platform build)
+#
+# Note: the working copy always holds the *next* dev version (e.g. 0.1.1 right
+# after v0.1.0 shipped). `cargo release <version>` releases that exact version
+# without further bumping, so the shipped version matches the working copy.
+
+[release]
+# Only release from main.
+allow-branch = ["main"]
+# Tag must carry the `v` prefix so release.yml fires.
+tag-name = "v{{version}}"
+# Release commit uses Conventional Commits.
+pre-release-commit-message = "chore: release {{version}}"
+# LLAIA is a binary app, not published to crates.io.
+publish = false
+# Feihei pushes manually (push --follow-tags), so cargo-release does not push.
+push = false
+sign-tag = false

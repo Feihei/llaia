@@ -161,8 +161,22 @@ CI 在 `push` / PR 时对 `main` 跑三道门：`cargo fmt --check` → `cargo c
 
 ### 发版
 
-- 打 `v*` 形式的 tag（如 `v0.1.0`）并 `git push origin <tag>` 触发 `release.yml`，自动构建多平台二进制并上传到 GitHub Releases。
-- tag 必须带 `v` 前缀，否则 release 工作流不触发。
+- 走 `cargo-release` 自动化流程（配置见仓库根 `release.toml`）。工具本地一次性安装：`cargo install cargo-release`（或 `cargo binstall cargo-release`）。
+- 工作区版本号始终保持为**下一个开发版本**（如 v0.1.0 发完后，`Cargo.toml` 为 `0.1.1`）。
+- 提版本号（开发阶段，纯版本号改动，跳过测试）：
+  ```bash
+  cargo set-version 0.1.2
+  git add Cargo.toml Cargo.lock
+  git commit -m "chore: bump version to 0.1.2"
+  ```
+- 发布某个开发版本（生成 `chore: release X.Y.Z` 提交 + `vX.Y.Z` tag，不自动 push）：
+  ```bash
+  cargo release 0.1.1 --execute --no-publish --no-push
+  git push --follow-tags
+  ```
+- `git push --follow-tags` 推送 tag 后触发 `release.yml`，自动构建多平台二进制并上传到 GitHub Releases。
+- **tag 必须带 `v` 前缀**（`release.toml` 已用 `tag-name = "v{{version}}"` 保证），否则 release 工作流不触发。
+- 不发布到 crates.io（`release.toml` 中 `publish = false`）；`push = false` 由 Feihei 手动推送。
 
 ## 设计文档索引
 
