@@ -313,6 +313,14 @@
 
 - [ ] `/move` 或 `/cd` 斜杠命令：允许把 CWD 从默认 workspace 移动到用户指定位置，提醒风险并要求确认（扩展 P3-a 的 workspace 边界模型）
 
+### 进程生命周期与重启机制
+
+> 背景（2026-08-10 评估）：WebUI 重启按钮走 spawn 替代进程路线（zeroclaw 的 respawn 层），子进程故意脱离终端——终端启动的用户重启后失去 Ctrl+C 控制，只能任务管理器杀。调研 zeroclaw（`.ref/zeroclaw`）三层机制后结论：全套 daemon/supervisor 太重不借鉴，但两项便宜改进与一项正解记入本节。当前阶段决定保持轻量不动，痛点可用现有机制缓解（provider 改动已热加载，多数场景无需重启）。
+
+- [ ] `/api/shutdown` + WebUI 停止按钮：优雅退出 serve，解决脱管进程只能任务管理器杀的痛点
+- [ ] spawn-after-teardown 顺序（zeroclaw `restart.rs` 精华）：启动时 record_launch 记录原始 argv，先优雅 teardown（端口已释放）再拉子进程，替换 ping/sleep 延迟土法并保留启动参数
+- [ ] 同 PID 原地 reload（正解，zeroclaw 主力路线）：WebUI 触发进程内信号，原地拆除/重建全部 channel 子系统，PID 不变，终端归属与 Ctrl+C 保留；需要给 QQ WS/Web/cron/MCP 各 channel 做 cancellation token 化改造，工作量较大
+
 ### 权限管理系统
 
 - [ ] 三档权限 profile：`read-only` / `default` / `yolo`，对齐 opencode 的 plan/build 双模式思路
