@@ -72,6 +72,7 @@
           <div>
             <div class="form-row"><label>context_threshold</label><input type="number" step="0.1" min="0" max="1" x-model.number="cfg.runtime.context_threshold"></div>
             <div class="form-row"><label>max_iterations</label><input type="number" min="1" x-model.number="cfg.runtime.max_iterations"></div>
+            <div class="form-row"><label>timezone</label><input type="text" x-model="cfg.runtime.timezone" placeholder="Asia/Shanghai (IANA)"></div>
             <button @click="saveConfig()">Save</button>
           </div>
         </template>
@@ -379,6 +380,13 @@
                 <span x-show="restarting">Restarting…</span>
               </button>
               <span class="cron-msg" x-text="restartMsg"></span>
+            </div>
+            <div style="margin-top:16px;">
+              <button @click="shutdownService()" x-bind:disabled="shuttingDown">
+                <span x-show="!shuttingDown">Stop Service</span>
+                <span x-show="shuttingDown">Stopping…</span>
+              </button>
+              <span class="cron-msg" x-text="shutdownMsg"></span>
             </div>
           </div>
         </template>

@@ -11,7 +11,7 @@ use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 
 /// 共享状态：所有 handler 共用
 #[derive(Clone)]
@@ -21,6 +21,8 @@ pub struct AppState {
     pub config_path: std::path::PathBuf,
     pub workspace: std::path::PathBuf,
     pub token: Arc<String>,
+    /// 优雅停止信号：/api/shutdown handler 触发，serve_cmd 的 select! 监听并退出（ADR-0018）
+    pub shutdown_signal: Arc<Notify>,
     /// active WS 连接注册表：id → event sender，用于主动推送（cron 任务结果等）
     pub active_ws: Arc<
         tokio::sync::Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<WebEvent>>>,
@@ -511,6 +513,21 @@ pub async fn restart_service(
         std::process::exit(0);
     });
     axum::Json(serde_json::json!({ "restarting": true })).into_response()
+}
+
+/// POST /api/shutdown → 优雅停止 serve 进程（ADR-0018）。
+/// 触发 shutdown_signal，serve_cmd 的 select! 监听到后执行统一清理（cron 停止 + task abort）并退出。
+/// 容器内允许：与 /api/restart 不同，shutdown 只是退出、不 spawn 替代进程，不会孤立 PID 1。
+pub async fn shutdown_service(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    state.shutdown_signal.notify_one();
+    axum::Json(serde_json::json!({ "ok": true, "note": "shutdown signaled" })).into_response()
 }
 
 /// 容器环境探测：docker/podman 会建 /.dockerenv 或设 container 环境变量。
@@ -1136,6 +1153,7 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         )
         .route("/api/config/validate", axum::routing::post(validate_config))
         .route("/api/restart", axum::routing::post(restart_service))
+        .route("/api/shutdown", axum::routing::post(shutdown_service))
         .route("/api/status", axum::routing::get(get_status))
         // cron API
         .route("/api/cron", axum::routing::get(list_cron))

@@ -43,7 +43,6 @@ pub const SOUL_TEMPLATE: &str = r#"# 人格
 pub const USER_TEMPLATE: &str = r#"# 基本信息
 
 - 姓名：
-- 时区：Asia/Shanghai
 
 # 身份绑定
 
@@ -66,13 +65,17 @@ pub async fn compress_memory(
     memory_path: &PathBuf,
     provider: &dyn Provider,
     backup_dir: &PathBuf,
+    tz: &Option<String>,
 ) -> Result<()> {
     let content = tokio::fs::read_to_string(memory_path)
         .await
         .with_context(|| format!("read {:?}", memory_path))?;
 
     tokio::fs::create_dir_all(backup_dir).await.ok();
-    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let ts = crate::time::now(tz)
+        .naive
+        .format("%Y%m%d-%H%M%S")
+        .to_string();
     let backup_path = backup_dir.join(format!("MEMORY.{}.md", ts));
     tokio::fs::write(&backup_path, &content).await?;
 

@@ -36,6 +36,11 @@ pub struct RuntimeConfig {
     /// 设置后会构建独立的 compact provider，可用更便宜的模型做压缩。
     #[serde(default)]
     pub compact_model: Option<String>,
+    /// IANA 时区名（如 "Asia/Shanghai"），决定 agent 状态栏与用户可见日期。
+    /// None（默认）= 跟随宿主机本地时区，与旧行为一致。
+    /// 非法值在 Config::load 里 warn + 置 None。
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -44,6 +49,7 @@ impl Default for RuntimeConfig {
             context_threshold: default_threshold(),
             max_iterations: default_max_iterations(),
             compact_model: None,
+            timezone: None,
         }
     }
 }
@@ -445,6 +451,18 @@ impl Config {
                     "runtime.compact_model is not a valid 'provider_id.model_alias' reference, will be ignored"
                 );
                 config.runtime.compact_model = None;
+            }
+        }
+        // timezone 校验：非法 IANA 名降级为跟随系统，而不是让每一轮状态栏都错
+        if let Some(tz) = &config.runtime.timezone {
+            if tz.trim().is_empty() {
+                config.runtime.timezone = None;
+            } else if !crate::time::is_valid_tz(tz.trim()) {
+                tracing::warn!(
+                    timezone = tz.as_str(),
+                    "runtime.timezone is not a valid IANA name, falling back to system local time"
+                );
+                config.runtime.timezone = None;
             }
         }
         // agent fallback 链引用校验：无效项移除（备用链是容错手段，不应阻塞启动）

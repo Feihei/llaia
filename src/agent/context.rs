@@ -21,7 +21,12 @@ impl Context {
         self.history.push(msg);
     }
 
-    pub fn to_messages(&self) -> Vec<ChatMessage> {
+    /// 组装送给 provider 的消息列表。
+    ///
+    /// `tz` 为 `[runtime].timezone`，用于生成末尾的运行时状态栏（ADR-0017）。
+    /// 状态栏不写入 `history`：每轮现算、只挂在尾部，system 前缀
+    /// （SOUL/USER/MEMORY/Skills）逐轮字节一致，KV cache 才能命中。
+    pub fn to_messages(&self, tz: &Option<String>) -> Vec<ChatMessage> {
         let mut msgs = vec![ChatMessage::system(&self.system)];
         if let Some(s) = &self.summary {
             msgs.push(ChatMessage::system(format!(
@@ -30,6 +35,7 @@ impl Context {
             )));
         }
         msgs.extend(self.history.iter().cloned());
+        msgs.push(ChatMessage::user(crate::time::status_bar(tz)));
         msgs
     }
 
@@ -130,8 +136,9 @@ mod tests {
     #[test]
     fn test_to_messages_includes_system() {
         let ctx = Context::new("SOUL".into());
-        let msgs = ctx.to_messages();
-        assert_eq!(msgs.len(), 1);
+        let msgs = ctx.to_messages(&None);
+        // system + 状态栏
+        assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, Role::System);
     }
 
@@ -140,9 +147,41 @@ mod tests {
         let mut ctx = Context::new("SOUL".into());
         ctx.summary = Some("old stuff".into());
         ctx.push(ChatMessage::user("hi"));
-        let msgs = ctx.to_messages();
-        assert_eq!(msgs.len(), 3);
+        let msgs = ctx.to_messages(&None);
+        // system + summary + history + 状态栏
+        assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[1].role, Role::System);
+    }
+
+    #[test]
+    fn test_status_bar_is_last_and_not_persisted() {
+        let mut ctx = Context::new("SOUL".into());
+        ctx.push(ChatMessage::user("hi"));
+        let msgs = ctx.to_messages(&Some("Asia/Shanghai".into()));
+        let last = msgs.last().unwrap();
+        assert_eq!(last.role, Role::User);
+        assert!(last.content.as_text().contains("Asia/Shanghai"));
+        // 状态栏只在 to_messages 里现算，不落进 history
+        assert_eq!(ctx.history.len(), 1);
+    }
+
+    #[test]
+    fn test_system_prefix_stable_across_turns() {
+        // 缓存友好性回归：前缀部分逐轮必须字节一致，只有尾部状态栏会变
+        let mut ctx = Context::new("SOUL".into());
+        ctx.push(ChatMessage::user("hi"));
+        let a = ctx.to_messages(&None);
+        let b = ctx.to_messages(&None);
+        assert_eq!(
+            a[..a.len() - 1]
+                .iter()
+                .map(|m| m.content.as_text())
+                .collect::<Vec<_>>(),
+            b[..b.len() - 1]
+                .iter()
+                .map(|m| m.content.as_text())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

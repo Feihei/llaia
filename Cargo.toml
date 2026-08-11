@@ -25,6 +25,9 @@ regex = "1"
 dirs = "5"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+# IANA tz database for [runtime].timezone. Already in the tree transitively via
+# tokio-cron-scheduler, so promoting it to a direct dependency costs nothing.
+chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4"] }
 shellexpand = "3"
 tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }

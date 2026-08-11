@@ -396,11 +396,10 @@ async fn build_single_agent(
             workspace.clone(),
         )),
         Arc::new(WebFetch::new()?),
-        Arc::new(MemoryWrite::new(
-            memory_path.clone(),
-            user_path.clone(),
-            is_main,
-        )),
+        Arc::new(
+            MemoryWrite::new(memory_path.clone(), user_path.clone(), is_main)
+                .with_timezone(config.runtime.timezone.clone()),
+        ),
         Arc::new(SendImage::new(workspace.clone())),
         Arc::new(SendFile::new(workspace.clone())),
     ];

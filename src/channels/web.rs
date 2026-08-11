@@ -313,6 +313,8 @@ pub struct WebChannel {
     pub cron_scheduler: Arc<std::sync::Mutex<Option<Arc<crate::cron::CronScheduler>>>>,
     /// McpRegistry 共享槽（serve_cmd 通过 set_mcp_registry 注入，供 MCP API 展示状态）
     pub mcp_registry: Arc<std::sync::Mutex<Option<Arc<crate::mcp::client::McpRegistry>>>>,
+    /// 优雅停止信号：serve_cmd 创建并持有，注入 AppState 后由 /api/shutdown handler 触发（ADR-0018）
+    pub shutdown_signal: Arc<Notify>,
 }
 
 impl WebChannel {
@@ -322,6 +324,7 @@ impl WebChannel {
         config_full: Arc<RwLock<Config>>,
         config_path: PathBuf,
         workspace: PathBuf,
+        shutdown_signal: Arc<Notify>,
     ) -> Self {
         let cron_path = config_path.with_file_name("cron.toml");
         Self {
@@ -334,6 +337,7 @@ impl WebChannel {
             cron_path,
             cron_scheduler: Arc::new(std::sync::Mutex::new(None)),
             mcp_registry: Arc::new(std::sync::Mutex::new(None)),
+            shutdown_signal,
         }
     }
 
@@ -364,6 +368,7 @@ impl WebChannel {
             config_path: self.config_path.clone(),
             workspace: self.workspace.clone(),
             token: Arc::new(token),
+            shutdown_signal: self.shutdown_signal.clone(),
             active_ws: self.active_ws.clone(),
             next_ws_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             cron_path: self.cron_path.clone(),

@@ -84,6 +84,7 @@ async fn build_state(tmp: &std::path::Path) -> AppState {
         config_path: config_dir.join("config.toml"),
         workspace,
         token: Arc::new(TOKEN.to_string()),
+        shutdown_signal: Arc::new(tokio::sync::Notify::new()),
         active_ws: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         next_ws_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         cron_path: config_dir.join("cron.toml"),

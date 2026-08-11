@@ -14,6 +14,7 @@ const CONFIG_TEMPLATE: &str = r#"# LLAIA 配置文件
 [runtime]
 context_threshold = 0.7
 max_iterations = 10
+# timezone = "Asia/Shanghai"     # 可选：IANA 时区名（如 Asia/Shanghai / America/New_York）；未设置则跟随系统时区
 # compact_model = "default.qwen"  # 可选：用更便宜的模型跑上下文压缩，未设置时复用主模型
 
 [log]
@@ -303,6 +304,16 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     let (registry, cron_tool, mcp_registry) =
         crate::channels::cli::build_agent(&config, config_dir).await?;
 
+    // serve 模式：让主 agent 与 WebChannel 共享同一份 live_config，
+    // 这样 WebUI 修改 [runtime].timezone 后下一轮对话即可生效（ADR-0017 热更新）。
+    let live_config = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
+    {
+        let mut a = registry.main.lock().await;
+        a.attach_live_config(live_config.clone());
+    }
+    // WebUI 优雅停止信号：/api/shutdown 触发后让 serve_cmd 退出（ADR-0018）
+    let shutdown_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+
     // serve 模式：无 provider 时 warn 但继续启动（WebUI 配置功能不依赖 provider，聊天降级提示）
     {
         let a = registry.main.lock().await;
@@ -400,9 +411,10 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     let web = std::sync::Arc::new(crate::channels::web::WebChannel::new(
         config.webui.clone(),
         registry.clone(),
-        std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
+        live_config.clone(),
         config_path,
         workspace.clone(),
+        shutdown_signal.clone(),
     ));
     web.set_mcp_registry(mcp_registry);
     let web_pusher_for_cron: std::sync::Arc<dyn crate::cron::ProactivePusher> = web.clone();
@@ -466,12 +478,14 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
             // 与 chat 共用同一句退出语
             println!("\n{}", crate::banner::GOODBYE);
         }
-        _ = async {
-            for t in tasks {
-                let _ = t.await;
-            }
-        } => {}
+        _ = shutdown_signal.notified() => {
+            tracing::info!("received /api/shutdown, shutting down");
+            println!("\n{}", crate::banner::GOODBYE);
+        }
     }
+
+    // 共享清理逻辑（ADR-0018）：cron 调度器停止 + 各 channel task abort
+    shutdown_serve(&_cron, &tasks).await;
     Ok(())
 }
 
@@ -491,6 +505,19 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         cfg.runtime.context_threshold
     );
     println!("runtime.max_iterations: {}", cfg.runtime.max_iterations);
+    match &cfg.runtime.timezone {
+        Some(tz) => {
+            if crate::time::is_valid_tz(tz.trim()) {
+                println!("runtime.timezone: {} (resolved)", tz);
+            } else {
+                println!(
+                    "[warn] runtime.timezone '{}' is not a valid IANA timezone name; runtime falls back to system local time",
+                    tz
+                );
+            }
+        }
+        None => println!("runtime.timezone: <unset> (follows system local time)"),
+    }
 
     // provider 配置检查：无 [provider.<id>] section 时 warn（不 error，serve 可降级启动）
     if cfg.provider.is_empty() {
@@ -679,7 +706,8 @@ pub async fn remember_cmd(text: &str, config_dir: &Path) -> Result<()> {
     let workspace = agent_cfg.derive_workspace(config_dir, "main");
     let memory_path = workspace.join("MEMORY.md");
     crate::memory::ensure_template(&memory_path, crate::memory::MEMORY_TEMPLATE).await?;
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let tz = cfg.runtime.timezone.clone();
+    let today = crate::time::now(&tz).ymd();
     let line = format!("- [{}] {}\n", today, text);
     let mut content = tokio::fs::read_to_string(&memory_path)
         .await
@@ -698,6 +726,25 @@ pub fn load_config_or_init(config_dir: &Path) -> Result<Config> {
     } else {
         Ok(Config::default_for_workspace(&config_dir.to_string_lossy()))
     }
+}
+
+/// 共享清理逻辑（ADR-0018）：停止 cron 调度器，并 abort 所有 channel task。
+/// 在 serve_cmd 退出前调用，保证 Ctrl+C 与 /api/shutdown 走同一收尾路径。
+async fn shutdown_serve(
+    cron: &Option<std::sync::Arc<crate::cron::CronScheduler>>,
+    tasks: &[tokio::task::JoinHandle<()>],
+) {
+    if let Some(sched) = cron {
+        if let Err(e) = sched.shutdown().await {
+            tracing::warn!(error = %e, "cron scheduler shutdown failed");
+        } else {
+            tracing::info!("cron scheduler stopped");
+        }
+    }
+    for h in tasks {
+        h.abort();
+    }
+    tracing::info!("channel tasks aborted, serve exiting");
 }
 
 /// RAII guard：作用域结束时自动释放 PID 文件

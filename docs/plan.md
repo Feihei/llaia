@@ -310,7 +310,7 @@
 
 ### P4 / 时间感知与运行时事实注入
 
-- [ ] **时区从 USER.md 剥离，改由 config 注入 + 热更新**（必要性：**高** / 难度：★☆☆）
+- [x] **时区从 USER.md 剥离，改由 config 注入 + 热更新**（必要性：**高** / 难度：★☆☆）
   - 现状问题：
     1. **agent 实际上没有当前时间感知**。system prompt 只在进程启动时拼一次（`channels/cli.rs:441`），USER.md 里的「时区：Asia/Shanghai」（`memory/markdown.rs:46`）只是一行静态文本——模型知道时区名，但不知道「现在几点、今天星期几」，跨天长驻进程里这行还会越来越误导。
     2. **散落的本地时间调用**。`chrono::Local::now()` 在 cron/runner、audit、memory_write、MEMORY 备份、`llaia remember` 等 6 处各写各的，全依赖宿主机 TZ；Docker 镜像默认 UTC，导致记忆条目日期、审计时间戳、cron 触发时刻整体偏 8 小时，且与 USER.md 里声明的时区自相矛盾。
@@ -341,7 +341,7 @@
     - **写入边界**：MEMORY.md 放开全编辑（增 / 改 / 删，去重压缩价值成立之必须）；USER.md v1 不碰（最多在 diff 摘要里「提议」）。
     - **安全兜底**：事前备份 MEMORY.md（带时间戳，留最近 N 份）→ 事后算 diff 推送通知用户（绝不静默）→ `/dream` 手动触发 → `/dream-rollback` 回滚 → **默认开**（idle 门 + diff + 回滚三道防线使风险可控）。
 - [ ] 更聪明的上下文压缩：防止重要信息丢失、提高缓存命中、减少对 LLM 压缩的依赖（参考《深入理解 AI Agent》李博杰 v1.2 §2.7.2）（必要性：**高** / 难度：★★★）
-- [ ] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界（必要性：**中** / 难度：★☆☆，纯文档）
+- [x] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界（必要性：**中** / 难度：★☆☆，纯文档）
 
 ### P4 / 模型与工具调用
 
@@ -352,7 +352,7 @@
 
 > 背景（2026-08-10 评估）：WebUI 重启按钮走 spawn 替代进程路线（zeroclaw 的 respawn 层），子进程故意脱离终端——终端启动的用户重启后失去 Ctrl+C 控制，只能任务管理器杀。调研 zeroclaw（`.ref/zeroclaw`）三层机制后结论：全套 daemon/supervisor 太重不借鉴，但两项便宜改进与一项正解记入本节。当前阶段决定保持轻量不动，痛点可用现有机制缓解（provider 改动已热加载，多数场景无需重启）。
 
-- [ ] `/api/shutdown` + WebUI 停止按钮：优雅退出 serve，解决脱管进程只能任务管理器杀的痛点（必要性：**高** / 难度：★☆☆）
+- [x] `/api/shutdown` + WebUI 停止按钮：优雅退出 serve，解决脱管进程只能任务管理器杀的痛点（必要性：**高** / 难度：★☆☆）
   - **现状**：WebUI 已有 `/api/restart`（`web/mod.rs:466`，spawn 替代进程后 `exit(0)`），但**没有** `/api/shutdown`；`serve_cmd`（`commands/mod.rs:463`）只靠 `tokio::select! { ctrl_c / 所有 channel task 结束 }` 退出，且退出路径**无任何清理**（cron 调度器不显式 shutdown、spawn 出的 channel task 直接随进程退出丢弃）。终端启动的用户点 restart 后子进程脱离终端、失去 Ctrl+C，只能任务管理器杀——这正是本项的痛点来源。
   - **细化方案（详见 [ADR-0018](docs/adr/0018-shutdown.md)）**：
     - **① 共享 shutdown 信号**：`WebChannel` 新增 `pub shutdown_signal: Arc<tokio::sync::Notify>`（`web.rs:301` 结构体；在 `new()` 里 `Arc::new(Notify::new())`）。`build_router`（`web.rs:361`）把它 clone 进 `AppState`（新字段 `shutdown_signal`）。`serve_cmd` 在 spawn 前 `let shutdown_signal = web.shutdown_signal.clone();` 持有同一 Arc。

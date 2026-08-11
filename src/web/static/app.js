@@ -21,6 +21,8 @@ function llaiaApp() {
     status: null,
     restarting: false,
     restartMsg: '',
+    shuttingDown: false,
+    shutdownMsg: '',
     // cron
     cronSection: 'tasks',
     cronTasks: [],
@@ -526,6 +528,26 @@ function llaiaApp() {
       };
       // replacement process starts ~1s after old one exits
       setTimeout(poll, 3000);
+    },
+    // stop serve process via /api/shutdown; serve_cmd then runs the shared
+    // cleanup (cron stop + channel task abort) and exits (ADR-0018)
+    async shutdownService() {
+      if (!confirm('Stop the llaia serve process now? This will terminate all channels and exit.')) return;
+      this.shuttingDown = true;
+      this.shutdownMsg = 'Stopping…';
+      try {
+        const r = await this.apiFetch('/api/shutdown', { method: 'POST' });
+        if (!this.authed) return;
+        if (r.ok) {
+          this.shutdownMsg = 'Service stopped. You may close this page.';
+        } else {
+          this.shutdownMsg = 'Shutdown failed: HTTP ' + r.status;
+          this.shuttingDown = false;
+        }
+      } catch (e) {
+        this.shutdownMsg = 'Request failed: ' + e.message;
+        this.shuttingDown = false;
+      }
     },
     formatBytes(n) { if (n < 1024) return n + ' B'; if (n < 1048576) return (n/1024).toFixed(1)+' KB'; return (n/1048576).toFixed(1)+' MB'; },
   };

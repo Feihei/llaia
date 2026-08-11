@@ -12,6 +12,10 @@ pub struct MemoryWrite {
     pub user_path: PathBuf,
     pub is_main: bool,
     pub lock: Arc<Mutex<()>>,
+    /// `[runtime].timezone` 启动快照：决定条目日期用哪个时区。
+    /// Docker 镜像默认 UTC，不带这个值时北京用户的记忆会整体早一天落盘。
+    /// 构造期快照即可——改时区属于低频操作，重启生效可接受。
+    timezone: Option<String>,
 }
 
 impl MemoryWrite {
@@ -21,7 +25,13 @@ impl MemoryWrite {
             user_path,
             is_main,
             lock: Arc::new(Mutex::new(())),
+            timezone: None,
         }
+    }
+
+    pub fn with_timezone(mut self, tz: Option<String>) -> Self {
+        self.timezone = tz;
+        self
     }
 }
 
@@ -58,7 +68,7 @@ impl Tool for MemoryWrite {
         }
 
         let _g = self.lock.lock().await;
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today = crate::time::now(&self.timezone).ymd();
         let line = format!("- [{}] {}\n", today, entry);
 
         let mut content = tokio::fs::read_to_string(&self.memory_path)
@@ -89,6 +99,22 @@ mod tests {
 
         let content = tokio::fs::read_to_string(&mem_path).await.unwrap();
         assert!(content.contains("user likes rust"));
+    }
+
+    #[tokio::test]
+    async fn test_entry_date_uses_configured_timezone() {
+        let dir = tempdir().unwrap();
+        let mem_path = dir.path().join("MEMORY.md");
+        let user_path = dir.path().join("USER.md");
+        let tool = MemoryWrite::new(mem_path.clone(), user_path, true)
+            .with_timezone(Some("Asia/Shanghai".into()));
+        tool.execute(&serde_json::json!({"entry": "tz check"}), "cli")
+            .await
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(&mem_path).await.unwrap();
+        let expected = crate::time::now(&Some("Asia/Shanghai".into())).ymd();
+        assert!(content.contains(&format!("- [{}] tz check", expected)));
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ pub mod path_guard;
 pub mod pid;
 pub mod provider;
 pub mod skill;
+pub mod time;
 pub mod tool_call;
 pub mod tools;
 pub mod web;

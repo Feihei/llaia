@@ -77,6 +77,13 @@ pub struct Agent {
     /// 启动时配置快照（供 /provider 等运行时命令枚举/构建 provider；
     /// 不随 config.toml 热加载更新——运行时切换本身就是临时态）
     pub config: Arc<Config>,
+    /// 实时配置（ADR-0017）：读取那些"改了就该立刻生效、无需重启"的字段，
+    /// 目前是 `[runtime].timezone`。
+    ///
+    /// 默认指向自己独占的一份启动快照（CLI 模式无热加载，与现状一致）；
+    /// serve 模式下 `attach_live_config` 把它换成 WebUI 共享的那个 Arc，
+    /// 于是 `PUT /api/config` 写入后下一轮 `to_messages` 立即读到新值。
+    live_config: Arc<RwLock<Config>>,
 }
 
 /// 单次工具调用记录（用于 delegate 提取产出文件）
@@ -121,7 +128,19 @@ impl Agent {
             audit,
             turn_tool_calls: Vec::new(),
             config: Arc::new(config.clone()),
+            live_config: Arc::new(RwLock::new(config.clone())),
         }
+    }
+
+    /// 接入共享的实时配置（serve 模式下由 `serve_cmd` 注入 WebUI 持有的同一个 Arc）。
+    /// 不调用时 agent 用自己的启动快照，行为与热加载前完全一致。
+    pub fn attach_live_config(&mut self, live: Arc<RwLock<Config>>) {
+        self.live_config = live;
+    }
+
+    /// 当前生效的时区设置（`[runtime].timezone`），热更新即时可见。
+    pub async fn timezone(&self) -> Option<String> {
+        self.live_config.read().await.runtime.timezone.clone()
     }
 
     /// 拿当前 provider 的 snapshot（Arc 克隆）。
@@ -271,6 +290,9 @@ impl Agent {
         }
 
         let max_iters = self.max_iterations;
+        // 时区快照：整轮用同一个值。turn 中途 WebUI 改配置不会让同一轮里的
+        // 状态栏前后矛盾，下一轮自然读到新值。
+        let tz = self.timezone().await;
 
         // 重复工具调用检测：连续相同 (name, args) 调用计数
         let mut last_tool_name: Option<String> = None;
@@ -290,7 +312,7 @@ impl Agent {
                     "已达工具调用次数上限，请停止调用工具，基于已获取的信息总结任务并直接回复用户。",
                 ));
             }
-            let messages = self.context.to_messages();
+            let messages = self.context.to_messages(&tz);
             let tools = if force_summary {
                 None
             } else {
