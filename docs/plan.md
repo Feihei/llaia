@@ -293,57 +293,145 @@
 
 ---
 
-## P4 — 未来计划（待排期）
+## P4 — 基础能力增强
 
 **状态**：⏳ 计划中
 
 > 来源：[docs/issues/](issues/) 收集的反馈与扩展评估，已实现的见各阶段完成清单。
 > 已取消：cron.toml 移入 agent workspace（10#）—— CronTool 已让 agent 动态管理任务，无需文件层编辑。
+> 2026-08-10 重整：新增「时间感知」「做梦」两条，全部条目按主题重新分组并标注必要性/难度，末尾汇总为 P4-a ~ P4-f 阶段计划。
 
-### Provider / Channel 继续扩展
+**评估口径**：
 
-- [ ] Google Gemini REST provider（generateContent + functionDeclarations，★★☆）
-- [ ] OpenAI Responses API（缓做，聚合网关可用 OpenAI 兼容协议绕过）
-- [ ] 邮箱 channel：IMAP 轮询 + SMTP（还 P2-e 欠账，★★☆）
-- [ ] 飞书 / Lark：事件订阅长连接模式（★★☆）
-- [ ] Slack Socket Mode / Discord / LINE（★★★）
-- [ ] 明确不做：WhatsApp 自实现、微信个人号非官方协议（封号风险，与 ClawBot 官方路线是两回事）
+- 必要性 **高** = 不做会持续踩坑或已影响正确性；**中** = 明显改善体验，可择机；**低** = 锦上添花或已有替代路径
+- 难度 ★☆☆ = 半天内、单点改动；★★☆ = 一到数天、跨多个模块；★★★ = 结构性改造，动手前先出 ADR
 
-### 交互增强
+---
 
-- [ ] `/move` 或 `/cd` 斜杠命令：允许把 CWD 从默认 workspace 移动到用户指定位置，提醒风险并要求确认（扩展 P3-a 的 workspace 边界模型）
+### P4 / 时间感知与运行时事实注入
 
-### 进程生命周期与重启机制
+- [ ] **时区从 USER.md 剥离，改由 config 注入 + 热更新**（必要性：**高** / 难度：★☆☆）
+  - 现状问题：
+    1. **agent 实际上没有当前时间感知**。system prompt 只在进程启动时拼一次（`channels/cli.rs:441`），USER.md 里的「时区：Asia/Shanghai」（`memory/markdown.rs:46`）只是一行静态文本——模型知道时区名，但不知道「现在几点、今天星期几」，跨天长驻进程里这行还会越来越误导。
+    2. **散落的本地时间调用**。`chrono::Local::now()` 在 cron/runner、audit、memory_write、MEMORY 备份、`llaia remember` 等 6 处各写各的，全依赖宿主机 TZ；Docker 镜像默认 UTC，导致记忆条目日期、审计时间戳、cron 触发时刻整体偏 8 小时，且与 USER.md 里声明的时区自相矛盾。
+    3. **热更新缺口（关键）**：`Agent` 持有的是 `config: Arc<Config>` **启动快照**（`agent/mod.rs:79,123`），而 `hot_reload_providers`（`web/mod.rs:391`）只换 provider、**不更新** 这个快照。即便加了 `[runtime].timezone`，WebUI 改了也不会被 agent 读到——必须先把 live config 通道打通。
+  - **细化方案（详见 [ADR-0017](docs/adr/0017-timezone-injection.md)）**：
+    - **① Config schema**：`RuntimeConfig` 加 `pub timezone: Option<String>`（IANA 名，`default_timezone()` → `None` = 跟随系统，零配置无回归）；`Config::load` 加校验——非法 IANA 名（参考 `compact_model` 校验写法，`config.rs:440`）warn + 置 `None`。`Cargo.toml` 加 `chrono-tz`（与现有 `chrono 0.4` 兼容，用 `0.10`）。
+    - **② 统一时间源 `src/time.rs`**（新建）：
+      - `pub struct Now { naive: NaiveDateTime, zone_label: String }`；`pub fn now(tz: &Option<String>) -> Now`（set → `chrono_tz::Tz` 解析 + `Utc::now().with_timezone`；unset → `Local::now()`）；`pub fn unix_now() -> i64`（`Utc::now().timestamp()`，**时区无关**，供做梦空闲门算 elapsed）；`pub fn resolve_tz(tz: &Option<String>) -> Option<Tz>`（`OnceLock<Mutex<HashMap>>` 缓存解析结果，非法/未设 → `None`）。
+      - `pub fn status_bar(tz: &Option<String>) -> String`：产出 §2.6.3「Agent 状态栏」文本 = 当前本地时间(含星期) + 时区标签 + **§2.6.5 操作提示**（如「距上次对话已过 N 分钟，空闲中 / 当前非工作时间，可执行整理类后台任务」）。
+    - **③ live config 通道（热更新核心）**：`Agent` 新增 `live_config: Arc<RwLock<Config>>`，`new()` 接收它；`build_agent` 在 WebUI 下传 `state.config.clone()`、CLI 下设 `Arc::new(RwLock::new(config.clone()))`（永不更新，与 CLI 无热加载现状一致）。在 `hot_reload_providers`（`web/mod.rs:391`）末尾补：`*state.registry.main.lock().await.live_config.write().await = new_config.clone();` —— 下次 `to_messages` 即用新时区，进行中的 turn 不受影响（snapshot 语义）。保留原 `config: Arc<Config>` 快照给 `/provider` 等 provider 引用读取（slash.rs 不需要改）。
+    - **④ 状态栏注入点**：`Context::to_messages(&self) -> Vec<ChatMessage>`（`agent/context.rs:24`）改为 `to_messages(&self, tz: &Option<String>)`，在末尾 `msgs.push(ChatMessage::user(crate::time::status_bar(tz)))`。调用方 `agent/mod.rs:293` 改为传 `&self.live_config.read().await.runtime.timezone`；`context.rs:133/143` 两个测试改为 `to_messages(&None)`。**不**写入 `context.history`——状态栏每轮 `to_messages` 现算、仅挂尾，整段 system（SOUL/USER/MEMORY）作为稳定前缀被缓存，符合 §2.6.3。QQ/Telegram/Web 全部经 `handle_message_streaming → to_messages`，自动覆盖。
+    - **⑤ 收敛零散 `Local::now()`**：
+      - **改走 tz**：`tools/memory.rs:61`（/remember 落盘日期）、`memory/markdown.rs:75`（MEMORY 备份文件名）、`commands/mod.rs:682`（remember CLI 日期）→ `time::now(tz).naive.format("%Y-%m-%d")`。其中 memory 工具需拿到 tz：v1 先传 `&None`（仍系统本地，行为与今一致，无回归），列入后续「把 tz 透传进工具」的小改进；**模型感知的时间（状态栏）已是正确的配置时区**，这正是本项的核心目标。
+      - **维持 UTC（运维日志，不动）**：`audit.rs:41`、`memory/sqlite.rs:106/128/156`、`cron/runner.rs:54` 本就用 `Utc::now()` 或仅打日志，保持 UTC，与用户可见时间解耦。
+    - **⑥ 配套清理**：`USER_TEMPLATE`（`memory/markdown.rs:46`）去掉「时区：Asia/Shanghai」行；旧 USER.md 不强制迁移（纯静态文本无害，下次编辑自然淘汰）；`llaia doctor` 加时区解析检查；WebUI 配置面板暴露 `[runtime].timezone`。
+  - **验证要点**：① 改 timezone 后不重启，`/dream` 触发或下一轮对话的状态栏即时反映新时区；② 多轮对话下 system 前缀 token 稳定（cache 命中）；③ `resolve_tz("Asia/Shanghai")`→`Some`、`resolve_tz("Mars/Phobos")`→`None`；④ Docker(UTC) 下记忆落盘日期与配置时区一致而非宿主机 UTC。
+
+### P4 / 记忆与上下文
+
+- [ ] **「做梦」：闲时自动整理记忆**（必要性：**中高** / 难度：★★☆）
+  - 动机：MEMORY.md 目前只在超限时被动压缩（`memory/markdown.rs:65 compress_memory`），长期使用必然堆积重复、过期、互相矛盾的条目；而会话里产生的有效信息，只有用户手动 `/remember` 才能沉淀下来。
+  - 形态：cron 触发的 agent 模式任务，在独立 cron session 上跑一轮，通过 `memory_write` 整理记忆（主会话历史不污染）。
+  - 可直接复用的现成件：cron 调度器 + `run_agent_mode`（P3-c，独立 session）、`compress_memory`、sqlite 会话记录、audit 日志、pusher。
+  - **设计已决议（见 [ADR-0016](docs/adr/0016-dream.md)）**，要点：
+    - **架构**：做梦 = 一个 Agent 模式的 cron 任务，复用 `run_agent_mode`（`src/cron/runner.rs`），**不引入新 agent 架构**（否决「影子 agent / 独立闭环」——用户指出它会凭空造第三类东西，与现有架构不对齐）。
+    - **触发**：cron 定时调度 + 运行时空闲门控（距最后一条用户消息 N 分钟无交互才跑），不做独立 idle 检测器（参考 openclaw）。空闲门依赖 P4-a 时区，但为「配套」非「阻塞」。
+    - **模型**：主模型 + fallback，v1 不起独立 `compact_provider` 实例（idle 门已保证不抢活跃会话）。
+    - **写入边界**：MEMORY.md 放开全编辑（增 / 改 / 删，去重压缩价值成立之必须）；USER.md v1 不碰（最多在 diff 摘要里「提议」）。
+    - **安全兜底**：事前备份 MEMORY.md（带时间戳，留最近 N 份）→ 事后算 diff 推送通知用户（绝不静默）→ `/dream` 手动触发 → `/dream-rollback` 回滚 → **默认开**（idle 门 + diff + 回滚三道防线使风险可控）。
+- [ ] 更聪明的上下文压缩：防止重要信息丢失、提高缓存命中、减少对 LLM 压缩的依赖（参考《深入理解 AI Agent》李博杰 v1.2 §2.7.2）（必要性：**高** / 难度：★★★）
+- [ ] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界（必要性：**中** / 难度：★☆☆，纯文档）
+
+### P4 / 模型与工具调用
+
+- [ ] 工具调用格式优化：解决 think 内容 / `<tool_call>` 标签泄露到用户回复的问题（agen 系模型偶发），研究 jinja 模板调用格式，参考 AstrBot `core/agent/tool.py` 与 zeroclaw `zeroclaw-tool-call-parser`（必要性：**高**，属可见的正确性缺陷 / 难度：★★☆）
+- [ ] image 描述模型单独设置：主模型无多模态时，用独立模型描述图片，避免能力缺失（必要性：**中** / 难度：★★☆）
+
+### P4 / 进程生命周期与重启机制
 
 > 背景（2026-08-10 评估）：WebUI 重启按钮走 spawn 替代进程路线（zeroclaw 的 respawn 层），子进程故意脱离终端——终端启动的用户重启后失去 Ctrl+C 控制，只能任务管理器杀。调研 zeroclaw（`.ref/zeroclaw`）三层机制后结论：全套 daemon/supervisor 太重不借鉴，但两项便宜改进与一项正解记入本节。当前阶段决定保持轻量不动，痛点可用现有机制缓解（provider 改动已热加载，多数场景无需重启）。
 
-- [ ] `/api/shutdown` + WebUI 停止按钮：优雅退出 serve，解决脱管进程只能任务管理器杀的痛点
-- [ ] spawn-after-teardown 顺序（zeroclaw `restart.rs` 精华）：启动时 record_launch 记录原始 argv，先优雅 teardown（端口已释放）再拉子进程，替换 ping/sleep 延迟土法并保留启动参数
-- [ ] 同 PID 原地 reload（正解，zeroclaw 主力路线）：WebUI 触发进程内信号，原地拆除/重建全部 channel 子系统，PID 不变，终端归属与 Ctrl+C 保留；需要给 QQ WS/Web/cron/MCP 各 channel 做 cancellation token 化改造，工作量较大
+- [ ] `/api/shutdown` + WebUI 停止按钮：优雅退出 serve，解决脱管进程只能任务管理器杀的痛点（必要性：**高** / 难度：★☆☆）
+  - **现状**：WebUI 已有 `/api/restart`（`web/mod.rs:466`，spawn 替代进程后 `exit(0)`），但**没有** `/api/shutdown`；`serve_cmd`（`commands/mod.rs:463`）只靠 `tokio::select! { ctrl_c / 所有 channel task 结束 }` 退出，且退出路径**无任何清理**（cron 调度器不显式 shutdown、spawn 出的 channel task 直接随进程退出丢弃）。终端启动的用户点 restart 后子进程脱离终端、失去 Ctrl+C，只能任务管理器杀——这正是本项的痛点来源。
+  - **细化方案（详见 [ADR-0018](docs/adr/0018-shutdown.md)）**：
+    - **① 共享 shutdown 信号**：`WebChannel` 新增 `pub shutdown_signal: Arc<tokio::sync::Notify>`（`web.rs:301` 结构体；在 `new()` 里 `Arc::new(Notify::new())`）。`build_router`（`web.rs:361`）把它 clone 进 `AppState`（新字段 `shutdown_signal`）。`serve_cmd` 在 spawn 前 `let shutdown_signal = web.shutdown_signal.clone();` 持有同一 Arc。
+    - **② 新 handler `shutdown_service`（`web/mod.rs`，仿 `restart_service`）**：`authorize` 通过后 `state.shutdown_signal.notify_one()`。与 restart 不同，**容器内允许**（stop 正是用户想要的，停止 PID1=停容器，合理）；`build_system_routes()`（`web/mod.rs:1138` 附近）加 `.route("/api/shutdown", axum::routing::post(shutdown_service))`。
+    - **③ `serve_cmd` 收尾（`commands/mod.rs:463`）**：`tokio::select!` 增加分支 `_ = shutdown_signal.notified() => { … }`，与 ctrl_c 共用后续清理：
+      ```rust
+      // 退出路径共用：先停 cron，再 abort 各 channel task 并 await
+      if let Some(cron) = &_cron { let _ = cron.shutdown().await; }   // cron/mod.rs:299
+      for t in &tasks { t.abort(); }
+      for t in tasks { let _ = t.await; }
+      println!("\n{}", crate::banner::GOODBYE);
+      ```
+      `tasks` 不再被 `for t in tasks { t.await }` 消费（改为 `for t in &mut tasks { … }` 借用），保证 shutdown 分支能 abort 它们。
+    - **④ 响应时序**：handler 先 `return Json({shutting_down:true})`，再用 `tokio::spawn` 延迟 ~100ms 后 `notify_one()`，确保浏览器收到响应、WebUI 切到「已停止」态，再触发进程收尾。
+    - **⑤ WebUI 前端**：`index.html:377` 的 `Restart Service` 按钮旁加 `Stop Service` 按钮，`app.js:499 restartService()` 旁加 `shutdownService()`（POST `/api/shutdown`，成功后显示「Service stopped」而非轮询重启）。
+  - **验证要点**：① 点停止按钮 → 进程在 ~1s 内干净退出，终端打印 GOODBYE，无残留子进程（含 MCP child，transport 有 `kill_on_drop`）；② cron 任务不再触发（shutdown 已调）；③ Ctrl+C 路径行为不变；④ 容器内点停止能停掉容器（restart 仍拒）。
+- [ ] spawn-after-teardown 顺序（zeroclaw `restart.rs` 精华）：启动时 record_launch 记录原始 argv，先优雅 teardown（端口已释放）再拉子进程，替换 ping/sleep 延迟土法并保留启动参数（必要性：**中** / 难度：★★☆）
+- [ ] 同 PID 原地 reload（正解，zeroclaw 主力路线）：WebUI 触发进程内信号，原地拆除/重建全部 channel 子系统，PID 不变，终端归属与 Ctrl+C 保留；需要给 QQ WS/Web/cron/MCP 各 channel 做 cancellation token 化改造（必要性：**中** / 难度：★★★）
 
-### 权限管理系统
+### P4 / 交互增强
 
-- [ ] 三档权限 profile：`read-only` / `default` / `yolo`，对齐 opencode 的 plan/build 双模式思路
+- [ ] `/move` 或 `/cd` 斜杠命令：允许把 CWD 从默认 workspace 移动到用户指定位置，提醒风险并要求确认（扩展 P3-a 的 workspace 边界模型）（必要性：**中** / 难度：★☆☆）
+
+### P4 / 权限管理系统
+
+- [ ] 三档权限 profile：`read-only` / `default` / `yolo`，对齐 opencode 的 plan/build 双模式思路（必要性：**中** / 难度：★★☆）
   - 双维度判定：① 操作是否风险 ② 是否在 workspace 内
   - `read-only`：所有写操作都审批
   - `default`：仅 workspace 外的风险操作审批
   - `yolo`：全放行
   - 审批流程：发消息提示操作内容 + 目录，加 `/ok` `/deny` 斜杠命令，所有频道一致
   - 在 P3-a 的 `confirm_mode`（none/always/session）之上演进，不破坏现有边界
+  - 注：与 `/move` 是同一套边界模型的两端（一个放宽范围、一个收紧授权），宜同期设计
 
-### 模型与工具调用
+### P4 / Provider / Channel 继续扩展
 
-- [ ] image 描述模型单独设置：主模型无多模态时，用独立模型描述图片，避免能力缺失
-- [ ] 工具调用格式优化：解决 think 内容 / `<tool_call>` 标签泄露到用户回复的问题（agen 系模型偶发），研究 jinja 模板调用格式，参考 AstrBot `core/agent/tool.py` 与 zeroclaw `zeroclaw-tool-call-parser`
+- [ ] Google Gemini REST provider（generateContent + functionDeclarations）（必要性：**中** / 难度：★★☆）
+- [ ] 邮箱 channel：IMAP 轮询 + SMTP（还 P2-e 欠账）（必要性：**中** / 难度：★★☆）
+- [ ] 飞书 / Lark：事件订阅长连接模式（必要性：**中低** / 难度：★★☆）
+- [ ] OpenAI Responses API（缓做，聚合网关可用 OpenAI 兼容协议绕过）（必要性：**低** / 难度：★★☆）
+- [ ] Slack Socket Mode / Discord / LINE（必要性：**低**，单用户助理已有 5 个 channel / 难度：★★★）
+- [ ] 明确不做：WhatsApp 自实现、微信个人号非官方协议（封号风险，与 ClawBot 官方路线是两回事）
 
-### 上下文管理
-
-- [ ] 更聪明的上下文压缩：防止重要信息丢失、提高缓存命中、减少对 LLM 压缩的依赖（参考《深入理解 AI Agent》李博杰 v1.2 §2.7.2）
-- [ ] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界
-
-### 生态复用
+### P4 / 生态复用
 
 - [x] 评估借用 zeroclaw 代码：结论——**值得借鉴、不值得依赖**。许可（Apache-2.0/MIT）允许复制，但引 crate 会拖进 zeroclaw-api/config 依赖树且实现过于全功能（单用户场景可砍 70%）；正确姿势是单文件 vendor + 裁剪适配（dingtalk.rs 仅 554 行可直接移植）。详见 [specs/2026-08-07-provider-channel-expansion.md](specs/2026-08-07-provider-channel-expansion.md)
+
+---
+
+### P4 阶段计划
+
+**执行顺序**：P4-a → P4-b → P4-c → P4-d → P4-e →（P4-f 按需触发）
+
+| 阶段 | 主题 | 包含条目 | 难度 | 排序理由 |
+|---|---|---|---|---|
+| **P4-a** | 地基与快赢 | 时区 config 化 + 热更新（[ADR-0017](docs/adr/0017-timezone-injection.md) 已决议）；`/api/shutdown` + 停止按钮（[ADR-0018](docs/adr/0018-shutdown.md) 已决议）；上下文注入策略文档化 | ★☆☆ | 全是单点改动，且时区是 P4-c「做梦」的前置依赖——idle 判定和「最近 N 天」语义都要先有可信时间 |
+| **P4-b** | 输出正确性 | 工具调用格式优化（think / `<tool_call>` 泄露）；image 描述模型单独设置 | ★★☆ | 唯一影响「用户直接看到的东西是否正确」的一组，优先级高于任何新功能 |
+| **P4-c** | 记忆系统进化 | 「做梦」（[ADR-0016](docs/adr/0016-dream.md) 已决议）；更聪明的上下文压缩 | ★★☆~★★★ | 两者共用同一条「抽取 → 合并 → 压缩」管线，分开做会返工；本阶段是 P4 的核心价值点 |
+| **P4-d** | 边界与授权 | 三档权限 profile + `/ok` `/deny`；`/move` `/cd` | ★★☆ | 同一套 workspace 边界模型的一放一收，同期设计才自洽；依赖 P4-a 已落地的稳定运行时 |
+| **P4-e** | 生态扩展 | Gemini provider → 邮箱 channel → 飞书 | ★★☆ | 纯增量、互不阻塞，可穿插进任何空档；按实际使用需求拉取，不必一次做完 |
+| **P4-f** | 待触发 | 同 PID 原地 reload；spawn-after-teardown；Responses API；Slack / Discord / LINE | ★★☆~★★★ | 当前无强痛点（provider 已热加载，重启需求低频）。等 P4-a 的 `/api/shutdown` 上线后复评：若仍频繁被重启问题咬到，再启动 cancellation token 化改造 |
+
+**阶段间依赖**：
+
+- P4-c「做梦」← P4-a 时区（idle 窗口、日期语义）
+- P4-c「做梦」← 已有 cron 调度器（P3-c）、`compress_memory`、`compact_provider`，无需新造轮子
+- P4-d 权限 profile ← P3-a 的 `confirm_mode` 与 audit 日志，在其上演进而非重写
+- P4-f 同 PID reload ← 各 channel 的 cancellation token 化，是全 P4 最大的一块结构性改造，不进主线
+
+---
+
+## P5 - 未来计划
+
+**状态**：⏳ 计划中
+
+- 环境探测：本地shell、python、node、rust、go等环境探测，根据情况对agent进行提示，优化行为
+- skill增强，在现有skill工具基础上针对llaia进行优化，npx skills工具的rust实现，claude的创建skill、hermes的curator等管理skill的元skill的llaia化
+- provider接入优化，参考zeroclaw、goose等项目的provider接入，openai兼容格式针对ollama、llamacpp和其它供应商的优化探讨
+- 系统提示词优化，言简意赅，占用更少token，参考pi等项目
 
 ---
 
