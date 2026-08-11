@@ -10,7 +10,7 @@ There are loads of AI agents out there and they keep getting heavier — most ar
 
 - Local-first: your data stays on your own machine, no cloud required
 - Personal use, single user
-- Only one main agent helps you, delegating to a few internal subagents when needed
+- One main agent with a few internal subagents for delegation
 
 ### ❌ NOT for
 
@@ -19,82 +19,134 @@ There are loads of AI agents out there and they keep getting heavier — most ar
 - Multi-agent orchestration swarms
 - Public-facing bots (customer-service, group-chat bot, etc.)
 
----
-
 ### Risk Notes
 
-LLAIA is an AI assistant with file and terminal access — LLMs can read/write files and run shell commands on your machine. That power comes with risk. LLMs do **NOT** always generate outcomes as you espect. **It's you who owns the actions.** Double-check destructive operations (deletes, overwrites, `git` pushes, etc.) before approving.
+LLAIA is an AI assistant with file and terminal access — LLMs can read/write files and run shell commands on your machine. That power comes with risk. LLMs do **NOT** always generate outcomes as you expect. **It's you who owns the actions.** Double-check destructive operations (deletes, overwrites, `git` pushes, etc.) before approving.
 
-LLAIA operates in your workspace directory only by default, **ALWAYS** backup your important data before letting it operate on, or you can use **git** to retrieve histroy.
-
-### Prerequisites
-
-- **A provider / LLM endpoint.** LLAIA does not bundle a model — you must point it at one:
-  - **Local (recommended for privacy):** [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or [llama.cpp](https://github.com/ggerganov/llama.cpp) — each can expose an OpenAI-compatible server on your machine.
-  - **Cloud API:** [OpenRouter](https://openrouter.ai) or any other OpenAI-compatible endpoint, plus **Anthropic** natively (Messages API). Needs an API key; conversation text is sent off-machine.
-- **Bash toolchain — strongly recommended.** LLAIA's `terminal` tool runs shell commands, and it inherits the shell environment it was launched from. For consistent behavior we strongly recommend running LLAIA under **bash**. On **Windows, launch it from Git Bash** (not `cmd.exe` or PowerShell) — this avoids shell-incompatibility issues when the agent runs commands. (Ollama/LM Studio GUIs work fine regardless; this only affects the agent's own terminal tool.)
-- **Build toolchain (only if building from source):** a Rust toolchain (`cargo`). Otherwise just download the prebuilt binary from the Release page.
+LLAIA operates in your workspace directory only by default. **ALWAYS** back up your important data before letting it operate on them, or use **git** to retrieve history.
 
 ---
 
-## Quick Start
+## Installation
 
-Clone the repo and step in:
+### Binary
 
-```bash
-git clone <repo-url> && cd llaia
-cargo run -- [command]
-```
-
-Or grab the binary for your architecture from the [Release page](https://github.com/Feihei/llaia/releases), drop it in your system PATH, and run:
-
-```bash
-llaia [command]
-```
-
-For the list of commands:
+Grab the prebuilt binary for your architecture from the [Release page](https://github.com/Feihei/llaia/releases), drop it in your system `PATH`, and run:
 
 ```bash
 llaia help
 ```
 
-### Step 1: Initialize
+### Docker
 
-On first run, execute:
+The official image is published to **ghcr.io/feihei/llaia:latest** (~280 MB, Debian bookworm-slim).
+
+It bundles a practical toolchain for the agent's terminal tool: `bash`, `curl`, `wget`, `git`, `jq`, `unzip`, `python3` (with `pip`), and [`uv`](https://github.com/astral-sh/uv) for fast Python package management.
+
+```bash
+docker run -d --name llaia \
+  -p 51217:51217 \
+  -v llaia-data:/data \
+  ghcr.io/feihei/llaia:latest
+```
+
+On first launch the container auto-generates a minimal config under `/data` that enables the Web UI. Grab the access token from the container log, then open the browser and configure:
+
+```bash
+docker logs llaia | grep -i token
+# → open http://127.0.0.1:51217
+```
+
+**docker compose:**
+
+```yaml
+# compose.yml
+services:
+  llaia:
+    image: ghcr.io/feihei/llaia:latest
+    container_name: llaia
+    restart: unless-stopped
+    ports:
+      - "51217:51217"
+    volumes:
+      - llaia-data:/data
+
+volumes:
+  llaia-data:
+```
+
+**Browser automation sidecar** (page rendering, screenshots, form filling — optional):
+
+```yaml
+# compose.browser.yml (extend compose.yml)
+services:
+  browser:
+    image: browserless/chrome:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - CONNECTION_TIMEOUT=600000
+```
+
+The agent can talk CDP to `http://browser:3000` from within the compose network. This is a starting point — wire it up yourself with Playwright or raw CDP.
+
+### Build from source
+
+Requires a **Rust toolchain** ([rustup](https://rustup.rs)). On Windows, run from **Git Bash**.
+
+```bash
+git clone https://github.com/Feihei/llaia.git && cd llaia
+cargo build --release
+# binary at ./target/release/llaia
+```
+
+---
+
+## Getting Started
+
+### 1. Initialize
 
 ```bash
 llaia init
 ```
 
-It creates LLAIA's data structure under your home directory (default `~/.llaia/`):
+This creates the data directory under `~/.llaia/`:
 
 ```
 ~/.llaia/
- ├─ config.toml        # main config file (commented template; most sections commented out)
+ ├─ .env               # secrets (API keys etc.); fill in real values
+ ├─ config.toml        # main config (commented template)
+ ├─ cron.toml          # scheduled tasks (all commented by default)
+ ├─ mcp.toml           # MCP server config (all commented by default)
  ├─ logs/              # runtime logs
- └─ workspace/         # main agent workspace (also where the agent reads/writes files by default)
+ ├─ skills/            # user & project skills
+ └─ workspace/         # agent reads/writes files here by default
      ├─ SOUL.md        # agent persona
-     ├─ USER.md        # your basic info and preferences
-     ├─ MEMORY.md      # long-term memory (the agent writes here)
+     ├─ USER.md        # your info and preferences
+     ├─ MEMORY.md      # long-term memory
      ├─ uploads/       # uploaded-file staging
      ├─ subagent/      # sub-agent workspaces
-     └─ sessions.db    # conversation history (auto-created on first launch)
+     └─ sessions.db    # conversation history (SQLite)
 ```
 
-Notes:
-- **Idempotent**: existing files are not overwritten. To force regeneration, add `--force`:
-  ```bash
-  llaia init --force
-  ```
-- The `~` in paths expands to your home directory automatically. You can also point elsewhere with `llaia --config-dir <path> <command>`.
+- **Idempotent**: existing files are not overwritten. Use `--force` to regenerate.
+- Use `--config-dir <path>` to place the data directory elsewhere.
 
-### Step 2: Connect a model (pick one)
+### 2. Configure a provider
 
-LLAIA needs at least one LLM endpoint before chat works.
+LLAIA does not bundle a model — point it at one:
 
-**A. Web UI config (recommended for beginners)** — skip manual editing, go to Step 3 to start the service, then fill it in from the browser.
+| Type | Examples | Privacy |
+|---|---|---|
+| Local | [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), [llama.cpp](https://github.com/ggerganov/llama.cpp) | Data stays local |
+| Cloud | [OpenRouter](https://openrouter.ai), any OpenAI-compatible endpoint, Anthropic Messages API | Text sent off-machine |
 
-**B. Edit the config manually** — open `~/.llaia/config.toml`, uncomment the `[provider.default]` and `[agent.main]` sections and fill in your endpoint. Minimal local-Ollama example:
+**A. Web UI (recommended for beginners)**
+Start the service first (see Step 3), then fill in provider settings from the browser.
+
+**B. Edit config manually**
+Open `~/.llaia/config.toml`, uncomment `[provider.default]` and `[agent.main]`:
 
 ```toml
 [provider.default]
@@ -108,64 +160,92 @@ native_tool_calling = false
 context_size = 32768
 
 [agent.main]
-model = "default.qwen"             # references provider.<id>.<model_alias> above
+model = "default.qwen"             # references provider.<id>.<model_alias>
 ```
 
-For cloud Anthropic, use `type = "anthropic"` and add `max_tokens` on the model entry (see the commented example in the generated template). Optional: set `fallback = [...]` under `[agent.main]` to auto-degrade to backup models when the primary fails.
+For cloud Anthropic, use `type = "anthropic"` and add `max_tokens` on the model entry. Set `fallback = [...]` under `[agent.main]` to auto-degrade to backup models.
 
-### Step 3: Start using it
+### 3. Launch
 
-- **Web UI (recommended)**:
-  ```bash
-  llaia serve
-  ```
-  Then open `http://127.0.0.1:51217` in your browser. On first launch, if `webui.token` in `config.toml` is left empty, a random access token is generated and printed to the log — use it to log in, then configure the provider from the page.
+```bash
+llaia serve       # Web UI + background channels (recommended)
+llaia chat        # terminal-only interactive chat
+```
 
-- **Terminal chat**:
-  ```bash
-  llaia chat
-  ```
-  > Note: `llaia chat` runs purely in the terminal and **cannot configure a provider from the command line**. With no endpoint set it errors out and points you to `llaia serve` + Web UI.
+Web UI: open `http://127.0.0.1:51217`. If `webui.token` is left empty, a random token is printed to the log on first launch.
 
----
-
-## Common commands
+### CLI commands
 
 | Command | What it does |
 |---|---|
-| `llaia chat` | Enter terminal chat mode (default, can be omitted) |
-| `llaia serve` | Start background services: built-in Web UI (and optional messaging channels); no terminal chat |
-| `llaia init [--force]` | Initialize the data directory: scaffold + default templates |
-| `llaia config` | Print the currently effective config |
-| `llaia doctor` | Diagnose provider connectivity and file integrity (troubleshooting) |
-| `llaia remember "<a sentence>"` | Write a line of long-term memory into MEMORY.md directly |
+| `llaia chat` | Terminal chat mode |
+| `llaia serve` | Web UI + optional messaging channels |
+| `llaia init [--force]` | Scaffold data directory + default templates |
+| `llaia config` | Print the effective config |
+| `llaia doctor` | Diagnose provider connectivity and file integrity |
+| `llaia remember "<text>"` | Append a line to long-term memory |
 
-In-session slash commands (in chat or Web UI): `/new` `/exit` `/compact` `/clear` `/remember` `/config` `/provider` (list & switch models at runtime) `/help`.
+### In-session commands
 
-### Messaging channels
-
-LLAIA can reach you beyond the Web UI. All channels are **disabled by default**; enable them in `config.toml` (credentials go in `.env` via `${VAR}` references — the init template has commented examples):
-
-| Channel | Config section | Credentials |
-|---|---|---|
-| QQ (official bot platform, C2C) | `[channels.qq]` | app_id / app_secret |
-| Telegram | `[channels.telegram]` | bot token from @BotFather (long polling, no public IP needed) |
-| DingTalk | `[channels.dingtalk]` | client_id / client_secret (Stream Mode, no public IP needed) |
-| WeChat (ClawBot / ilink) | `[channels.wechat]` | first launch prints a QR-code link — scan with your phone to log in |
-
-Each channel has an `allow_*` field as a single-user safety lock (only your own messages are answered).
+`/new` `/exit` `/compact` `/clear` `/remember` `/config` `/provider` `/help`
 
 ---
 
-## The files it creates, and what you can edit
+## Configuration Guide
 
-- **`config.toml`** — the master switch. Model endpoint, log level, QQ toggle, Web UI port, tool permissions — all here. `llaia init` generates a heavily-commented template.
-- **`workspace/SOUL.md`** — what character you want the assistant to have (e.g. "concise, occasional joke").
-- **`workspace/USER.md`** — your name, timezone, preferences (language, etc.) so it knows you better.
-- **`workspace/MEMORY.md`** — the assistant's long-term memory; it writes here on its own, or you can add via `llaia remember`.
-- **`workspace/sessions.db`** — all conversation history (SQLite); old messages are kept here as the source of truth when context is compressed.
+### Channels
 
-All of these are plain Markdown / TOML — **open them in any editor and change them anytime**; the changes take effect on next launch.
+LLAIA can reach you beyond the Web UI. All channels are **disabled by default**; enable them in `config.toml`. Credentials go in `.env` via `${VAR}` references.
+
+| Channel | Config section | Credentials |
+|---|---|---|
+| QQ (official bot, C2C) | `[channels.qq]` | `app_id` / `app_secret` |
+| Telegram | `[channels.telegram]` | bot token from @BotFather (long polling, no public IP needed) |
+| DingTalk | `[channels.dingtalk]` | `client_id` / `client_secret` (Stream Mode, no public IP needed) |
+| WeChat (ClawBot / ilink) | `[channels.wechat]` | first launch prints a QR-code link — scan with your phone |
+
+Each channel has an `allow_*` field as a single-user safety lock.
+
+### Cron (scheduled tasks)
+
+Define repeating or one-shot tasks in `cron.toml`. Each task wakes the main agent or runs a tool chain directly. Results can be pushed to a specific channel.
+
+```toml
+# cron.toml
+[[tasks]]
+name = "daily reminder"
+schedule = "0 9 * * *"
+prompt = "Good morning! Summarize today's schedule."
+channel = "qq"
+```
+
+See [docs/adr/0013-cron-scheduling.md](docs/adr/0013-cron-scheduling.md) for details.
+
+### MCP (Model Context Protocol)
+
+Connect external tools and data sources via MCP servers. Define servers in `mcp.toml`:
+
+```toml
+# mcp.toml
+[servers.filesystem]
+command = "npx"
+args = ["-y", "@anthropic/mcp-filesystem", "/path/to/data"]
+enabled = true
+```
+
+Tools are named `<server>__<tool_name>` (e.g. `filesystem__read_file`). See [docs/adr/0014-mcp-client.md](docs/adr/0014-mcp-client.md).
+
+### Skills
+
+Skills extend the agent with reusable workflows, domain knowledge, and tool integrations. Drop skill folders into `~/.llaia/skills/` (user-level) or `.workbuddy/skills/` (project-level).
+
+```
+~/.llaia/skills/
+ └── my-skill/
+     └── SKILL.md       # skill definition (prompt + metadata)
+```
+
+The agent loads them at startup — no restart needed for project-level skills. See [docs/adr/0015-skill-framework.md](docs/adr/0015-skill-framework.md).
 
 ---
 
