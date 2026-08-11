@@ -379,7 +379,7 @@ impl Agent {
             let compact_provider = self.provider_for_compact().await;
             match compact_provider.as_ref() {
                 Some(p) => {
-                    if let Err(e) = self.context.compact(p.as_ref(), 6).await {
+                    if let Err(e) = self.context.compact(p.as_ref(), 6, self.context_size).await {
                         tracing::warn!(error = %e, "auto-compact failed");
                     }
                 }

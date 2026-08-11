@@ -37,7 +37,7 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
             Ok(SlashOutcome::Handled("[context cleared]".into()))
         }
         "/compact" => match agent.provider_for_compact().await {
-            Some(p) => match agent.context.compact(p.as_ref(), 6).await {
+            Some(p) => match agent.context.compact(p.as_ref(), 6, agent.context_size).await {
                 Ok(_) => Ok(SlashOutcome::Handled("[compacted]".into())),
                 Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
             },

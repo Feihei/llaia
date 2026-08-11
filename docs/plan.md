@@ -330,7 +330,7 @@
 
 ### P4 / 记忆与上下文
 
-- [ ] **「做梦」：闲时自动整理记忆**（必要性：**中高** / 难度：★★☆）
+- [x] **「做梦」：闲时自动整理记忆**（必要性：**中高** / 难度：★★☆）
   - 动机：MEMORY.md 目前只在超限时被动压缩（`memory/markdown.rs:65 compress_memory`），长期使用必然堆积重复、过期、互相矛盾的条目；而会话里产生的有效信息，只有用户手动 `/remember` 才能沉淀下来。
   - 形态：cron 触发的 agent 模式任务，在独立 cron session 上跑一轮，通过 `memory_write` 整理记忆（主会话历史不污染）。
   - 可直接复用的现成件：cron 调度器 + `run_agent_mode`（P3-c，独立 session）、`compress_memory`、sqlite 会话记录、audit 日志、pusher。
@@ -342,7 +342,13 @@
     - **模型**：主模型 + fallback，v1 不起独立 `compact_provider` 实例（idle 门已保证不抢活跃会话）。
     - **写入边界**：MEMORY.md 放开全编辑（增 / 改 / 删，去重压缩价值成立之必须，由扩展后 `memory_write` 承载）；USER.md v1 不碰（最多在 diff 摘要里「提议」）。
     - **安全兜底**：保留手写时间戳 `.bak`（**不引 git**，本地单用户够用）→ 事后算 diff 推送通知用户（绝不静默）→ `/dream` 手动触发 → `/dream-rollback` 回滚 → **默认开**（idle 门 + diff + 回滚三道防线使风险可控）。
-- [ ] 更聪明的上下文压缩：防止重要信息丢失、提高缓存命中、减少对 LLM 压缩的依赖（参考《深入理解 AI Agent》李博杰 v1.2 §2.7.2）（必要性：**高** / 难度：★★★）
+- [x] 更聪明的上下文压缩：防止重要信息丢失、提高缓存命中、减少对 LLM 压缩的依赖（参考《深入理解 AI Agent》李博杰 v1.2 §2.7.2）（必要性：**高** / 难度：★★★）
+  - **设计已决议（见 [ADR-0019](docs/adr/0019-smart-compaction.md)）**，要点：
+    - **廉价抽取式先行（cheap-first，不调 LLM）**：`compact` 每轮先跑 `cheap_normalize`——丢弃空消息、多模态图片降级为 `[图片]`、工具消息截断到 500 字符、连续重复用户消息去重。归一化后若仍在预算内（`estimate_tokens() <= token_budget`）直接返回，跳过 LLM 摘要：既省一次调用，又保留 `summary` 前缀稳定（KV cache 友好）。
+    - **重要性锚点（落地 ADR-0004「首条用户消息留」）**：首条用户消息若落入 to_compress 区，提出来前置到 to_keep 且不进摘要 dump——永不被摘要掉（原实现会把它一起摘要丢）。
+    - **工具消息裁剪**：ADR-0004「工具调用结果可丢」——工具消息在上下文里只留截断短注（完整内容已在 sqlite 留底），且进摘要 dump 时只给一行 `[tool] (结果已归档) <前80字>`，不让大段工具输出消耗 LLM 输入。
+    - 签名 `compact(provider, keep_recent, token_budget) -> Result<bool>`（bool=是否真调 LLM）；调用方补 `token_budget = context_size`（主循环 + `/compact`）。不新增 config key，作为默认升级。
+- [x] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界（必要性：**中** / 难度：★☆☆，纯文档）
 - [x] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界（必要性：**中** / 难度：★☆☆，纯文档）
 
 ### P4 / 模型与工具调用
