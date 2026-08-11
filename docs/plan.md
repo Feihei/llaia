@@ -336,10 +336,12 @@
   - 可直接复用的现成件：cron 调度器 + `run_agent_mode`（P3-c，独立 session）、`compress_memory`、sqlite 会话记录、audit 日志、pusher。
   - **设计已决议（见 [ADR-0016](docs/adr/0016-dream.md)）**，要点：
     - **架构**：做梦 = 一个 Agent 模式的 cron 任务，复用 `run_agent_mode`（`src/cron/runner.rs`），**不引入新 agent 架构**（否决「影子 agent / 独立闭环」——用户指出它会凭空造第三类东西，与现有架构不对齐）。
+    - **两阶段管线（2026-08-11 增补，参考 nanobot）**：stage1 临时 dream 会话蒸馏增量历史 → 写 `dream_draft.md`（中间缓冲，不进上下文）；stage2 基于 draft 手术式全编辑 MEMORY.md（进上下文）。两阶段都跑在独立 cron 会话，复用同一套 machinery。
+    - **游标增量（2026-08-11 增补）**：sqlite 记 `last_dream_message_id`，stage1 每轮只消化 `id > 游标` 的新消息、成功后推进；首启游标置当前最大 id（不重放老历史）。增量、可续跑、崩溃安全。
     - **触发**：cron 定时调度 + 运行时空闲门控（距最后一条用户消息 N 分钟无交互才跑），不做独立 idle 检测器（参考 openclaw）。空闲门依赖 P4-a 时区，但为「配套」非「阻塞」。
     - **模型**：主模型 + fallback，v1 不起独立 `compact_provider` 实例（idle 门已保证不抢活跃会话）。
-    - **写入边界**：MEMORY.md 放开全编辑（增 / 改 / 删，去重压缩价值成立之必须）；USER.md v1 不碰（最多在 diff 摘要里「提议」）。
-    - **安全兜底**：事前备份 MEMORY.md（带时间戳，留最近 N 份）→ 事后算 diff 推送通知用户（绝不静默）→ `/dream` 手动触发 → `/dream-rollback` 回滚 → **默认开**（idle 门 + diff + 回滚三道防线使风险可控）。
+    - **写入边界**：MEMORY.md 放开全编辑（增 / 改 / 删，去重压缩价值成立之必须，由扩展后 `memory_write` 承载）；USER.md v1 不碰（最多在 diff 摘要里「提议」）。
+    - **安全兜底**：保留手写时间戳 `.bak`（**不引 git**，本地单用户够用）→ 事后算 diff 推送通知用户（绝不静默）→ `/dream` 手动触发 → `/dream-rollback` 回滚 → **默认开**（idle 门 + diff + 回滚三道防线使风险可控）。
 - [ ] 更聪明的上下文压缩：防止重要信息丢失、提高缓存命中、减少对 LLM 压缩的依赖（参考《深入理解 AI Agent》李博杰 v1.2 §2.7.2）（必要性：**高** / 难度：★★★）
 - [x] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界（必要性：**中** / 难度：★☆☆，纯文档）
 
@@ -436,6 +438,8 @@
 - 系统提示词优化，言简意赅，占用更少token，参考pi等项目
 - session.db会话历史在webUI中可查询和修改，参考astrbot
 - webUI中provider api探测可用模型，点击可添加到models中，添加按钮检查可用性，参考astrbot
+- 配置中api-key等敏感信息自动写入.env文件中，config只保留环境引用，加强安全，探讨是否使用别的手段避免明文存储敏感信息，比如存储如db二进制？
+- 给主agent配置mcp的工具，通过自然对话添加mcp
 
 ---
 

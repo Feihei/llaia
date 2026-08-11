@@ -265,6 +265,8 @@ fn parse_task(args: &Value) -> Result<CronTask> {
         enabled,
         prompt,
         steps,
+        kind: None,
+        idle_minutes: None,
     })
 }
 

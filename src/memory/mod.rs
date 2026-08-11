@@ -1,3 +1,4 @@
+pub mod dream;
 pub mod markdown;
 pub mod sqlite;
 

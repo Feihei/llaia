@@ -1,5 +1,6 @@
 use crate::agent::Agent;
 use crate::config::Config;
+use crate::cron::{CronMode, CronTask};
 use anyhow::Result;
 
 pub enum SlashOutcome {
@@ -22,7 +23,7 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /config /help"
+            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /config /dream /dream-rollback /help"
                 .into(),
         )),
         "/new" => {
@@ -118,6 +119,36 @@ tools: {:?}
                 agent.tools.names()
             );
             Ok(SlashOutcome::Handled(info))
+        }
+        "/dream" => {
+            // 手动触发一次做梦：两阶段记忆整理（跳过空闲门控）。
+            let task = CronTask {
+                id: "dream".into(),
+                schedule: "0 4 * * *".into(),
+                mode: CronMode::Agent,
+                channel: "cli".into(),
+                enabled: true,
+                prompt: None,
+                steps: None,
+                kind: Some("dream".into()),
+                idle_minutes: Some(30),
+            };
+            match crate::cron::dream::run_dream(agent, &task, true).await {
+                Ok(summary) => Ok(SlashOutcome::Handled(summary)),
+                Err(e) => Ok(SlashOutcome::Handled(format!("[dream failed: {}]", e))),
+            }
+        }
+        "/dream-rollback" => {
+            // 回滚 MEMORY.md 到最近一份 .bak 备份。
+            let memory_path = agent.workspace.join("MEMORY.md");
+            let backup_dir = agent.workspace.join("MEMORY.backups");
+            match crate::memory::dream::restore_memory(&memory_path, &backup_dir, None).await {
+                Ok(restored) => Ok(SlashOutcome::Handled(format!(
+                    "[dream rolled back to backup: {}]",
+                    restored.display()
+                ))),
+                Err(e) => Ok(SlashOutcome::Handled(format!("[dream-rollback failed: {}]", e))),
+            }
         }
         _ => Ok(SlashOutcome::Handled(format!("[unknown command: {}]", cmd))),
     }

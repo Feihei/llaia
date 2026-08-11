@@ -100,6 +100,25 @@ pub async fn run_agent_mode(
     task: &CronTask,
     pusher: &dyn ProactivePusher,
 ) -> anyhow::Result<()> {
+    // 内置任务走专用编排入口（如做梦两阶段管线）
+    if task.kind.as_deref() == Some("dream") {
+        let mut a = agent.lock().await;
+        match crate::cron::dream::run_dream(&mut a, task, false).await {
+            Ok(summary) => {
+                if let Err(e) = pusher.push(&summary).await {
+                    tracing::warn!(error = %e, task = %task.id, "push dream summary failed");
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                let msg = format!("[cron:{} 失败] dream: {}", task.id, e);
+                tracing::error!("{}", msg);
+                let _ = pusher.push(&msg).await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        }
+    }
+
     let prompt = task.prompt.as_deref().unwrap_or("");
     if prompt.is_empty() {
         let msg = format!("[cron:{} 失败] agent 模式但 prompt 为空", task.id);

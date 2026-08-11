@@ -1,3 +1,4 @@
+pub mod dream;
 pub mod runner;
 
 use crate::agent::AgentRegistry;
@@ -31,6 +32,14 @@ pub struct CronTask {
     /// mode = "tools" 时：预定义工具链
     #[serde(default)]
     pub steps: Option<Vec<Step>>,
+    /// 内置任务类型（可选）："dream" = 做梦（两阶段记忆整理），由专用编排入口处理，
+    /// 不走普通 run_agent_mode。其它任务留空。
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// 空闲门控（分钟）：距最后一条用户消息不足该时长则跳过（仅 dream 等后台任务用）。
+    /// 0 / 留空 = 不门控。
+    #[serde(default)]
+    pub idle_minutes: Option<u64>,
 }
 
 fn default_enabled() -> bool {
@@ -141,6 +150,33 @@ impl CronScheduler {
                 .await
                 .map_err(|e| anyhow::anyhow!("add cron job '{}': {}", task.id, e))?;
             job_uuids_map.insert(task.id.clone(), uuid);
+        }
+
+        // 播种内置 dream 任务：cron.toml 未定义任何 kind="dream" 任务时，注入默认做梦任务。
+        // 用户可在 cron.toml 自定义（改名/改 schedule/关掉），均被尊重。
+        let has_dream = tasks_map
+            .values()
+            .any(|t| t.kind.as_deref() == Some("dream"));
+        if !has_dream {
+            let dream_task = CronTask {
+                id: "dream".into(),
+                schedule: "0 4 * * *".into(), // 每日 04:00
+                mode: CronMode::Agent,
+                channel: "cli".into(),
+                enabled: true,
+                prompt: None,
+                steps: None,
+                kind: Some("dream".into()),
+                idle_minutes: Some(30), // 距上次对话 ≥30 分钟才跑
+            };
+            tasks_map.insert(dream_task.id.clone(), dream_task.clone());
+            let job = build_job(&dream_task, &pushers, &registry)?;
+            let uuid = scheduler
+                .add(job)
+                .await
+                .map_err(|e| anyhow::anyhow!("add builtin dream job: {}", e))?;
+            job_uuids_map.insert(dream_task.id.clone(), uuid);
+            tracing::info!("seeded builtin dream cron task (daily 04:00, idle>=30min)");
         }
 
         scheduler
@@ -350,14 +386,17 @@ fn validate_task(task: &CronTask) -> anyhow::Result<()> {
     }
     match task.mode {
         CronMode::Agent => {
-            if task
-                .prompt
-                .as_ref()
-                .map(|p| p.trim().is_empty())
-                .unwrap_or(true)
+            // dream 等内置任务由专用编排入口自带 prompt，允许 prompt 为空
+            let is_builtin = task.kind.as_deref() == Some("dream");
+            if !is_builtin
+                && task
+                    .prompt
+                    .as_ref()
+                    .map(|p| p.trim().is_empty())
+                    .unwrap_or(true)
             {
                 anyhow::bail!(
-                    "cron task '{}' mode=agent requires non-empty prompt",
+                    "cron task '{}' mode=agent requires non-empty prompt (or kind=dream)",
                     task.id
                 );
             }
