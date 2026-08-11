@@ -9,7 +9,10 @@ use crate::agent::context::Context;
 use crate::agent::runner::{execute_tool_calls, ToolRegistry};
 use crate::config::Config;
 use crate::memory::sqlite::SessionStore;
-use crate::provider::{ChatMessage, ChatRequest, Provider, Role, StreamEvent};
+use crate::provider::{
+    ChatMessage, ChatRequest, ContentPart, ImageUrlContent, MessageContent, Provider, Role,
+    StreamEvent,
+};
 use anyhow::Result;
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -52,6 +55,10 @@ pub struct Agent {
     /// 未配置时复用 `provider`（兼容旧行为）；配置后用更便宜的模型跑 compact。
     /// 与 `provider` 一样支持热替换。
     pub compact_provider: Arc<RwLock<Option<Arc<dyn Provider>>>>,
+    /// 图片描述用的独立 provider（可选）。
+    /// 主模型无多模态能力时，用此 provider 描述图片，描述文本替换图片注入主模型上下文。
+    /// 未配置时：图片直接发给主模型。
+    pub vision_provider: Arc<RwLock<Option<Arc<dyn Provider>>>>,
     pub tools: Arc<ToolRegistry>,
     pub context: Context,
     pub session_store: Arc<SessionStore>,
@@ -99,6 +106,7 @@ impl Agent {
         config: &Config,
         provider: Option<Arc<dyn Provider>>,
         compact_provider: Option<Arc<dyn Provider>>,
+        vision_provider: Option<Arc<dyn Provider>>,
         tools: Arc<ToolRegistry>,
         session_store: Arc<SessionStore>,
         session_id: i64,
@@ -113,6 +121,7 @@ impl Agent {
         Self {
             provider: Arc::new(RwLock::new(provider)),
             compact_provider: Arc::new(RwLock::new(compact_provider)),
+            vision_provider: Arc::new(RwLock::new(vision_provider)),
             tools,
             context: Context::new(system_prompt),
             session_store,
@@ -180,6 +189,17 @@ impl Agent {
         *guard = new_provider;
     }
 
+    /// 拿 vision provider 的 snapshot：未配置时返回 None。
+    pub async fn vision_provider_snapshot(&self) -> Option<Arc<dyn Provider>> {
+        self.vision_provider.read().await.clone()
+    }
+
+    /// 热替换 vision_provider（vision_model 变更时调用）。
+    pub async fn reload_vision_provider(&self, new_provider: Option<Arc<dyn Provider>>) {
+        let mut guard = self.vision_provider.write().await;
+        *guard = new_provider;
+    }
+
     /// 是否处于降级模式（无 provider）。
     pub async fn has_provider(&self) -> bool {
         self.provider.read().await.is_some()
@@ -242,6 +262,82 @@ impl Agent {
             .await
     }
 
+    /// 图片描述降级：消息含图片且配置了 vision_provider 时，用 vision_provider
+    /// 逐张描述图片，把描述文本 + 原始文本组合成纯文本消息返回。
+    /// 无图片或无 vision_provider 时原样返回。
+    async fn maybe_describe_images(&self, msg: ChatMessage) -> ChatMessage {
+        if !msg.content.has_image() {
+            return msg;
+        }
+        let vision_provider = match self.vision_provider_snapshot().await {
+            Some(p) => p,
+            None => return msg, // 无 vision_provider，图片直接发给主模型
+        };
+
+        let parts = match &msg.content {
+            MessageContent::Multimodal(parts) => parts,
+            _ => return msg,
+        };
+
+        let mut text_parts = Vec::new();
+        let mut image_urls = Vec::new();
+        for part in parts {
+            match part {
+                ContentPart::Text { text } => text_parts.push(text.clone()),
+                ContentPart::ImageUrl { image_url } => image_urls.push(image_url.url.clone()),
+            }
+        }
+
+        // 逐张描述图片
+        let mut descriptions = Vec::new();
+        for (i, url) in image_urls.iter().enumerate() {
+            let desc = self
+                .describe_single_image(vision_provider.as_ref(), url)
+                .await;
+            descriptions.push(format!("[图片{}描述] {}", i + 1, desc));
+        }
+
+        // 组合改写后的纯文本消息
+        let mut combined = descriptions.join("\n");
+        if !text_parts.is_empty() {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(&text_parts.join(""));
+        }
+        tracing::debug!(
+            images = image_urls.len(),
+            "described images via vision_provider"
+        );
+        ChatMessage::user(combined)
+    }
+
+    /// 用 vision provider 描述单张图片。失败时返回占位文本，不阻塞对话。
+    async fn describe_single_image(&self, provider: &dyn Provider, image_url: &str) -> String {
+        let parts = vec![
+            ContentPart::Text {
+                text: "请详细描述这张图片的内容，包括文字、物体、场景等关键信息。".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: image_url.into(),
+                },
+            },
+        ];
+        let req_msg = ChatMessage::user_multimodal(parts);
+        let req = ChatRequest {
+            messages: std::slice::from_ref(&req_msg),
+            tools: None,
+        };
+        match provider.chat(&req).await {
+            Ok(resp) => resp.text.unwrap_or_else(|| "[图片描述为空]".into()),
+            Err(e) => {
+                tracing::warn!(error = %e, "vision provider describe image failed");
+                "[图片描述失败]".into()
+            }
+        }
+    }
+
     /// 多模态流式版本：接收任意 ChatMessage（支持文本+图片）。
     /// 文本消息存入 sqlite，多模态消息只存文本部分（图片 base64 不持久化）。
     pub async fn handle_message_streaming(
@@ -252,7 +348,9 @@ impl Agent {
     ) -> Result<String> {
         // 清空本次 turn 的工具调用历史
         self.turn_tool_calls.clear();
-        // 持久化：只存文本部分（图片 base64 太大不存 sqlite）
+        // 图片描述降级：主模型无多模态时，用 vision_provider 描述图片
+        let user_msg = self.maybe_describe_images(user_msg).await;
+        // 持久化：只存文本部分（图片 base64 太大不存 sqlite；已描述则存描述后文本）
         let text_for_store = user_msg.content.as_text();
         self.session_store
             .append_message(self.session_id, &Role::User, &text_for_store)?;
@@ -350,18 +448,18 @@ impl Agent {
                 }
                 match ev? {
                     StreamEvent::TextDelta(d) => {
-                        if provider.native_tool_calling() {
-                            let _ = event_tx.send(TurnEvent::Chunk { delta: d.clone() }).await;
-                            iter_text.push_str(&d);
-                        } else {
-                            let user_text = parser.feed(&d);
-                            if !user_text.is_empty() {
-                                let _ = event_tx.send(TurnEvent::Chunk { delta: user_text }).await;
-                            }
-                            iter_text.push_str(&d);
-                            let new_calls = parser.take_tool_calls();
-                            calls.extend(new_calls);
+                        // 统一走 parser：剥离 think 标签 + 提取 tool_call 标签。
+                        // 无论 native 与否都跑——native 模式下模型偶发把
+                        // <think>/<tool_call> 泄露到文本流，parser 兜底清洗。
+                        // 对无标签文本 parser 是透传的，不影响正常输出。
+                        // iter_text 存清洗后文本（think/标签不进 context/sqlite）。
+                        let user_text = parser.feed(&d);
+                        if !user_text.is_empty() {
+                            iter_text.push_str(&user_text);
+                            let _ = event_tx.send(TurnEvent::Chunk { delta: user_text }).await;
                         }
+                        let new_calls = parser.take_tool_calls();
+                        calls.extend(new_calls);
                     }
                     StreamEvent::ToolCall(tc) => {
                         calls.push(tc);
@@ -378,16 +476,15 @@ impl Agent {
                 }
             }
 
-            if !provider.native_tool_calling() {
-                let rest = parser.finish();
-                if !rest.is_empty() {
-                    let _ = event_tx
-                        .send(TurnEvent::Chunk {
-                            delta: rest.clone(),
-                        })
-                        .await;
-                    iter_text.push_str(&rest);
-                }
+            // 统一 finish：流结束时输出 parser 残留（未闭合标签的 buffer）
+            let rest = parser.finish();
+            if !rest.is_empty() {
+                let _ = event_tx
+                    .send(TurnEvent::Chunk {
+                        delta: rest.clone(),
+                    })
+                    .await;
+                iter_text.push_str(&rest);
             }
 
             if calls.is_empty() {
@@ -524,7 +621,9 @@ fn build_repeated_tool_warning(tool_name: &str, streak: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{ChatRequest, ChatResponse, Provider, StreamEvent, ToolCall};
+    use crate::provider::{
+        ChatRequest, ChatResponse, ContentPart, ImageUrlContent, Provider, StreamEvent, ToolCall,
+    };
     use async_stream::try_stream;
     use async_trait::async_trait;
     use futures_util::stream::BoxStream;
@@ -575,6 +674,7 @@ mod tests {
         Agent::new(
             &config,
             Some(provider),
+            None,
             None,
             tools,
             Arc::new(store),
@@ -683,6 +783,167 @@ mod tests {
         assert_eq!(tool_starts, vec!["echo"]);
         assert_eq!(chunks.concat(), "done");
         assert_eq!(done_count, 1);
+    }
+
+    /// native 模式下模型把 <think> 泄露到文本流，parser 应剥离推理内容
+    #[tokio::test]
+    async fn test_native_mode_strips_think_tags() {
+        let think = format!(
+            "{}secret reasoning{}visible reply",
+            concat!("<", "think>"),
+            concat!("<", "/think>")
+        );
+        let rounds = vec![vec![StreamEvent::TextDelta(think), StreamEvent::Done]];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = agent.handle_input_streaming("hi", "cli", tx).await.unwrap();
+
+        // 用户只看到 visible reply，think 内容被剥离
+        assert_eq!(result, "visible reply");
+
+        let mut chunks = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            if let TurnEvent::Chunk { delta } = ev {
+                chunks.push(delta);
+            }
+        }
+        assert_eq!(chunks.concat(), "visible reply");
+    }
+
+    /// native 模式下模型把 <tool_call> 标签泄露到文本流，parser 应提取为工具调用并执行
+    #[tokio::test]
+    async fn test_native_mode_strips_tool_call_tags() {
+        let tag = "\u{3c}tool_call\u{3e}{\"name\":\"echo\",\"arguments\":{}}\u{3c}/tool_call\u{3e}";
+        let text = format!("before {} after", tag);
+        let rounds = vec![
+            vec![StreamEvent::TextDelta(text), StreamEvent::Done],
+            vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done],
+        ];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let _ = agent.handle_input_streaming("read", "cli", tx).await;
+
+        let mut chunks = Vec::new();
+        let mut tool_starts = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                TurnEvent::Chunk { delta } => chunks.push(delta),
+                TurnEvent::ToolStart { name, .. } => tool_starts.push(name),
+                _ => {}
+            }
+        }
+        // 用户看到 "before  after"，标签被剥离
+        assert_eq!(chunks.concat(), "before  afterdone");
+        // 工具调用被提取并执行
+        assert_eq!(tool_starts, vec!["echo"]);
+    }
+
+    /// Mock vision provider：chat 返回固定描述文本
+    struct VisionMockProvider {
+        description: String,
+    }
+
+    #[async_trait]
+    impl Provider for VisionMockProvider {
+        async fn chat(&self, _req: &ChatRequest<'_>) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                text: Some(self.description.clone()),
+                tool_calls: vec![],
+            })
+        }
+        async fn chat_stream(&self, _req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
+            unreachable!("vision provider should only use chat()")
+        }
+        fn native_tool_calling(&self) -> bool {
+            true
+        }
+    }
+
+    /// 配了 vision_provider 时，含图片消息被改写为纯文本（描述 + 原文本）
+    #[tokio::test]
+    async fn test_vision_provider_describes_images() {
+        let rounds = vec![vec![
+            StreamEvent::TextDelta("收到".into()),
+            StreamEvent::Done,
+        ]];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        *agent.vision_provider.write().await = Some(Arc::new(VisionMockProvider {
+            description: "一张红色方块的图片".into(),
+        }));
+
+        let msg = ChatMessage::user_multimodal(vec![
+            ContentPart::Text {
+                text: "这张图是什么？".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/jpeg;base64,xxx".into(),
+                },
+            },
+        ]);
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(msg, "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "收到");
+
+        // 验证 context 里的用户消息被改写为纯文本（含描述）
+        let user_msg = &agent.context.history[0];
+        let text = user_msg.content.as_text();
+        assert!(
+            text.contains("[图片1描述]"),
+            "expected image description tag in: {}",
+            text
+        );
+        assert!(
+            text.contains("一张红色方块的图片"),
+            "expected vision description in: {}",
+            text
+        );
+        assert!(
+            text.contains("这张图是什么？"),
+            "expected original text in: {}",
+            text
+        );
+        // 确保图片不再以多模态形式存在
+        assert!(!user_msg.content.has_image());
+    }
+
+    /// 未配 vision_provider 时，图片直接发给主模型（消息原样，多模态保留）
+    #[tokio::test]
+    async fn test_no_vision_provider_passes_image_through() {
+        let rounds = vec![vec![
+            StreamEvent::TextDelta("回复".into()),
+            StreamEvent::Done,
+        ]];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+
+        let msg = ChatMessage::user_multimodal(vec![
+            ContentPart::Text {
+                text: "看图".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/jpeg;base64,xxx".into(),
+                },
+            },
+        ]);
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(msg, "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "回复");
+
+        // 验证 context 里的用户消息保持原样（多模态，未被改写）
+        let user_msg = &agent.context.history[0];
+        assert!(
+            user_msg.content.has_image(),
+            "image should be preserved without vision_provider"
+        );
     }
 
     #[tokio::test]
@@ -807,6 +1068,7 @@ mod tests {
             &config,
             Some(sub_provider),
             None,
+            None,
             sub_tools,
             Arc::new(sub_store),
             sub_sid,
@@ -849,6 +1111,7 @@ mod tests {
         let main_agent = Agent::new(
             &config,
             Some(main_provider),
+            None,
             None,
             main_tools,
             Arc::new(main_store),

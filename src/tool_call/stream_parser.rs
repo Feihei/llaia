@@ -26,10 +26,14 @@ enum State {
     MaybeThink,
     /// 可能是 tool_call 开标签
     MaybeTag,
+    /// 可能是 markdown fence 开头（```）
+    MaybeFence,
     /// 处于 think 块内，丢弃内容直到遇到 think 闭标签
     InThink,
     /// 处于 tool_call 标签内，累积 JSON
     InToolCall,
+    /// 处于 markdown fence 内，累积 JSON
+    InFence,
 }
 
 // 所有标签常量用 concat! 拼接，避免字面量被工具层误解析。
@@ -47,6 +51,37 @@ const CLOSE_TAGS: &[&str] = &[
 ];
 const THINK_OPEN_TAGS: &[&str] = &[concat!("<", "think>"), concat!("<", "thinking>")];
 const THINK_CLOSE_TAGS: &[&str] = &[concat!("<", "/think>"), concat!("<", "/thinking>")];
+
+/// Markdown fence 开头：``` + 已知语言标识 + 换行。
+/// 支持已知语言别名（同标签别名）和 \n / \r\n 换行。
+const FENCE_LANGS: &[&str] = &["tool_call", "toolcall", "tool-call", "invoke"];
+/// Fence 闭合标记
+const FENCE_CLOSE: &str = "```";
+
+/// 检查 `s` 是否是某个 fence open（```lang\n 或 ```lang\r\n）的完整匹配。
+fn fence_open_exact(s: &str) -> bool {
+    for lang in FENCE_LANGS {
+        if s == format!("```{}\n", lang) || s == format!("```{}\r\n", lang) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 检查 `s` 是否是某个 fence open 的前缀（即继续累积有可能匹配）。
+fn fence_open_prefix(s: &str) -> bool {
+    for lang in FENCE_LANGS {
+        let open = format!("```{}\n", lang);
+        if open.starts_with(s) {
+            return true;
+        }
+        let open_crlf = format!("```{}\r\n", lang);
+        if open_crlf.starts_with(s) {
+            return true;
+        }
+    }
+    false
+}
 
 impl Default for ToolCallStreamParser {
     fn default() -> Self {
@@ -74,6 +109,10 @@ impl ToolCallStreamParser {
                     if ch == '<' {
                         // 所有 think / tool_call 开标签都以 '<' 开头，先走 MaybeThink
                         self.state = State::MaybeThink;
+                        self.pending.push(ch);
+                    } else if ch == '`' {
+                        // 可能是 markdown fence 开头
+                        self.state = State::MaybeFence;
                         self.pending.push(ch);
                     } else {
                         out.push(ch);
@@ -151,6 +190,44 @@ impl ToolCallStreamParser {
                         self.state = State::Outside;
                     }
                 }
+                State::MaybeFence => {
+                    self.pending.push(ch);
+                    if fence_open_exact(&self.pending) {
+                        // 完整匹配 fence 开头（```lang\n），进入 InFence
+                        self.state = State::InFence;
+                        self.pending.clear();
+                        self.buffer.clear();
+                    } else if fence_open_prefix(&self.pending) {
+                        // 仍是 fence 开头前缀，继续累积
+                    } else {
+                        // 不是 fence（普通代码块或单反引号），透传 pending
+                        out.push_str(&self.pending);
+                        self.pending.clear();
+                        self.state = State::Outside;
+                    }
+                }
+                State::InFence => {
+                    self.buffer.push(ch);
+                    if self.buffer.ends_with(FENCE_CLOSE) {
+                        let body = &self.buffer[..self.buffer.len() - FENCE_CLOSE.len()];
+                        let body_trimmed = body.trim();
+                        let call = serde_json::from_str::<Value>(body_trimmed)
+                            .ok()
+                            .and_then(|v| value_to_tool_call(&v))
+                            .or_else(|| {
+                                extract_json_with_brace_counting(body_trimmed)
+                                    .and_then(|sub| serde_json::from_str::<Value>(sub).ok())
+                                    .and_then(|v| value_to_tool_call(&v))
+                            });
+                        if let Some(call) = call {
+                            self.completed.push(call);
+                        } else {
+                            out.push_str(&self.buffer);
+                        }
+                        self.buffer.clear();
+                        self.state = State::Outside;
+                    }
+                }
             }
         }
         out
@@ -162,16 +239,18 @@ impl ToolCallStreamParser {
     }
 
     /// 流结束时调用，返回残留内容作为普通文本。
-    /// InThink 状态丢弃未闭合的思考内容（防泄漏）；InToolCall 还原开标签+buffer。
+    /// InThink / InFence 状态丢弃未闭合的内容（防泄漏）；InToolCall 还原开标签+buffer。
     pub fn finish(self) -> String {
         let mut out = String::new();
         match self.state {
             State::InThink => {}
+            State::InFence => {}
             State::InToolCall => {
                 out.push_str(self.open_tag);
                 out.push_str(&self.buffer);
             }
             _ => {
+                // Outside / MaybeThink / MaybeTag / MaybeFence：输出 pending
                 out.push_str(&self.pending);
             }
         }
@@ -366,5 +445,69 @@ mod tests {
         let calls = p.take_tool_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].arguments, json!({"k": 1}));
+    }
+
+    // --- markdown fence 格式测试 ---
+
+    #[test]
+    fn test_markdown_fence_tool_call() {
+        let mut p = ToolCallStreamParser::new();
+        let body = r#"{"name":"x","arguments":{}}"#;
+        let input = format!("```tool_call\n{}\n```", body);
+        assert_eq!(p.feed(&input), "");
+        let calls = p.take_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "x");
+    }
+
+    #[test]
+    fn test_markdown_fence_invoke_alias() {
+        let mut p = ToolCallStreamParser::new();
+        let body = r#"{"name":"x","arguments":{}}"#;
+        let input = format!("```invoke\n{}\n```", body);
+        assert_eq!(p.feed(&input), "");
+        assert_eq!(p.take_tool_calls().len(), 1);
+    }
+
+    #[test]
+    fn test_markdown_fence_with_surrounding_text() {
+        let mut p = ToolCallStreamParser::new();
+        let body = r#"{"name":"x","arguments":{}}"#;
+        let input = format!("before ```tool_call\n{}\n``` after", body);
+        assert_eq!(p.feed(&input), "before  after");
+        assert_eq!(p.take_tool_calls().len(), 1);
+    }
+
+    #[test]
+    fn test_plain_code_fence_passthrough() {
+        let mut p = ToolCallStreamParser::new();
+        let input = "```python\nprint('hello')\n```";
+        // 结尾的 ``` 会被缓冲（等待判断是否 fence 语言），finish 后才输出
+        let mut out = p.feed(input);
+        assert_eq!(p.take_tool_calls().len(), 0);
+        out.push_str(&p.finish());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn test_markdown_fence_cross_chunk() {
+        let mut p = ToolCallStreamParser::new();
+        let body = r#"{"name":"x","arguments":{}}"#;
+        let out1 = p.feed("```too");
+        let out2 = p.feed("l_call\n");
+        let out3 = p.feed(body);
+        let out4 = p.feed("\n```");
+        assert_eq!(format!("{}{}{}{}", out1, out2, out3, out4), "");
+        let calls = p.take_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "x");
+    }
+
+    #[test]
+    fn test_unclosed_fence_discarded() {
+        let mut p = ToolCallStreamParser::new();
+        let out = p.feed("```tool_call\n{\"name\":\"x\"");
+        assert_eq!(out, "");
+        assert_eq!(p.finish(), "");
     }
 }

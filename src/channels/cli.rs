@@ -380,6 +380,19 @@ async fn build_single_agent(
         _ => None,
     };
 
+    // 构建 vision_provider（独立于主 provider，用于描述图片）
+    // vision_model 未配置 / 解析失败 → None（图片直接发给主模型）
+    let vision_provider: Option<Arc<dyn Provider>> = match &config.runtime.vision_model {
+        Some(m) if !m.is_empty() => match crate::provider::provider_from_ref(config, m) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(model = m.as_str(), error = %e, "build vision_provider failed, images will be sent to main provider");
+                None
+            }
+        },
+        _ => None,
+    };
+
     // 构建完整工具集（用新字段）
     let skills_dir = config_dir.join("skills");
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
@@ -497,6 +510,7 @@ async fn build_single_agent(
         config,
         provider,
         compact_provider,
+        vision_provider,
         registry,
         session_store,
         session_id,

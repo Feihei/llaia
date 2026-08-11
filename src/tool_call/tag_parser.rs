@@ -1,17 +1,24 @@
 use crate::provider::ToolCall;
 use serde_json::Value;
 
-/// 从模型回复文本中解析工具调用标签，并剥离 think 标签。
+/// 从模型回复文本中解析工具调用，并剥离 think 标签。
 /// 返回 (纯文本部分, 工具调用列表)。
-/// 支持多种标签别名，以及 JSON 解析失败时的 brace-balancing 恢复。
+/// 支持两种工具调用格式：
+/// - 标签格式：`<tool_call>{...}</tool_call>`（别名 toolcall/tool-call/invoke）
+/// - Markdown fence 格式：`` ```tool_call\n{...}\n``` ``（同别名）
+///   以及 JSON 解析失败时的 brace-balancing 恢复。
 pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
     // 先 strip think 标签，防止推理内容泄漏
     let stripped = strip_think_tags(text);
 
+    // 标签格式 OR markdown fence 格式，用 alternation 合并。
+    // group 1 = 标签 body，group 2 = fence body。
     let re_str = concat!(
-        r"(?is)<",
+        r"(?is)(?:<",
         r"(?:tool_call|toolcall|tool-call|invoke)>\s*(.*?)\s*<",
-        r"/(?:tool_call|toolcall|tool-call|invoke)>"
+        r"/(?:tool_call|toolcall|tool-call|invoke)>",
+        r"|```(?:tool_call|toolcall|tool-call|invoke)\s*(.*?)```",
+        r")"
     );
     let re = regex::Regex::new(re_str).unwrap();
 
@@ -24,7 +31,12 @@ pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
         clean_text.push_str(&stripped[last_end..match_start]);
         last_end = cap.get(0).unwrap().end();
 
-        let body = cap.get(1).unwrap().as_str().trim();
+        // body 来自 group 1（标签）或 group 2（fence）
+        let body = cap
+            .get(1)
+            .or(cap.get(2))
+            .map(|m| m.as_str().trim())
+            .unwrap_or("");
         let call = serde_json::from_str::<Value>(body)
             .ok()
             .and_then(|v| value_to_tool_call(&v))
@@ -252,5 +264,71 @@ mod tests {
         let v: Value = serde_json::from_str(sub).unwrap();
         assert_eq!(v["name"], "x");
         assert_eq!(v["arguments"]["s"], "{]}");
+    }
+
+    // --- markdown fence 格式测试 ---
+
+    const FENCE_TC: &str = "```tool_call";
+    const FENCE_INV: &str = "```invoke";
+    const FENCE_CLOSE: &str = "```";
+
+    #[test]
+    fn test_markdown_fence_tool_call() {
+        let json = r#"{"name":"file_read","arguments":{"path":"/tmp/x"}}"#;
+        let text = format!("before\n{}\n{}\n{}\nafter", FENCE_TC, json, FENCE_CLOSE);
+        let (clean, calls) = parse_tool_calls(&text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_read");
+        assert_eq!(calls[0].arguments, json!({"path": "/tmp/x"}));
+        assert!(clean.contains("before"));
+        assert!(clean.contains("after"));
+        assert!(!clean.contains("tool_call"));
+        assert!(!clean.contains("```"));
+    }
+
+    #[test]
+    fn test_markdown_fence_invoke_alias() {
+        let json = r#"{"name":"x","arguments":{}}"#;
+        let text = format!("{}\n{}\n{}", FENCE_INV, json, FENCE_CLOSE);
+        let (_, calls) = parse_tool_calls(&text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "x");
+    }
+
+    #[test]
+    fn test_markdown_fence_multiline_json() {
+        let json = r#"{
+  "name": "file_write",
+  "arguments": {"path": "/tmp/y", "content": "hello"}
+}"#;
+        let text = format!("{}\n{}\n{}", FENCE_TC, json, FENCE_CLOSE);
+        let (_, calls) = parse_tool_calls(&text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_write");
+    }
+
+    #[test]
+    fn test_plain_code_fence_not_parsed() {
+        // 普通 python 代码块不应被误解析为工具调用
+        let text = "```python\nprint('hello')\n```";
+        let (clean, calls) = parse_tool_calls(text);
+        assert!(calls.is_empty());
+        assert!(clean.contains("python"));
+        assert!(clean.contains("print"));
+    }
+
+    #[test]
+    fn test_mixed_tag_and_fence() {
+        let tag_json = r#"{"name":"a","arguments":{}}"#;
+        let fence_json = r#"{"name":"b","arguments":{}}"#;
+        let text = format!(
+            "{}{}{} {}{}{}",
+            TC_OPEN, tag_json, TC_CLOSE, FENCE_TC, fence_json, "```"
+        );
+        let text = format!("{}\n{}", text, FENCE_CLOSE);
+        let (_, calls) = parse_tool_calls(&text);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
     }
 }

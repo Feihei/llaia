@@ -61,6 +61,7 @@ async fn build_state(tmp: &std::path::Path) -> AppState {
         &config,
         None,
         None,
+        None,
         Arc::new(ToolRegistry::new()),
         Arc::new(store),
         sid,

@@ -277,6 +277,7 @@ mod tests {
             &config,
             Some(Arc::new(LabelProvider("big-model".into()))),
             None,
+            None,
             Arc::new(crate::agent::runner::ToolRegistry::new()),
             Arc::new(store),
             sid,

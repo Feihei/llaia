@@ -345,8 +345,10 @@
 
 ### P4 / 模型与工具调用
 
-- [ ] 工具调用格式优化：解决 think 内容 / `<tool_call>` 标签泄露到用户回复的问题（agen 系模型偶发），研究 jinja 模板调用格式，参考 AstrBot `core/agent/tool.py` 与 zeroclaw `zeroclaw-tool-call-parser`（必要性：**高**，属可见的正确性缺陷 / 难度：★★☆）
-- [ ] image 描述模型单独设置：主模型无多模态时，用独立模型描述图片，避免能力缺失（必要性：**中** / 难度：★★☆）
+- [x] 工具调用格式优化：解决 think 内容 / `<tool_call>` 标签泄露到用户回复的问题（agen 系模型偶发），研究 jinja 模板调用格式，参考 AstrBot `core/agent/tool.py` 与 zeroclaw `zeroclaw-tool-call-parser`（必要性：**高**，属可见的正确性缺陷 / 难度：★★☆）
+  - **实现**：统一走 `ToolCallStreamParser`（去掉 native/标签降级分支），native 模式下 think/tool_call 标签泄露也被清洗；补充 markdown fence 格式（`` ```tool_call `` / `` ```invoke ``）；`iter_text` 改存清洗后文本（不污染 context/sqlite）。详见 [specs/2026-08-11-p4b-tool-call-cleanup-design.md](specs/2026-08-11-p4b-tool-call-cleanup-design.md)
+- [x] image 描述模型单独设置：主模型无多模态时，用独立模型描述图片，避免能力缺失（必要性：**中** / 难度：★★☆）
+  - **实现**：`RuntimeConfig.vision_model` 配置（照搬 `compact_model` 模式）；Agent 持有 `vision_provider`（支持热替换）；`handle_message_streaming` 入口拦截多模态消息，用 vision_provider 逐张描述图片，描述文本替换图片注入主模型上下文
 
 ### P4 / 进程生命周期与重启机制
 
@@ -409,7 +411,7 @@
 | 阶段 | 主题 | 包含条目 | 难度 | 排序理由 |
 |---|---|---|---|---|
 | **P4-a** | 地基与快赢 | 时区 config 化 + 热更新（[ADR-0017](docs/adr/0017-timezone-injection.md) 已决议）；`/api/shutdown` + 停止按钮（[ADR-0018](docs/adr/0018-shutdown.md) 已决议）；上下文注入策略文档化 | ★☆☆ | 全是单点改动，且时区是 P4-c「做梦」的前置依赖——idle 判定和「最近 N 天」语义都要先有可信时间 |
-| **P4-b** | 输出正确性 | 工具调用格式优化（think / `<tool_call>` 泄露）；image 描述模型单独设置 | ★★☆ | 唯一影响「用户直接看到的东西是否正确」的一组，优先级高于任何新功能 |
+| **P4-b** | 输出正确性 | ✅ 工具调用格式优化（think / `<tool_call>` 泄露）；image 描述模型单独设置 | ★★☆ | 唯一影响「用户直接看到的东西是否正确」的一组，优先级高于任何新功能 |
 | **P4-c** | 记忆系统进化 | 「做梦」（[ADR-0016](docs/adr/0016-dream.md) 已决议）；更聪明的上下文压缩 | ★★☆~★★★ | 两者共用同一条「抽取 → 合并 → 压缩」管线，分开做会返工；本阶段是 P4 的核心价值点 |
 | **P4-d** | 边界与授权 | 三档权限 profile + `/ok` `/deny`；`/move` `/cd` | ★★☆ | 同一套 workspace 边界模型的一放一收，同期设计才自洽；依赖 P4-a 已落地的稳定运行时 |
 | **P4-e** | 生态扩展 | Gemini provider → 邮箱 channel → 飞书 | ★★☆ | 纯增量、互不阻塞，可穿插进任何空档；按实际使用需求拉取，不必一次做完 |
@@ -432,6 +434,8 @@
 - skill增强，在现有skill工具基础上针对llaia进行优化，npx skills工具的rust实现，claude的创建skill、hermes的curator等管理skill的元skill的llaia化
 - provider接入优化，参考zeroclaw、goose等项目的provider接入，openai兼容格式针对ollama、llamacpp和其它供应商的优化探讨
 - 系统提示词优化，言简意赅，占用更少token，参考pi等项目
+- session.db会话历史在webUI中可查询和修改，参考astrbot
+- webUI中provider api探测可用模型，点击可添加到models中，添加按钮检查可用性，参考astrbot
 
 ---
 

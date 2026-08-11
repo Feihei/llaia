@@ -393,9 +393,11 @@ pub fn build_provider_from_config(config: &Config) -> Result<Option<Arc<dyn Prov
 async fn hot_reload_providers(state: &AppState, new_config: &Config) -> Result<(), String> {
     let new_provider = build_provider_from_config(new_config)?;
     let new_compact = build_compact_provider_from_config(new_config);
+    let new_vision = build_vision_provider_from_config(new_config);
     let agent = state.registry.main.lock().await;
     agent.reload_provider(new_provider).await;
     agent.reload_compact_provider(new_compact).await;
+    agent.reload_vision_provider(new_vision).await;
     Ok(())
 }
 
@@ -410,6 +412,20 @@ fn build_compact_provider_from_config(config: &Config) -> Option<Arc<dyn Provide
         Ok(p) => Some(p),
         Err(e) => {
             tracing::warn!(error = %e, model = m.as_str(), "build compact_provider failed");
+            None
+        }
+    }
+}
+
+fn build_vision_provider_from_config(config: &Config) -> Option<Arc<dyn Provider>> {
+    let m = config.runtime.vision_model.as_ref()?;
+    if m.is_empty() {
+        return None;
+    }
+    match crate::provider::provider_from_ref(config, m) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!(error = %e, model = m.as_str(), "build vision_provider failed");
             None
         }
     }

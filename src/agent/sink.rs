@@ -208,6 +208,7 @@ mod tests {
             &config,
             Some(provider),
             None,
+            None,
             tools,
             Arc::new(store),
             sid,

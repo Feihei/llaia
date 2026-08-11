@@ -299,6 +299,7 @@ mod tests {
             &config,
             Some(Arc::new(HangingProvider)),
             None,
+            None,
             Arc::new(ToolRegistry::new()),
             Arc::new(store),
             sid,
@@ -443,6 +444,7 @@ mod tests {
         let sub_agent = Agent::new(
             &config,
             Some(provider),
+            None,
             None,
             Arc::new(tools),
             Arc::new(store),

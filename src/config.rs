@@ -41,6 +41,11 @@ pub struct RuntimeConfig {
     /// 非法值在 Config::load 里 warn + 置 None。
     #[serde(default)]
     pub timezone: Option<String>,
+    /// 图片描述用的模型引用 "provider_id.model_alias"。
+    /// 主模型无多模态能力时，用此模型描述图片，描述文本替换图片注入主模型上下文。
+    /// 未设置时：图片直接发给主模型（主模型不支持则由 provider 决定如何处理）。
+    #[serde(default)]
+    pub vision_model: Option<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -50,6 +55,7 @@ impl Default for RuntimeConfig {
             max_iterations: default_max_iterations(),
             compact_model: None,
             timezone: None,
+            vision_model: None,
         }
     }
 }

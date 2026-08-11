@@ -16,6 +16,7 @@ context_threshold = 0.7
 max_iterations = 10
 # timezone = "Asia/Shanghai"     # 可选：IANA 时区名（如 Asia/Shanghai / America/New_York）；未设置则跟随系统时区
 # compact_model = "default.qwen"  # 可选：用更便宜的模型跑上下文压缩，未设置时复用主模型
+# vision_model = "default.gpt-4o"  # 可选：主模型无多模态时，用此模型描述图片；未设置则图片直接发给主模型
 
 [log]
 level = "info"
