@@ -305,7 +305,7 @@ impl Channel for CliChannel {
 /// is_main=true 且 config 有子 Agent 时，挂载 delegate 工具并返回其引用用于后续注入 registry
 /// is_main=true 时挂载 cron_task 工具并返回其引用用于后续注入 scheduler
 #[allow(clippy::too_many_arguments)]
-async fn build_single_agent(
+pub async fn build_single_agent(
     config: &Config,
     config_dir: &std::path::Path,
     alias: &str,
@@ -448,7 +448,7 @@ async fn build_single_agent(
         agent_cfg.denied_tools.iter().map(|s| s.as_str()).collect();
     let mut delegate_tool: Option<Arc<DelegateTool>> = None;
     let mut cron_tool: Option<Arc<CronTool>> = None;
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     for tool in all_tools {
         if !denied.contains(tool.name()) {
             registry.register(tool);
@@ -469,12 +469,13 @@ async fn build_single_agent(
         cron_tool = Some(c);
     }
 
-    let mut system_prompt = format!(
+    let system_prompt_base = format!(
         "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}\n\n# WORKSPACE\n{}\n\n工作目录说明：所有工具的相对路径都相对于 WORKSPACE 解析；terminal 命令在 WORKSPACE 下执行。需要写到其它位置时请使用绝对路径。",
         soul, user, memory, workspace.display()
     );
     // Skills（P3-e）：Progressive Disclosure，只注入 active skill 的 name + description + 路径
     let skills_prompt = crate::skill::prompt::build_skills_prompt(skills);
+    let mut system_prompt = system_prompt_base.clone();
     if !skills_prompt.is_empty() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&skills_prompt);
@@ -482,10 +483,11 @@ async fn build_single_agent(
     // 标签降级模式下注入 tool instructions 到 system prompt。
     // 注意：有 delegate 工具时，OnceCell registry 尚未注入（在 build_agent 末尾才注入），
     // 此时 delegate 的 enum 为空。所以推迟到 build_agent 里 set_registry 后再注入。
-    if let Some(p) = provider_ref {
-        if !p.native_tool_calling() && !has_delegate {
-            system_prompt.push_str(&build_tool_instructions(&registry.specs()));
-        }
+    let has_tool_instructions = provider_ref
+        .map(|p| !p.native_tool_calling())
+        .unwrap_or(false);
+    if has_tool_instructions && !has_delegate {
+        system_prompt.push_str(&build_tool_instructions(&registry.specs()));
     }
     let registry = Arc::new(registry);
 
@@ -525,7 +527,7 @@ async fn build_single_agent(
         "context_size resolved"
     );
 
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         config,
         provider,
         compact_provider,
@@ -543,6 +545,8 @@ async fn build_single_agent(
         audit,
     )
     .await;
+    // 记录 system 前缀与 tool-instructions 标记，供热加载 skills 时重建
+    agent.init_system_meta(system_prompt_base, has_tool_instructions);
 
     Ok((
         Arc::new(Mutex::new(agent)),
@@ -642,7 +646,7 @@ pub async fn build_agent(
     )
     .await?;
 
-    let mut registry = AgentRegistry::new(main_agent, main_workspace);
+    let registry = AgentRegistry::new(main_agent, main_workspace);
     for (alias, agent) in sub_agents {
         registry.register_sub_agent(alias, agent);
     }

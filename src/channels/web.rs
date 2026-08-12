@@ -5,6 +5,7 @@ use crate::commands::slash::{try_handle, SlashOutcome};
 use crate::config::{Config, WebUiConfig};
 use crate::image_utils;
 use crate::provider::{ChatMessage, ContentPart, ImageUrlContent};
+use crate::tools::cron::CronTool;
 use crate::web::{
     build_system_routes, check_token, generate_token, resolve_within, AppState, TokenQuery,
 };
@@ -343,13 +344,16 @@ pub struct WebChannel {
     pub active_ws: Arc<tokio::sync::Mutex<std::collections::HashMap<u64, mpsc::Sender<WebEvent>>>>,
     /// cron.toml 路径（供 raw 编辑接口读写）
     pub cron_path: PathBuf,
-    /// CronScheduler 共享槽（serve_cmd 启动 cron 后通过 set_cron_scheduler 注入；
+    /// CronHandle 共享槽（serve_cmd 启动 cron 后通过 set_cron_scheduler 注入；
     /// build_router 时读取快照填 AppState）。启动失败保持 None，cron API 返回 503。
-    pub cron_scheduler: Arc<std::sync::Mutex<Option<Arc<crate::cron::CronScheduler>>>>,
+    pub cron_scheduler: Arc<std::sync::Mutex<Option<Arc<crate::cron::CronHandle>>>>,
     /// McpRegistry 共享槽（serve_cmd 通过 set_mcp_registry 注入，供 MCP API 展示状态）
     pub mcp_registry: Arc<std::sync::Mutex<Option<Arc<crate::mcp::client::McpRegistry>>>>,
     /// 优雅停止信号：serve_cmd 创建并持有，注入 AppState 后由 /api/shutdown handler 触发（ADR-0018）
     pub shutdown_signal: Arc<Notify>,
+    /// CronTool 实例（serve 构建时注入），热加载 cron 时用它重新指向新调度器。
+    /// 与 AppState 同款 Arc<Mutex<Option>> 槽位。
+    pub cron_tool: Arc<std::sync::Mutex<Option<Arc<CronTool>>>>,
 }
 
 impl WebChannel {
@@ -373,17 +377,23 @@ impl WebChannel {
             cron_scheduler: Arc::new(std::sync::Mutex::new(None)),
             mcp_registry: Arc::new(std::sync::Mutex::new(None)),
             shutdown_signal,
+            cron_tool: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
-    /// 注入 CronScheduler（serve_cmd 在 CronScheduler::start 成功后调用，spawn 前）
-    pub fn set_cron_scheduler(&self, s: Arc<crate::cron::CronScheduler>) {
+    /// 注入 CronHandle（serve_cmd 在 CronHandle::start 成功后调用，spawn 前）
+    pub fn set_cron_scheduler(&self, s: Arc<crate::cron::CronHandle>) {
         *self.cron_scheduler.lock().unwrap() = Some(s);
     }
 
     /// 注入 McpRegistry（serve_cmd 在 build_agent 后调用，spawn 前）
     pub fn set_mcp_registry(&self, r: Arc<crate::mcp::client::McpRegistry>) {
         *self.mcp_registry.lock().unwrap() = Some(r);
+    }
+
+    /// 注入 CronTool（serve_cmd 在 build_agent 后调用，spawn 前）
+    pub fn set_cron_tool(&self, t: Option<Arc<CronTool>>) {
+        *self.cron_tool.lock().unwrap() = t;
     }
 
     pub fn build_router(&self) -> axum::Router {
@@ -395,8 +405,7 @@ impl WebChannel {
         } else {
             self.config.token.clone()
         };
-        // 读取 cron_scheduler 快照（短锁，clone Arc）
-        let cron_scheduler = self.cron_scheduler.lock().unwrap().clone();
+        // 读取 cron_scheduler / mcp_registry / cron_tool 的共享槽（Arc 克隆，零拷贝）
         let state = AppState {
             registry: self.registry.clone(),
             config: self.config_full.clone(),
@@ -407,10 +416,11 @@ impl WebChannel {
             active_ws: self.active_ws.clone(),
             next_ws_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             cron_path: self.cron_path.clone(),
-            cron_scheduler,
+            cron_scheduler: self.cron_scheduler.clone(),
             mcp_path: self.cron_path.with_file_name("mcp.toml"),
-            mcp_registry: self.mcp_registry.lock().unwrap().clone(),
+            mcp_registry: self.mcp_registry.clone(),
             skills_dir: self.cron_path.with_file_name("skills"),
+            cron_tool: self.cron_tool.clone(),
         };
         // 系统级路由 + WS 路由，共享同一个 state
         build_system_routes()

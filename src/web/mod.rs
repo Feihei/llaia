@@ -31,14 +31,19 @@ pub struct AppState {
     pub next_ws_id: Arc<std::sync::atomic::AtomicU64>,
     /// cron.toml 路径（供 raw 编辑接口读写）
     pub cron_path: std::path::PathBuf,
-    /// CronScheduler 实例（None 时 cron API 返回 503）
-    pub cron_scheduler: Option<Arc<crate::cron::CronScheduler>>,
+    /// CronHandle 实例（None 时 cron API 返回 503）。
+    /// 用 Arc<Mutex> 包一层，以便 reload_all 在保存配置后原地替换而不必重建 AppState。
+    pub cron_scheduler: Arc<std::sync::Mutex<Option<Arc<crate::cron::CronHandle>>>>,
     /// mcp.toml 路径（供 raw 编辑 / 测试连接接口读写）
     pub mcp_path: std::path::PathBuf,
-    /// McpRegistry 实例（None 时 MCP 状态 API 返回 503；raw 编辑不受影响）
-    pub mcp_registry: Option<Arc<crate::mcp::client::McpRegistry>>,
+    /// McpRegistry 实例（None 时 MCP 状态 API 返回 503；raw 编辑不受影响）。
+    /// 同 cron_scheduler，用 Arc<Mutex> 支持热加载时替换。
+    pub mcp_registry: Arc<std::sync::Mutex<Option<Arc<crate::mcp::client::McpRegistry>>>>,
     /// skills 目录（<config_dir>/skills，供 Skills API 读写）
     pub skills_dir: std::path::PathBuf,
+    /// CronTool 实例（热加载 cron 时用它重新指向新调度器）。
+    /// 与 WebChannel 同款 Arc<Mutex<Option>> 槽位。
+    pub cron_tool: Arc<std::sync::Mutex<Option<Arc<crate::tools::cron::CronTool>>>>,
 }
 
 /// 生成 32 字节随机 hex token
@@ -351,17 +356,19 @@ pub async fn put_config(
     }
     *state.config.write().await = merged.clone();
 
-    // 热加载 provider + compact_provider
+    // provider 热加载（失败仅 warn，不阻断其它子系统的热加载）
     if let Err(e) = hot_reload_providers(&state, &merged).await {
         tracing::warn!(error = %e, "hot_reload_providers failed (config saved)");
-        return axum::Json(serde_json::json!({
-            "ok": true,
-            "note": "config saved but provider reload failed: ".to_string() + &e
-        }))
-        .into_response();
     }
-    axum::Json(serde_json::json!({ "ok": true, "note": "config saved and provider reloaded" }))
-        .into_response()
+
+    // 全量热加载：runtime / skills / mcp / cron / sub-agents（P4-f 轻量版）
+    let config_dir = state.config_path.parent().unwrap_or_else(|| Path::new("."));
+    let notes = reload_all(&state, &merged, &config_dir).await;
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "note": format!("config saved; {}", notes.join("; "))
+    }))
+    .into_response()
 }
 
 fn json_err(code: StatusCode, msg: &str) -> Response {
@@ -399,6 +406,77 @@ async fn hot_reload_providers(state: &AppState, new_config: &Config) -> Result<(
     agent.reload_compact_provider(new_compact).await;
     agent.reload_vision_provider(new_vision).await;
     Ok(())
+}
+
+/// 全量热加载（P4-f 轻量版）：保存配置后，除 provider 外，再热加载
+/// runtime 参数、skills、MCP 连接、cron 调度、子 Agent 定义。
+/// 进行中的 turn 不受影响（各子系统均基于 Arc/RwLock 的 snapshot 语义）。
+///
+/// 返回人类可读的加载结果清单，用于 WebUI 反馈。
+async fn reload_all(state: &AppState, merged: &Config, config_dir: &Path) -> Vec<String> {
+    let mut notes: Vec<String> = Vec::new();
+    let registry = state.registry.clone();
+
+    // 1. runtime 参数 + skills（main agent）
+    let skills = crate::skill::loader::load_skills(&config_dir.join("skills"));
+    {
+        let mut main = registry.main.lock().await;
+        main.reload_runtime(merged).await;
+        let skills_prompt = crate::skill::prompt::build_skills_prompt(&skills);
+        main.reload_skills(&skills_prompt);
+    }
+    notes.push("agent runtime + skills reloaded".into());
+
+    // 2. MCP 重连
+    let mcp_cfg = match crate::mcp::McpConfig::load(&state.mcp_path) {
+        Ok(c) => c,
+        Err(e) => {
+            notes.push(format!("mcp config load failed: {e}"));
+            // 仍继续其它子系统的热加载；mcp 配置缺失时等价于空配置
+            crate::mcp::McpConfig::default()
+        }
+    };
+    let new_mcp = Arc::new(crate::mcp::client::McpRegistry::connect_all(&mcp_cfg.server).await);
+    let mut mcp_tools: Vec<Arc<dyn crate::tools::Tool>> = Vec::new();
+    for (prefixed, def) in new_mcp.tool_defs().await {
+        mcp_tools.push(Arc::new(crate::tools::mcp::McpTool::new(
+            prefixed,
+            def,
+            new_mcp.clone(),
+        )));
+    }
+    *state.mcp_registry.lock().unwrap() = Some(new_mcp.clone());
+    registry
+        .main
+        .lock()
+        .await
+        .tools
+        .replace_mcp_tools(mcp_tools.clone());
+    for alias in registry.available_sub_agents() {
+        if let Ok(a) = registry.get(&alias) {
+            a.lock().await.tools.replace_mcp_tools(mcp_tools.clone());
+        }
+    }
+    notes.push(format!("mcp reconnected ({} tools)", mcp_tools.len()));
+
+    // 3. cron 热重载（复用已运行的调度器实例，不重启后台 ticker）
+    // 注意：先把 Option<Arc<CronHandle>> clone 出锁，避免 std::sync::MutexGuard
+    // 跨 await 存活导致 future 非 Send（axum handler 要求 Send）。
+    let cron_handle = state.cron_scheduler.lock().unwrap().clone();
+    if let Some(handle) = cron_handle {
+        match handle.reload(&state.cron_path).await {
+            Ok(()) => notes.push("cron rescheduled".into()),
+            Err(e) => notes.push(format!("cron reload failed: {e}")),
+        }
+    }
+
+    // 4. 子 Agent 重建
+    registry
+        .rebuild_sub_agents(merged, config_dir, mcp_tools, &skills)
+        .await;
+    notes.push("sub-agents rebuilt".into());
+
+    notes
 }
 
 /// 根据 runtime.compact_model 构建 compact_provider。
@@ -655,17 +733,19 @@ pub async fn put_config_raw(
     }
     *state.config.write().await = parsed.clone();
 
-    // 热加载 provider + compact_provider
+    // provider 热加载（失败仅 warn，不阻断其它子系统的热加载）
     if let Err(e) = hot_reload_providers(&state, &parsed).await {
         tracing::warn!(error = %e, "hot_reload_providers failed (config saved)");
-        return axum::Json(serde_json::json!({
-            "ok": true,
-            "note": "config saved but provider reload failed: ".to_string() + &e
-        }))
-        .into_response();
     }
-    axum::Json(serde_json::json!({ "ok": true, "note": "config saved and provider reloaded" }))
-        .into_response()
+
+    // 全量热加载：runtime / skills / mcp / cron / sub-agents（P4-f 轻量版）
+    let config_dir = state.config_path.parent().unwrap_or_else(|| Path::new("."));
+    let notes = reload_all(&state, &parsed, &config_dir).await;
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "note": format!("config saved; {}", notes.join("; "))
+    }))
+    .into_response()
 }
 
 #[derive(Serialize)]
@@ -737,9 +817,10 @@ pub async fn list_cron(
     if !authorize(&state, &headers, &q) {
         return unauthorized();
     }
-    match &state.cron_scheduler {
+    let scheduler = state.cron_scheduler.lock().unwrap().clone();
+    match scheduler {
         Some(s) => {
-            let tasks = s.list_tasks().await;
+            let tasks = s.scheduler.list_tasks().await;
             axum::Json(tasks).into_response()
         }
         None => json_err(
@@ -775,8 +856,9 @@ pub async fn trigger_cron(
     if !authorize(&state, &headers, &q) {
         return unauthorized();
     }
-    match &state.cron_scheduler {
-        Some(s) => match s.trigger(&id).await {
+    let scheduler = state.cron_scheduler.lock().unwrap().clone();
+    match scheduler {
+        Some(s) => match s.scheduler.trigger(&id).await {
             Ok(()) => axum::Json(serde_json::json!({ "ok": true })).into_response(),
             Err(e) => json_err(StatusCode::NOT_FOUND, &format!("trigger: {}", e)),
         },
@@ -858,7 +940,7 @@ pub async fn list_mcp(
     if !authorize(&state, &headers, &q) {
         return unauthorized();
     }
-    let Some(registry) = state.mcp_registry.clone() else {
+    let Some(registry) = state.mcp_registry.lock().unwrap().clone() else {
         return json_err(
             StatusCode::SERVICE_UNAVAILABLE,
             "MCP registry not available",

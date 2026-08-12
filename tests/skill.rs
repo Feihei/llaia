@@ -90,10 +90,11 @@ async fn build_state(tmp: &std::path::Path) -> AppState {
         active_ws: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         next_ws_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         cron_path: config_dir.join("cron.toml"),
-        cron_scheduler: None,
+        cron_scheduler: Arc::new(std::sync::Mutex::new(None)),
         mcp_path: config_dir.join("mcp.toml"),
-        mcp_registry: None,
+        mcp_registry: Arc::new(std::sync::Mutex::new(None)),
         skills_dir: config_dir.join("skills"),
+        cron_tool: Arc::new(std::sync::Mutex::new(None)),
     }
 }
 

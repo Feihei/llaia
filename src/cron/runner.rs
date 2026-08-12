@@ -56,10 +56,10 @@ pub async fn run_tools_mode(
         let args = substitute_placeholders(&step.args, &prev, &now);
         let tool_name = step.tool.clone();
 
-        // 取工具（克隆 Arc 避免 lock 持有跨 await）
+        // 取工具（clone 出 Arc 避免跨 await 持有 agent 锁）
         let tool = {
             let a = agent.lock().await;
-            a.tools.get(&tool_name).cloned()
+            a.tools.get(&tool_name)
         };
         let tool = match tool {
             Some(t) => t,

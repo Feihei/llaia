@@ -419,6 +419,8 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         shutdown_signal.clone(),
     ));
     web.set_mcp_registry(mcp_registry);
+    // cron_tool 注入 WebChannel，供热加载 cron 时重新指向新调度器（P4-f）
+    web.set_cron_tool(cron_tool.clone());
     let web_pusher_for_cron: std::sync::Arc<dyn crate::cron::ProactivePusher> = web.clone();
     let web_host = config.webui.host.clone();
     let web_port = config.webui.port;
@@ -434,17 +436,16 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     }
     pushers.insert("web".into(), web_pusher_for_cron);
     // cli：无持久连接，不注册 pusher（channel="cli" 的任务会用 NoopPusher 丢弃结果）
-    let _cron = match crate::cron::CronScheduler::start(&cron_path, registry.clone(), pushers).await
-    {
+    let _cron = match crate::cron::CronHandle::start(&cron_path, registry.clone(), pushers).await {
         Ok(s) => {
             tracing::info!("CronScheduler started");
-            let s = std::sync::Arc::new(s);
             // 注入给 WebChannel（共享槽，build_router 读取快照填 AppState）
             web.set_cron_scheduler(s.clone());
-            tracing::info!("CronScheduler injected into WebChannel");
+            tracing::info!("CronHandle injected into WebChannel");
             // 注入给 CronTool，让 agent 能通过工具管理 cron 任务
+            // （CronTool 需要的是下层 Arc<CronScheduler>，取其 scheduler 字段）
             if let Some(ct) = &cron_tool {
-                ct.set_scheduler(s.clone());
+                ct.set_scheduler(s.scheduler.clone());
                 tracing::info!("CronScheduler injected into CronTool");
             }
             Some(s)
@@ -737,15 +738,12 @@ pub fn load_config_or_init(config_dir: &Path) -> Result<Config> {
 /// 共享清理逻辑（ADR-0018）：停止 cron 调度器，并 abort 所有 channel task。
 /// 在 serve_cmd 退出前调用，保证 Ctrl+C 与 /api/shutdown 走同一收尾路径。
 async fn shutdown_serve(
-    cron: &Option<std::sync::Arc<crate::cron::CronScheduler>>,
+    cron: &Option<std::sync::Arc<crate::cron::CronHandle>>,
     tasks: &[tokio::task::JoinHandle<()>],
 ) {
     if let Some(sched) = cron {
-        if let Err(e) = sched.shutdown().await {
-            tracing::warn!(error = %e, "cron scheduler shutdown failed");
-        } else {
-            tracing::info!("cron scheduler stopped");
-        }
+        sched.request_stop();
+        tracing::info!("cron scheduler stopped");
     }
     for h in tasks {
         h.abort();

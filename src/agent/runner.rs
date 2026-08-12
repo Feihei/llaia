@@ -6,11 +6,11 @@ use crate::provider::{ChatMessage, ToolCall};
 use crate::tools::Tool;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
 }
 
 impl Default for ToolRegistry {
@@ -22,20 +22,37 @@ impl Default for ToolRegistry {
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: RwLock::new(HashMap::new()),
         }
     }
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+    pub fn register(&self, tool: Arc<dyn Tool>) {
+        self.tools
+            .write()
+            .unwrap()
+            .insert(tool.name().to_string(), tool);
     }
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.tools.get(name)
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.read().unwrap().get(name).cloned()
     }
     pub fn specs(&self) -> Vec<crate::provider::ToolSpec> {
-        self.tools.values().map(|t| t.spec()).collect()
+        self.tools
+            .read()
+            .unwrap()
+            .values()
+            .map(|t| t.spec())
+            .collect()
     }
     pub fn names(&self) -> Vec<String> {
-        self.tools.keys().cloned().collect()
+        self.tools.read().unwrap().keys().cloned().collect()
+    }
+    /// 替换所有 MCP 来源的工具（名称含 "__" 前缀）。
+    /// 热加载 MCP 时调用：先移除旧 MCP 工具，再注册新集合，内置/delegate/cron 工具不受影响。
+    pub fn replace_mcp_tools(&self, new: Vec<Arc<dyn Tool>>) {
+        let mut g = self.tools.write().unwrap();
+        g.retain(|k, _| !k.contains("__"));
+        for t in new {
+            g.insert(t.name().to_string(), t);
+        }
     }
 }
 

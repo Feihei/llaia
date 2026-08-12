@@ -338,6 +338,197 @@ impl CronScheduler {
             .await
             .map_err(|e| anyhow::anyhow!("shutdown cron scheduler: {}", e))
     }
+
+    /// 克隆当前已注册的 pusher 表（热重载 cron 时复用，避免重新构造）。
+    pub fn pushers_clone(&self) -> HashMap<String, Arc<dyn ProactivePusher>> {
+        self.pushers.clone()
+    }
+
+    /// 热重载任务集：复用**已运行**的调度器实例（不重启后台 ticker）。
+    ///
+    /// 与 [`CronScheduler::start`] 不同，本方法不会调用 `JobScheduler::start`
+    /// （其 future 是 `!Send`，无法在 axum handler 内 await）。它只移除全部旧
+    /// job 并按最新 cron.toml 重新 `add`，因此返回的 future 是 `Send`，可直接在
+    /// WebUI 配置保存的热加载路径里 await。
+    pub async fn reload(&self, cron_path: &Path) -> anyhow::Result<()> {
+        // 1. 清除旧 job
+        {
+            let mut job_uuids = self.job_uuids.lock().await;
+            let ids: Vec<uuid::Uuid> = job_uuids.drain().map(|(_, u)| u).collect();
+            for u in ids {
+                if let Err(e) = self.scheduler.remove(&u).await {
+                    tracing::warn!(uuid = %u, error = %e, "remove old cron job failed");
+                }
+            }
+        }
+
+        // 2. 重新加载配置并注册 enabled 任务
+        let cfg = CronConfig::load(cron_path)?;
+        let mut tasks_map: HashMap<String, CronTask> = HashMap::new();
+        let mut job_uuids_map: HashMap<String, uuid::Uuid> = HashMap::new();
+        let pushers = self.pushers.clone();
+        for task in &cfg.task {
+            tasks_map.insert(task.id.clone(), task.clone());
+            if !task.enabled {
+                tracing::info!(task = %task.id, "cron task disabled, skip");
+                continue;
+            }
+            let job = build_job(task, &pushers, &self.registry)?;
+            let uuid = self
+                .scheduler
+                .add(job)
+                .await
+                .map_err(|e| anyhow::anyhow!("add cron job '{}': {}", task.id, e))?;
+            job_uuids_map.insert(task.id.clone(), uuid);
+        }
+
+        // 3. dream 种子（与 start 同逻辑：cron.toml 无 dream 任务时补种）
+        let has_dream = tasks_map
+            .values()
+            .any(|t| t.kind.as_deref() == Some("dream"));
+        if !has_dream {
+            let dream_task = CronTask {
+                id: "dream".into(),
+                schedule: "0 4 * * *".into(),
+                mode: CronMode::Agent,
+                channel: "cli".into(),
+                enabled: true,
+                prompt: None,
+                steps: None,
+                kind: Some("dream".into()),
+                idle_minutes: Some(30),
+            };
+            tasks_map.insert(dream_task.id.clone(), dream_task.clone());
+            let job = build_job(&dream_task, &pushers, &self.registry)?;
+            let uuid = self
+                .scheduler
+                .add(job)
+                .await
+                .map_err(|e| anyhow::anyhow!("add builtin dream job: {}", e))?;
+            job_uuids_map.insert(dream_task.id.clone(), uuid);
+            tracing::info!("seeded builtin dream cron task (daily 04:00, idle>=30min)");
+        }
+
+        // 4. 更新缓存
+        *self.tasks.lock().await = tasks_map;
+        *self.job_uuids.lock().await = job_uuids_map;
+        tracing::info!("CronScheduler reloaded (hot)");
+        Ok(())
+    }
+}
+
+/// 对 `!Send` 的 tokio-cron-scheduler 的封装。
+///
+/// `tokio_cron_scheduler` 的全部异步 API（`start` / `add` / `remove`）返回的
+/// future 都是 `!Send`，因为它们在 await 点持有 `RwLock` guard。这使得无法在
+/// axum handler（要求 future: `Send`）内直接 await。本 handle 在**专属的
+/// 单线程 tokio runtime**（一个 `std::thread` + `current_thread` runtime）上
+/// 驱动调度器及其全部 `!Send` 操作，对外只暴露 `Send` 的接口：
+///
+/// - `scheduler: Arc<CronScheduler>` —— 供 handler 调用 `list_tasks` / `trigger`
+///   这类本身 `Send` 的方法（只读共享存储，不触碰 `!Send` 调度器 API）。
+/// - `reload(...)` —— 通过 channel 把请求发给专属线程，线程内 await `!Send` 的
+///   `CronScheduler::reload`（仅 `remove`/`add`，不重启 ticker），再用 oneshot
+///   把结果回传，整个对外 future 是 `Send`。
+pub struct CronHandle {
+    /// 已启动的调度器（共享存储由内部 ticker 持续读取）
+    pub scheduler: Arc<CronScheduler>,
+    /// 发往专属线程的命令通道
+    tx: tokio::sync::mpsc::UnboundedSender<CronCommand>,
+}
+
+enum CronCommand {
+    /// 热重载任务集（path 指向最新 cron.toml）；resp 回传结果
+    Reload(
+        std::path::PathBuf,
+        tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+    ),
+    /// 停止专属线程的驱动循环（drop 时也会发）
+    Stop,
+}
+
+impl Drop for CronHandle {
+    fn drop(&mut self) {
+        // 通知专属线程退出驱动循环；通道已关闭时静默忽略
+        let _ = self.tx.send(CronCommand::Stop);
+    }
+}
+
+impl CronHandle {
+    /// 在专属单线程 runtime 上启动 cron 调度器，返回可跨线程安全使用的 handle。
+    ///
+    /// 调度器内部的 ticker / 监听器均 spawn 在该专属 runtime 上，因此会随该
+    /// runtime（即专属线程）持续存活，直至收到 `Stop` 或 handle 被 drop。
+    pub async fn start(
+        cron_path: &Path,
+        registry: Arc<AgentRegistry>,
+        pushers: HashMap<String, Arc<dyn ProactivePusher>>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CronCommand>();
+        let (sched_tx, sched_rx) = tokio::sync::oneshot::channel::<Arc<CronScheduler>>();
+        let cron_path = cron_path.to_path_buf();
+
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to build cron runtime");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let sched = match CronScheduler::start(&cron_path, registry, pushers).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to start cron scheduler");
+                        return;
+                    }
+                };
+                let sched = Arc::new(sched);
+                if sched_tx.send(sched.clone()).is_err() {
+                    tracing::error!("cron scheduler handle channel closed before start");
+                    return;
+                }
+                while let Some(cmd) = rx.recv().await {
+                    match cmd {
+                        CronCommand::Reload(path, resp) => {
+                            let r = sched.reload(&path).await;
+                            let _ = resp.send(r);
+                        }
+                        CronCommand::Stop => break,
+                    }
+                }
+            });
+        });
+
+        let scheduler = sched_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("cron scheduler thread terminated before start"))?;
+        Ok(Arc::new(Self { scheduler, tx }))
+    }
+
+    /// 热重载 cron 任务集（复用已运行的调度器，Send 安全，可在 axum handler 内 await）。
+    pub async fn reload(&self, cron_path: &Path) -> anyhow::Result<()> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        if self
+            .tx
+            .send(CronCommand::Reload(cron_path.to_path_buf(), resp_tx))
+            .is_err()
+        {
+            anyhow::bail!("cron scheduler thread is not running");
+        }
+        resp_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("cron reload response channel closed"))?
+    }
+
+    /// 请求专属线程停止（随后线程退出，runtime 释放）。
+    pub fn request_stop(&self) {
+        let _ = self.tx.send(CronCommand::Stop);
+    }
 }
 
 /// 构造一个 cron Job：捕获 agent / task / pusher，到点调用 runner::run_task。

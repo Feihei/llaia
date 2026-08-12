@@ -100,6 +100,12 @@ pub struct Agent {
     /// serve 模式下 `attach_live_config` 把它换成 WebUI 共享的那个 Arc，
     /// 于是 `PUT /api/config` 写入后下一轮 `to_messages` 立即读到新值。
     live_config: Arc<RwLock<Config>>,
+    /// 系统提示词静态前缀（SOUL/USER/MEMORY/WORKSPACE），skills 段在其后追加。
+    /// 热加载 skills 时只重建 skills 段，不动前缀（见 `reload_skills`）。
+    system_prompt_base: String,
+    /// provider 是否非 native tool calling（标签降级模式）。
+    /// 决定 system 末尾是否追加 tool instructions（热加载 skills 时需重建）。
+    system_has_tool_instructions: bool,
 }
 
 /// 单次工具调用记录（用于 delegate 提取产出文件）
@@ -156,6 +162,8 @@ impl Agent {
             turn_tool_calls: Vec::new(),
             config: Arc::new(config.clone()),
             live_config: Arc::new(RwLock::new(config.clone())),
+            system_prompt_base: String::new(),
+            system_has_tool_instructions: false,
         }
     }
 
@@ -227,6 +235,41 @@ impl Agent {
     pub async fn reload_vision_provider(&self, new_provider: Option<Arc<dyn Provider>>) {
         let mut guard = self.vision_provider.write().await;
         *guard = new_provider;
+    }
+
+    /// 初始化系统提示词元数据（构建期由 build_single_agent 调用，供热加载 skills 重建用）。
+    /// 仅记录前缀与 tool-instructions 标记，运行期 `reload_skills` 据此重建。
+    pub(crate) fn init_system_meta(&mut self, base: String, has_tool_instructions: bool) {
+        self.system_prompt_base = base;
+        self.system_has_tool_instructions = has_tool_instructions;
+    }
+
+    /// 热加载 runtime 参数（permission / context_threshold / max_iterations）。
+    /// 时区由 live_config 通道已即时生效，这里只覆盖其余 runtime 字段。
+    pub async fn reload_runtime(&mut self, config: &Config) {
+        let perm = config
+            .runtime
+            .permission
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        *self.permission_profile.write().await = perm;
+        self.context_threshold = config.runtime.context_threshold;
+        self.max_iterations = config.runtime.max_iterations;
+    }
+
+    /// 热加载 skills：重建 system 提示词的 skills 段（前缀与 tool instructions 不变）。
+    pub fn reload_skills(&mut self, skills_prompt: &str) {
+        let mut sys = self.system_prompt_base.clone();
+        if !skills_prompt.is_empty() {
+            sys.push_str("\n\n");
+            sys.push_str(skills_prompt);
+        }
+        if self.system_has_tool_instructions {
+            sys.push_str(&crate::tool_call::prompt::build_tool_instructions(
+                &self.tools.specs(),
+            ));
+        }
+        self.context.system = sys;
     }
 
     /// 是否处于降级模式（无 provider）。
