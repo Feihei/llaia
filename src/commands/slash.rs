@@ -31,7 +31,7 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move <path>|/cd <path> /config /dream /dream-rollback /help"
+            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move [<path>|home] (alias /cd) — 无参数或 /move home 恢复到原始 workspace /config /dream /dream-rollback /help"
                 .into(),
         )),
         "/permission" => {
@@ -71,12 +71,22 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
             }
         }
         "/move" | "/cd" => {
-            if args.is_empty() {
-                let ws = agent.workspace_root.read().await.clone();
+            let arg = args.trim();
+            // 无参数 / home / ~ / - ：快速恢复到原始（家目录）workspace，无需审批
+            if arg.is_empty() || arg == "home" || arg == "~" || arg == "-" {
+                let home = agent.workspace.clone();
+                let current = agent.workspace_root.read().await.clone();
+                if current == home {
+                    return Ok(SlashOutcome::Handled(format!(
+                        "workspace 已是原始目录：{}",
+                        home.display()
+                    )));
+                }
+                agent.set_workspace(home.clone()).await;
                 return Ok(SlashOutcome::Handled(format!(
-                    "current workspace: {}\nusage: {} <absolute-or-relative-path>",
-                    ws.display(),
-                    cmd
+                    "[已恢复到原始 workspace] {}（之前：{}）",
+                    home.display(),
+                    current.display()
                 )));
             }
             match validate_move_target(args) {

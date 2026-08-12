@@ -75,7 +75,8 @@ pub struct Agent {
     pub approval_gate: Arc<crate::agent::approval::ApprovalGate>,
     /// 权限档位（P4-d）：read-only / default / yolo，运行时可切换
     pub permission_profile: Arc<RwLock<String>>,
-    /// Agent 工作区根（工具能访问的"挂载根"）
+    /// Agent 家目录（固定，不随 /move 变化）：SOUL/USER/MEMORY/sessions.db/uploads 都在这里。
+    /// 与 workspace_root（文件/终端工具的实时作用域，/move 会改变它）区分开，避免记忆/历史串味。
     pub workspace: std::path::PathBuf,
     /// 与文件/终端工具共享的工作区根（Arc<RwLock>），/move 一处更新、所有工具即时生效
     pub workspace_root: Arc<RwLock<std::path::PathBuf>>,
@@ -163,11 +164,10 @@ impl Agent {
         *self.permission_profile.write().await = profile.to_string();
     }
 
-    /// 切换工作区根（/move 命令）。同步更新 workspace 快照与共享 root，
-    /// 文件/终端工具通过 workspace_root 即时生效。
+    /// 切换工具作用域（/move 命令）：只更新 workspace_root（文件/终端工具实时生效），
+    /// 不动 workspace（agent 家目录，SOUL/USER/MEMORY/sessions.db 所在，固定不变）。
     pub async fn set_workspace(&mut self, new_workspace: std::path::PathBuf) {
-        *self.workspace_root.write().await = new_workspace.clone();
-        self.workspace = new_workspace;
+        *self.workspace_root.write().await = new_workspace;
     }
 
     /// 接入共享的实时配置（serve 模式下由 `serve_cmd` 注入 WebUI 持有的同一个 Arc）。
@@ -582,7 +582,7 @@ impl Agent {
 
             let ctx = crate::agent::approval::ApprovalContext {
                 profile: self.permission_profile.read().await.clone(),
-                workspace: self.workspace.clone(),
+                workspace: self.workspace_root.read().await.clone(),
                 gate: self.approval_gate.clone(),
                 agent_alias: self.alias.clone(),
                 audit: self.audit.clone(),
