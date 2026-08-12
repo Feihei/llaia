@@ -68,6 +68,7 @@ async fn build_state(tmp: &std::path::Path) -> AppState {
         "sys".into(),
         8192,
         workspace.clone(),
+        Arc::new(tokio::sync::RwLock::new(workspace.clone())),
         config_dir.clone(),
         true,
         "main".into(),

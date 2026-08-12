@@ -14,6 +14,7 @@ const CONFIG_TEMPLATE: &str = r#"# LLAIA 配置文件
 [runtime]
 context_threshold = 0.7
 max_iterations = 10
+# permission = "default"  # 可选：权限档位 default / read-only / yolo；未设置默认 default。运行时也可用 /permission 切换（不落盘）
 # timezone = "Asia/Shanghai"     # 可选：IANA 时区名（如 Asia/Shanghai / America/New_York）；未设置则跟随系统时区
 # compact_model = "default.qwen"  # 可选：用更便宜的模型跑上下文压缩，未设置时复用主模型
 # vision_model = "default.gpt-4o"  # 可选：主模型无多模态时，用此模型描述图片；未设置则图片直接发给主模型
@@ -518,6 +519,10 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
             }
         }
         None => println!("runtime.timezone: <unset> (follows system local time)"),
+    }
+    match &cfg.runtime.permission {
+        Some(p) => println!("runtime.permission: {}", p),
+        None => println!("runtime.permission: <unset> (effective: default)"),
     }
 
     // provider 配置检查：无 [provider.<id>] section 时 warn（不 error，serve 可降级启动）

@@ -46,6 +46,11 @@ pub struct RuntimeConfig {
     /// 未设置时：图片直接发给主模型（主模型不支持则由 provider 决定如何处理）。
     #[serde(default)]
     pub vision_model: Option<String>,
+    /// 权限档位（P4-d）：read-only / default / yolo。
+    /// 决定哪些有副作用的操作需要交互式审批，以及审批范围。
+    /// None（默认）= "default"。非法值 warn + 置 None。
+    #[serde(default)]
+    pub permission: Option<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -56,6 +61,7 @@ impl Default for RuntimeConfig {
             compact_model: None,
             timezone: None,
             vision_model: None,
+            permission: None,
         }
     }
 }
@@ -469,6 +475,19 @@ impl Config {
                     "runtime.timezone is not a valid IANA name, falling back to system local time"
                 );
                 config.runtime.timezone = None;
+            }
+        }
+        // permission 档位校验：非法值降级为 default，而不是让每轮都按未知档位处理
+        if let Some(p) = &config.runtime.permission {
+            let v = p.trim().to_lowercase();
+            if v.is_empty() || !matches!(v.as_str(), "default" | "read-only" | "yolo") {
+                tracing::warn!(
+                    permission = p.as_str(),
+                    "runtime.permission is not one of default/read-only/yolo, falling back to default"
+                );
+                config.runtime.permission = None;
+            } else {
+                config.runtime.permission = Some(v);
             }
         }
         // agent fallback 链引用校验：无效项移除（备用链是容错手段，不应阻塞启动）

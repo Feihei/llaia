@@ -177,6 +177,22 @@ impl DingtalkChannel {
                     let _ = self.send_markdown(&webhook, &m).await;
                 }
                 crate::commands::slash::SlashOutcome::NotSlash => {}
+                crate::commands::slash::SlashOutcome::Resume { notice, message } => {
+                    let _ = self.send_markdown(&webhook, &notice).await;
+                    let sink = DingtalkSink {
+                        dt: Arc::clone(self),
+                        webhook: webhook.clone(),
+                        buffer: String::new(),
+                    };
+                    let _ = run_turn(
+                        agent.clone(),
+                        crate::provider::ChatMessage::user(&message),
+                        "dingtalk".into(),
+                        Box::new(sink),
+                        stop.clone(),
+                    )
+                    .await;
+                }
             }
             return Ok(());
         }

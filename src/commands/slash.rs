@@ -1,12 +1,20 @@
+use crate::agent::approval::{format_move_prompt, validate_move_target};
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::cron::{CronMode, CronTask};
 use anyhow::Result;
+use serde_json::json;
 
 pub enum SlashOutcome {
     Handled(String),
     Exit,
     NotSlash,
+    /// 解决待定审批后，启动一轮 continuation turn 让模型基于结果继续。
+    /// `notice` 立即呈现给用户（如工具结果摘要），`message` 作为 continuation 的用户消息喂给模型。
+    Resume {
+        notice: String,
+        message: String,
+    },
 }
 
 /// 处理斜杠命令，返回 (outcome, 输出文本)。
@@ -23,9 +31,76 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /config /dream /dream-rollback /help"
+            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move <path>|/cd <path> /config /dream /dream-rollback /help"
                 .into(),
         )),
+        "/permission" => {
+            if args.is_empty() {
+                let cur = agent.permission_profile.read().await.clone();
+                return Ok(SlashOutcome::Handled(format!(
+                    "current permission profile: {}\nusage: /permission <read-only|default|yolo>",
+                    cur
+                )));
+            }
+            let p = args.to_lowercase();
+            if !matches!(p.as_str(), "read-only" | "default" | "yolo") {
+                return Ok(SlashOutcome::Handled(
+                    "invalid profile, use one of: read-only | default | yolo".into(),
+                ));
+            }
+            agent.set_permission_profile(&p).await;
+            Ok(SlashOutcome::Handled(format!("[permission profile set to {}]", p)))
+        }
+        "/ok" | "/deny" => {
+            if args.is_empty() {
+                return Ok(SlashOutcome::Handled(format!(
+                    "usage: {} <approval-id>",
+                    cmd
+                )));
+            }
+            let approve = cmd == "/ok";
+            match resolve_approval(agent, args, approve).await {
+                Ok(Some((notice, message))) => {
+                    Ok(SlashOutcome::Resume { notice, message })
+                }
+                Ok(None) => Ok(SlashOutcome::Handled(format!(
+                    "[{}] 没有待确认的请求 {}",
+                    cmd, args
+                ))),
+                Err(e) => Ok(SlashOutcome::Handled(format!("[{} failed: {}]", cmd, e))),
+            }
+        }
+        "/move" | "/cd" => {
+            if args.is_empty() {
+                let ws = agent.workspace_root.read().await.clone();
+                return Ok(SlashOutcome::Handled(format!(
+                    "current workspace: {}\nusage: {} <absolute-or-relative-path>",
+                    ws.display(),
+                    cmd
+                )));
+            }
+            match validate_move_target(args) {
+                Ok(target) => {
+                    let id = agent
+                        .approval_gate
+                        .register(
+                            "__move_workspace",
+                            &json!({ "path": target.to_string_lossy() }),
+                            "move",
+                            "cli",
+                            &agent.alias,
+                            false,
+                        )
+                        .await;
+                    let prompt = format_move_prompt(&target, &id);
+                    Ok(SlashOutcome::Handled(format!(
+                        "[已登记切换请求] 请回复 `/ok {}` 确认切换，或 `/deny {}` 取消。{}",
+                        id, id, prompt
+                    )))
+                }
+                Err(e) => Ok(SlashOutcome::Handled(format!("[move failed: {}]", e))),
+            }
+        }
         "/new" => {
             agent.context.clear();
             agent.context.summary = None;
@@ -152,6 +227,72 @@ tools: {:?}
         }
         _ => Ok(SlashOutcome::Handled(format!("[unknown command: {}]", cmd))),
     }
+}
+
+/// 解析一条待确认审批：从门控取出 pending，按批准/拒绝决定执行与否。
+///
+/// - 普通工具：批准则 `execute_with_events` 真正执行，拒绝则返回拒绝提示。
+/// - `__move_workspace`：批准则把 agent 工作目录切到目标，拒绝则不动。
+///
+/// 返回 `Some((notice, message))` 时，调用方应启动一次 continuation turn，
+/// 把 `message` 作为用户消息喂给模型，让其基于工具结果继续。
+async fn resolve_approval(
+    agent: &mut Agent,
+    id: &str,
+    approve: bool,
+) -> Result<Option<(String, String)>> {
+    let pending = agent.approval_gate.take(id).await;
+    let pending = match pending {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    if pending.tool_name == "__move_workspace" {
+        if approve {
+            let target = validate_move_target(
+                pending
+                    .args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            )?;
+            agent.set_workspace(target.clone()).await;
+            let notice = format!("[已切换工作目录到 {}]", target.display());
+            return Ok(Some((notice.clone(), notice)));
+        } else {
+            let notice = "[已拒绝] 切换工作目录（保持原 workspace）".to_string();
+            return Ok(Some((notice.clone(), notice)));
+        }
+    }
+
+    let tool = match agent.tools.get(&pending.tool_name) {
+        Some(t) => t.clone(),
+        None => {
+            return Ok(Some((
+                format!("[工具不存在: {}]", pending.tool_name),
+                String::new(),
+            )))
+        }
+    };
+
+    let result = if approve {
+        match tool
+            .execute_with_events(&pending.args, &pending.channel, None)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => format!("[error: {}]", e),
+        }
+    } else {
+        format!("用户拒绝执行：{}", pending.tool_name)
+    };
+
+    let notice = format!(
+        "[{}] {}",
+        if approve { "已批准" } else { "已拒绝" },
+        pending.tool_name
+    );
+    Ok(Some((notice, result)))
 }
 
 /// 把 config 中所有 provider/model 组合 flatten 成有序 model ref 列表
@@ -315,6 +456,9 @@ mod tests {
             "sys".into(),
             8192,
             "/tmp/llaia-test/workspace".into(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/tmp/llaia-test/workspace",
+            ))),
             "/tmp/llaia-test".into(),
             true,
             "main".into(),

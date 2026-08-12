@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 /// CLI 输出 sink：即时打印到 stdout
 struct CliSink;
@@ -163,6 +163,23 @@ impl Channel for CliChannel {
                     SlashOutcome::Exit => break,
                     SlashOutcome::Handled(msg) => {
                         println!("{}", msg);
+                        continue;
+                    }
+                    SlashOutcome::Resume { notice, message } => {
+                        // 审批已解决：先回显结果摘要，再跑一轮 continuation turn
+                        // 让模型基于工具结果继续（message 即工具输出的用户消息）。
+                        println!("{}", notice);
+                        let stop = Arc::new(Notify::new());
+                        let sink = Box::new(CliSink);
+                        let agent_clone = agent.clone();
+                        let _ = run_turn(
+                            agent_clone,
+                            crate::provider::ChatMessage::user(&message),
+                            "cli".into(),
+                            sink,
+                            stop.clone(),
+                        )
+                        .await;
                         continue;
                     }
                     SlashOutcome::NotSlash => {} // 不会到这里（已 starts_with '/'）
@@ -306,6 +323,8 @@ async fn build_single_agent(
     // workspace 自动推导（忽略配置中的 workspace 字段）
     let workspace = agent_cfg.derive_workspace(config_dir, alias);
     std::fs::create_dir_all(&workspace).ok();
+    // 与文件/终端工具共享的工作区根（P4-d /move 一处更新、所有工具即时生效）
+    let workspace_root = Arc::new(RwLock::new(workspace.clone()));
 
     let soul_path = workspace.join("SOUL.md");
     let user_path = workspace.join("USER.md");
@@ -397,16 +416,16 @@ async fn build_single_agent(
     let skills_dir = config_dir.join("skills");
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(FileRead::new(
-            workspace.clone(),
+            workspace_root.clone(),
             is_main,
             Some(skills_dir.clone()),
         )),
-        Arc::new(FileWrite::new(workspace.clone(), is_main)),
-        Arc::new(FileEdit::new(workspace.clone(), is_main)),
+        Arc::new(FileWrite::new(workspace_root.clone(), is_main)),
+        Arc::new(FileEdit::new(workspace_root.clone(), is_main)),
         Arc::new(Terminal::new(
             config.tools.terminal.command_policy.clone(),
             config.tools.terminal.command_whitelist.clone(),
-            workspace.clone(),
+            workspace_root.clone(),
         )),
         Arc::new(WebFetch::new()?),
         Arc::new(
@@ -517,6 +536,7 @@ async fn build_single_agent(
         system_prompt,
         context_size,
         workspace.clone(),
+        workspace_root,
         config_dir.to_path_buf(),
         is_main,
         alias.to_string(),

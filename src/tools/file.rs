@@ -4,24 +4,30 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct FileRead {
-    workspace: PathBuf,
+    workspace: Arc<RwLock<PathBuf>>,
     is_main: bool,
     /// skills 目录（<config_dir>/skills）：SKILL.md 特殊放行用，None 时不放行
     skills_dir: Option<PathBuf>,
 }
 pub struct FileWrite {
-    workspace: PathBuf,
+    workspace: Arc<RwLock<PathBuf>>,
     is_main: bool,
 }
 pub struct FileEdit {
-    workspace: PathBuf,
+    workspace: Arc<RwLock<PathBuf>>,
     is_main: bool,
 }
 
 impl FileRead {
-    pub fn new(workspace: PathBuf, is_main: bool, skills_dir: Option<PathBuf>) -> Self {
+    pub fn new(
+        workspace: Arc<RwLock<PathBuf>>,
+        is_main: bool,
+        skills_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             workspace,
             is_main,
@@ -30,12 +36,12 @@ impl FileRead {
     }
 }
 impl FileWrite {
-    pub fn new(workspace: PathBuf, is_main: bool) -> Self {
+    pub fn new(workspace: Arc<RwLock<PathBuf>>, is_main: bool) -> Self {
         Self { workspace, is_main }
     }
 }
 impl FileEdit {
-    pub fn new(workspace: PathBuf, is_main: bool) -> Self {
+    pub fn new(workspace: Arc<RwLock<PathBuf>>, is_main: bool) -> Self {
         Self { workspace, is_main }
     }
 }
@@ -72,10 +78,11 @@ impl Tool for FileRead {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'path' argument"))?;
+        let ws = self.workspace.read().await;
         // 特殊放行：skills 目录内的 SKILL.md（位于 agent workspace 之外，ADR-0015）
         if let Some(skills_dir) = &self.skills_dir {
             if let Some(skill_path) =
-                crate::skill::loader::resolve_skill_path(skills_dir, &self.workspace, path)
+                crate::skill::loader::resolve_skill_path(skills_dir, &ws, path)
             {
                 let content = tokio::fs::read_to_string(&skill_path)
                     .await
@@ -84,11 +91,11 @@ impl Tool for FileRead {
             }
         }
         let extra = if self.is_main {
-            extra_readable_for_main(&self.workspace)
+            extra_readable_for_main(&ws)
         } else {
             None
         };
-        let resolved = path_guard::validate_path(&self.workspace, path, extra.as_deref())?;
+        let resolved = path_guard::validate_path(&ws, path, extra.as_deref())?;
         let content = tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| anyhow!("read {:?}: {}", resolved, e))?;
@@ -115,7 +122,7 @@ impl Tool for FileWrite {
         })
     }
     fn requires_confirm(&self) -> bool {
-        false
+        true
     }
     async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
         let path = args
@@ -127,10 +134,11 @@ impl Tool for FileWrite {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'content'"))?;
 
+        let ws = self.workspace.read().await;
         // 主 agent 写 subagent/ 路径时拒绝（.inbox/ 例外由 delegate 系统层处理，不经 file 工具）
-        let resolved = path_guard::validate_path(&self.workspace, path, None)?;
+        let resolved = path_guard::validate_path(&ws, path, None)?;
         if self.is_main {
-            let subagent_dir = self.workspace.join("subagent");
+            let subagent_dir = ws.join("subagent");
             if resolved.starts_with(&subagent_dir) {
                 anyhow::bail!("main agent cannot write to sub-agent workspace: {}", path);
             }
@@ -170,7 +178,7 @@ impl Tool for FileEdit {
         })
     }
     fn requires_confirm(&self) -> bool {
-        false
+        true
     }
     async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
         let path = args
@@ -186,9 +194,10 @@ impl Tool for FileEdit {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'new_string'"))?;
 
-        let resolved = path_guard::validate_path(&self.workspace, path, None)?;
+        let ws = self.workspace.read().await;
+        let resolved = path_guard::validate_path(&ws, path, None)?;
         if self.is_main {
-            let subagent_dir = self.workspace.join("subagent");
+            let subagent_dir = ws.join("subagent");
             if resolved.starts_with(&subagent_dir) {
                 anyhow::bail!("main agent cannot write to sub-agent workspace: {}", path);
             }
@@ -224,14 +233,16 @@ impl Tool for FileEdit {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
     use tempfile::tempdir;
+    use tokio::sync::RwLock;
 
     #[tokio::test]
     async fn test_file_read_write() {
         let ws = tempdir().unwrap();
         let ws_path = ws.path().to_path_buf();
         std::fs::write(ws_path.join("test.txt"), "hello world").unwrap();
-        let tool = FileRead::new(ws_path, true, None);
+        let tool = FileRead::new(Arc::new(RwLock::new(ws_path)), true, None);
         let result = tool
             .execute(&json!({"path": "test.txt"}), "cli")
             .await
@@ -243,13 +254,13 @@ mod tests {
     async fn test_workspace_boundary_blocks_parent_traversal() {
         let ws = tempdir().unwrap();
         let ws_path = ws.path().to_path_buf();
-        let write_tool = FileWrite::new(ws_path.clone(), true);
+        let write_tool = FileWrite::new(Arc::new(RwLock::new(ws_path.clone())), true);
         write_tool
             .execute(&json!({"path": "inside.txt", "content": "ok"}), "cli")
             .await
             .unwrap();
 
-        let read_tool = FileRead::new(ws_path, true, None);
+        let read_tool = FileRead::new(Arc::new(RwLock::new(ws_path)), true, None);
         let escaped = read_tool
             .execute(&json!({"path": "../outside.txt"}), "cli")
             .await;
@@ -264,7 +275,7 @@ mod tests {
         std::fs::create_dir_all(&subagent_dir).unwrap();
         std::fs::write(subagent_dir.join("result.md"), "sub output").unwrap();
 
-        let tool = FileRead::new(ws_path, true, None);
+        let tool = FileRead::new(Arc::new(RwLock::new(ws_path)), true, None);
         let result = tool
             .execute(&json!({"path": "subagent/coder/result.md"}), "cli")
             .await;
@@ -278,7 +289,7 @@ mod tests {
         let ws_path = ws.path().to_path_buf();
         std::fs::create_dir_all(ws_path.join("subagent").join("coder")).unwrap();
 
-        let tool = FileWrite::new(ws_path, true);
+        let tool = FileWrite::new(Arc::new(RwLock::new(ws_path)), true);
         let result = tool
             .execute(
                 &json!({"path": "subagent/coder/evil.txt", "content": "hack"}),
@@ -303,7 +314,7 @@ mod tests {
         std::fs::create_dir_all(&searcher_ws).unwrap();
         std::fs::write(searcher_ws.join("secret.txt"), "secret").unwrap();
 
-        let tool = FileRead::new(coder_ws, false, None);
+        let tool = FileRead::new(Arc::new(RwLock::new(coder_ws)), false, None);
         let result = tool
             .execute(&json!({"path": "../searcher/secret.txt"}), "cli")
             .await;
@@ -326,7 +337,11 @@ mod tests {
         .unwrap();
         std::fs::write(skill_dir.join("secret.txt"), "secret").unwrap();
 
-        let tool = FileRead::new(ws_path, true, Some(skills_dir.clone()));
+        let tool = FileRead::new(
+            Arc::new(RwLock::new(ws_path)),
+            true,
+            Some(skills_dir.clone()),
+        );
         // SKILL.md 可读（绝对路径）
         let result = tool
             .execute(
@@ -345,7 +360,11 @@ mod tests {
             .await;
         assert!(result.is_err());
         // 未配 skills_dir 时 SKILL.md 也拒绝
-        let tool_no_skills = FileRead::new(root.path().join("workspace"), true, None);
+        let tool_no_skills = FileRead::new(
+            Arc::new(RwLock::new(root.path().join("workspace"))),
+            true,
+            None,
+        );
         let result = tool_no_skills
             .execute(
                 &json!({"path": skill_dir.join("SKILL.md").to_str().unwrap()}),

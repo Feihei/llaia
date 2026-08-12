@@ -567,6 +567,35 @@ impl QqChannel {
                 crate::commands::slash::SlashOutcome::NotSlash => {
                     // 不会走到这里（已检查 starts_with '/'）
                 }
+                crate::commands::slash::SlashOutcome::Resume { notice, message } => {
+                    let _ = self
+                        .send_c2c_message(user_openid, &notice, Some(msg_id.as_str()))
+                        .await;
+                    let stop = Arc::new(Notify::new());
+                    {
+                        let mut stops = self.running_stops.lock().await;
+                        stops.insert(user_openid.to_string(), stop.clone());
+                    }
+                    let sink = Box::new(QqSink {
+                        qq: self.clone(),
+                        user_openid: user_openid.to_string(),
+                        msg_id: msg_id.to_string(),
+                        buffer: String::new(),
+                    });
+                    let turn_result = run_turn(
+                        agent.clone(),
+                        crate::provider::ChatMessage::user(&message),
+                        "qq".into(),
+                        sink,
+                        stop,
+                    )
+                    .await;
+                    {
+                        let mut stops = self.running_stops.lock().await;
+                        stops.remove(user_openid);
+                    }
+                    turn_result?;
+                }
             }
             return Ok(());
         }

@@ -450,6 +450,22 @@ impl WechatChannel {
                     let _ = self.send_text(&from_user_id, &m).await;
                 }
                 crate::commands::slash::SlashOutcome::NotSlash => {}
+                crate::commands::slash::SlashOutcome::Resume { notice, message } => {
+                    let _ = self.send_text(&from_user_id, &notice).await;
+                    let sink = WechatSink {
+                        wx: Arc::clone(self),
+                        user_id: from_user_id.clone(),
+                        buffer: String::new(),
+                    };
+                    let _ = run_turn(
+                        agent.clone(),
+                        crate::provider::ChatMessage::user(&message),
+                        "wechat".into(),
+                        Box::new(sink),
+                        stop.clone(),
+                    )
+                    .await;
+                }
             }
             return Ok(());
         }

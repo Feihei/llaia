@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod context;
 pub mod registry;
 pub mod runner;
@@ -68,9 +69,16 @@ pub struct Agent {
     pub context_threshold: f64,
     pub max_iterations: u32,
     /// 全局 confirm_mode（none / always / session），不再 per-channel
+    /// [deprecated] P4-d 起由 permission profile 取代，保留字段仅为向后兼容
     pub confirm_mode: String,
+    /// 审批门控（P4-d）：独立锁，保存待确认的审批请求
+    pub approval_gate: Arc<crate::agent::approval::ApprovalGate>,
+    /// 权限档位（P4-d）：read-only / default / yolo，运行时可切换
+    pub permission_profile: Arc<RwLock<String>>,
     /// Agent 工作区根（工具能访问的"挂载根"）
     pub workspace: std::path::PathBuf,
+    /// 与文件/终端工具共享的工作区根（Arc<RwLock>），/move 一处更新、所有工具即时生效
+    pub workspace_root: Arc<RwLock<std::path::PathBuf>>,
     /// 配置根目录（~/.llaia/），agent 工具不可访问，但用于推导路径
     pub config_dir: std::path::PathBuf,
     /// 是否主 agent（决定能否读 subagent/）
@@ -113,11 +121,17 @@ impl Agent {
         system_prompt: String,
         context_size: usize,
         workspace: std::path::PathBuf,
+        workspace_root: Arc<RwLock<std::path::PathBuf>>,
         config_dir: std::path::PathBuf,
         is_main: bool,
         alias: String,
         audit: Option<Arc<crate::audit::AuditLog>>,
     ) -> Self {
+        let permission = config
+            .runtime
+            .permission
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
         Self {
             provider: Arc::new(RwLock::new(provider)),
             compact_provider: Arc::new(RwLock::new(compact_provider)),
@@ -130,7 +144,10 @@ impl Agent {
             context_threshold: config.runtime.context_threshold,
             max_iterations: config.runtime.max_iterations,
             confirm_mode: config.channels.qq.confirm_mode.clone(),
-            workspace,
+            approval_gate: crate::agent::approval::ApprovalGate::new(),
+            permission_profile: Arc::new(RwLock::new(permission)),
+            workspace: workspace.clone(),
+            workspace_root,
             config_dir,
             is_main,
             alias,
@@ -139,6 +156,18 @@ impl Agent {
             config: Arc::new(config.clone()),
             live_config: Arc::new(RwLock::new(config.clone())),
         }
+    }
+
+    /// 运行时切换权限档位（/permission 命令）。不写 config.toml。
+    pub async fn set_permission_profile(&self, profile: &str) {
+        *self.permission_profile.write().await = profile.to_string();
+    }
+
+    /// 切换工作区根（/move 命令）。同步更新 workspace 快照与共享 root，
+    /// 文件/终端工具通过 workspace_root 即时生效。
+    pub async fn set_workspace(&mut self, new_workspace: std::path::PathBuf) {
+        *self.workspace_root.write().await = new_workspace.clone();
+        self.workspace = new_workspace;
     }
 
     /// 接入共享的实时配置（serve 模式下由 `serve_cmd` 注入 WebUI 持有的同一个 Arc）。
@@ -551,16 +580,15 @@ impl Agent {
                 });
             }
 
-            let tool_msgs = execute_tool_calls(
-                &self.tools,
-                &calls,
-                channel,
-                &self.confirm_mode,
-                &self.alias,
-                self.audit.clone(),
-                Some(&event_tx),
-            )
-            .await?;
+            let ctx = crate::agent::approval::ApprovalContext {
+                profile: self.permission_profile.read().await.clone(),
+                workspace: self.workspace.clone(),
+                gate: self.approval_gate.clone(),
+                agent_alias: self.alias.clone(),
+                audit: self.audit.clone(),
+            };
+            let (tool_msgs, deferred) =
+                execute_tool_calls(&self.tools, &calls, channel, &ctx, Some(&event_tx)).await?;
             for msg in tool_msgs.iter() {
                 let text = msg.content.as_text();
                 let _ = event_tx
@@ -575,6 +603,13 @@ impl Agent {
             }
 
             tracing::info!(iter = i, "tool iteration done");
+
+            // 有待确认请求：本轮暂停，等待用户 /ok /deny 解析后再续跑，
+            // 不继续调用模型，避免重复触发同一审批。
+            if deferred {
+                let _ = event_tx.send(TurnEvent::Done).await;
+                return Ok(iter_text);
+            }
 
             // 工具执行后检测用户中止：保存已完成的工具结果，提前返回
             if event_tx.is_closed() {
@@ -682,6 +717,9 @@ mod tests {
             "test system".into(),
             8192,
             std::path::PathBuf::from("/tmp/llaia-test/workspace"),
+            Arc::new(RwLock::new(std::path::PathBuf::from(
+                "/tmp/llaia-test/workspace",
+            ))),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),
@@ -1075,6 +1113,9 @@ mod tests {
             "sub soul".into(),
             8192,
             std::path::PathBuf::from("/tmp/llaia-test/workspace/subagent/coder"),
+            Arc::new(RwLock::new(std::path::PathBuf::from(
+                "/tmp/llaia-test/workspace/subagent/coder",
+            ))),
             std::path::PathBuf::from("/tmp/llaia-test"),
             false,
             "coder".into(),
@@ -1119,6 +1160,7 @@ mod tests {
             "main soul".into(),
             8192,
             main_workspace.clone(),
+            Arc::new(RwLock::new(main_workspace.clone())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),

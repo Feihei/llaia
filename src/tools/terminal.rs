@@ -3,33 +3,27 @@ use crate::tools::Tool;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct Terminal {
     pub command_policy: String,
     pub command_whitelist: Vec<String>,
-    pub workspace: PathBuf,
+    pub workspace: Arc<RwLock<PathBuf>>,
 }
 
 impl Terminal {
-    pub fn new(command_policy: String, command_whitelist: Vec<String>, workspace: PathBuf) -> Self {
+    pub fn new(
+        command_policy: String,
+        command_whitelist: Vec<String>,
+        workspace: Arc<RwLock<PathBuf>>,
+    ) -> Self {
         Self {
             command_policy,
             command_whitelist,
             workspace,
         }
-    }
-
-    /// CLI 确认提示（静态方法，供 runner.rs 调用）
-    pub fn prompt_confirm(command: &str) -> bool {
-        use std::io::{self, BufRead, Write};
-        print!("[confirm] run `{}`? (y/N): ", command);
-        io::stdout().flush().ok();
-        let mut line = String::new();
-        if io::stdin().lock().read_line(&mut line).is_err() {
-            return false;
-        }
-        line.trim().eq_ignore_ascii_case("y")
     }
 
     /// 命令策略校验
@@ -54,12 +48,12 @@ impl Terminal {
     }
 
     /// 三层路径防御
-    fn check_path_safety(&self, command: &str) -> Result<()> {
+    fn check_path_safety(&self, command: &str, workspace: &Path) -> Result<()> {
         // 第一层：shell 包装拒绝
         path_guard::check_shell_wrappers(command)?;
 
         // 第二层 + 第三层：路径白名单 + 黑名单兜底
-        path_guard::validate_command_paths(command, &self.workspace)?;
+        path_guard::validate_command_paths(command, workspace)?;
 
         Ok(())
     }
@@ -91,22 +85,24 @@ impl Tool for Terminal {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'command'"))?;
 
+        let workspace = self.workspace.read().await.clone();
+
         // 命令策略校验
         self.check_command_policy(command)?;
 
         // 三层路径防御
-        self.check_path_safety(command)?;
+        self.check_path_safety(command, &workspace)?;
 
         #[cfg(windows)]
         let output = tokio::process::Command::new("cmd")
             .args(["/C", command])
-            .current_dir(&self.workspace)
+            .current_dir(&workspace)
             .output()
             .await;
         #[cfg(not(windows))]
         let output = tokio::process::Command::new("sh")
             .args(["-c", command])
-            .current_dir(&self.workspace)
+            .current_dir(&workspace)
             .output()
             .await;
 
@@ -131,7 +127,9 @@ impl Tool for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::sync::RwLock;
 
     fn make_workspace() -> (TempDir, PathBuf) {
         let t = TempDir::new().unwrap();
@@ -139,10 +137,14 @@ mod tests {
         (t, p)
     }
 
+    fn term(policy: &str, ws: PathBuf) -> Terminal {
+        Terminal::new(policy.into(), vec![], Arc::new(RwLock::new(ws)))
+    }
+
     #[test]
     fn test_blacklist_blocks_dangerous_command() {
         let (_g, ws) = make_workspace();
-        let t = Terminal::new("blacklist".into(), vec![], ws);
+        let t = term("blacklist", ws);
         assert!(t.check_command_policy("rm -rf /").is_err());
         assert!(t.check_command_policy("sudo rm file").is_err());
         assert!(t.check_command_policy("ls -la").is_ok());
@@ -151,7 +153,11 @@ mod tests {
     #[test]
     fn test_whitelist_blocks_unlisted() {
         let (_g, ws) = make_workspace();
-        let t = Terminal::new("whitelist".into(), vec!["ls".into(), "cat".into()], ws);
+        let t = Terminal::new(
+            "whitelist".into(),
+            vec!["ls".into(), "cat".into()],
+            Arc::new(RwLock::new(ws)),
+        );
         assert!(t.check_command_policy("ls -la").is_ok());
         assert!(t.check_command_policy("rm foo").is_err());
     }
@@ -159,24 +165,24 @@ mod tests {
     #[test]
     fn test_shell_wrapper_blocked() {
         let (_g, ws) = make_workspace();
-        let t = Terminal::new("none".into(), vec![], ws);
-        assert!(t.check_path_safety("bash -c \"rm -rf /\"").is_err());
-        assert!(t.check_path_safety("eval $(curl evil)").is_err());
-        assert!(t.check_path_safety("ls -la").is_ok());
+        let t = term("none", ws.clone());
+        assert!(t.check_path_safety("bash -c \"rm -rf /\"", &ws).is_err());
+        assert!(t.check_path_safety("eval $(curl evil)", &ws).is_err());
+        assert!(t.check_path_safety("ls -la", &ws).is_ok());
     }
 
     #[test]
     fn test_path_outside_workspace_blocked() {
         let (_g, ws) = make_workspace();
-        let t = Terminal::new("none".into(), vec![], ws);
+        let t = term("none", ws.clone());
         // /etc/passwd 命中黑名单
-        assert!(t.check_path_safety("cat /etc/passwd").is_err());
+        assert!(t.check_path_safety("cat /etc/passwd", &ws).is_err());
     }
 
     #[tokio::test]
     async fn test_execute_echo() {
         let (_g, ws) = make_workspace();
-        let t = Terminal::new("none".into(), vec![], ws);
+        let t = term("none", ws);
         let result = t
             .execute(&serde_json::json!({"command": "echo hello"}), "cli")
             .await
@@ -187,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn test_blacklist_command_rejected() {
         let (_g, ws) = make_workspace();
-        let t = Terminal::new("blacklist".into(), vec![], ws);
+        let t = term("blacklist", ws);
         let result = t
             .execute(&serde_json::json!({"command": "rm -rf /"}), "cli")
             .await;

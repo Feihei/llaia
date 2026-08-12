@@ -1,6 +1,7 @@
 use crate::agent::sink::{run_turn, OutputSink};
 use crate::agent::{AgentRegistry, MediaKind};
 use crate::channels::Channel;
+use crate::commands::slash::{try_handle, SlashOutcome};
 use crate::config::{Config, WebUiConfig};
 use crate::image_utils;
 use crate::provider::{ChatMessage, ContentPart, ImageUrlContent};
@@ -216,14 +217,48 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                     let chat: ChatIn = serde_json::from_str(&s).unwrap();
                                     let text = chat.text.unwrap_or_default();
                                     tracing::info!(text = %text, images = chat.images.as_ref().map(|v| v.len()).unwrap_or(0), "web received message");
-                                    // 构造消息
-                                    let user_msg = build_user_message(&text, chat.images.as_deref(), &workspace);
-                                    let sink = Box::new(WebSink::new(tx.clone(), end_tx.clone()));
-                                    let stop_clone = stop.clone();
-                                    let agent_clone = agent.clone();
-                                    current_turn = Some(tokio::spawn(async move {
-                                        let _ = run_turn(agent_clone, user_msg, "web".into(), sink, stop_clone).await;
-                                    }));
+
+                                    // 斜杠命令拦截（P4-d）：与其它频道一致地走审批/续跑流。
+                                    // web 用 type:"stop" 中断（见上面 "stop" 分支），不认 /stop，故排除之。
+                                    let slash_outcome = if text.starts_with('/') && text.trim() != "/stop" {
+                                        let mut a = agent.lock().await;
+                                        Some(try_handle(&text, &mut a).await)
+                                    } else {
+                                        None
+                                    };
+                                    match slash_outcome {
+                                        Some(Ok(SlashOutcome::Handled(msg))) => {
+                                            let _ = tx.send(WebEvent::Chunk { delta: msg }).await;
+                                            let _ = tx.send(WebEvent::Done).await;
+                                        }
+                                        Some(Ok(SlashOutcome::Resume { notice, message })) => {
+                                            // 先回显结果摘要，再跑 continuation turn 让模型基于工具结果继续
+                                            let _ = tx.send(WebEvent::Chunk { delta: notice }).await;
+                                            let sink = Box::new(WebSink::new(tx.clone(), end_tx.clone()));
+                                            let stop_clone = stop.clone();
+                                            let agent_clone = agent.clone();
+                                            current_turn = Some(tokio::spawn(async move {
+                                                let _ = run_turn(agent_clone, ChatMessage::user(&message), "web".into(), sink, stop_clone).await;
+                                            }));
+                                        }
+                                        Some(Ok(SlashOutcome::Exit)) => {
+                                            // web 常驻连接，/exit 无意义，忽略
+                                        }
+                                        Some(Ok(SlashOutcome::NotSlash)) | None => {
+                                            // 普通消息：构造并跑一轮 agent turn
+                                            let user_msg = build_user_message(&text, chat.images.as_deref(), &workspace);
+                                            let sink = Box::new(WebSink::new(tx.clone(), end_tx.clone()));
+                                            let stop_clone = stop.clone();
+                                            let agent_clone = agent.clone();
+                                            current_turn = Some(tokio::spawn(async move {
+                                                let _ = run_turn(agent_clone, user_msg, "web".into(), sink, stop_clone).await;
+                                            }));
+                                        }
+                                        Some(Err(e)) => {
+                                            let _ = tx.send(WebEvent::Error { message: e.to_string() }).await;
+                                            let _ = tx.send(WebEvent::Done).await;
+                                        }
+                                    }
                                 }
                             }
                             _ => {}

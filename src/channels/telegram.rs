@@ -250,6 +250,22 @@ impl TelegramChannel {
                     let _ = self.send_text(chat_id, &m).await;
                 }
                 crate::commands::slash::SlashOutcome::NotSlash => {}
+                crate::commands::slash::SlashOutcome::Resume { notice, message } => {
+                    let _ = self.send_text(chat_id, &notice).await;
+                    let sink = TelegramSink {
+                        tg: Arc::clone(self),
+                        chat_id,
+                        buffer: String::new(),
+                    };
+                    let _ = run_turn(
+                        agent.clone(),
+                        crate::provider::ChatMessage::user(&message),
+                        "telegram".into(),
+                        Box::new(sink),
+                        stop.clone(),
+                    )
+                    .await;
+                }
             }
             return Ok(());
         }
