@@ -74,6 +74,13 @@ confirm_mode = "none"        # none / always / session
 # client_secret = "${DINGTALK_CLIENT_SECRET}"
 # allow_staff_id = ""          # 只响应此 staffId 的消息，空 = 不限制
 
+# [channels.feishu]
+# enabled = false
+# app_id = "${FEISHU_APP_ID}"
+# app_secret = "${FEISHU_APP_SECRET}"
+# allow_open_id = ""           # 只响应此 open_id 的消息（单用户锁），空 = 不限制
+# mention_only = false         # 群聊仅 @ 时回复（true）；私聊始终回复
+
 # [channels.wechat]
 # enabled = false              # 微信 ClawBot（ilink bot），首次启动打印二维码链接，手机扫码登录
 # allow_user_id = ""           # 只响应此 ilink_user_id 的消息，空 = 不限制
@@ -104,6 +111,8 @@ const ENV_TEMPLATE: &str = r#"# LLAIA 环境变量（本文件不要提交到 gi
 # TELEGRAM_BOT_TOKEN=
 # DINGTALK_CLIENT_ID=
 # DINGTALK_CLIENT_SECRET=
+# FEISHU_APP_ID=
+# FEISHU_APP_SECRET=
 # TAVILY_API_KEY=
 "#;
 
@@ -426,6 +435,20 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         } else {
             None
         };
+
+    // 飞书 channel：启用时构造并 spawn（事件订阅长连接 WS 免公网）
+    if config.channels.feishu.enabled {
+        let fs = std::sync::Arc::new(crate::channels::feishu::FeishuChannel::new(
+            config.channels.feishu.clone(),
+        ));
+        let registry = registry.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = crate::channels::Channel::run(fs, registry).await {
+                tracing::error!(error = %e, "FeishuChannel exited with error");
+            }
+        }));
+        tracing::info!("FeishuChannel started");
+    }
 
     // webui 随 serve 无条件启动（serve 模式下用户唯一保证可用的交互入口）
     // 注意：WebChannel 先创建，但不立即 spawn —— 需要在 CronScheduler 启动后注入 cron_scheduler，

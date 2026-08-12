@@ -188,6 +188,8 @@ pub struct ChannelsConfig {
     pub wechat: WechatConfig,
     #[serde(default)]
     pub mail: MailConfig,
+    #[serde(default)]
+    pub feishu: FeishuConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -409,6 +411,57 @@ fn default_mail_from_name() -> String {
 }
 fn default_mail_max_attach() -> u64 {
     10
+}
+
+/// 飞书/Lark 频道：开放平台事件订阅「长连接」模式（WebSocket 免公网回调）。
+/// 协议细节见 zeroclaw-channels/src/lark.rs（Apache-2.0 / MIT）：
+/// 建连向 POST {ws_base}/callback/ws/endpoint 换 wss 地址，收 protobuf 二进制帧，
+/// 收到事件 3 秒内回 ACK 帧，回复走 POST {api_base}/im/v1/messages。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 飞书应用 App ID，支持 ${VAR} 引用 .env
+    #[serde(default)]
+    pub app_id: String,
+    /// 飞书应用 App Secret，支持 ${VAR} 引用 .env
+    #[serde(default)]
+    pub app_secret: String,
+    /// 只响应此 open_id 的消息（单用户安全锁）；空 = 不限制
+    #[serde(default)]
+    pub allow_open_id: String,
+    /// 群聊中是否仅在被 @ 时回复（true=仅 @ 时回复，false=群内所有消息都回复）。
+    /// 私聊（p2p）不受影响，始终回复。默认 false。
+    #[serde(default)]
+    pub mention_only: bool,
+    /// API base（测试可指到 mock），默认官方地址
+    #[serde(default = "default_feishu_api_base")]
+    pub api_base: String,
+    /// WS base（取 wss 地址用），默认官方地址
+    #[serde(default = "default_feishu_ws_base")]
+    pub ws_base: String,
+}
+
+impl Default for FeishuConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            app_id: String::new(),
+            app_secret: String::new(),
+            allow_open_id: String::new(),
+            mention_only: false,
+            api_base: default_feishu_api_base(),
+            ws_base: default_feishu_ws_base(),
+        }
+    }
+}
+
+fn default_feishu_api_base() -> String {
+    "https://open.feishu.cn/open-apis".into()
+}
+
+fn default_feishu_ws_base() -> String {
+    "https://open.feishu.cn".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -638,6 +691,8 @@ impl Config {
         self.channels.mail.smtp_server = expand(&self.channels.mail.smtp_server)?;
         self.channels.mail.smtp_user = expand(&self.channels.mail.smtp_user)?;
         self.channels.mail.smtp_pass = expand(&self.channels.mail.smtp_pass)?;
+        self.channels.feishu.app_id = expand(&self.channels.feishu.app_id)?;
+        self.channels.feishu.app_secret = expand(&self.channels.feishu.app_secret)?;
         self.webui.token = expand(&self.webui.token)?;
         self.tools.tavily.api_key = expand(&self.tools.tavily.api_key)?;
         self.log.dir = expand(&self.log.dir)?;

@@ -13,7 +13,7 @@ function llaiaApp() {
     uploaded: [],
     ws: null,
     // config
-    cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{}}, tools:{terminal:{whitelist:[]},tavily:{}} },
+    cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{}} },
     configSection: 'runtime',
     rawToml: '',
     rawMsg: '',

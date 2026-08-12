@@ -176,7 +176,17 @@ owner_email = ""           # 单用户安全锁：只响应此地址；为空则
 from_name = "LLAIA"
 mark_seen = true           # 处理后标记已读
 max_attachment_mb = 10     # 附件大小上限，超出仅提示不下载
+
+[channels.feishu]
+enabled = false
+app_id = ""                # 飞书应用 App ID，支持 ${VAR}
+app_secret = ""            # 飞书应用 App Secret，支持 ${VAR}
+allow_open_id = ""         # 单用户安全锁：只响应此 open_id；空 = 不限制
+mention_only = false       # 群聊仅 @ 时回复（true）；私聊始终回复
+api_base = "https://open.feishu.cn/open-apis"
+ws_base = "https://open.feishu.cn"
 ```
+
 
 
 微信登录态（bot_token / sync_buf / context_tokens）不入 config.toml，持久化在 config 目录下独立文件 `wechat_state.json`，避免敏感凭证与配置混写。

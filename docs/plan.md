@@ -401,7 +401,7 @@
 
 - [x] Google Gemini REST provider（generateContent + functionDeclarations）（必要性：**中** / 难度：★★☆）
 - [x] 邮箱 channel：IMAP 轮询 + SMTP（还 P2-e 欠账）（必要性：**中** / 难度：★★☆）
-- [ ] 飞书 / Lark：事件订阅长连接模式（必要性：**中低** / 难度：★★☆）
+- [x] 飞书 / Lark：事件订阅长连接模式（必要性：**中低** / 难度：★★☆）
 - [ ] OpenAI Responses API（缓做，聚合网关可用 OpenAI 兼容协议绕过）（必要性：**低** / 难度：★★☆）
 - [ ] Slack Socket Mode / Discord / LINE（必要性：**低**，单用户助理已有 5 个 channel / 难度：★★★）
 - [ ] 明确不做：WhatsApp 自实现、微信个人号非官方协议（封号风险，与 ClawBot 官方路线是两回事）
