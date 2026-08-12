@@ -97,7 +97,7 @@
 
 ### P2-a：子 Agent 委派模式
 
-**状态**：✅ 已完成（基础委派 + 循环保护 + 重复工具检测 + workspace 边界）
+**状态**：✅ 已完成（基础委派 + 循环保护 + 重复工具检测 + workspace 边界；剩余 2 项「异步委派 / 每子 Agent 独立工具形态」经评估明确不做，P2-a 收敛完成）
 
 - [x] 主 Agent 委派机制（`delegate` 工具 + `AgentRegistry` 预加载子 Agent）
 - [x] 专用子 Agent 定义与注册（`[agent.<alias>]` 配置 + `denied_tools` 黑名单）
@@ -112,8 +112,8 @@
 
 **后续优化（推迟到 P3+ 视需求评估）**：
 
-- [ ] 异步委派：子 Agent 完成后通过唤醒机制通知主 Agent，主 Agent 期间可继续对话（参考 AstrBot 的 `background_task` + CronMessageEvent 方案，需先引入事件/通知子系统）
-- [ ] 每子 Agent 独立工具形态：`transfer_to_{name}` 替代单一 `delegate` + enum，对 native tool calling 模式更友好（标签降级模式会增加 system prompt 体积，需权衡）
+- [x] ~~异步委派~~ **spec 已出，待实现**（见 [spec](specs/2026-08-12-async-delegation-design.md)）：`delegate` 加 `async:bool` 参数（默认 false，零回归）；`async:true` 时 `tokio::spawn` 后台跑子 agent、立即返回，结果经 channel `pusher()` 推回原会话（仅最终结果，前缀 `[子Agent {name} 完成]`）；`/delegate-list` + `/delegate-cancel <id>` 取消；每会话并发上限 3（硬编码）。成本中（★★☆）。
+- [x] ~~每子 Agent 独立工具形态（`transfer_to_{name}`）~~ **明确不做**：当前单一 `delegate` + `agent_name` enum 在 native 与标签降级两种模式均通吃。改为 N 个 `transfer_to_{name}` 仅对 native 模式略有好处（模型少一层 enum 歧义），但在标签降级模式下会令 system prompt 多出 N-1 块工具说明（`build_tool_instructions` 每工具生成一块，见 `src/tool_call/prompt.rs:27`），且动态生成 / 热重载（`reload_all` 重建子 agent）更复杂。**净收益：边际甚至为负 / 成本：中**。`delegate`+enum 已是更优的通用设计。
 
 **详细计划**：[plans/2026-07-23-sub-agent-delegation.md](plans/2026-07-23-sub-agent-delegation.md)
 **设计规格**：[specs/2026-07-23-sub-agent-delegation-design.md](specs/2026-07-23-sub-agent-delegation-design.md)
@@ -311,49 +311,20 @@
 ### P4 / 时间感知与运行时事实注入
 
 - [x] **时区从 USER.md 剥离，改由 config 注入 + 热更新**（必要性：**高** / 难度：★☆☆）
-  - 现状问题：
-    1. **agent 实际上没有当前时间感知**。system prompt 只在进程启动时拼一次（`channels/cli.rs:441`），USER.md 里的「时区：Asia/Shanghai」（`memory/markdown.rs:46`）只是一行静态文本——模型知道时区名，但不知道「现在几点、今天星期几」，跨天长驻进程里这行还会越来越误导。
-    2. **散落的本地时间调用**。`chrono::Local::now()` 在 cron/runner、audit、memory_write、MEMORY 备份、`llaia remember` 等 6 处各写各的，全依赖宿主机 TZ；Docker 镜像默认 UTC，导致记忆条目日期、审计时间戳、cron 触发时刻整体偏 8 小时，且与 USER.md 里声明的时区自相矛盾。
-    3. **热更新缺口（关键）**：`Agent` 持有的是 `config: Arc<Config>` **启动快照**（`agent/mod.rs:79,123`），而 `hot_reload_providers`（`web/mod.rs:391`）只换 provider、**不更新** 这个快照。即便加了 `[runtime].timezone`，WebUI 改了也不会被 agent 读到——必须先把 live config 通道打通。
-  - **细化方案（详见 [ADR-0017](docs/adr/0017-timezone-injection.md)）**：
-    - **① Config schema**：`RuntimeConfig` 加 `pub timezone: Option<String>`（IANA 名，`default_timezone()` → `None` = 跟随系统，零配置无回归）；`Config::load` 加校验——非法 IANA 名（参考 `compact_model` 校验写法，`config.rs:440`）warn + 置 `None`。`Cargo.toml` 加 `chrono-tz`（与现有 `chrono 0.4` 兼容，用 `0.10`）。
-    - **② 统一时间源 `src/time.rs`**（新建）：
-      - `pub struct Now { naive: NaiveDateTime, zone_label: String }`；`pub fn now(tz: &Option<String>) -> Now`（set → `chrono_tz::Tz` 解析 + `Utc::now().with_timezone`；unset → `Local::now()`）；`pub fn unix_now() -> i64`（`Utc::now().timestamp()`，**时区无关**，供做梦空闲门算 elapsed）；`pub fn resolve_tz(tz: &Option<String>) -> Option<Tz>`（`OnceLock<Mutex<HashMap>>` 缓存解析结果，非法/未设 → `None`）。
-      - `pub fn status_bar(tz: &Option<String>) -> String`：产出 §2.6.3「Agent 状态栏」文本 = 当前本地时间(含星期) + 时区标签 + **§2.6.5 操作提示**（如「距上次对话已过 N 分钟，空闲中 / 当前非工作时间，可执行整理类后台任务」）。
-    - **③ live config 通道（热更新核心）**：`Agent` 新增 `live_config: Arc<RwLock<Config>>`，`new()` 接收它；`build_agent` 在 WebUI 下传 `state.config.clone()`、CLI 下设 `Arc::new(RwLock::new(config.clone()))`（永不更新，与 CLI 无热加载现状一致）。在 `hot_reload_providers`（`web/mod.rs:391`）末尾补：`*state.registry.main.lock().await.live_config.write().await = new_config.clone();` —— 下次 `to_messages` 即用新时区，进行中的 turn 不受影响（snapshot 语义）。保留原 `config: Arc<Config>` 快照给 `/provider` 等 provider 引用读取（slash.rs 不需要改）。
-    - **④ 状态栏注入点**：`Context::to_messages(&self) -> Vec<ChatMessage>`（`agent/context.rs:24`）改为 `to_messages(&self, tz: &Option<String>)`，在末尾 `msgs.push(ChatMessage::user(crate::time::status_bar(tz)))`。调用方 `agent/mod.rs:293` 改为传 `&self.live_config.read().await.runtime.timezone`；`context.rs:133/143` 两个测试改为 `to_messages(&None)`。**不**写入 `context.history`——状态栏每轮 `to_messages` 现算、仅挂尾，整段 system（SOUL/USER/MEMORY）作为稳定前缀被缓存，符合 §2.6.3。QQ/Telegram/Web 全部经 `handle_message_streaming → to_messages`，自动覆盖。
-    - **⑤ 收敛零散 `Local::now()`**：
-      - **改走 tz**：`tools/memory.rs:61`（/remember 落盘日期）、`memory/markdown.rs:75`（MEMORY 备份文件名）、`commands/mod.rs:682`（remember CLI 日期）→ `time::now(tz).naive.format("%Y-%m-%d")`。其中 memory 工具需拿到 tz：v1 先传 `&None`（仍系统本地，行为与今一致，无回归），列入后续「把 tz 透传进工具」的小改进；**模型感知的时间（状态栏）已是正确的配置时区**，这正是本项的核心目标。
-      - **维持 UTC（运维日志，不动）**：`audit.rs:41`、`memory/sqlite.rs:106/128/156`、`cron/runner.rs:54` 本就用 `Utc::now()` 或仅打日志，保持 UTC，与用户可见时间解耦。
-    - **⑥ 配套清理**：`USER_TEMPLATE`（`memory/markdown.rs:46`）去掉「时区：Asia/Shanghai」行；旧 USER.md 不强制迁移（纯静态文本无害，下次编辑自然淘汰）；`llaia doctor` 加时区解析检查；WebUI 配置面板暴露 `[runtime].timezone`。
-  - **验证要点**：① 改 timezone 后不重启，`/dream` 触发或下一轮对话的状态栏即时反映新时区；② 多轮对话下 system 前缀 token 稳定（cache 命中）；③ `resolve_tz("Asia/Shanghai")`→`Some`、`resolve_tz("Mars/Phobos")`→`None`；④ Docker(UTC) 下记忆落盘日期与配置时区一致而非宿主机 UTC。
+  - 见 [ADR-0017](docs/adr/0017-timezone-injection.md)：统一时间源 `src/time.rs` + `RuntimeConfig.timezone`（IANA，None=跟随系统）+ live config 通道（热更新），收敛 6 处零散 `Local::now()`；状态栏经 `Context::to_messages` 注入，进程内即时反映新时区。
 
 ### P4 / 记忆与上下文
 
 - [x] **「做梦」：闲时自动整理记忆**（必要性：**中高** / 难度：★★☆）
-  - 动机：MEMORY.md 目前只在超限时被动压缩（`memory/markdown.rs:65 compress_memory`），长期使用必然堆积重复、过期、互相矛盾的条目；而会话里产生的有效信息，只有用户手动 `/remember` 才能沉淀下来。
-  - 形态：cron 触发的 agent 模式任务，在独立 cron session 上跑一轮，通过 `memory_write` 整理记忆（主会话历史不污染）。
-  - 可直接复用的现成件：cron 调度器 + `run_agent_mode`（P3-c，独立 session）、`compress_memory`、sqlite 会话记录、audit 日志、pusher。
-  - **设计已决议（见 [ADR-0016](docs/adr/0016-dream.md)）**，要点：
-    - **架构**：做梦 = 一个 Agent 模式的 cron 任务，复用 `run_agent_mode`（`src/cron/runner.rs`），**不引入新 agent 架构**（否决「影子 agent / 独立闭环」——用户指出它会凭空造第三类东西，与现有架构不对齐）。
-    - **两阶段管线（2026-08-11 增补，参考 nanobot）**：stage1 临时 dream 会话蒸馏增量历史 → 写 `dream_draft.md`（中间缓冲，不进上下文）；stage2 基于 draft 手术式全编辑 MEMORY.md（进上下文）。两阶段都跑在独立 cron 会话，复用同一套 machinery。
-    - **游标增量（2026-08-11 增补）**：sqlite 记 `last_dream_message_id`，stage1 每轮只消化 `id > 游标` 的新消息、成功后推进；首启游标置当前最大 id（不重放老历史）。增量、可续跑、崩溃安全。
-    - **触发**：cron 定时调度 + 运行时空闲门控（距最后一条用户消息 N 分钟无交互才跑），不做独立 idle 检测器（参考 openclaw）。空闲门依赖 P4-a 时区，但为「配套」非「阻塞」。
-    - **模型**：主模型 + fallback，v1 不起独立 `compact_provider` 实例（idle 门已保证不抢活跃会话）。
-    - **写入边界**：MEMORY.md 放开全编辑（增 / 改 / 删，去重压缩价值成立之必须，由扩展后 `memory_write` 承载）；USER.md v1 不碰（最多在 diff 摘要里「提议」）。
-    - **安全兜底**：保留手写时间戳 `.bak`（**不引 git**，本地单用户够用）→ 事后算 diff 推送通知用户（绝不静默）→ `/dream` 手动触发 → `/dream-rollback` 回滚 → **默认开**（idle 门 + diff + 回滚三道防线使风险可控）。
+  - 见 [ADR-0016](docs/adr/0016-dream.md)：cron 触发的 Agent 模式任务，复用 `run_agent_mode`；两阶段管线（draft 蒸馏 → 手术编辑 MEMORY.md）+ 游标增量 + 空闲门控 + 三道防线（`.bak`/diff 推送/`/dream-rollback`），默认开。
 - [x] 更聪明的上下文压缩：防止重要信息丢失、提高缓存命中、减少对 LLM 压缩的依赖（参考《深入理解 AI Agent》李博杰 v1.2 §2.7.2）（必要性：**高** / 难度：★★★）
-  - **设计已决议（见 [ADR-0019](docs/adr/0019-smart-compaction.md)）**，要点：
-    - **廉价抽取式先行（cheap-first，不调 LLM）**：`compact` 每轮先跑 `cheap_normalize`——丢弃空消息、多模态图片降级为 `[图片]`、工具消息截断到 500 字符、连续重复用户消息去重。归一化后若仍在预算内（`estimate_tokens() <= token_budget`）直接返回，跳过 LLM 摘要：既省一次调用，又保留 `summary` 前缀稳定（KV cache 友好）。
-    - **重要性锚点（落地 ADR-0004「首条用户消息留」）**：首条用户消息若落入 to_compress 区，提出来前置到 to_keep 且不进摘要 dump——永不被摘要掉（原实现会把它一起摘要丢）。
-    - **工具消息裁剪**：ADR-0004「工具调用结果可丢」——工具消息在上下文里只留截断短注（完整内容已在 sqlite 留底），且进摘要 dump 时只给一行 `[tool] (结果已归档) <前80字>`，不让大段工具输出消耗 LLM 输入。
-    - 签名 `compact(provider, keep_recent, token_budget) -> Result<bool>`（bool=是否真调 LLM）；调用方补 `token_budget = context_size`（主循环 + `/compact`）。不新增 config key，作为默认升级。
+  - 见 [ADR-0019](docs/adr/0019-smart-compaction.md)：cheap-first 抽取式归一化先行（预算内跳过 LLM，KV cache 友好）+ 重要性锚点（首条用户消息永不被摘要）+ 工具消息裁剪；`compact(provider, keep_recent, token_budget) -> Result<bool>`，无新 config key。
 - [x] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界（必要性：**中** / 难度：★☆☆，纯文档）
 
 ### P4 / 模型与工具调用
 
 - [x] 工具调用格式优化：解决 think 内容 / `<tool_call>` 标签泄露到用户回复的问题（agen 系模型偶发），研究 jinja 模板调用格式，参考 AstrBot `core/agent/tool.py` 与 zeroclaw `zeroclaw-tool-call-parser`（必要性：**高**，属可见的正确性缺陷 / 难度：★★☆）
-  - **实现**：统一走 `ToolCallStreamParser`（去掉 native/标签降级分支），native 模式下 think/tool_call 标签泄露也被清洗；补充 markdown fence 格式（`` ```tool_call `` / `` ```invoke ``）；`iter_text` 改存清洗后文本（不污染 context/sqlite）。详见 [specs/2026-08-11-p4b-tool-call-cleanup-design.md](specs/2026-08-11-p4b-tool-call-cleanup-design.md)
+  - 统一 `ToolCallStreamParser` 清洗 think/`<tool_call>` 泄露（native/标签降级通吃），补 markdown fence 格式；见 [spec](specs/2026-08-11-p4b-tool-call-cleanup-design.md)。
 - [x] image 描述模型单独设置：主模型无多模态时，用独立模型描述图片，避免能力缺失（必要性：**中** / 难度：★★☆）
   - **实现**：`RuntimeConfig.vision_model` 配置（照搬 `compact_model` 模式）；Agent 持有 `vision_provider`（支持热替换）；`handle_message_streaming` 入口拦截多模态消息，用 vision_provider 逐张描述图片，描述文本替换图片注入主模型上下文
 
@@ -362,22 +333,7 @@
 > 背景（2026-08-10 评估）：WebUI 重启按钮走 spawn 替代进程路线（zeroclaw 的 respawn 层），子进程故意脱离终端——终端启动的用户重启后失去 Ctrl+C 控制，只能任务管理器杀。调研 zeroclaw（`.ref/zeroclaw`）三层机制后结论：全套 daemon/supervisor 太重不借鉴，但两项便宜改进与一项正解记入本节。当前阶段决定保持轻量不动，痛点可用现有机制缓解（provider 改动已热加载，多数场景无需重启）。
 
 - [x] `/api/shutdown` + WebUI 停止按钮：优雅退出 serve，解决脱管进程只能任务管理器杀的痛点（必要性：**高** / 难度：★☆☆）
-  - **现状**：WebUI 已有 `/api/restart`（`web/mod.rs:466`，spawn 替代进程后 `exit(0)`），但**没有** `/api/shutdown`；`serve_cmd`（`commands/mod.rs:463`）只靠 `tokio::select! { ctrl_c / 所有 channel task 结束 }` 退出，且退出路径**无任何清理**（cron 调度器不显式 shutdown、spawn 出的 channel task 直接随进程退出丢弃）。终端启动的用户点 restart 后子进程脱离终端、失去 Ctrl+C，只能任务管理器杀——这正是本项的痛点来源。
-  - **细化方案（详见 [ADR-0018](docs/adr/0018-shutdown.md)）**：
-    - **① 共享 shutdown 信号**：`WebChannel` 新增 `pub shutdown_signal: Arc<tokio::sync::Notify>`（`web.rs:301` 结构体；在 `new()` 里 `Arc::new(Notify::new())`）。`build_router`（`web.rs:361`）把它 clone 进 `AppState`（新字段 `shutdown_signal`）。`serve_cmd` 在 spawn 前 `let shutdown_signal = web.shutdown_signal.clone();` 持有同一 Arc。
-    - **② 新 handler `shutdown_service`（`web/mod.rs`，仿 `restart_service`）**：`authorize` 通过后 `state.shutdown_signal.notify_one()`。与 restart 不同，**容器内允许**（stop 正是用户想要的，停止 PID1=停容器，合理）；`build_system_routes()`（`web/mod.rs:1138` 附近）加 `.route("/api/shutdown", axum::routing::post(shutdown_service))`。
-    - **③ `serve_cmd` 收尾（`commands/mod.rs:463`）**：`tokio::select!` 增加分支 `_ = shutdown_signal.notified() => { … }`，与 ctrl_c 共用后续清理：
-      ```rust
-      // 退出路径共用：先停 cron，再 abort 各 channel task 并 await
-      if let Some(cron) = &_cron { let _ = cron.shutdown().await; }   // cron/mod.rs:299
-      for t in &tasks { t.abort(); }
-      for t in tasks { let _ = t.await; }
-      println!("\n{}", crate::banner::GOODBYE);
-      ```
-      `tasks` 不再被 `for t in tasks { t.await }` 消费（改为 `for t in &mut tasks { … }` 借用），保证 shutdown 分支能 abort 它们。
-    - **④ 响应时序**：handler 先 `return Json({shutting_down:true})`，再用 `tokio::spawn` 延迟 ~100ms 后 `notify_one()`，确保浏览器收到响应、WebUI 切到「已停止」态，再触发进程收尾。
-    - **⑤ WebUI 前端**：`index.html:377` 的 `Restart Service` 按钮旁加 `Stop Service` 按钮，`app.js:499 restartService()` 旁加 `shutdownService()`（POST `/api/shutdown`，成功后显示「Service stopped」而非轮询重启）。
-  - **验证要点**：① 点停止按钮 → 进程在 ~1s 内干净退出，终端打印 GOODBYE，无残留子进程（含 MCP child，transport 有 `kill_on_drop`）；② cron 任务不再触发（shutdown 已调）；③ Ctrl+C 路径行为不变；④ 容器内点停止能停掉容器（restart 仍拒）。
+  - 见 [ADR-0018](docs/adr/0018-shutdown.md)：共享 `shutdown_signal: Arc<Notify>`；`/api/shutdown` handler `notify_one()`，`serve_cmd` 与 ctrl_c 共用收尾清理（先停 cron 再 abort channel tasks）；WebUI 加停止按钮。容器内允许停止（stop=停容器），restart 仍拒。
 - [x] WebUI config 热加载（reload_all，即最初定义的 P4-f 轻量方案 A）：保存 `/api/config` / `/api/config/raw` 后进程内就地重载 agent 定义 / skills / MCP 工具 / cron 任务 / 非连接型 channel 参数，无需重启 serve；连接型配置（QQ 凭证、Web host/port/token）仍按需重启（必要性：**中** / 难度：★★☆）
 - [x] ~~spawn-after-teardown 顺序~~ **明确本阶段不做**：zeroclaw `restart.rs` 的 record_launch + 先 teardown 再拉子进程。当前 `reload_all` 已覆盖「配置改动免重启」诉求，重启本身低频且无强痛点，无结构改造必要（必要性：**低** / 原难度：★★☆）
 - [x] ~~同 PID 原地 reload~~ **明确本阶段不做**：WebUI 信号触发进程内拆除/重建全部 channel 子系统（cancellation token 化）。同上，被 `reload_all` 与低频重启需求覆盖，无强痛点（必要性：**低** / 原难度：★★★）
@@ -385,19 +341,12 @@
 ### P4 / 交互增强
 
 - [x] `/move` 或 `/cd` 斜杠命令：允许把 CWD 从默认 workspace 移动到用户指定位置，提醒风险并要求确认（扩展 P3-a 的 workspace 边界模型）（必要性：**中** / 难度：★☆☆）
-  - 已交付（commit `13d275d`）：`/move`/`/cd` 路由同一 handler（src/commands/slash.rs）；agent 家目录与工具作用域解耦（记忆/会话/USER.md 锁死 `~/.llaia/workspace`，move 只改 terminal/文件工具作用域）；无参/`home`/`~`/`-` 一键回原始 workspace（免审批）；风险确认走权限档位审批门。**明确不做**：git-bash 风格 `/x/...` 路径在 Windows 下不识别为绝对路径（跨盘需 `X:/...`），按 Feihei 决定不修复——非 bug，属 Rust `Path` 对 Unix 风格路径的固有解析行为，用户用 `X:/...` 即可。
+  - 已交付（commit `13d275d`）：`/move`/`/cd` 同一 handler；家目录与工具作用域解耦，无参/`home`/`~`/`-` 一键回原始 workspace；风险确认走权限档位审批门。**明确不做**：git-bash `/x/...` 跨盘路径（Rust `Path` 固有解析，用 `X:/...`）。
 
 ### P4 / 权限管理系统
 
 - [x] 三档权限 profile：`read-only` / `default` / `yolo`，对齐 opencode 的 plan/build 双模式思路（必要性：**中** / 难度：★★☆）
-  - 已交付（commit `147544f`）：`RuntimeConfig.permission` + `ApprovalGate`（src/agent/approval.rs）、`/permission` 运行时切换、`/ok` `/deny` 审批斜杠命令跨频道一致；init 模板 + doctor 已暴露。WebUI Runtime 表单 permission 下拉已加（src/web/static/index.html + app.js，unset/default/read-only/yolo 四选项，unset 存为 None）。
-  - 双维度判定：① 操作是否风险 ② 是否在 workspace 内
-  - `read-only`：所有写操作都审批
-  - `default`：仅 workspace 外的风险操作审批
-  - `yolo`：全放行
-  - 审批流程：发消息提示操作内容 + 目录，加 `/ok` `/deny` 斜杠命令，所有频道一致
-  - 在 P3-a 的 `confirm_mode`（none/always/session）之上演进，不破坏现有边界
-  - 注：与 `/move` 是同一套边界模型的两端（一个放宽范围、一个收紧授权），宜同期设计
+  - 已交付（commit `147544f`）：`RuntimeConfig.permission` + `ApprovalGate` + `/permission` + `/ok` `/deny` 跨频道一致；WebUI Runtime 表单 permission 下拉（`unset`/`default`/`read-only`/`yolo`）。双维度（风险 × workspace 内外）判定：`read-only` 全审批 / `default` 仅 workspace 外风险 / `yolo` 全放行。在 P3-a `confirm_mode` 上演进。
 
 ### P4 / Provider / Channel 继续扩展
 
@@ -405,12 +354,8 @@
 - [x] 邮箱 channel：IMAP 轮询 + SMTP（还 P2-e 欠账）（必要性：**中** / 难度：★★☆）
 - [x] 飞书 / Lark：事件订阅长连接模式（必要性：**中低** / 难度：★★☆）
 - [x] ~~OpenAI Responses API~~ **明确本阶段不做**：聚合网关已用 OpenAI 兼容协议（`/v1/chat/completions`）绕过，无切换动机（必要性：**低** / 原难度：★★☆）
-- [x] ~~Slack Socket Mode / Discord / LINE~~ **明确本阶段不做**（已调研 zeroclaw `crates/zeroclaw-channels/src/` 实现，难度如下；必要性：**低**，单用户助理已有 5 个 channel）
-  - 三者均**纯手写、未引第三方 SDK**（Slack/Discord 用 `tokio-tungstenite` WS gateway，LINE 用 `/line/webhook` HTTP 路由 + HMAC 签名校验）。
-  - **Slack**（`slack.rs` 10024 行）：Socket Mode = WebSocket 收事件 + REST 回复，含 socket-mode 重连退避。MVP 裁剪（文本收发 + 单用户锁 + ACK）约 400–600 行；全量含 threads/files/blocks/reactions 才到万行。**难度：★★☆（MVP 中等，体量靠功能堆叠）**。
-  - **Discord**（`discord/` 13907 行，`mod.rs` 8097）：gateway WS + 心跳 + RESUME + intents + slash commands + components + interactions + embeds。体量最大，即便 MVP 也要处理 gateway  opcode/心跳/交互模型，约 600–1000 行。**难度：★★★（最重，gateway 交互模型复杂）**。
-  - **LINE**（`line.rs` 2762 行）：webhook（HTTP POST）+ HMAC-SHA256 签名校验 + push 回复，协议最简单（约 200–300 行 MVP）。**但致命架构冲突**：纯 webhook 需公网入口（ngrok/frp 隧道），与 LLAIA「免公网 IP」设计目标相悖（此前飞书 webhook 方案即因此被否）。**难度：协议 ★★☆ / 架构阻塞 ★★★（需隧道入口）**。
-  - 结论：三者本期均不实现；若未来要做，Slack 是性价比最高（手写 WS+REST、无公网依赖），LINE 受架构限制需先解决入口问题，Discord 投入最大。
+- [x] ~~Slack Socket Mode / Discord / LINE~~ **明确本阶段不做**（必要性：**低**，单用户助理已有 5 个 channel；三者均纯手写未引 SDK）：
+  - Slack（WS+REST，MVP ★★☆）/ Discord（gateway 最重 ★★★）/ LINE（webhook 需公网入口，架构冲突 ★★★）。未来若做优先 Slack。
 - [ ] 明确不做：WhatsApp 自实现、微信个人号非官方协议（封号风险，与 ClawBot 官方路线是两回事）
 
 ### P4 / 生态复用
@@ -455,6 +400,7 @@
 - webUI中provider api探测可用模型，点击可添加到models中，添加按钮检查可用性，参考astrbot
 - 配置中api-key等敏感信息自动写入.env文件中，config只保留环境引用，加强安全，探讨是否使用别的手段避免明文存储敏感信息，比如存储如db二进制？
 - 给主agent配置mcp的工具，通过自然对话添加mcp
+- tts服务接入、发语音
 
 ---
 
