@@ -97,7 +97,7 @@
 
 ### P2-a：子 Agent 委派模式
 
-**状态**：✅ 已完成（基础委派 + 循环保护 + 重复工具检测 + workspace 边界；剩余 2 项「异步委派 / 每子 Agent 独立工具形态」经评估明确不做，P2-a 收敛完成）
+**状态**：✅ 已完成（基础委派 + 循环保护 + 重复工具检测 + workspace 边界 + 异步委派；「每子 Agent 独立工具形态」经评估明确不做，P2-a 收敛完成）
 
 - [x] 主 Agent 委派机制（`delegate` 工具 + `AgentRegistry` 预加载子 Agent）
 - [x] 专用子 Agent 定义与注册（`[agent.<alias>]` 配置 + `denied_tools` 黑名单）
@@ -112,7 +112,7 @@
 
 **后续优化（推迟到 P3+ 视需求评估）**：
 
-- [x] ~~异步委派~~ **spec 已出，待实现**（见 [spec](specs/2026-08-12-async-delegation-design.md)）：`delegate` 加 `async:bool` 参数（默认 false，零回归）；`async:true` 时 `tokio::spawn` 后台跑子 agent、立即返回，结果经 channel `pusher()` 推回原会话（仅最终结果，前缀 `[子Agent {name} 完成]`）；`/delegate-list` + `/delegate-cancel <id>` 取消；每会话并发上限 3（硬编码）。成本中（★★☆）。
+- [x] ~~异步委派~~ **✅ 已实现**（见 [spec](specs/2026-08-12-async-delegation-design.md)）：`delegate` 工具新增 `async:bool` 参数（默认 false，零回归）；`async:true` 时 `tokio::spawn` 后台跑子 agent 并立即返回 ack，结果经 channel `pusher()` 推回原会话（仅最终结果，前缀 `[子Agent {name} 完成]`）；`/delegate-list` + `/delegate-cancel <id>` 取消；每会话并发上限 3（硬编码）。CLI 走 stdout，未实现 `ProactivePusher` 的 channel（飞书/Telegram/微信/钉钉）异步委派返回友好错误。成本中（★★☆）。
 - [x] ~~每子 Agent 独立工具形态（`transfer_to_{name}`）~~ **明确不做**：当前单一 `delegate` + `agent_name` enum 在 native 与标签降级两种模式均通吃。改为 N 个 `transfer_to_{name}` 仅对 native 模式略有好处（模型少一层 enum 歧义），但在标签降级模式下会令 system prompt 多出 N-1 块工具说明（`build_tool_instructions` 每工具生成一块，见 `src/tool_call/prompt.rs:27`），且动态生成 / 热重载（`reload_all` 重建子 agent）更复杂。**净收益：边际甚至为负 / 成本：中**。`delegate`+enum 已是更优的通用设计。
 
 **详细计划**：[plans/2026-07-23-sub-agent-delegation.md](plans/2026-07-23-sub-agent-delegation.md)

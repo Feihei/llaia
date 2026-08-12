@@ -11,6 +11,7 @@
 use crate::agent::sink::{run_turn, OutputSink};
 use crate::agent::{AgentRegistry, MediaKind};
 use crate::channels::qq::split_reply;
+use crate::channels::Channel;
 use crate::config::TelegramConfig;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -191,6 +192,7 @@ impl TelegramChannel {
         update: &Update,
         agent: &Arc<Mutex<crate::agent::Agent>>,
         stop: &Arc<Notify>,
+        registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
         let Some(msg) = &update.message else {
             return Ok(());
@@ -238,7 +240,7 @@ impl TelegramChannel {
             }
             let outcome = {
                 let mut a = agent.lock().await;
-                crate::commands::slash::try_handle(text, &mut a).await?
+                crate::commands::slash::try_handle(text, &mut a, Some(registry.clone())).await?
             };
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
@@ -257,6 +259,11 @@ impl TelegramChannel {
                         chat_id,
                         buffer: String::new(),
                     };
+                    registry.set_delivery(
+                        self.clone()
+                            .pusher()
+                            .map(crate::tools::delegate::DeliveryTarget::Pusher),
+                    );
                     let _ = run_turn(
                         agent.clone(),
                         crate::provider::ChatMessage::user(&message),
@@ -276,6 +283,11 @@ impl TelegramChannel {
             chat_id,
             buffer: String::new(),
         };
+        registry.set_delivery(
+            self.clone()
+                .pusher()
+                .map(crate::tools::delegate::DeliveryTarget::Pusher),
+        );
         run_turn(
             agent.clone(),
             crate::provider::ChatMessage::user(text),
@@ -304,7 +316,7 @@ impl crate::channels::Channel for TelegramChannel {
                 Ok(updates) => {
                     for u in &updates {
                         offset = u.update_id + 1;
-                        if let Err(e) = self.handle_update(u, &agent, &stop).await {
+                        if let Err(e) = self.handle_update(u, &agent, &stop, &registry).await {
                             tracing::error!(update_id = u.update_id, error = %e, "handle update failed");
                         }
                     }

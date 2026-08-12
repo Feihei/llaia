@@ -52,6 +52,9 @@ impl MailChannel {
 
 #[async_trait]
 impl Channel for MailChannel {
+    fn pusher(self: Arc<Self>) -> Option<Arc<dyn crate::cron::ProactivePusher>> {
+        Some(self as Arc<dyn crate::cron::ProactivePusher>)
+    }
     async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
         let agent = registry.main.clone();
         tracing::info!(
@@ -62,7 +65,7 @@ impl Channel for MailChannel {
         let poll = self.config.poll_interval_secs.max(5);
         // 轮询循环：单轮出错只 log 不退出，避免把整个 serve 进程拖垮。
         loop {
-            if let Err(e) = self.clone().poll_once(&agent).await {
+            if let Err(e) = self.clone().poll_once(&agent, &registry).await {
                 tracing::error!(error = %e, "mail poll failed, will retry");
             }
             tokio::time::sleep(Duration::from_secs(poll)).await;
@@ -72,7 +75,11 @@ impl Channel for MailChannel {
 
 impl MailChannel {
     /// 单次轮询：拉未读 → 逐封处理（调 agent）→ 标记已读 → 退出。
-    async fn poll_once(self: Arc<Self>, agent: &Arc<Mutex<Agent>>) -> Result<()> {
+    async fn poll_once(
+        self: Arc<Self>,
+        agent: &Arc<Mutex<Agent>>,
+        registry: &Arc<AgentRegistry>,
+    ) -> Result<()> {
         let cfg = self.config.clone();
         let mut session = connect_imap_session(&cfg).await?;
 
@@ -117,7 +124,11 @@ impl MailChannel {
 
         let mut processed_uids: Vec<u32> = Vec::new();
         for (uid, body) in fetched {
-            match self.clone().process_message(agent, &cfg, &body).await {
+            match self
+                .clone()
+                .process_message(agent, &cfg, &body, registry)
+                .await
+            {
                 Ok(()) => processed_uids.push(uid),
                 Err(e) => tracing::error!(error = %e, uid, "process mail failed, skipped"),
             }
@@ -144,6 +155,7 @@ impl MailChannel {
         agent: &Arc<Mutex<Agent>>,
         cfg: &MailConfig,
         body: &[u8],
+        registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
         let parsed = mailparse::parse_mail(body).context("parse mail failed")?;
         let subject = parsed
@@ -219,6 +231,11 @@ impl MailChannel {
             buffer: String::new(),
         });
         let stop = Arc::new(Notify::new());
+        registry.set_delivery(
+            self.clone()
+                .pusher()
+                .map(crate::tools::delegate::DeliveryTarget::Pusher),
+        );
         run_turn(agent.clone(), user_msg, "mail".into(), sink, stop).await?;
         Ok(())
     }

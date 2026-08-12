@@ -28,4 +28,12 @@ use std::sync::Arc;
 pub trait Channel: Send + Sync + 'static {
     /// 启动 channel，阻塞运行直到退出。
     async fn run(self: Arc<Self>, registry: Arc<crate::agent::AgentRegistry>) -> Result<()>;
+
+    /// 主动推送器：异步委派完成后把结果推回本 channel。
+    /// 默认返回 None（不支持后台推送 → 异步委派返回友好错误）。
+    /// 已实现 `ProactivePusher` 的 channel（qq/web/mail）重写返回自身。
+    fn pusher(self: Arc<Self>) -> Option<Arc<dyn crate::cron::ProactivePusher>> {
+        let _ = self;
+        None
+    }
 }

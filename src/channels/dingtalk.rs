@@ -12,6 +12,7 @@
 use crate::agent::sink::{run_turn, OutputSink};
 use crate::agent::{AgentRegistry, MediaKind};
 use crate::channels::qq::split_reply;
+use crate::channels::Channel;
 use crate::config::DingtalkConfig;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -123,6 +124,7 @@ impl DingtalkChannel {
         frame: &serde_json::Value,
         agent: &Arc<Mutex<crate::agent::Agent>>,
         stop: &Arc<Notify>,
+        registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
         let data = match Self::parse_stream_data(frame) {
             Some(d) => d,
@@ -167,7 +169,7 @@ impl DingtalkChannel {
             }
             let outcome = {
                 let mut a = agent.lock().await;
-                crate::commands::slash::try_handle(&text, &mut a).await?
+                crate::commands::slash::try_handle(&text, &mut a, Some(registry.clone())).await?
             };
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
@@ -184,6 +186,11 @@ impl DingtalkChannel {
                         webhook: webhook.clone(),
                         buffer: String::new(),
                     };
+                    registry.set_delivery(
+                        self.clone()
+                            .pusher()
+                            .map(crate::tools::delegate::DeliveryTarget::Pusher),
+                    );
                     let _ = run_turn(
                         agent.clone(),
                         crate::provider::ChatMessage::user(&message),
@@ -203,6 +210,11 @@ impl DingtalkChannel {
             webhook,
             buffer: String::new(),
         };
+        registry.set_delivery(
+            self.clone()
+                .pusher()
+                .map(crate::tools::delegate::DeliveryTarget::Pusher),
+        );
         run_turn(
             agent.clone(),
             crate::provider::ChatMessage::user(text),
@@ -218,6 +230,7 @@ impl DingtalkChannel {
         self: &Arc<Self>,
         agent: &Arc<Mutex<crate::agent::Agent>>,
         stop: &Arc<Notify>,
+        registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
         let gw = self.register_connection().await?;
         let ws_url = format!("{}?ticket={}", gw.endpoint, gw.ticket);
@@ -260,7 +273,7 @@ impl DingtalkChannel {
                         return Err(anyhow!("ws ack send failed: {}", e));
                     }
                     if frame_type != "SYSTEM" {
-                        if let Err(e) = self.handle_message(&frame, agent, stop).await {
+                        if let Err(e) = self.handle_message(&frame, agent, stop, registry).await {
                             tracing::error!(error = %e, "handle dingtalk message failed");
                         }
                     }
@@ -281,7 +294,7 @@ impl crate::channels::Channel for DingtalkChannel {
         }
         let stop = Arc::new(Notify::new());
         loop {
-            if let Err(e) = self.run_connection(&agent, &stop).await {
+            if let Err(e) = self.run_connection(&agent, &stop, &registry).await {
                 // 网络抖动/凭证失效/gateway 踢连接：等 5s 重连
                 tracing::warn!(error = %e, "dingtalk connection lost, reconnect in 5s");
                 tokio::time::sleep(Duration::from_secs(5)).await;

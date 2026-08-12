@@ -13,8 +13,9 @@
 //! 文档：<https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QjN24iN>
 
 use crate::agent::sink::{run_turn, OutputSink};
-use crate::agent::{Agent, MediaKind};
+use crate::agent::{Agent, AgentRegistry, MediaKind};
 use crate::channels::qq::split_reply;
+use crate::channels::Channel;
 use crate::commands::slash::{try_handle, SlashOutcome};
 use crate::config::FeishuConfig;
 use crate::provider::ChatMessage;
@@ -630,6 +631,7 @@ impl FeishuChannel {
         agent: &Arc<Mutex<Agent>>,
         stop: &Arc<Notify>,
         inbound: InboundMessage,
+        registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
         let text = inbound.text.trim().to_string();
         if text.is_empty() {
@@ -647,7 +649,7 @@ impl FeishuChannel {
             }
             let outcome = {
                 let mut a = agent.lock().await;
-                try_handle(&text, &mut a).await?
+                try_handle(&text, &mut a, Some(registry.clone())).await?
             };
             match outcome {
                 SlashOutcome::Exit => {
@@ -666,6 +668,11 @@ impl FeishuChannel {
                         chat_id: inbound.reply_target.clone(),
                         buffer: String::new(),
                     };
+                    registry.set_delivery(
+                        self.clone()
+                            .pusher()
+                            .map(crate::tools::delegate::DeliveryTarget::Pusher),
+                    );
                     let _ = run_turn(
                         agent.clone(),
                         ChatMessage::user(&message),
@@ -685,6 +692,11 @@ impl FeishuChannel {
             chat_id: inbound.reply_target.clone(),
             buffer: String::new(),
         };
+        registry.set_delivery(
+            self.clone()
+                .pusher()
+                .map(crate::tools::delegate::DeliveryTarget::Pusher),
+        );
         run_turn(
             agent.clone(),
             ChatMessage::user(&text),
@@ -711,9 +723,13 @@ impl crate::channels::Channel for FeishuChannel {
             let self_clone = self.clone();
             let agent = agent.clone();
             let stop = stop.clone();
+            let registry = registry.clone();
             tokio::spawn(async move {
                 while let Some(msg) = rx.recv().await {
-                    if let Err(e) = self_clone.handle_message(&agent, &stop, msg).await {
+                    if let Err(e) = self_clone
+                        .handle_message(&agent, &stop, msg, &registry)
+                        .await
+                    {
                         tracing::error!(error = %e, "feishu handle message failed");
                     }
                 }

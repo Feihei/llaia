@@ -157,7 +157,7 @@ impl Channel for CliChannel {
             if line.starts_with('/') {
                 let outcome = {
                     let mut a = agent.lock().await;
-                    try_handle(&line, &mut a).await?
+                    try_handle(&line, &mut a, Some(registry.clone())).await?
                 };
                 match outcome {
                     SlashOutcome::Exit => break,
@@ -172,6 +172,7 @@ impl Channel for CliChannel {
                         let stop = Arc::new(Notify::new());
                         let sink = Box::new(CliSink);
                         let agent_clone = agent.clone();
+                        registry.set_delivery(Some(crate::tools::delegate::DeliveryTarget::Stdout));
                         let _ = run_turn(
                             agent_clone,
                             crate::provider::ChatMessage::user(&message),
@@ -249,6 +250,7 @@ impl Channel for CliChannel {
             let stop = Arc::new(Notify::new());
             let sink = Box::new(CliSink);
             let agent_clone = agent.clone();
+            registry.set_delivery(Some(crate::tools::delegate::DeliveryTarget::Stdout));
             let mut turn_handle = tokio::spawn(run_turn(
                 agent_clone,
                 user_msg,

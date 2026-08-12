@@ -13,6 +13,7 @@
 use crate::agent::sink::{run_turn, OutputSink};
 use crate::agent::{AgentRegistry, MediaKind};
 use crate::channels::qq::split_reply;
+use crate::channels::Channel;
 use crate::config::WechatConfig;
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use aes::Aes128;
@@ -308,6 +309,7 @@ impl WechatChannel {
         self: &Arc<Self>,
         agent: &Arc<Mutex<crate::agent::Agent>>,
         stop: &Arc<Notify>,
+        registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
         let data = self.fetch_updates().await?;
         if !Self::api_ok(&data) {
@@ -329,7 +331,10 @@ impl WechatChannel {
             .cloned()
             .unwrap_or_default();
         for msg in &msgs {
-            if let Err(e) = self.handle_message(msg, agent, stop).await {
+            if let Err(e) = self
+                .handle_message(msg, agent, stop, registry.clone())
+                .await
+            {
                 tracing::error!(error = %e, "handle wechat message failed");
             }
         }
@@ -389,6 +394,7 @@ impl WechatChannel {
         msg: &serde_json::Value,
         agent: &Arc<Mutex<crate::agent::Agent>>,
         stop: &Arc<Notify>,
+        registry: Arc<AgentRegistry>,
     ) -> Result<()> {
         let from_user_id = msg
             .get("from_user_id")
@@ -438,7 +444,7 @@ impl WechatChannel {
             }
             let outcome = {
                 let mut a = agent.lock().await;
-                crate::commands::slash::try_handle(&text, &mut a).await?
+                crate::commands::slash::try_handle(&text, &mut a, Some(registry.clone())).await?
             };
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
@@ -457,6 +463,11 @@ impl WechatChannel {
                         user_id: from_user_id.clone(),
                         buffer: String::new(),
                     };
+                    registry.set_delivery(
+                        self.clone()
+                            .pusher()
+                            .map(crate::tools::delegate::DeliveryTarget::Pusher),
+                    );
                     let _ = run_turn(
                         agent.clone(),
                         crate::provider::ChatMessage::user(&message),
@@ -476,6 +487,11 @@ impl WechatChannel {
             user_id: from_user_id,
             buffer: String::new(),
         };
+        registry.set_delivery(
+            self.clone()
+                .pusher()
+                .map(crate::tools::delegate::DeliveryTarget::Pusher),
+        );
         run_turn(
             agent.clone(),
             crate::provider::ChatMessage::user(text),
@@ -667,7 +683,7 @@ impl crate::channels::Channel for WechatChannel {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 continue;
             }
-            match self.poll_once(&agent, &stop).await {
+            match self.poll_once(&agent, &stop, &registry).await {
                 Ok(()) => {}
                 Err(e) => {
                     let msg = e.to_string();

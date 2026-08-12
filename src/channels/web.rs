@@ -223,7 +223,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                     // web 用 type:"stop" 中断（见上面 "stop" 分支），不认 /stop，故排除之。
                                     let slash_outcome = if text.starts_with('/') && text.trim() != "/stop" {
                                         let mut a = agent.lock().await;
-                                        Some(try_handle(&text, &mut a).await)
+                                        Some(try_handle(&text, &mut a, Some(state.registry.clone())).await)
                                     } else {
                                         None
                                     };
@@ -460,7 +460,16 @@ impl crate::cron::ProactivePusher for WebChannel {
 
 #[async_trait]
 impl Channel for WebChannel {
+    fn pusher(self: Arc<Self>) -> Option<Arc<dyn crate::cron::ProactivePusher>> {
+        Some(self as Arc<dyn crate::cron::ProactivePusher>)
+    }
     async fn run(self: Arc<Self>, _registry: Arc<AgentRegistry>) -> Result<(), anyhow::Error> {
+        // 注入本轮结果投递目标（web 经 pusher 主动推送回 WS 会话；serve 单 channel 下持久生效）
+        self.registry.set_delivery(
+            self.clone()
+                .pusher()
+                .map(crate::tools::delegate::DeliveryTarget::Pusher),
+        );
         let addr: std::net::SocketAddr = format!("{}:{}", self.config.host, self.config.port)
             .parse()
             .map_err(|e| {

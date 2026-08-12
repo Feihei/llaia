@@ -1,9 +1,11 @@
 use crate::agent::approval::{format_move_prompt, validate_move_target};
 use crate::agent::Agent;
+use crate::agent::AgentRegistry;
 use crate::config::Config;
 use crate::cron::{CronMode, CronTask};
 use anyhow::Result;
 use serde_json::json;
+use std::sync::Arc;
 
 pub enum SlashOutcome {
     Handled(String),
@@ -19,7 +21,12 @@ pub enum SlashOutcome {
 
 /// 处理斜杠命令，返回 (outcome, 输出文本)。
 /// 输出文本由调用方决定如何呈现（CLI 打印，QQ 发回用户）。
-pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
+/// `registry` 用于后台委派管理（/delegate-list / /delegate-cancel），无则相关命令提示缺失。
+pub async fn try_handle(
+    line: &str,
+    agent: &mut Agent,
+    registry: Option<Arc<AgentRegistry>>,
+) -> Result<SlashOutcome> {
     let trimmed = line.trim();
     if !trimmed.starts_with('/') {
         return Ok(SlashOutcome::NotSlash);
@@ -31,7 +38,7 @@ pub async fn try_handle(line: &str, agent: &mut Agent) -> Result<SlashOutcome> {
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move [<path>|home] (alias /cd) — 无参数或 /move home 恢复到原始 workspace /config /dream /dream-rollback /help"
+            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move [<path>|home] (alias /cd) — 无参数或 /move home 恢复到原始 workspace /config /dream /dream-rollback /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -233,6 +240,59 @@ tools: {:?}
                     restored.display()
                 ))),
                 Err(e) => Ok(SlashOutcome::Handled(format!("[dream-rollback failed: {}]", e))),
+            }
+        }
+        "/delegate-list" => {
+            match &registry {
+                Some(reg) => {
+                    let tasks = reg.background_tasks.lock().unwrap();
+                    if tasks.is_empty() {
+                        Ok(SlashOutcome::Handled("[无后台委派任务]".into()))
+                    } else {
+                        let mut s = String::from("后台委派任务:\n");
+                        for t in tasks.values() {
+                            let secs = t.started.elapsed().as_secs();
+                            s.push_str(&format!(
+                                "- {} [{}] 已运行 {}s\n",
+                                t.id,
+                                t.agent_name,
+                                secs
+                            ));
+                        }
+                        Ok(SlashOutcome::Handled(s))
+                    }
+                }
+                None => Ok(SlashOutcome::Handled(
+                    "[delegate-list] 当前环境无 registry".into(),
+                )),
+            }
+        }
+        "/delegate-cancel" => {
+            if args.is_empty() {
+                Ok(SlashOutcome::Handled("usage: /delegate-cancel <id>".into()))
+            } else {
+                match &registry {
+                    Some(reg) => {
+                        let mut tasks = reg.background_tasks.lock().unwrap();
+                        match tasks.remove(args) {
+                            Some(t) => {
+                                drop(tasks);
+                                t.handle.abort();
+                                Ok(SlashOutcome::Handled(format!(
+                                    "[已取消后台任务 {}]",
+                                    args
+                                )))
+                            }
+                            None => Ok(SlashOutcome::Handled(format!(
+                                "[delegate-cancel] 无此任务 {}",
+                                args
+                            ))),
+                        }
+                    }
+                    None => Ok(SlashOutcome::Handled(
+                        "[delegate-cancel] 当前环境无 registry".into(),
+                    )),
+                }
             }
         }
         _ => Ok(SlashOutcome::Handled(format!("[unknown command: {}]", cmd))),

@@ -6,9 +6,36 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::OnceCell;
 
+use crate::agent::registry::BackgroundTask;
+use crate::agent::Agent;
 use crate::agent::AgentRegistry;
 use crate::agent::TurnEvent;
+use crate::cron::ProactivePusher;
 use crate::tools::Tool;
+
+/// 后台委派完成后的结果投递目标。
+/// - `Pusher`：serve channel（qq/web/mail 等已实现 ProactivePusher），结果推回发起委派的 channel。
+/// - `Stdout`：CLI 模式，结果直接打印到终端。
+#[derive(Clone)]
+pub enum DeliveryTarget {
+    Pusher(Arc<dyn ProactivePusher>),
+    Stdout,
+}
+
+impl DeliveryTarget {
+    async fn push(&self, message: &str) {
+        match self {
+            DeliveryTarget::Pusher(p) => {
+                if let Err(e) = p.push(message).await {
+                    tracing::error!(error = %e, "delivery push failed");
+                }
+            }
+            DeliveryTarget::Stdout => {
+                println!("{}", message);
+            }
+        }
+    }
+}
 
 pub struct DelegateTool {
     registry: OnceCell<Arc<AgentRegistry>>,
@@ -63,6 +90,11 @@ impl Tool for DelegateTool {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "要传递给子 Agent 的文件路径列表（主 agent workspace 内的相对路径），系统会复制到子 agent .inbox/"
+                },
+                "async": {
+                    "type": "boolean",
+                    "description": "是否后台异步执行。true=立即返回并在完成后主动推送结果（用户可继续对话）；false=同步等待子 Agent 完成（默认）",
+                    "default": false
                 }
             },
             "required": ["agent_name", "task"]
@@ -94,6 +126,7 @@ impl Tool for DelegateTool {
         let task = args["task"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing task"))?;
+        let is_async = args["async"].as_bool().unwrap_or(false);
         let file_paths: Vec<String> = args["file_paths"]
             .as_array()
             .map(|arr| {
@@ -154,76 +187,154 @@ impl Tool for DelegateTool {
             )
         };
 
-        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
-        let task_clone = full_task.clone();
-        let timeout = self.timeout_secs;
-
-        // 子 agent 用独立 channel 标识 "delegate"，不继承主 agent 的 channel。
-        let result = tokio::time::timeout(Duration::from_secs(timeout), async {
-            sub_agent
-                .lock()
-                .await
-                .handle_input_streaming(&task_clone, "delegate", tx)
-                .await
-        })
-        .await;
-
-        // 收集子 Agent 的事件：Chunk 转发给主 channel（让用户看到委派进度），同时累积输出
-        let mut output = String::new();
-        while let Ok(ev) = rx.try_recv() {
-            // 其他事件（ToolStart/ToolResult/Done/Error）不转发，避免主 channel 噪音
-            if let TurnEvent::Chunk { delta } = ev {
-                output.push_str(&delta);
-                if let Some(tx) = event_tx {
-                    let _ = tx.send(TurnEvent::Chunk { delta }).await;
+        // ── 异步分支：后台 spawn，立即返回 ack，完成由 delivery 主动推送 ──
+        if is_async {
+            // 并发上限（每会话 3）
+            {
+                let tasks = registry.background_tasks.lock().unwrap();
+                if tasks.len() >= 3 {
+                    return Ok("[委派失败: 后台委派已达上限(3)]".into());
                 }
             }
+            let id = uuid::Uuid::new_v4().to_string();
+            let delivery = registry.clone_delivery();
+            let child = sub_agent.clone();
+            let task_txt = full_task.clone();
+            let to = self.timeout_secs;
+            let sub_name = agent_name.to_string();
+            let bg = registry.clone();
+            let task_id = id.clone();
+            let handle = tokio::spawn(async move {
+                let return_value = run_child(child, task_txt, to, None).await;
+                let msg = format!(
+                    "[子Agent {} 完成]\n{}",
+                    sub_name,
+                    format_delivery_text(&return_value)
+                );
+                match delivery {
+                    Some(d) => d.push(&msg).await,
+                    None => {
+                        tracing::warn!(id = %task_id, "async delegate finished but no delivery target");
+                    }
+                }
+                bg.background_tasks.lock().unwrap().remove(&task_id);
+            });
+            registry.background_tasks.lock().unwrap().insert(
+                id.clone(),
+                BackgroundTask {
+                    id: id.clone(),
+                    agent_name: agent_name.to_string(),
+                    started: std::time::Instant::now(),
+                    handle,
+                },
+            );
+            return Ok(format!(
+                "已后台启动子 Agent {name}（任务 {id}），完成会主动通知你。可用 /delegate-list 查看、/delegate-cancel 取消。",
+                name = agent_name,
+                id = id
+            ));
         }
 
-        // 从子 agent 本次 turn 的工具调用记录提取产出文件清单
-        let output_files: Vec<String> = {
-            let sub_a = sub_agent.lock().await;
-            sub_a
-                .turn_tool_calls
-                .iter()
-                .filter(|tc| tc.name == "file_write" || tc.name == "file_edit")
-                .filter_map(|tc| {
-                    tc.args
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect()
-        };
-
-        let return_value = match result {
-            Ok(Ok(_)) => {
-                if output.is_empty() && output_files.is_empty() {
-                    "[子 Agent 无输出]".to_string()
-                } else {
-                    serde_json::json!({
-                        "text": output,
-                        "output_files": output_files,
-                    })
-                    .to_string()
-                }
-            }
-            Ok(Err(e)) => serde_json::json!({
-                "text": format!("[子 Agent 执行错误: {}]", e),
-                "output_files": output_files,
-            })
-            .to_string(),
-            Err(_) => serde_json::json!({
-                "text": format!("[子 Agent 超时({}秒)]", timeout),
-                "output_files": output_files,
-            })
-            .to_string(),
-        };
-
+        // ── 同步分支（默认）：阻塞到子 Agent 完成，转发 Chunk 进度 ──
+        let return_value =
+            run_child(sub_agent.clone(), full_task, self.timeout_secs, event_tx).await;
         Ok(return_value)
     }
+}
+
+/// 跑一轮子 Agent，收集输出与产出文件，返回与同步分支一致的 result 字符串。
+/// `forward` 为 `Some` 时把子 Agent 的 Chunk 事件转发给主 channel（同步分支用）；
+/// 异步分支传 `None`，仅最终通过 delivery 推送。
+async fn run_child(
+    sub_agent: Arc<tokio::sync::Mutex<Agent>>,
+    full_task: String,
+    timeout: u64,
+    forward: Option<&mpsc::Sender<TurnEvent>>,
+) -> String {
+    let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+    let task_clone = full_task.clone();
+    // 子 agent 用独立 channel 标识 "delegate"，不继承主 agent 的 channel。
+    let result = tokio::time::timeout(Duration::from_secs(timeout), async {
+        sub_agent
+            .lock()
+            .await
+            .handle_input_streaming(&task_clone, "delegate", tx)
+            .await
+    })
+    .await;
+
+    // 收集子 Agent 的 Chunk 事件，转发给主 channel 并累积输出
+    let mut output = String::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let TurnEvent::Chunk { delta } = ev {
+            output.push_str(&delta);
+            if let Some(tx) = forward {
+                let _ = tx.send(TurnEvent::Chunk { delta }).await;
+            }
+        }
+    }
+
+    // 从子 agent 本次 turn 的工具调用记录提取产出文件清单
+    let output_files: Vec<String> = {
+        let sub_a = sub_agent.lock().await;
+        sub_a
+            .turn_tool_calls
+            .iter()
+            .filter(|tc| tc.name == "file_write" || tc.name == "file_edit")
+            .filter_map(|tc| {
+                tc.args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    };
+
+    match result {
+        Ok(Ok(_)) => {
+            if output.is_empty() && output_files.is_empty() {
+                "[子 Agent 无输出]".to_string()
+            } else {
+                serde_json::json!({
+                    "text": output,
+                    "output_files": output_files,
+                })
+                .to_string()
+            }
+        }
+        Ok(Err(e)) => serde_json::json!({
+            "text": format!("[子 Agent 执行错误: {}]", e),
+            "output_files": output_files,
+        })
+        .to_string(),
+        Err(_) => serde_json::json!({
+            "text": format!("[子 Agent 超时({}秒)]", timeout),
+            "output_files": output_files,
+        })
+        .to_string(),
+    }
+}
+
+/// 把子 Agent 的 result 字符串整理为面向用户的最终消息（去掉 JSON 外壳，附产出文件）。
+fn format_delivery_text(return_value: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<Value>(return_value) {
+        if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+            let mut s = text.to_string();
+            if let Some(files) = v.get("output_files").and_then(|f| f.as_array()) {
+                let names: Vec<String> = files
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect();
+                if !names.is_empty() {
+                    s.push_str(&format!("\n\n产出文件: {}", names.join(", ")));
+                }
+            }
+            return s;
+        }
+    }
+    return_value.to_string()
 }
 
 #[cfg(test)]
@@ -313,7 +424,7 @@ mod tests {
             None,
         )
         .await;
-        let mut registry = AgentRegistry::new(Arc::new(Mutex::new(agent)), sub_workspace);
+        let registry = AgentRegistry::new(Arc::new(Mutex::new(agent)), sub_workspace);
         // 把同一个 agent 也注册为子 agent（测试用，避免构造两个）
         let dummy = registry.main.clone();
         registry.register_sub_agent(sub_alias.into(), dummy);
@@ -435,7 +546,7 @@ mod tests {
         });
         let store = SessionStore::open_in_memory().unwrap();
         let sid = store.create_session("sub", "test").unwrap();
-        let mut tools = ToolRegistry::new();
+        let tools = ToolRegistry::new();
         tools.register(Arc::new(ConfirmRequiredTool {
             called: called.clone(),
         }));
@@ -461,7 +572,7 @@ mod tests {
         )
         .await;
 
-        let mut registry = AgentRegistry::new(Arc::new(Mutex::new(sub_agent)), sub_workspace);
+        let registry = AgentRegistry::new(Arc::new(Mutex::new(sub_agent)), sub_workspace);
         let sub = registry.main.clone();
         registry.register_sub_agent("coder".into(), sub);
         let registry = Arc::new(registry);

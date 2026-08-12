@@ -510,6 +510,7 @@ impl QqChannel {
         agent: &Arc<Mutex<Agent>>,
         user_openid: &str,
         incoming: &C2cIncoming,
+        registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
         let text = &incoming.text;
         let msg_id = &incoming.msg_id;
@@ -546,7 +547,7 @@ impl QqChannel {
             }
             let outcome = {
                 let mut a = agent.lock().await;
-                crate::commands::slash::try_handle(text, &mut a).await?
+                crate::commands::slash::try_handle(text, &mut a, Some(registry.clone())).await?
             };
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
@@ -582,6 +583,11 @@ impl QqChannel {
                         msg_id: msg_id.to_string(),
                         buffer: String::new(),
                     });
+                    registry.set_delivery(
+                        self.clone()
+                            .pusher()
+                            .map(crate::tools::delegate::DeliveryTarget::Pusher),
+                    );
                     let turn_result = run_turn(
                         agent.clone(),
                         crate::provider::ChatMessage::user(&message),
@@ -680,6 +686,11 @@ impl QqChannel {
             buffer: String::new(),
         });
 
+        registry.set_delivery(
+            self.clone()
+                .pusher()
+                .map(crate::tools::delegate::DeliveryTarget::Pusher),
+        );
         let turn_result = run_turn(agent.clone(), user_msg, "qq".into(), sink, stop).await;
 
         // 清理中断信号注册
@@ -793,13 +804,16 @@ impl OutputSink for QqSink {
 
 #[async_trait]
 impl Channel for QqChannel {
+    fn pusher(self: Arc<Self>) -> Option<Arc<dyn crate::cron::ProactivePusher>> {
+        Some(self as Arc<dyn crate::cron::ProactivePusher>)
+    }
     async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
         let agent = registry.main.clone();
         tracing::info!(app_id = %self.config.app_id, "QqChannel starting");
 
         // 外层重连循环：ws 断开后等待 5 秒重连，避免 serve 进程退出
         loop {
-            match self.clone().run_connection(&agent).await {
+            match self.clone().run_connection(&agent, &registry).await {
                 Ok(()) => tracing::warn!("qq ws connection closed, will reconnect"),
                 Err(e) => {
                     tracing::error!(error = %e, "qq ws connection ended with error, will reconnect")
@@ -813,7 +827,11 @@ impl Channel for QqChannel {
 
 impl QqChannel {
     /// 单次连接的完整生命周期：建连 → IDENTIFY → 消息/心跳循环 → 断开
-    async fn run_connection(self: Arc<Self>, agent: &Arc<Mutex<Agent>>) -> Result<()> {
+    async fn run_connection(
+        self: Arc<Self>,
+        agent: &Arc<Mutex<Agent>>,
+        registry: &Arc<AgentRegistry>,
+    ) -> Result<()> {
         let ws_url = self.get_ws_url().await?;
         tracing::info!(url = %ws_url, "connecting to QQ gateway");
 
@@ -922,9 +940,10 @@ impl QqChannel {
                                     *self.owner_openid.lock().await = Some(user_openid.clone());
                                     let this = self.clone();
                                     let agent = agent.clone();
+                                    let registry = registry.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = this
-                                            .handle_user_message(&agent, &user_openid, &incoming)
+                                            .handle_user_message(&agent, &user_openid, &incoming, &registry)
                                             .await
                                         {
                                             tracing::error!(error = %e, "handle_user_message failed");
