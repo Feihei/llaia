@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod dingtalk;
+pub mod mail;
 pub mod qq;
 pub mod telegram;
 pub mod web;
@@ -8,6 +9,7 @@ pub mod wechat;
 // 重新导出，方便外部使用
 pub use cli::CliChannel;
 pub use dingtalk::DingtalkChannel;
+pub use mail::MailChannel;
 pub use qq::QqChannel;
 pub use telegram::TelegramChannel;
 pub use web::WebChannel;

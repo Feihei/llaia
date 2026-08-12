@@ -406,6 +406,27 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         tracing::info!("WechatChannel started");
     }
 
+    // 邮箱 channel：启用时构造并 spawn（IMAP 轮询收件 + SMTP 发信）
+    // 作为 cron pusher 注册为 "mail"，主动推送结果发往 owner_email。
+    let mail_pusher_for_cron: Option<std::sync::Arc<dyn crate::cron::ProactivePusher>> =
+        if config.channels.mail.enabled {
+            let mail = std::sync::Arc::new(
+                crate::channels::mail::MailChannel::new(config.channels.mail.clone())
+                    .with_workspace(workspace.clone()),
+            );
+            let pusher: std::sync::Arc<dyn crate::cron::ProactivePusher> = mail.clone();
+            let registry = registry.clone();
+            tasks.push(tokio::spawn(async move {
+                if let Err(e) = crate::channels::Channel::run(mail, registry).await {
+                    tracing::error!(error = %e, "MailChannel exited with error");
+                }
+            }));
+            tracing::info!("MailChannel started");
+            Some(pusher)
+        } else {
+            None
+        };
+
     // webui 随 serve 无条件启动（serve 模式下用户唯一保证可用的交互入口）
     // 注意：WebChannel 先创建，但不立即 spawn —— 需要在 CronScheduler 启动后注入 cron_scheduler，
     // 再 spawn WebChannel::run（build_router 在 run 内调用，此时 cron_scheduler 已就位）
@@ -433,6 +454,9 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     > = std::collections::HashMap::new();
     if let Some(p) = qq_pusher_for_cron {
         pushers.insert("qq".into(), p);
+    }
+    if let Some(p) = &mail_pusher_for_cron {
+        pushers.insert("mail".into(), p.clone());
     }
     pushers.insert("web".into(), web_pusher_for_cron);
     // cli：无持久连接，不注册 pusher（channel="cli" 的任务会用 NoopPusher 丢弃结果）

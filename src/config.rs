@@ -186,6 +186,8 @@ pub struct ChannelsConfig {
     pub dingtalk: DingtalkConfig,
     #[serde(default)]
     pub wechat: WechatConfig,
+    #[serde(default)]
+    pub mail: MailConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,6 +317,98 @@ fn default_wechat_base_url() -> String {
 
 fn default_wechat_cdn_base_url() -> String {
     "https://novac2c.cdn.weixin.qq.com/c2c".into()
+}
+
+/// 邮箱频道：IMAP 轮询收件 + SMTP 发信（个人助理入口，单用户安全锁）。
+/// 收信走 IMAP（默认 993 隐式 TLS），发信用 SMTP（465 隐式 TLS / 587 STARTTLS）。
+/// 仅响应 owner_email 发来的邮件，避免自动回复外部信件造成邮件循环。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// IMAP 服务器（如 imap.gmail.com）
+    #[serde(default)]
+    pub imap_server: String,
+    /// IMAP 端口（默认 993，隐式 TLS）
+    #[serde(default = "default_imap_port")]
+    pub imap_port: u16,
+    /// IMAP 登录账号（通常即邮箱地址）
+    #[serde(default)]
+    pub imap_user: String,
+    /// IMAP 密码 / 授权码，支持 ${VAR} 引用 .env
+    #[serde(default)]
+    pub imap_pass: String,
+    /// SMTP 服务器（如 smtp.gmail.com）
+    #[serde(default)]
+    pub smtp_server: String,
+    /// SMTP 端口（默认 465 隐式 TLS；587 走 STARTTLS）
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    /// SMTP 登录账号（留空则复用 imap_user）
+    #[serde(default)]
+    pub smtp_user: String,
+    /// SMTP 密码 / 授权码（留空则复用 imap_pass），支持 ${VAR}
+    #[serde(default)]
+    pub smtp_pass: String,
+    /// 轮询间隔（秒），默认 30
+    #[serde(default = "default_mail_poll")]
+    pub poll_interval_secs: u64,
+    /// 监听的邮箱文件夹，默认 INBOX
+    #[serde(default = "default_mail_mailbox")]
+    pub mailbox: String,
+    /// 单用户安全锁：只响应此地址发来的邮件；为空则响应所有发件人（谨慎）
+    #[serde(default)]
+    pub owner_email: String,
+    /// 发信显示的发件人名，默认 LLAIA
+    #[serde(default = "default_mail_from_name")]
+    pub from_name: String,
+    /// 处理后标记已读，默认 true（避免重复处理）
+    #[serde(default = "default_true")]
+    pub mark_seen: bool,
+    /// 单封邮件附件大小上限（MB），默认 10；超出的附件仅提示不下载
+    #[serde(default = "default_mail_max_attach")]
+    pub max_attachment_mb: u64,
+}
+
+impl Default for MailConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            imap_server: String::new(),
+            imap_port: default_imap_port(),
+            imap_user: String::new(),
+            imap_pass: String::new(),
+            smtp_server: String::new(),
+            smtp_port: default_smtp_port(),
+            smtp_user: String::new(),
+            smtp_pass: String::new(),
+            poll_interval_secs: default_mail_poll(),
+            mailbox: default_mail_mailbox(),
+            owner_email: String::new(),
+            from_name: default_mail_from_name(),
+            mark_seen: true,
+            max_attachment_mb: default_mail_max_attach(),
+        }
+    }
+}
+
+fn default_imap_port() -> u16 {
+    993
+}
+fn default_smtp_port() -> u16 {
+    465
+}
+fn default_mail_poll() -> u64 {
+    30
+}
+fn default_mail_mailbox() -> String {
+    "INBOX".into()
+}
+fn default_mail_from_name() -> String {
+    "LLAIA".into()
+}
+fn default_mail_max_attach() -> u64 {
+    10
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +632,12 @@ impl Config {
         self.channels.telegram.bot_token = expand(&self.channels.telegram.bot_token)?;
         self.channels.dingtalk.client_id = expand(&self.channels.dingtalk.client_id)?;
         self.channels.dingtalk.client_secret = expand(&self.channels.dingtalk.client_secret)?;
+        self.channels.mail.imap_server = expand(&self.channels.mail.imap_server)?;
+        self.channels.mail.imap_user = expand(&self.channels.mail.imap_user)?;
+        self.channels.mail.imap_pass = expand(&self.channels.mail.imap_pass)?;
+        self.channels.mail.smtp_server = expand(&self.channels.mail.smtp_server)?;
+        self.channels.mail.smtp_user = expand(&self.channels.mail.smtp_user)?;
+        self.channels.mail.smtp_pass = expand(&self.channels.mail.smtp_pass)?;
         self.webui.token = expand(&self.webui.token)?;
         self.tools.tavily.api_key = expand(&self.tools.tavily.api_key)?;
         self.log.dir = expand(&self.log.dir)?;

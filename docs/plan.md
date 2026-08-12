@@ -159,7 +159,7 @@
 
 - [x] 图片 / 文件消息收发（QQ 收发图/文件、CLI `@path`、`send_image`/`send_file` 工具）—— 见 [specs/2026-07-24-multimedia-design.md](specs/2026-07-24-multimedia-design.md)
 - [x] 主动消息推送（与 P3 cron 一并实现）
-- [ ] 邮箱 channel（IMAP 轮询 + SMTP，`lettre` + `async-imap` 生态成熟）—— 见 [specs/2026-08-07-provider-channel-expansion.md](specs/2026-08-07-provider-channel-expansion.md)
+- [x] 邮箱 channel（IMAP 轮询 + SMTP，`lettre` + `async-imap` 生态成熟）—— 见 [specs/2026-08-07-provider-channel-expansion.md](specs/2026-08-07-provider-channel-expansion.md)
 
 ---
 
@@ -399,8 +399,8 @@
 
 ### P4 / Provider / Channel 继续扩展
 
-- [ ] Google Gemini REST provider（generateContent + functionDeclarations）（必要性：**中** / 难度：★★☆）
-- [ ] 邮箱 channel：IMAP 轮询 + SMTP（还 P2-e 欠账）（必要性：**中** / 难度：★★☆）
+- [x] Google Gemini REST provider（generateContent + functionDeclarations）（必要性：**中** / 难度：★★☆）
+- [x] 邮箱 channel：IMAP 轮询 + SMTP（还 P2-e 欠账）（必要性：**中** / 难度：★★☆）
 - [ ] 飞书 / Lark：事件订阅长连接模式（必要性：**中低** / 难度：★★☆）
 - [ ] OpenAI Responses API（缓做，聚合网关可用 OpenAI 兼容协议绕过）（必要性：**低** / 难度：★★☆）
 - [ ] Slack Socket Mode / Discord / LINE（必要性：**低**，单用户助理已有 5 个 channel / 难度：★★★）

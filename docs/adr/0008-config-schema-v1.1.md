@@ -159,6 +159,24 @@ enabled = false
 allow_user_id = ""          # ilink_user_id 安全锁，空 = 不限制
 base_url = "https://ilinkai.weixin.qq.com"
 cdn_base_url = "https://novac2c.cdn.weixin.qq.com/c2c"
+
+[channels.mail]
+enabled = false
+imap_server = ""            # 如 imap.gmail.com
+imap_port = 993            # 隐式 TLS
+imap_user = ""             # 登录账号（通常即邮箱地址）
+imap_pass = ""             # 密码 / 授权码，支持 ${VAR}
+smtp_server = ""           # 如 smtp.gmail.com
+smtp_port = 465            # 465 隐式 TLS；587 走 STARTTLS
+smtp_user = ""             # 留空复用 imap_user
+smtp_pass = ""             # 留空复用 imap_pass
+poll_interval_secs = 30    # 轮询间隔
+mailbox = "INBOX"
+owner_email = ""           # 单用户安全锁：只响应此地址；为空则响应所有发件人
+from_name = "LLAIA"
+mark_seen = true           # 处理后标记已读
+max_attachment_mb = 10     # 附件大小上限，超出仅提示不下载
 ```
+
 
 微信登录态（bot_token / sync_buf / context_tokens）不入 config.toml，持久化在 config 目录下独立文件 `wechat_state.json`，避免敏感凭证与配置混写。
