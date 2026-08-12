@@ -178,9 +178,11 @@ CI 在 `push` / PR 时对 `main` 跑三道门：`cargo fmt --check` → `cargo c
 - **tag 必须带 `v` 前缀**（`release.toml` 已用 `tag-name = "v{{version}}"` 保证），否则 release 工作流不触发。
 - 不发布到 crates.io（`release.toml` 中 `publish = false`）；`push = false` 由 Feihei 手动推送。
 
-## 设计文档索引
+## 文档结构
 
-- [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 到 ADR-0010）
+- [docs/guide/](docs/guide/README.md) — **用户文档**（按功能模块）：安装、快速开始、CLI、配置、Web UI、频道、定时任务、MCP、技能、记忆与上下文、斜杠命令、工具、权限与安全、FAQ。README 只做入口，详情在此。
+- [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 到 ADR-0020，开发者向）
 - [docs/glossary.md](docs/glossary.md) — 术语表
 - [docs/specs/](docs/specs/) — 规格文档
 - [docs/plans/](docs/plans/) — 实现计划
+- [docs/issues/](docs/issues/) — 问题记录
