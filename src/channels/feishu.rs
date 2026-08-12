@@ -421,7 +421,7 @@ impl FeishuChannel {
             payload: None,
         };
         if write
-            .send(WsMsg::Binary(init_ping.encode_to_vec().into()))
+            .send(WsMsg::Binary(init_ping.encode_to_vec()))
             .await
             .is_err()
         {
@@ -446,7 +446,7 @@ impl FeishuChannel {
                         headers: vec![PbHeader { key: "type".into(), value: "ping".into() }],
                         payload: None,
                     };
-                    if write.send(WsMsg::Binary(ping.encode_to_vec().into())).await.is_err() {
+                    if write.send(WsMsg::Binary(ping.encode_to_vec())).await.is_err() {
                         tracing::warn!("feishu ping failed, reconnecting");
                         break;
                     }
@@ -512,7 +512,7 @@ impl FeishuChannel {
                         let mut ack = frame.clone();
                         ack.payload = Some(br#"{"code":200,"headers":{},"data":[]}"#.to_vec());
                         ack.headers.push(PbHeader { key: "biz_rt".into(), value: "0".into() });
-                        let _ = write.send(WsMsg::Binary(ack.encode_to_vec().into())).await;
+                        let _ = write.send(WsMsg::Binary(ack.encode_to_vec())).await;
                     }
 
                     // 分片重组
@@ -735,7 +735,7 @@ impl crate::channels::Channel for FeishuChannel {
                 }
             })
         };
-        let _ = consumer; // serve 退出时会 abort 所有 task
+        std::mem::drop(consumer); // serve 退出时会 abort 所有 task（drop 仅丢弃 JoinHandle，后台任务继续跑，运行时关闭才 abort）
 
         loop {
             if let Err(e) = self.listen_ws(&tx).await {

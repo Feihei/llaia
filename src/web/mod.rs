@@ -363,7 +363,7 @@ pub async fn put_config(
 
     // 全量热加载：runtime / skills / mcp / cron / sub-agents（P4-f 轻量版）
     let config_dir = state.config_path.parent().unwrap_or_else(|| Path::new("."));
-    let notes = reload_all(&state, &merged, &config_dir).await;
+    let notes = reload_all(&state, &merged, config_dir).await;
     axum::Json(serde_json::json!({
         "ok": true,
         "note": format!("config saved; {}", notes.join("; "))
@@ -740,7 +740,7 @@ pub async fn put_config_raw(
 
     // 全量热加载：runtime / skills / mcp / cron / sub-agents（P4-f 轻量版）
     let config_dir = state.config_path.parent().unwrap_or_else(|| Path::new("."));
-    let notes = reload_all(&state, &parsed, &config_dir).await;
+    let notes = reload_all(&state, &parsed, config_dir).await;
     axum::Json(serde_json::json!({
         "ok": true,
         "note": format!("config saved; {}", notes.join("; "))

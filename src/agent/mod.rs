@@ -1187,7 +1187,7 @@ mod tests {
         let main_sid = main_store.create_session("main", "test").unwrap();
 
         let delegate = Arc::new(DelegateTool::new(120));
-        let mut main_tools = ToolRegistry::new();
+        let main_tools = ToolRegistry::new();
         main_tools.register(delegate.clone());
         let main_tools = Arc::new(main_tools);
 
@@ -1212,7 +1212,7 @@ mod tests {
         .await;
         let main_arc: Arc<TokioMutex<Agent>> = Arc::new(TokioMutex::new(main_agent));
 
-        let mut registry = AgentRegistry::new(main_arc, main_workspace);
+        let registry = AgentRegistry::new(main_arc, main_workspace);
         registry.register_sub_agent("coder".into(), sub_arc);
         let registry = Arc::new(registry);
         delegate.set_registry(registry.clone());

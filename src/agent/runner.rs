@@ -230,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_calls() {
-        let mut reg = ToolRegistry::new();
+        let reg = ToolRegistry::new();
         reg.register(Arc::new(EchoTool));
         let calls = vec![ToolCall {
             id: "1".into(),
@@ -310,7 +310,7 @@ mod tests {
             }
         }
 
-        let mut reg = ToolRegistry::new();
+        let reg = ToolRegistry::new();
         reg.register(Arc::new(DangerousTool));
         let calls = vec![ToolCall {
             id: "1".into(),

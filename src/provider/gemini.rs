@@ -290,7 +290,7 @@ impl Provider for GeminiProvider {
 
         let resp = self
             .client
-            .post(&self.generate_url())
+            .post(self.generate_url())
             .header("x-goog-api-key", &self.api_key)
             .json(&body)
             .send()
@@ -372,7 +372,7 @@ impl Provider for GeminiProvider {
 
         let resp = match self
             .client
-            .post(&self.stream_url())
+            .post(self.stream_url())
             .header("x-goog-api-key", &self.api_key)
             .json(&body)
             .send()
