@@ -247,6 +247,8 @@ function llaiaApp() {
       // expand model back to provider top level (adapt for serde flatten)
       // strip NaN (empty input[type=number] yields NaN, JSON.stringify turns it to null, backend u32 parse fails)
       const cfgToSend = JSON.parse(JSON.stringify(this.cfg, (key, value) => {
+        // permission: empty/unset → drop so backend stores None (effective default)
+        if (key === 'permission' && (value === '' || value === null || value === undefined)) return undefined;
         return typeof value === 'number' && isNaN(value) ? undefined : value;
       }));
       for (const pid in cfgToSend.provider) {
