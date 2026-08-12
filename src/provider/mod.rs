@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 pub mod anthropic;
 pub mod fallback;
+pub mod gemini;
 pub mod openai_compat;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -206,6 +207,19 @@ pub fn provider_from_ref(
                 &prov_cfg.base_url
             };
             Ok(Arc::new(anthropic::AnthropicProvider::new(
+                base_url,
+                &prov_cfg.api_key,
+                &model_cfg.model,
+                model_cfg.max_tokens.unwrap_or(0),
+            )?))
+        }
+        "gemini" => {
+            let base_url = if prov_cfg.base_url.is_empty() {
+                "https://generativelanguage.googleapis.com"
+            } else {
+                &prov_cfg.base_url
+            };
+            Ok(Arc::new(gemini::GeminiProvider::new(
                 base_url,
                 &prov_cfg.api_key,
                 &model_cfg.model,
