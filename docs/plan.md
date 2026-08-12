@@ -295,7 +295,7 @@
 
 ## P4 — 基础能力增强
 
-**状态**：⏳ 计划中
+**状态**：✅ 主体完成（P4-a~P4-e 全交付；P4-f 经复评收敛为空——原待触发项均已明确本阶段不做）
 
 > 来源：[docs/issues/](issues/) 收集的反馈与扩展评估，已实现的见各阶段完成清单。
 > 已取消：cron.toml 移入 agent workspace（10#）—— CronTool 已让 agent 动态管理任务，无需文件层编辑。
@@ -349,7 +349,6 @@
     - **工具消息裁剪**：ADR-0004「工具调用结果可丢」——工具消息在上下文里只留截断短注（完整内容已在 sqlite 留底），且进摘要 dump 时只给一行 `[tool] (结果已归档) <前80字>`，不让大段工具输出消耗 LLM 输入。
     - 签名 `compact(provider, keep_recent, token_budget) -> Result<bool>`（bool=是否真调 LLM）；调用方补 `token_budget = context_size`（主循环 + `/compact`）。不新增 config key，作为默认升级。
 - [x] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界（必要性：**中** / 难度：★☆☆，纯文档）
-- [x] 上下文注入策略文档化：明确每次启动注入哪些记忆（SOUL/USER/MEMORY + 上一轮未完成会话历史 + 近期摘要），供用户理解记忆边界（必要性：**中** / 难度：★☆☆，纯文档）
 
 ### P4 / 模型与工具调用
 
@@ -379,16 +378,19 @@
     - **④ 响应时序**：handler 先 `return Json({shutting_down:true})`，再用 `tokio::spawn` 延迟 ~100ms 后 `notify_one()`，确保浏览器收到响应、WebUI 切到「已停止」态，再触发进程收尾。
     - **⑤ WebUI 前端**：`index.html:377` 的 `Restart Service` 按钮旁加 `Stop Service` 按钮，`app.js:499 restartService()` 旁加 `shutdownService()`（POST `/api/shutdown`，成功后显示「Service stopped」而非轮询重启）。
   - **验证要点**：① 点停止按钮 → 进程在 ~1s 内干净退出，终端打印 GOODBYE，无残留子进程（含 MCP child，transport 有 `kill_on_drop`）；② cron 任务不再触发（shutdown 已调）；③ Ctrl+C 路径行为不变；④ 容器内点停止能停掉容器（restart 仍拒）。
-- [ ] spawn-after-teardown 顺序（zeroclaw `restart.rs` 精华）：启动时 record_launch 记录原始 argv，先优雅 teardown（端口已释放）再拉子进程，替换 ping/sleep 延迟土法并保留启动参数（必要性：**中** / 难度：★★☆）
-- [ ] 同 PID 原地 reload（正解，zeroclaw 主力路线）：WebUI 触发进程内信号，原地拆除/重建全部 channel 子系统，PID 不变，终端归属与 Ctrl+C 保留；需要给 QQ WS/Web/cron/MCP 各 channel 做 cancellation token 化改造（必要性：**中** / 难度：★★★）
+- [x] WebUI config 热加载（reload_all，即最初定义的 P4-f 轻量方案 A）：保存 `/api/config` / `/api/config/raw` 后进程内就地重载 agent 定义 / skills / MCP 工具 / cron 任务 / 非连接型 channel 参数，无需重启 serve；连接型配置（QQ 凭证、Web host/port/token）仍按需重启（必要性：**中** / 难度：★★☆）
+- [x] ~~spawn-after-teardown 顺序~~ **明确本阶段不做**：zeroclaw `restart.rs` 的 record_launch + 先 teardown 再拉子进程。当前 `reload_all` 已覆盖「配置改动免重启」诉求，重启本身低频且无强痛点，无结构改造必要（必要性：**低** / 原难度：★★☆）
+- [x] ~~同 PID 原地 reload~~ **明确本阶段不做**：WebUI 信号触发进程内拆除/重建全部 channel 子系统（cancellation token 化）。同上，被 `reload_all` 与低频重启需求覆盖，无强痛点（必要性：**低** / 原难度：★★★）
 
 ### P4 / 交互增强
 
-- [ ] `/move` 或 `/cd` 斜杠命令：允许把 CWD 从默认 workspace 移动到用户指定位置，提醒风险并要求确认（扩展 P3-a 的 workspace 边界模型）（必要性：**中** / 难度：★☆☆）
+- [x] `/move` 或 `/cd` 斜杠命令：允许把 CWD 从默认 workspace 移动到用户指定位置，提醒风险并要求确认（扩展 P3-a 的 workspace 边界模型）（必要性：**中** / 难度：★☆☆）
+  - 已交付（commit `13d275d`）：`/move`/`/cd` 路由同一 handler（src/commands/slash.rs）；agent 家目录与工具作用域解耦（记忆/会话/USER.md 锁死 `~/.llaia/workspace`，move 只改 terminal/文件工具作用域）；无参/`home`/`~`/`-` 一键回原始 workspace（免审批）；风险确认走权限档位审批门。**明确不做**：git-bash 风格 `/x/...` 路径在 Windows 下不识别为绝对路径（跨盘需 `X:/...`），按 Feihei 决定不修复——非 bug，属 Rust `Path` 对 Unix 风格路径的固有解析行为，用户用 `X:/...` 即可。
 
 ### P4 / 权限管理系统
 
-- [ ] 三档权限 profile：`read-only` / `default` / `yolo`，对齐 opencode 的 plan/build 双模式思路（必要性：**中** / 难度：★★☆）
+- [x] 三档权限 profile：`read-only` / `default` / `yolo`，对齐 opencode 的 plan/build 双模式思路（必要性：**中** / 难度：★★☆）
+  - 已交付（commit `147544f`）：`RuntimeConfig.permission` + `ApprovalGate`（src/agent/approval.rs）、`/permission` 运行时切换、`/ok` `/deny` 审批斜杠命令跨频道一致；init 模板 + doctor 已暴露。WebUI Runtime 表单 permission 下拉已加（src/web/static/index.html + app.js，unset/default/read-only/yolo 四选项，unset 存为 None）。
   - 双维度判定：① 操作是否风险 ② 是否在 workspace 内
   - `read-only`：所有写操作都审批
   - `default`：仅 workspace 外的风险操作审批
@@ -402,8 +404,13 @@
 - [x] Google Gemini REST provider（generateContent + functionDeclarations）（必要性：**中** / 难度：★★☆）
 - [x] 邮箱 channel：IMAP 轮询 + SMTP（还 P2-e 欠账）（必要性：**中** / 难度：★★☆）
 - [x] 飞书 / Lark：事件订阅长连接模式（必要性：**中低** / 难度：★★☆）
-- [ ] OpenAI Responses API（缓做，聚合网关可用 OpenAI 兼容协议绕过）（必要性：**低** / 难度：★★☆）
-- [ ] Slack Socket Mode / Discord / LINE（必要性：**低**，单用户助理已有 5 个 channel / 难度：★★★）
+- [x] ~~OpenAI Responses API~~ **明确本阶段不做**：聚合网关已用 OpenAI 兼容协议（`/v1/chat/completions`）绕过，无切换动机（必要性：**低** / 原难度：★★☆）
+- [x] ~~Slack Socket Mode / Discord / LINE~~ **明确本阶段不做**（已调研 zeroclaw `crates/zeroclaw-channels/src/` 实现，难度如下；必要性：**低**，单用户助理已有 5 个 channel）
+  - 三者均**纯手写、未引第三方 SDK**（Slack/Discord 用 `tokio-tungstenite` WS gateway，LINE 用 `/line/webhook` HTTP 路由 + HMAC 签名校验）。
+  - **Slack**（`slack.rs` 10024 行）：Socket Mode = WebSocket 收事件 + REST 回复，含 socket-mode 重连退避。MVP 裁剪（文本收发 + 单用户锁 + ACK）约 400–600 行；全量含 threads/files/blocks/reactions 才到万行。**难度：★★☆（MVP 中等，体量靠功能堆叠）**。
+  - **Discord**（`discord/` 13907 行，`mod.rs` 8097）：gateway WS + 心跳 + RESUME + intents + slash commands + components + interactions + embeds。体量最大，即便 MVP 也要处理 gateway  opcode/心跳/交互模型，约 600–1000 行。**难度：★★★（最重，gateway 交互模型复杂）**。
+  - **LINE**（`line.rs` 2762 行）：webhook（HTTP POST）+ HMAC-SHA256 签名校验 + push 回复，协议最简单（约 200–300 行 MVP）。**但致命架构冲突**：纯 webhook 需公网入口（ngrok/frp 隧道），与 LLAIA「免公网 IP」设计目标相悖（此前飞书 webhook 方案即因此被否）。**难度：协议 ★★☆ / 架构阻塞 ★★★（需隧道入口）**。
+  - 结论：三者本期均不实现；若未来要做，Slack 是性价比最高（手写 WS+REST、无公网依赖），LINE 受架构限制需先解决入口问题，Discord 投入最大。
 - [ ] 明确不做：WhatsApp 自实现、微信个人号非官方协议（封号风险，与 ClawBot 官方路线是两回事）
 
 ### P4 / 生态复用
@@ -423,7 +430,9 @@
 | **P4-c** | 记忆系统进化 | 「做梦」（[ADR-0016](docs/adr/0016-dream.md) 已决议）；更聪明的上下文压缩 | ★★☆~★★★ | 两者共用同一条「抽取 → 合并 → 压缩」管线，分开做会返工；本阶段是 P4 的核心价值点 |
 | **P4-d** | 边界与授权 | 三档权限 profile + `/ok` `/deny`；`/move` `/cd` | ★★☆ | 同一套 workspace 边界模型的一放一收，同期设计才自洽；依赖 P4-a 已落地的稳定运行时 |
 | **P4-e** | 生态扩展 | Gemini provider → 邮箱 channel → 飞书 | ★★☆ | 纯增量、互不阻塞，可穿插进任何空档；按实际使用需求拉取，不必一次做完 |
-| **P4-f** | 待触发 | 同 PID 原地 reload；spawn-after-teardown；Responses API；Slack / Discord / LINE | ★★☆~★★★ | 当前无强痛点（provider 已热加载，重启需求低频）。等 P4-a 的 `/api/shutdown` 上线后复评：若仍频繁被重启问题咬到，再启动 cancellation token 化改造 |
+| **P4-f** | 已收敛 | 原「同 PID 原地 reload / spawn-after-teardown / Responses API / Slack·Discord·LINE」经复评**全部明确本阶段不做**（见上述 ✅ 划除项），诉求已由 `reload_all` 覆盖或必要性过低 | — | 当前无强痛点（provider 已热加载，重启需求低频），不启动结构性改造 |
+
+> **P4-f 范围说明**：原本「配置改动免重启」的诉求，已用更轻量的 **reload_all** 实现（保存 `/api/config` 后进程内就地重载 agent/skills/MCP/cron/非连接型 channel 参数，见「P4 / 进程生命周期」首条 ✅）。经本期复评，原表中「仍需结构性改造」的重项（同 PID 原地 reload / spawn-after-teardown）与「缓做/低优先」的渠道扩展（Responses API / Slack / Discord / LINE）**均无强痛点、必要性低，明确不在本阶段做**，相关条目已在上方划除并附理由。P4-f 至此收敛为空，不再「待触发」。
 
 **阶段间依赖**：
 
