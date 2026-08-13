@@ -11,13 +11,13 @@
 ## 架构
 
 - Rust 编写，轻量、可移植
-- 主控 Agent + 多个专用 Agent 协作（**委派模式**，P2 引入；P1 主 Agent 单干）
-- 用户只跟主 Agent 接触，特定任务主 Agent 委派给特定子 Agent
-- P1 子 Agent 不实现，所有任务由主 Agent 完成
+- 主控 Agent + 多个专用 Agent 协作（**委派模式**）
+- 用户只跟主 Agent 接触，特定任务主 Agent 通过 `delegate` 工具委派给后台子 Agent（子 Agent 在独立 workspace 运行，由 `[agent.<alias>]` 配置，受 `denied_tools` / `delegate_timeout` 约束）
+- 子 Agent 借主 Agent 的工具集执行，结果回传主 Agent
 
-### Channel 抽象（P1.5 引入）
+### Channel 抽象
 
-用户接入通道抽象为 `Channel` trait，CLI 和 QQ 各自实现：
+用户接入通道抽象为 `Channel` trait，CLI、WebUI 与各 IM 平台各自实现：
 
 ```rust
 #[async_trait]
@@ -28,8 +28,8 @@ pub trait Channel: Send + Sync + 'static {
 
 - 每个 channel 负责自己的 I/O 循环（读用户输入、写回复）
 - 共享同一个 Agent，通过 `Arc<tokio::sync::Mutex<Agent>>` 串行化访问
-- `chat_cmd` 根据 config 启用情况 `tokio::spawn` 多个 channel 任务
-- P1.5 实现：`CliChannel`（终端 REPL）、`QqChannel`（腾讯官方 QQ 开放平台 C2C 单聊）
+- `serve_cmd` 根据 config 启用情况 `tokio::spawn` 多个 channel 任务（WebUI + 各 IM 频道）
+- 当前实现：`CliChannel`（终端 REPL）、`WebChannel`（WebUI HTTP/WS，主交互界面）、`QqChannel`、`TelegramChannel`、`DingtalkChannel`、`WechatChannel`（微信 ClawBot）、`FeishuChannel`、`MailChannel`（IMAP/SMTP）
 
 详见 [docs/adr/0009-qq-channel.md](docs/adr/0009-qq-channel.md)。
 
@@ -37,7 +37,7 @@ pub trait Channel: Send + Sync + 'static {
 
 ## 持久化
 
-三份 Markdown 文件 + sqlite 会话记录：
+三份 Markdown 文件 + sqlite 会话记录，**均位于 `<config_dir>/workspace/`（agent 家目录，固定）**：
 
 | 对象 | 形态 | 用途 |
 |---|---|---|
@@ -45,8 +45,11 @@ pub trait Channel: Send + Sync + 'static {
 | USER.md | 单文件 | 用户画像、身份绑定清单、偏好 |
 | MEMORY.md | 单文件，分条目 | 长期事实记忆 |
 | sessions.db | sqlite | 会话历史（source of truth） |
+| uploads/ | 目录 | 媒体/附件落盘 |
 
 MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消息从内存移除但 sqlite 留底。
+
+> **两个 `workspace` 的区别**：agent 家目录（SOUL/USER/MEMORY/sessions.db 所在，**固定不变**，位于 `config_dir/workspace/`）与文件/终端工具的实时作用域 `workspace_root`（可被 `/move` 切换）。`migrate.rs` 在 v0.2 后将旧版散落在 `~/.llaia/` 根的文件自动迁入 `workspace/`（写 `.migrated_v0.2` 标记，幂等）。
 
 详见 [docs/adr/0003-persistence-model.md](docs/adr/0003-persistence-model.md)。
 
@@ -60,86 +63,125 @@ MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消�
 
 ## Provider 与工具调用
 
-- P1 只实现 OpenAI 兼容 provider（覆盖 Ollama、Llama.cpp、LMStudio 等本地端点）
+- Provider 类型（按 `[provider.<id>].type` 区分）：
+  - `openai_compatible`（默认，未写 `type` 也走这个）：覆盖 Ollama、Llama.cpp、LMStudio 等 OpenAI 兼容端点
+  - `anthropic`：Anthropic Messages API（需 `max_tokens`）
+  - `gemini`：Google Gemini API（需 `max_tokens`）
+  - 未知 `type` 一律按 `openai_compatible` 处理（存量无 type 配置也能跑）
+  - 支持 **fallback 备用模型链**：`[agent.<alias>].fallback` 列出备用 model ref，主模型请求失败时按序降级
 - 工具调用协议：**原生优先 + 标签降级**
   - `native_tool_calling = true` → OpenAI function calling
   - `native_tool_calling = false` → system prompt 注入 `<tool_call>...</tool_call>` 协议
-- P1 不做流式输出（SSE）
+- 流式输出：`Provider` trait 已定义 `chat_stream`（SSE）接口，但 chat 主路径当前仍整块返回，未启用流式。
 
 详见 [docs/adr/0005-provider-and-tool-calling.md](docs/adr/0005-provider-and-tool-calling.md)。
 
-## 工具集（P1 最小集）
+## 工具集
 
-| 工具 | 用途 |
-|---|---|
-| `file_read` / `file_write` / `file_edit` | 文件读写、精确修改 |
-| `terminal` | 终端命令（含 ls/grep 等，不单列） |
-| `web_fetch` | 获取网页 |
-| `tavily_search` | 搜索（需 api_key） |
-| `memory_write` | 写 MEMORY.md |
+| 工具 | 模块 | 用途 |
+|---|---|---|
+| `file_read` / `file_write` / `file_edit` | `tools/file` | 文件读写、精确修改 |
+| `terminal` | `tools/terminal` | 终端命令（含 ls/grep 等，不单列），受 `tools.terminal` 命令策略约束 |
+| `web_fetch` | `tools/web` | 获取网页 |
+| `tavily_search` | `tools/tavily` | 搜索（需 `tools.tavily.api_key`） |
+| `memory_write` | `tools/memory` | 写 MEMORY.md |
+| `delegate` | `tools/delegate` | 后台委派子 Agent 执行长任务（脱离主回合，结果回传） |
+| `cron` | `tools/cron` | 注册/执行定时任务（Agent 模式 / Step 模式） |
+| `mcp` | `tools/mcp` | 接入外部 MCP server 暴露的工具 |
+| `send_media` | `tools/send_media` | 向频道回传图片/文件等媒体 |
 
-终端命令安全：配置项控制（`none` / `whitelist` 默认 / `always`）。
+终端命令安全：由 `[tools.terminal]` 控制——
+- `confirm`（`none` / `whitelist` 默认 / `always`）：是否需要交互式确认
+- `command_policy`（`blacklist` 默认 / `whitelist` / `none`）：命令黑白名单
 
-### 工具副作用标记（P1.5 引入）
+### 工具副作用标记
 
-`Tool` trait 加 `requires_confirm()` 方法（默认 `false`）。`FileWrite` / `FileEdit` / `Terminal` / `MemoryWrite` override 为 `true`。
+`Tool` trait 提供 `requires_confirm()`（默认 `false`）。有副作用的工具（`file_write` / `file_edit` / `terminal` / `memory_write` 等）override 为 `true`，触发审批流。
 
-QQ channel 下无法弹 stdin 等用户确认，`execute_tool_calls` 接收 `channel` 和 `qq_confirm_mode` 参数，按 `[channels.qq].confirm_mode` 决定是否执行：
+全局权限档位（`runtime.permission`，P4-d）：`read-only` / `default` / `yolo`，控制有副作用操作是否需要交互式审批及审批范围，运行时可用 `/permission <profile>` 切换。无 stdin 的频道（QQ/Telegram 等）则依赖 `[channels.<name>].confirm_mode` 作为兜底：
 
-- `always`（默认）：跳过需确认工具，回复用户原因
-- `whitelist`：P1.5 简化，等同于 `always`
-- `none`：全放行
+- `none`（默认）：全放行（需确认工具仍走 `/ok` `/deny` 审批）
+- `always`：跳过需确认工具，回复用户原因
+- `whitelist`：已废弃，加载时 warn 并 fallback 到 `none`
 
-CLI 子命令：`llaia chat`（默认）/ `llaia config` / `llaia doctor` / `llaia remember`。
-斜杠命令：`/new` `/exit` `/compact` `/clear` `/remember` `/config` `/help`。
+CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道）/ `llaia init`（生成配置骨架）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
+斜杠命令：`/new` `/exit` `/stop` `/compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/dream` `/dream-rollback` `/delegate-list` `/delegate-cancel <id>` `/help`。
 
 详见 [docs/adr/0006-tools-and-cli.md](docs/adr/0006-tools-and-cli.md) 与 [docs/adr/0009-qq-channel.md](docs/adr/0009-qq-channel.md)。
 
 ## 工作区与工程约定
 
-默认工作区 `~/.llaia/`，可配置：
+默认 state dir `~/.llaia/`，可用 `--config-dir` 覆盖：
 
 ```
 ~/.llaia/
   config.toml
-  SOUL.md
-  USER.md
-  MEMORY.md
-  sessions.db
+  .env                       # 可选，API key 等敏感配置（支持 ${VAR} 引用）
   logs/
+  workspace/                 # agent 家目录（固定）：SOUL.md / USER.md / MEMORY.md / sessions.db / uploads/ / subagent/
 ```
 
-- 配置格式：toml，命名式 section（`[provider.<id>]` / `[provider.<id>.<model_alias>]` / `[agent.<alias>]` / `[channels.<cli|qq>]`）
-- workspace 同时作为 state dir 和 tool working dir（P1.1 起，详见 ADR 0008）
-- 错误处理：`anyhow::Result`（P1 简单优先）
-- 日志：tracing，输出到文件 + stderr
-- P1 单 crate，P2 视复杂度再考虑拆分
+- 配置格式：toml，命名式 section（`[provider.<id>]` / `[provider.<id>.<model_alias>]` / `[agent.<alias>]` / `[webui]` / `[channels.<qq|telegram|dingtalk|wechat|mail|feishu>]` / `[tools.terminal]` / `[tools.tavily]` / `[runtime]`）
+- `workspace`（agent 家目录，固定）同时作为 state dir；文件/终端工具的实时作用域是 `workspace_root`，可被 `/move` 切换（详见「持久化」）
+- 错误处理：`anyhow::Result`
+- 日志：tracing，输出到文件 + stderr；`log.dir` 未配置时跟随 config 目录下的 `logs/`
+- 单 crate
 
-### Channels 配置（P1.5）
+### Channels 与 WebUI 配置
+
+IM 频道在 `[channels.<name>]` 下配置（均含 `enabled`，默认 false，及单用户安全锁字段）；Web UI 是顶层 `[webui]`（**不是** `[channels.web]`，旧写法会在 `Config::load` 时自动迁移到 `[webui]`）：
 
 ```toml
-[channels.cli]
-enabled = true                # 默认 true
+[webui]
+host = "127.0.0.1"           # 默认仅本机；改 0.0.0.0 需自担风险
+port = 51217                 # 默认端口
+token = ""                   # 留空则启动时随机生成并打印日志
 
 [channels.qq]
-enabled = false               # 默认 false
+enabled = false
 app_id = ""
 app_secret = ""
-confirm_mode = "always"       # always / whitelist / none
+confirm_mode = "none"        # none（默认，全放行）/ always（跳过需确认工具）/ whitelist（已废弃→none）
+
+[channels.telegram]
+enabled = false
+bot_token = "${TG_BOT_TOKEN}"
+allow_chat_id = 0            # 单用户安全锁，0=不限制
+
+[channels.dingtalk]
+enabled = false
+client_id = ""
+client_secret = ""
+
+[channels.wechat]            # 微信 ClawBot（ilink）
+enabled = false
+allow_user_id = ""
+
+[channels.mail]              # IMAP 收信 + SMTP 发信
+enabled = false
+imap_server = "imap.gmail.com"
+# imap_port=993 / imap_user / imap_pass / smtp_server / smtp_port / owner_email ...
+
+[channels.feishu]
+enabled = false
+app_id = ""
+app_secret = ""
 ```
 
-鉴权流程：启动时用 `app_id` + `app_secret` 调 `https://bots.qq.com/app/getAppAccessToken` 换取 `access_token`（有效期 7200 秒，过期前 60 秒自动刷新），HTTPS 请求头 `Authorization: QQBot {access_token}`，WS IDENTIFY 的 `token` 字段同此格式。
+> 各频道完整字段见 `src/config.rs` 中的 `*Config` 结构体。
+
+QQ 鉴权流程：启动时用 `app_id` + `app_secret` 调 `https://bots.qq.com/app/getAppAccessToken` 换取 `access_token`（有效期 7200 秒，过期前 60 秒自动刷新），HTTPS 请求头 `Authorization: QQBot {access_token}`，WS IDENTIFY 的 `token` 字段同此格式。
 
 详见 [docs/adr/0007-project-structure-and-conventions.md](docs/adr/0007-project-structure-and-conventions.md) 与 [docs/adr/0008-config-schema-v1.1.md](docs/adr/0008-config-schema-v1.1.md)。
 
-## P1 MVP 验收标准
+## P1 MVP 验收标准（历史基线，已超集实现）
 
-- 能 `cargo run -- chat` 进 REPL 多轮对话
-- 能调本地 Ollama / LMStudio
-- 主 Agent 能调文件读写 / 终端 / 网页 / 搜索
+- 能 `cargo run --` 进入交互（默认 `chat` REPL，或用 `llaia serve` 拉起 WebUI）
+- 能调本地 Ollama / LMStudio，以及 Anthropic / Gemini 等云端 provider
+- 主 Agent 能调文件读写 / 终端 / 网页 / 搜索 / 委派 / 定时任务
 - `/remember` 写 MEMORY，下次加载生效
 - 自动压缩，sqlite 留底
-- `llaia config` / `llaia doctor` 可用
+- `llaia config` / `llaia doctor` / `llaia init` 可用
 
 ## 编码约定
 
@@ -181,7 +223,7 @@ CI 在 `push` / PR 时对 `main` 跑三道门：`cargo fmt --check` → `cargo c
 ## 文档结构
 
 - [docs/guide/](docs/guide/README.md) — **用户文档**（按功能模块）：安装、快速开始、CLI、配置、Web UI、频道、定时任务、MCP、技能、记忆与上下文、斜杠命令、工具、权限与安全、FAQ。README 只做入口，详情在此。
-- [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 到 ADR-0020，开发者向）
+- [docs/adr/](docs/adr/) — 架构决策记录（ADR-0001 起持续追加，开发者向）
 - [docs/glossary.md](docs/glossary.md) — 术语表
 - [docs/specs/](docs/specs/) — 规格文档
 - [docs/plans/](docs/plans/) — 实现计划
