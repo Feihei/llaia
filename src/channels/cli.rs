@@ -368,7 +368,7 @@ pub async fn build_single_agent(
     let (provider, model_cfg, has_delegate) = if agent_cfg.model.is_empty() {
         tracing::warn!(
             agent = alias,
-            "agent.model 未配置，进入降级模式（无 provider）"
+            "agent.model not set, entering degraded mode (no provider)"
         );
         (None, None, false)
     } else {
@@ -624,7 +624,9 @@ pub async fn build_agent(
     // 构建 main Agent
     // 若 [agent.main] 未配置（init 模板默认状态），用空 model 构造降级 agent
     let main_cfg = config.agent.get("main").cloned().unwrap_or_else(|| {
-        tracing::warn!("[agent.main] 未配置，main agent 进入降级模式（无 provider）");
+        tracing::warn!(
+            "[agent.main] not configured, main agent entering degraded mode (no provider)"
+        );
         AgentConfig {
             model: String::new(),
             workspace: String::new(),

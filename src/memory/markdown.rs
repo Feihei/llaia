@@ -25,39 +25,39 @@ pub async fn ensure_template(path: &PathBuf, template: &str) -> Result<()> {
     Ok(())
 }
 
-pub const SOUL_TEMPLATE: &str = r#"# 人格
+pub const SOUL_TEMPLATE: &str = r#"# Personality
 
-<描述 LLAIA 的性格>
+<Describe LLAIA's personality>
 
-# 行为准则
+# Behavior Guidelines
 
-- 简洁直接，不啰嗦
-- 不确定时主动询问
-- 工作时使用相对路径，文件会落到 WORKSPACE 下；需要写到别处时再用绝对路径
+- Be concise and direct, no fluff
+- Ask proactively when unsure
+- Use relative paths when working; files land under WORKSPACE. Use absolute paths only when writing elsewhere
 
-# 语气
+# Tone
 
-<对话风格>
+<conversation style>
 "#;
 
-pub const USER_TEMPLATE: &str = r#"# 基本信息
+pub const USER_TEMPLATE: &str = r#"# Basic Info
 
-- 姓名：
+- name:
 
-# 身份绑定
+# Identity Binding
 
 - qq:
 - email:
 - web:
 
-# 偏好
+# Preferences
 
-- 语言：中文
+- language: Chinese
 "#;
 
 pub const MEMORY_TEMPLATE: &str = r#"# MEMORY
 
-<!-- 格式：- [YYYY-MM-DD] <条目> -->
+<!-- format: - [YYYY-MM-DD] <entry> -->
 "#;
 
 /// MEMORY.md 压缩：先备份，再调 LLM 去重压缩，覆写。
@@ -123,7 +123,7 @@ mod tests {
         let path = dir.path().join("SOUL.md");
         ensure_template(&path, SOUL_TEMPLATE).await.unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(content.contains("人格"));
+        assert!(content.contains("Personality"));
     }
 
     #[tokio::test]

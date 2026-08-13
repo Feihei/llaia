@@ -38,7 +38,7 @@ pub async fn try_handle(
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move [<path>|home] (alias /cd) — 无参数或 /move home 恢复到原始 workspace /config /dream /dream-rollback /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -71,7 +71,7 @@ pub async fn try_handle(
                     Ok(SlashOutcome::Resume { notice, message })
                 }
                 Ok(None) => Ok(SlashOutcome::Handled(format!(
-                    "[{}] 没有待确认的请求 {}",
+                    "[{}] no pending approval {}",
                     cmd, args
                 ))),
                 Err(e) => Ok(SlashOutcome::Handled(format!("[{} failed: {}]", cmd, e))),
@@ -85,13 +85,13 @@ pub async fn try_handle(
                 let current = agent.workspace_root.read().await.clone();
                 if current == home {
                     return Ok(SlashOutcome::Handled(format!(
-                        "workspace 已是原始目录：{}",
+                        "workspace is already the home directory: {}",
                         home.display()
                     )));
                 }
                 agent.set_workspace(home.clone()).await;
                 return Ok(SlashOutcome::Handled(format!(
-                    "[已恢复到原始 workspace] {}（之前：{}）",
+                    "[restored to home workspace] {} (was: {})",
                     home.display(),
                     current.display()
                 )));
@@ -111,7 +111,7 @@ pub async fn try_handle(
                         .await;
                     let prompt = format_move_prompt(&target, &id);
                     Ok(SlashOutcome::Handled(format!(
-                        "[已登记切换请求] 请回复 `/ok {}` 确认切换，或 `/deny {}` 取消。{}",
+                        "[switch requested] reply `/ok {}` to confirm or `/deny {}` to cancel. {}",
                         id, id, prompt
                     )))
                 }
@@ -247,13 +247,13 @@ tools: {:?}
                 Some(reg) => {
                     let tasks = reg.background_tasks.lock().unwrap();
                     if tasks.is_empty() {
-                        Ok(SlashOutcome::Handled("[无后台委派任务]".into()))
+                        Ok(SlashOutcome::Handled("[no background delegate tasks]".into()))
                     } else {
-                        let mut s = String::from("后台委派任务:\n");
+                        let mut s = String::from("background delegate tasks:\n");
                         for t in tasks.values() {
                             let secs = t.started.elapsed().as_secs();
                             s.push_str(&format!(
-                                "- {} [{}] 已运行 {}s\n",
+                                "- {} [{}] running {}s\n",
                                 t.id,
                                 t.agent_name,
                                 secs
@@ -263,7 +263,7 @@ tools: {:?}
                     }
                 }
                 None => Ok(SlashOutcome::Handled(
-                    "[delegate-list] 当前环境无 registry".into(),
+                    "[delegate-list] no registry in this environment".into(),
                 )),
             }
         }
@@ -279,18 +279,18 @@ tools: {:?}
                                 drop(tasks);
                                 t.handle.abort();
                                 Ok(SlashOutcome::Handled(format!(
-                                    "[已取消后台任务 {}]",
+                                    "[cancelled background task {}]",
                                     args
                                 )))
                             }
                             None => Ok(SlashOutcome::Handled(format!(
-                                "[delegate-cancel] 无此任务 {}",
+                                "[delegate-cancel] no such task {}",
                                 args
                             ))),
                         }
                     }
                     None => Ok(SlashOutcome::Handled(
-                        "[delegate-cancel] 当前环境无 registry".into(),
+                        "[delegate-cancel] no registry in this environment".into(),
                     )),
                 }
             }
@@ -327,10 +327,10 @@ async fn resolve_approval(
                     .unwrap_or(""),
             )?;
             agent.set_workspace(target.clone()).await;
-            let notice = format!("[已切换工作目录到 {}]", target.display());
+            let notice = format!("[switched working directory to {}]", target.display());
             return Ok(Some((notice.clone(), notice)));
         } else {
-            let notice = "[已拒绝] 切换工作目录（保持原 workspace）".to_string();
+            let notice = "[denied] working directory unchanged".to_string();
             return Ok(Some((notice.clone(), notice)));
         }
     }
@@ -339,7 +339,7 @@ async fn resolve_approval(
         Some(t) => t.clone(),
         None => {
             return Ok(Some((
-                format!("[工具不存在: {}]", pending.tool_name),
+                format!("[tool not found: {}]", pending.tool_name),
                 String::new(),
             )))
         }
@@ -354,12 +354,12 @@ async fn resolve_approval(
             Err(e) => format!("[error: {}]", e),
         }
     } else {
-        format!("用户拒绝执行：{}", pending.tool_name)
+        format!("user denied execution: {}", pending.tool_name)
     };
 
     let notice = format!(
         "[{}] {}",
-        if approve { "已批准" } else { "已拒绝" },
+        if approve { "approved" } else { "denied" },
         pending.tool_name
     );
     Ok(Some((notice, result)))

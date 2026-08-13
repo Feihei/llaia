@@ -281,16 +281,16 @@ pub fn resolve_skill_path(skills_dir: &Path, workspace: &Path, raw: &str) -> Opt
     Some(normalized)
 }
 
-// ───────────────────────── 内置示例 skill ─────────────────────────
+// ───────────────────────── built-in example skills ─────────────────────────
 
-/// 新建 skill 的默认模板（WebUI 创建时 content 缺省用）
+/// Default template for a new skill (used as the default content when creating via WebUI)
 pub fn default_skill_template(name: &str) -> String {
     format!(
-        "---\nname: {name}\ndescription: TODO: 这个 skill 做什么、何时使用\nduration: turn\n---\n\n# {name}\n\n## 工作流程\n1. \n\n## 输出格式\n\n## 注意事项\n"
+        "---\nname: {name}\ndescription: TODO: what this skill does and when to use it\nduration: turn\n---\n\n# {name}\n\n## Workflow\n1. \n\n## Output Format\n\n## Notes\n"
     )
 }
 
-/// 内置示例 skill：(目录名, SKILL.md 内容)
+/// Built-in example skills: (directory name, SKILL.md content)
 pub fn example_skills() -> &'static [(&'static str, &'static str)] {
     &[
         ("code-review", EXAMPLE_CODE_REVIEW),
@@ -299,7 +299,7 @@ pub fn example_skills() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-/// 种子内置示例：创建 skills 目录并写入示例 SKILL.md
+/// Seed built-in examples: create the skills dir and write example SKILL.md files
 fn seed_examples(skills_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(skills_dir)?;
     for (name, content) in example_skills() {
@@ -313,82 +313,82 @@ fn seed_examples(skills_dir: &Path) -> Result<()> {
 
 const EXAMPLE_CODE_REVIEW: &str = r#"---
 name: code-review
-description: 审查 Git 仓库的代码变更，给出结构化 review 意见。当用户请求代码审查、review 变更时使用。
+description: Review code changes in a Git repo and give structured review comments. Use when the user asks for a code review or to review changes.
 duration: turn
 tools: ["file_read", "terminal"]
 ---
 
 # Code Review
 
-## 工作流程
-1. 用 terminal 跑 `git status` 和 `git diff HEAD` 查看未提交变更（用户指定 commit 范围则用用户给的）
-2. 逐文件分析变更，重点看：
-   - 逻辑 bug 与边界条件
-   - 错误处理与资源泄漏
-   - 安全问题（注入、路径穿越、敏感信息泄漏）
-   - 明显违背项目约定的可读性问题
-3. 对可疑处用 file_read 读上下文确认，避免误报
+## Workflow
+1. Run `git status` and `git diff HEAD` via terminal to see uncommitted changes (use the user-specified commit range if given)
+2. Analyze changes file by file, focusing on:
+   - Logic bugs and edge cases
+   - Error handling and resource leaks
+   - Security issues (injection, path traversal, sensitive info leakage)
+   - Readability problems that clearly violate project conventions
+3. Use file_read on suspicious spots to confirm context and avoid false positives
 
-## 输出格式
-按严重程度分类：
-- 🔴 阻塞：必须修的 bug / 安全问题
-- 🟡 建议：推荐改进
-- 🟢 吹毛求疵：风格小问题
+## Output Format
+Group by severity:
+- 🔴 Blocker: bugs / security issues that must be fixed
+- 🟡 Suggestion: recommended improvements
+- 🟢 Nitpick: minor style issues
 
-每条评论指出文件与大致位置，给出修改建议。没有发现问题就明确说没有。
+Each comment points to the file and approximate location with a fix suggestion. If nothing is found, say so explicitly.
 
-## 注意事项
-- 只审查不直接改代码（用户明确要求修改除外）
-- workspace 不是 Git 仓库时告知用户，请其提供文件清单
+## Notes
+- Review only; don't modify code unless explicitly asked
+- If the workspace is not a Git repo, tell the user and ask for a file list
 "#;
 
 const EXAMPLE_NEWS_DIGEST: &str = r#"---
 name: news-digest
-description: 搜索并整理当日热点新闻/科技简讯。当用户问"今天有什么新闻"、"最近有什么热点"时使用。
+description: Search and summarize today's hot news / tech briefs. Use when the user asks "what's the news today" or "any recent highlights".
 duration: turn
 tools: ["tavily_search", "web_fetch"]
 ---
 
 # News Digest
 
-## 工作流程
-1. 用 tavily_search 搜索用户关注领域的热点（未指明领域 → 默认 AI/科技）
-2. 对重点新闻用 web_fetch 打开原文核实细节（2-3 篇即可，不要过度抓取）
-3. 整理成 3-5 条简讯
+## Workflow
+1. Use tavily_search for hot topics in the user's area of interest (default AI/tech if unspecified)
+2. Open the key articles with web_fetch to verify details (2-3 is enough; don't over-fetch)
+3. Summarize into 3-5 briefs
 
-## 输出格式
-每条简讯：
-- **标题**（一句话概括）
-- 要点（2-3 个 bullet）
-- 来源链接
+## Output Format
+Each brief:
+- **Title** (one-line summary)
+- Key points (2-3 bullets)
+- Source link
 
-结尾用一句话总结当日整体看点。语言精炼，避免大段翻译原文。
+End with one sentence summing up the day's overall takeaways. Be concise; avoid long verbatim translations.
 
-## 注意事项
-- tavily_search 不可用（未配 api_key）→ 说明情况，请用户配置或提供新闻 URL
-- 注明信息时效（"截至 X 日"），不要编造新闻
+## Notes
+- If tavily_search is unavailable (no api_key) → explain and ask the user to configure or provide news URLs
+- Note the information freshness ("as of X date"); never fabricate news
 "#;
 
 const EXAMPLE_TODOIST: &str = r#"---
 name: todoist
-description: 为用户设置提醒与待办任务（借助 cron 定时任务）。当用户说"提醒我..."、"定个待办"、"每天/每周做..."时使用。
+description: Set reminders and to-do tasks for the user (via cron schedules). Use when the user says "remind me...", "add a to-do", or "do X every day/week".
 duration: turn
 tools: ["cron_task", "memory_write"]
 ---
 
-# Todoist 提醒
+# Todoist Reminders
 
-## 工作流程
-1. 从用户消息解析：提醒内容、时间（一次性时刻或周期规则）
-2. 用 cron_task 工具创建定时任务：
-   - 一次性提醒 → mode = "agent"，prompt 写"提醒用户：X"
-   - 周期提醒 → 写成对应 cron 表达式 schedule（5 字段：分 时 日 月 周）
-3. 用 memory_write 把这条提醒记入 MEMORY.md，便于后续查询/取消
-4. 向用户确认：任务 id、触发时间、提醒内容
+## Workflow
+1. Parse from the user message: reminder content, time (one-shot moment or recurring rule)
+2. Create a scheduled task with the cron_task tool:
+   - One-shot reminder → mode = "agent", prompt = "Remind the user: X"
+   - Recurring reminder → write the matching cron expression schedule (5 fields: min hour day month weekday)
+3. Record this reminder into MEMORY.md with memory_write for later lookup/cancellation
+4. Confirm with the user: task id, trigger time, reminder content
 
-## 注意事项
-- 时间描述模糊（如"明天早上"）时先跟用户确认，或取合理默认值（8:00）并说明
-- cron_task 只在 serve 模式可用；工具调用失败时说明需要运行 `llaia serve`
+## Notes
+- If the time is vague (e.g. "tomorrow morning"), confirm with the user first, or take a reasonable default (8:00 AM) and say so
+- cron_task is only available in serve mode; on tool failure, explain that `llaia serve` must be running
 "#;
 
 #[cfg(test)]

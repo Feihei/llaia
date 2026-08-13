@@ -6,52 +6,52 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 
-/// init 默认配置模板：provider/agent 注释占位，各 channel 默认关闭。
-/// 模板内路径用 ~/.llaia 占位，加载时 Config::load 会展开 ~。
-const CONFIG_TEMPLATE: &str = r#"# LLAIA 配置文件
-# 字段说明见 docs/adr/0008-config-schema-v1.1.md
+/// Default config template for `init`: provider/agent placeholders commented out, all channels off by default.
+/// Paths inside the template use ~/.llaia as a placeholder; Config::load expands ~ at load time.
+const CONFIG_TEMPLATE: &str = r#"# LLAIA configuration file
+# Field reference: docs/adr/0008-config-schema-v1.1.md
 
 [runtime]
 context_threshold = 0.7
 max_iterations = 10
-# permission = "default"  # 可选：权限档位 default / read-only / yolo；未设置默认 default。运行时也可用 /permission 切换（不落盘）
-# timezone = "Asia/Shanghai"     # 可选：IANA 时区名（如 Asia/Shanghai / America/New_York）；未设置则跟随系统时区
-# compact_model = "default.qwen"  # 可选：用更便宜的模型跑上下文压缩，未设置时复用主模型
-# vision_model = "default.gpt-4o"  # 可选：主模型无多模态时，用此模型描述图片；未设置则图片直接发给主模型
+# permission = "default"  # optional: permission tier default / read-only / yolo; defaults to default. Switch at runtime with /permission (not persisted)
+# timezone = "Asia/Shanghai"     # optional: IANA timezone name (e.g. Asia/Shanghai / America/New_York); defaults to system timezone
+# compact_model = "default.qwen"  # optional: cheaper model for context compaction; defaults to main model
+# vision_model = "default.gpt-4o"  # optional: model to describe images when main model lacks multimodal; defaults to sending images to main model
 
 [log]
 level = "info"
 dir = "~/.llaia/logs"
 
-# Provider: 接入 LLM 服务
-# 本地 Ollama 示例：
+# Provider: connect an LLM service
+# Local Ollama example:
 # [provider.default]
 # type = "openai_compatible"
 # base_url = "http://localhost:11434/v1"
-# api_key = "${OLLAMA_API_KEY}"  # 或留空
+# api_key = "${OLLAMA_API_KEY}"  # or leave empty
 #
 # [provider.default.qwen]
 # model = "qwen2.5:7b"
 # native_tool_calling = false
 # context_size = 32768
 
-# 云端 Anthropic 示例（也兼容指向网关的 base_url）：
+# Cloud Anthropic example (also works with a gateway base_url):
 # [provider.claude]
 # type = "anthropic"
 # api_key = "${ANTHROPIC_API_KEY}"
 #
 # [provider.claude.sonnet]
 # model = "claude-sonnet-4-20250514"
-# max_tokens = 8192              # Anthropic 必传，未配置默认 4096
+# max_tokens = 8192              # required for Anthropic; defaults to 4096 if unset
 
-# 主 Agent：model 留空进入降级模式（无 provider，仅可配置 WebUI）
-# 配好上面的 provider 后填 "default.qwen" 等引用即可启用聊天
-# fallback = ["default.qwen"]    # 可选：主模型请求失败时依序降级的 model ref 链
-# workspace / soul / user / memory 字段已废弃，自动推导到 ~/.llaia/workspace/
+# Main Agent: leave model empty to enter degraded mode (no provider, WebUI config only)
+# After configuring a provider above, set e.g. "default.qwen" to enable chat
+# fallback = ["default.qwen"]    # optional: model ref chain tried in order when the main model fails
+# workspace / soul / user / memory fields are deprecated; auto-resolved to ~/.llaia/workspace/
 [agent.main]
 model = ""
 
-# 子 Agent 示例（取消注释启用；workspace 自动推导到 ~/.llaia/workspace/subagent/<alias>/）
+# Sub-agent example (uncomment to enable; workspace auto-resolves to ~/.llaia/workspace/subagent/<alias>/)
 # [agent.coder]
 # model = "default.qwen"
 # denied_tools = ["memory_write"]
@@ -59,36 +59,36 @@ model = ""
 
 [channels.qq]
 enabled = false
-app_id = ""                    # 支持 "${QQ_APP_ID}" 环境变量引用
-app_secret = ""                # 支持 "${QQ_APP_SECRET}" 环境变量引用
+app_id = ""                    # supports "${QQ_APP_ID}" env var reference
+app_secret = ""                # supports "${QQ_APP_SECRET}" env var reference
 confirm_mode = "none"        # none / always / session
 
 # [channels.telegram]
 # enabled = false
-# bot_token = "${TELEGRAM_BOT_TOKEN}"  # @BotFather 颁发
-# allow_chat_id = 0            # 只响应此 chat 的消息（单用户锁），0 = 不限制
+# bot_token = "${TELEGRAM_BOT_TOKEN}"  # issued by @BotFather
+# allow_chat_id = 0            # only respond to this chat (single-user lock); 0 = no restriction
 
 # [channels.dingtalk]
 # enabled = false
 # client_id = "${DINGTALK_CLIENT_ID}"
 # client_secret = "${DINGTALK_CLIENT_SECRET}"
-# allow_staff_id = ""          # 只响应此 staffId 的消息，空 = 不限制
+# allow_staff_id = ""          # only respond to this staffId; empty = no restriction
 
 # [channels.feishu]
 # enabled = false
 # app_id = "${FEISHU_APP_ID}"
 # app_secret = "${FEISHU_APP_SECRET}"
-# allow_open_id = ""           # 只响应此 open_id 的消息（单用户锁），空 = 不限制
-# mention_only = false         # 群聊仅 @ 时回复（true）；私聊始终回复
+# allow_open_id = ""           # only respond to this open_id (single-user lock); empty = no restriction
+# mention_only = false         # group chat: reply only when @-mentioned (true); DMs always reply
 
 # [channels.wechat]
-# enabled = false              # 微信 ClawBot（ilink bot），首次启动打印二维码链接，手机扫码登录
-# allow_user_id = ""           # 只响应此 ilink_user_id 的消息，空 = 不限制
+# enabled = false              # WeChat ClawBot (ilink bot); prints a QR login link on first start, scan with phone
+# allow_user_id = ""           # only respond to this ilink_user_id; empty = no restriction
 
 [webui]
 host = "127.0.0.1"
 port = 51217
-token = ""                   # 留空则启动时随机生成并打印日志
+token = ""                   # empty => random token generated at startup and printed to logs
 
 [tools.terminal]
 confirm = "none"
@@ -96,13 +96,13 @@ command_policy = "blacklist"
 command_whitelist = []
 
 [tools.tavily]
-api_key = ""                   # 支持 "${TAVILY_API_KEY}" 环境变量引用
+api_key = ""                   # supports "${TAVILY_API_KEY}" env var reference
 "#;
 
-/// init 默认 .env 模板：敏感凭据集中存放，避免写进 config.toml 明文。
-/// .env 与 config.toml 同目录，启动时自动加载（CWD 下的 .env 也会被读取）。
-const ENV_TEMPLATE: &str = r#"# LLAIA 环境变量（本文件不要提交到 git）
-# config.toml 中可用 "${VAR_NAME}" 引用此处定义的变量
+/// Default .env template for `init`: secrets live here, kept out of config.toml plaintext.
+/// .env sits next to config.toml and is loaded automatically at startup (a CWD .env is also read).
+const ENV_TEMPLATE: &str = r#"# LLAIA environment variables (do not commit this file to git)
+# Reference these here as "${VAR_NAME}" from config.toml
 
 # OLLAMA_API_KEY=
 # ANTHROPIC_API_KEY=
@@ -116,15 +116,15 @@ const ENV_TEMPLATE: &str = r#"# LLAIA 环境变量（本文件不要提交到 gi
 # TAVILY_API_KEY=
 "#;
 
-/// init 默认 cron.toml 模板：所有任务注释，仅作文档。
-const CRON_TEMPLATE: &str = r#"# LLAIA cron 定时任务配置
-# 字段说明见 docs/adr/0013-cron-scheduling.md
-# schedule: 5 字段 cron 表达式（分 时 日 月 周），内部自动转 6 字段供调度器使用
-# mode: agent（唤醒主 agent）/ tools（直接跑工具链）
-# channel: qq / cli / web（结果推送目标；cli 无持久连接用 NoopPusher 丢弃结果）
-# enabled: 默认 true；false 则调度器不注册
+/// Default cron.toml template for `init`: all tasks commented out, docs only.
+const CRON_TEMPLATE: &str = r#"# LLAIA cron schedule configuration
+# Field reference: docs/adr/0013-cron-scheduling.md
+# schedule: 5-field cron expression (min hour day month weekday); internally expanded to 6 fields for the scheduler
+# mode: agent (wake main agent) / tools (run a tool chain directly)
+# channel: qq / cli / web (where results are pushed; cli has no persistent connection, uses NoopPusher to drop results)
+# enabled: defaults to true; false means the scheduler won't register it
 
-# 示例：每天 8:00 唤醒 agent 查新闻推送
+# Example: wake agent every day at 08:00 to fetch news and push
 # [[task]]
 # id = "morning_news"
 # schedule = "0 8 * * *"
@@ -132,11 +132,11 @@ const CRON_TEMPLATE: &str = r#"# LLAIA cron 定时任务配置
 # channel = "qq"
 # enabled = true
 # prompt = """
-# 现在是早上 8:00。请查今天的 AI 科技热点，
-# 整理成 3-5 条简讯推送给我。
+# It's 8:00 AM. Check today's AI/tech headlines and
+# summarize them into 3-5 short briefs for me.
 # """
 
-# 示例：每 30 分钟跑工具链（不消耗 LLM token）
+# Example: run a tool chain every 30 minutes (no LLM token cost)
 # [[task]]
 # id = "health_check"
 # schedule = "*/30 * * * *"
@@ -149,13 +149,13 @@ const CRON_TEMPLATE: &str = r#"# LLAIA cron 定时任务配置
 # ]
 "#;
 
-/// init 默认 mcp.toml 模板：所有 server 注释，仅作文档。
-const MCP_TEMPLATE: &str = r#"# LLAIA MCP server 配置（修改后需重启 llaia serve/chat 生效）
-# 字段说明见 docs/adr/0014-mcp-client.md
-# 工具命名：<server id>__<tool_name>（如 filesystem__read_file）
-# MCP 工具默认 requires_confirm = true，safe_tools 里的工具免确认
+/// Default mcp.toml template for `init`: all servers commented out, docs only.
+const MCP_TEMPLATE: &str = r#"# LLAIA MCP server configuration (restart llaia serve/chat after changes)
+# Field reference: docs/adr/0014-mcp-client.md
+# Tool naming: <server id>__<tool_name> (e.g. filesystem__read_file)
+# MCP tools require confirmation by default; tools listed in safe_tools skip confirmation
 
-# 示例：stdio transport（本地子进程）
+# Example: stdio transport (local subprocess)
 # [[server]]
 # id = "filesystem"
 # enabled = true
@@ -165,7 +165,7 @@ const MCP_TEMPLATE: &str = r#"# LLAIA MCP server 配置（修改后需重启 lla
 # safe_tools = ["read_file", "list_directory"]
 # # tool_timeout_secs = 180
 
-# 示例：streamable HTTP transport（远程 server）
+# Example: streamable HTTP transport (remote server)
 # [[server]]
 # id = "remote"
 # enabled = true
@@ -173,9 +173,9 @@ const MCP_TEMPLATE: &str = r#"# LLAIA MCP server 配置（修改后需重启 lla
 # url = "https://internal-mcp.corp/mcp"
 #
 # [server.headers]
-# Authorization = "Bearer ${MCP_TOKEN}"   # secret 放 .env，不落盘
+# Authorization = "Bearer ${MCP_TOKEN}"   # secret goes in .env, not on disk
 
-# 示例：旧版 SSE transport
+# Example: legacy SSE transport
 # [[server]]
 # id = "legacy-sse"
 # enabled = true
@@ -183,13 +183,13 @@ const MCP_TEMPLATE: &str = r#"# LLAIA MCP server 配置（修改后需重启 lla
 # url = "https://legacy-mcp.corp/sse"
 "#;
 
-/// llaia init：生成 ~/.llaia/ 目录骨架 + 基础模板，提示进入 WebUI 完成配置。
-/// 幂等：已存在的文件不覆盖（除非 force）。
+/// llaia init: scaffold ~/.llaia/ and base templates, then point the user to the WebUI to finish setup.
+/// Idempotent: existing files are not overwritten (unless force).
 pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     let config_dir_expanded = shellexpand::tilde(&config_dir.to_string_lossy()).into_owned();
     let config_dir = PathBuf::from(&config_dir_expanded);
 
-    // 1. 创建目录骨架
+    // 1. Create directory skeleton
     let workspace = config_dir.join("workspace");
     let logs_dir = config_dir.join("logs");
     let uploads_dir = workspace.join("uploads");
@@ -200,13 +200,13 @@ pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     std::fs::create_dir_all(&uploads_dir)?;
     std::fs::create_dir_all(&subagent_dir)?;
 
-    // 2. 生成 config.toml
+    // 2. Generate config.toml
     let config_path = config_dir.join("config.toml");
     write_file_if_needed(&config_path, CONFIG_TEMPLATE, force)?;
     println!("✓ created directory structure at {}", config_dir.display());
     println!("✓ generated config.toml (with commented template)");
 
-    // 3. 生成 SOUL.md / USER.md / MEMORY.md 模板（同步阻塞，文件小）
+    // 3. Generate SOUL.md / USER.md / MEMORY.md templates (sync, small files)
     let soul_path = workspace.join("SOUL.md");
     let user_path = workspace.join("USER.md");
     let memory_path = workspace.join("MEMORY.md");
@@ -215,22 +215,22 @@ pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     write_file_if_needed(&memory_path, crate::memory::MEMORY_TEMPLATE, force)?;
     println!("✓ generated SOUL.md / USER.md / MEMORY.md templates");
 
-    // 4. 生成 cron.toml 模板
+    // 4. Generate cron.toml template
     let cron_path = config_dir.join("cron.toml");
     write_file_if_needed(&cron_path, CRON_TEMPLATE, force)?;
     println!("✓ generated cron.toml (cron template, all commented by default)");
 
-    // 5. 生成 mcp.toml 模板
+    // 5. Generate mcp.toml template
     let mcp_path = config_dir.join("mcp.toml");
     write_file_if_needed(&mcp_path, MCP_TEMPLATE, force)?;
     println!("✓ generated mcp.toml (MCP server template, all commented by default)");
 
-    // 6. 生成 .env 模板（敏感凭据集中存放，config.toml 用 ${VAR} 引用）
+    // 6. Generate .env template (secrets centralized; config.toml references via ${VAR})
     let env_path = config_dir.join(".env");
     write_file_if_needed(&env_path, ENV_TEMPLATE, force)?;
     println!("✓ generated .env (secret template; fill in real values, do not commit to git)");
 
-    // 7. 终端输出引导
+    // 7. Terminal onboarding output
     println!();
     println!("Next steps:");
     println!("  1. edit ~/.llaia/.env and fill in API keys and other secrets");
