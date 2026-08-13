@@ -6,6 +6,27 @@
 
 ---
 
+## v0.2.0 (2026-08-13)
+
+**里程碑**：v0.1.0 之后的首个 minor 版本。核心变化是 workspace 目录结构的破坏性迁移，并累积了 P1.5–P4+ 的能力扩展与若干稳定性修复。
+
+**⚠️ Breaking change — workspace 目录迁移**
+- Agent 家目录从 `~/.llaia/` 根迁移到 `~/.llaia/workspace/`：SOUL.md / USER.md / MEMORY.md / sessions.db / uploads / subagent/ 全部归入 `workspace/`。
+- 首次启动自动迁移旧数据并写入 `.migrated_v0.2` 标记；`workspace_root` 现可由 `/move` 切换（agent 家目录固定，二者区别见 AGENTS.md）。
+
+**本期交付（自 v0.1.0 累积）**
+- P1.5：QQ channel + 全 channel 流式输出 + 稳定性补丁
+- P2：主 Agent 委派子 Agent（`delegate` 工具）+ Web channel（WebUI）
+- P3：边界控制 / `llaia init` / cron 定时任务 / MCP 客户端 / Skill 系统
+- P3+：Anthropic provider、Telegram / 钉钉 / 微信 channel、交互快赢
+- P4：时区感知、做梦、上下文压缩增强、权限档位（read-only / default / yolo）、shutdown、Gemini provider、飞书 channel 等基础能力增强
+- 稳定性：`rustls` 加密 provider 固定为 `ring`（修复双 provider panic，见 commit `1010bb7`）
+- i18n：用户面向输出、init 模板、内置示例 skill 统一为英文（USER 模板保留 `language: Chinese` 偏好）
+
+详细阶段交付清单见下方 P1–P4+ 各节。
+
+---
+
 ## P1 — MVP（CLI 单 channel）
 
 **状态**：✅ 已完成
