@@ -264,7 +264,7 @@ function llaiaApp() {
       let j;
       try { j = await r.json(); } catch { j = {}; }
       console.log('PUT /api/config response:', r.status, j);
-      if (r.ok) { alert('Saved, restart llaia to take effect'); this.switchConfig(); } else { alert('Save failed: ' + (j.error||r.status)); }
+      if (r.ok) { alert('Saved ✓\n\n' + (j.note || 'Configuration applied (hot-reloaded).')); this.switchConfig(); } else { alert('Save failed: ' + (j.error||r.status)); }
     },
     // ---- provider/agent CRUD ----
     addProvider() {
@@ -292,7 +292,7 @@ function llaiaApp() {
       if (!alias || !alias.trim()) return;
       if (this.cfg.agent[alias]) { alert('Agent already exists: ' + alias); return; }
       this.cfg.agent[alias] = {
-        model: '', workspace: '', soul: null, user: null, memory: null,
+        model: '', workspace: '',
         denied_tools: [], delegate_timeout: 120,
       };
     },
@@ -314,7 +314,7 @@ function llaiaApp() {
       if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
-      if (r.ok) { alert('Saved, restart llaia to take effect'); this.switchConfig(); }
+      if (r.ok) { alert('Saved ✓\n\n' + (j.note || 'Configuration applied (hot-reloaded).')); this.switchConfig(); }
       else { alert('Save failed: ' + (j.error || r.status) + (j.line ? '\nPosition (char offset): ' + j.line : '')); }
     },
 
@@ -450,7 +450,7 @@ function llaiaApp() {
     async toggleSkill(name, active) {
       const r = await this.apiFetch(`/api/skills/${encodeURIComponent(name)}/active`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ active }) });
       if (!this.authed) return;
-      if (r.ok) { this.skillMsg = `✓ ${name} ${active ? 'enabled' : 'disabled'} (restart to apply)`; }
+      if (r.ok) { this.skillMsg = `✓ ${name} ${active ? 'enabled' : 'disabled'}（保存配置或重启后生效）`; }
       else { let j; try { j = await r.json(); } catch { j = {}; } this.skillMsg = '✗ ' + (j.error || r.status); await this.loadSkills(); }
     },
     async editSkill(name) {
@@ -470,7 +470,7 @@ function llaiaApp() {
       if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
-      if (r.ok) { this.skillContentMsg = '✓ Saved (restart to apply)'; }
+      if (r.ok) { this.skillContentMsg = '✓ Saved（保存配置或重启后生效）'; }
       else { this.skillContentMsg = '✗ ' + (j.error || r.status); }
     },
     async newSkill() {

@@ -123,10 +123,6 @@
                   <button class="btn-delete" @click="deleteAgent(alias)" x-show="alias !== 'main'" title="main agent 不可删除">Delete</button>
                 </div>
                 <div class="form-row"><label>model</label><input x-model="a.model" placeholder="provider_id.model_alias"></div>
-                <div class="form-row"><label>workspace</label><input x-model="a.workspace" style="width:400px"></div>
-                <div class="form-row"><label>soul</label><input x-model="a.soul"></div>
-                <div class="form-row"><label>user</label><input x-model="a.user"></div>
-                <div class="form-row"><label>memory</label><input x-model="a.memory"></div>
                 <div class="form-row"><label>delegate_timeout</label><input type="number" x-model.number="a.delegate_timeout"></div>
               </div>
             </template>
@@ -203,7 +199,7 @@
                   <button class="btn-add" @click="newSkill()">+ New skill</button>
                   <span class="cron-msg" x-text="skillMsg"></span>
                 </div>
-                <div class="hint">Skills 在启动时注入 system prompt，修改后需重启 <code>llaia serve</code>/<code>llaia chat</code> 生效。</div>
+                <div class="hint">Skills 在保存配置时会热加载进 system prompt，无需重启 serve。</div>
               </div>
             </template>
           </div>
