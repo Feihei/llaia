@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 pub mod anthropic;
+pub mod compat;
 pub mod fallback;
 pub mod gemini;
 pub mod openai_compat;
@@ -156,6 +157,18 @@ pub struct ChatRequest<'a> {
 pub struct ChatResponse {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    /// 流式 usage（token 统计）；仅部分 provider 在 compat 开启时填充。
+    pub usage: Option<Usage>,
+    /// 有效 finish_reason（含 compat 推断）；默认 None。
+    pub finish_reason: Option<String>,
+}
+
+/// 单次生成的 token 用量统计。
+#[derive(Debug, Clone, Default)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
 }
 
 /// 流式事件
@@ -169,6 +182,10 @@ pub enum StreamEvent {
     Done,
     /// 错误
     Error(String),
+    /// 流式 usage（token 统计），仅在 compat.streaming_usage 时产生
+    Usage(Usage),
+    /// 有效 finish_reason（含 compat 推断）
+    FinishReason(String),
 }
 
 #[async_trait]
@@ -227,12 +244,21 @@ pub fn provider_from_ref(
             )?))
         }
         // openai_compatible 及未知 type 都走 OpenAI 兼容协议（存量配置无 type 也能跑）
-        _ => Ok(Arc::new(openai_compat::OpenAiCompatibleProvider::new(
-            &prov_cfg.base_url,
-            &prov_cfg.api_key,
-            &model_cfg.model,
-            model_cfg.native_tool_calling,
-        )?)),
+        _ => {
+            // 兼容层：先按 base_url 探测预设，再用 [provider.<id>.compat.*] 覆盖
+            let mut compat = compat::Compat::detect(&prov_cfg.base_url);
+            if let Some(c) = &prov_cfg.compat {
+                compat.apply_override(c);
+            }
+            Ok(Arc::new(openai_compat::OpenAiCompatibleProvider::new(
+                &prov_cfg.base_url,
+                &prov_cfg.api_key,
+                &model_cfg.model,
+                model_cfg.native_tool_calling,
+                model_cfg.max_tokens,
+                compat,
+            )?))
+        }
     }
 }
 

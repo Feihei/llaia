@@ -1,4 +1,5 @@
 use futures_util::StreamExt;
+use llaia::provider::compat::Compat;
 use llaia::provider::openai_compat::OpenAiCompatibleProvider;
 use llaia::provider::{ChatMessage, ChatRequest, Provider, StreamEvent};
 use serde_json::json;
@@ -28,7 +29,15 @@ async fn test_stream_text_deltas() {
         .create_async()
         .await;
 
-    let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
+    let provider = OpenAiCompatibleProvider::new(
+        server.url(),
+        "",
+        "test-model",
+        true,
+        None,
+        Compat::default(),
+    )
+    .unwrap();
     let msgs = vec![ChatMessage::user("hi")];
     let req = ChatRequest {
         messages: &msgs,
@@ -69,7 +78,15 @@ async fn test_stream_tool_calls_accumulated() {
         .create_async()
         .await;
 
-    let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
+    let provider = OpenAiCompatibleProvider::new(
+        server.url(),
+        "",
+        "test-model",
+        true,
+        None,
+        Compat::default(),
+    )
+    .unwrap();
     let msgs = vec![ChatMessage::user("read /tmp")];
     let req = ChatRequest {
         messages: &msgs,
@@ -105,7 +122,15 @@ async fn test_stream_error_status() {
         .create_async()
         .await;
 
-    let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
+    let provider = OpenAiCompatibleProvider::new(
+        server.url(),
+        "",
+        "test-model",
+        true,
+        None,
+        Compat::default(),
+    )
+    .unwrap();
     let msgs = vec![ChatMessage::user("hi")];
     let req = ChatRequest {
         messages: &msgs,

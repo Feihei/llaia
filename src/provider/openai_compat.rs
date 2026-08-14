@@ -1,5 +1,6 @@
 use crate::provider::{
-    ChatRequest, ChatResponse, MessageContent, Provider, Role, StreamEvent, ToolCall,
+    compat::{Compat, MaxTokensField},
+    ChatRequest, ChatResponse, MessageContent, Provider, Role, StreamEvent, ToolCall, Usage,
 };
 use anyhow::{anyhow, Result};
 use async_stream::try_stream;
@@ -20,14 +21,21 @@ pub struct OpenAiCompatibleProvider {
     api_key: String,
     model: String,
     native_tool_calling: bool,
+    /// 兼容开关集合：按 base_url 探测 + 配置覆盖，见 `docs/adr/0026-provider-compat.md`。
+    compat: Compat,
+    /// 单次生成最大 token 数；None 时不发送（bare 行为）。
+    max_tokens: Option<usize>,
 }
 
 impl OpenAiCompatibleProvider {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         model: impl Into<String>,
         native_tool_calling: bool,
+        max_tokens: Option<usize>,
+        compat: Compat,
     ) -> Result<Self> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(30))
@@ -38,6 +46,8 @@ impl OpenAiCompatibleProvider {
             api_key: api_key.into(),
             model: model.into(),
             native_tool_calling,
+            max_tokens,
+            compat,
         })
     }
 }
@@ -60,6 +70,76 @@ fn content_to_json(content: &MessageContent) -> serde_json::Value {
         MessageContent::Multimodal(parts) => {
             serde_json::to_value(parts).unwrap_or(serde_json::Value::Null)
         }
+    }
+}
+
+/// 解析流式 usage（token 统计）；字段缺失时补 0。仅在 compat.streaming_usage 时调用。
+fn parse_usage(v: Option<&serde_json::Value>) -> Option<Usage> {
+    let v = v?;
+    Some(Usage {
+        prompt_tokens: v.get("prompt_tokens").and_then(|n| n.as_u64()).unwrap_or(0) as u32,
+        completion_tokens: v
+            .get("completion_tokens")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as u32,
+        total_tokens: v.get("total_tokens").and_then(|n| n.as_u64()).unwrap_or(0) as u32,
+    })
+}
+
+/// 构造发送给 OpenAI 兼容端点的 messages，并按 compat 应用：
+/// - `requires_assistant_after_tool`：多轮 tool 结果后补一条空 assistant 占位。
+fn build_openai_messages<'a>(req: &'a ChatRequest<'a>, compat: &Compat) -> Vec<OpenAiMessage<'a>> {
+    let mut messages: Vec<OpenAiMessage<'_>> = req
+        .messages
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+            };
+            OpenAiMessage {
+                role,
+                content: content_to_json(&m.content),
+                tool_calls: m.tool_calls.as_ref().map(|tcs| {
+                    tcs.iter()
+                        .map(|tc| OpenAiToolCallSer {
+                            id: &tc.id,
+                            tool_type: "function",
+                            function: OpenAiFunctionSer {
+                                name: &tc.name,
+                                arguments: tc.arguments.to_string(),
+                            },
+                        })
+                        .collect()
+                }),
+                tool_call_id: m.tool_call_id.as_deref(),
+            }
+        })
+        .collect();
+    if compat.requires_assistant_after_tool {
+        if let Some(last) = messages.last() {
+            if last.role == "tool" {
+                messages.push(OpenAiMessage {
+                    role: "assistant",
+                    content: serde_json::Value::String(String::new()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+        }
+    }
+    messages
+}
+
+/// 按 compat 选择 max_tokens 字段名；返回 `(max_tokens, max_completion_tokens)`，仅其一为 Some。
+/// `None` 字段名 → 两者皆 None（= bare 行为，不发送 max_tokens）。
+fn select_max_tokens_fields(compat: &Compat, value: Option<usize>) -> (Option<u32>, Option<u32>) {
+    match compat.max_tokens_field {
+        MaxTokensField::MaxTokens => (value.map(|v| v as u32), None),
+        MaxTokensField::MaxCompletionTokens => (None, value.map(|v| v as u32)),
+        MaxTokensField::None => (None, None),
     }
 }
 
@@ -97,10 +177,14 @@ impl Provider for OpenAiCompatibleProvider {
         let mut stream = self.chat_stream(req).await;
         let mut text = String::new();
         let mut tool_calls = Vec::new();
+        let mut usage = None;
+        let mut finish_reason = None;
         while let Some(ev) = stream.next().await {
             match ev? {
                 StreamEvent::TextDelta(d) => text.push_str(&d),
                 StreamEvent::ToolCall(tc) => tool_calls.push(tc),
+                StreamEvent::Usage(u) => usage = Some(u),
+                StreamEvent::FinishReason(fr) => finish_reason = Some(fr),
                 StreamEvent::Done => break,
                 StreamEvent::Error(msg) => return Err(anyhow!("stream error: {}", msg)),
             }
@@ -108,41 +192,16 @@ impl Provider for OpenAiCompatibleProvider {
         Ok(ChatResponse {
             text: if text.is_empty() { None } else { Some(text) },
             tool_calls,
+            usage,
+            finish_reason,
         })
     }
 
     async fn chat_stream(&self, req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
         let url = format!("{}/chat/completions", self.base_url);
 
-        let messages: Vec<OpenAiMessage> = req
-            .messages
-            .iter()
-            .map(|m| {
-                let role = match m.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                };
-                OpenAiMessage {
-                    role,
-                    content: content_to_json(&m.content),
-                    tool_calls: m.tool_calls.as_ref().map(|tcs| {
-                        tcs.iter()
-                            .map(|tc| OpenAiToolCallSer {
-                                id: &tc.id,
-                                tool_type: "function",
-                                function: OpenAiFunctionSer {
-                                    name: &tc.name,
-                                    arguments: tc.arguments.to_string(),
-                                },
-                            })
-                            .collect()
-                    }),
-                    tool_call_id: m.tool_call_id.as_deref(),
-                }
-            })
-            .collect();
+        // 构造 messages（含 requires_assistant_after_tool 占位）
+        let messages = build_openai_messages(req, &self.compat);
 
         let tools: Option<Vec<OpenAiTool>> = if self.native_tool_calling {
             req.tools.map(|ts| {
@@ -167,12 +226,27 @@ impl Provider for OpenAiCompatibleProvider {
             None
         };
 
+        // max_tokens 字段名随 compat 切换；仅当实际持有值且字段名非 None 时才发送（bare 行为不发送）。
+        let (max_tokens, max_completion_tokens) =
+            select_max_tokens_fields(&self.compat, self.max_tokens);
+        // streaming_usage：请求 include_usage，流式尾包才会带 usage。
+        let stream_options = if self.compat.streaming_usage {
+            Some(StreamOptions {
+                include_usage: true,
+            })
+        } else {
+            None
+        };
+
         let body = ChatCompletionsStreamRequest {
             model: &self.model,
             messages,
             tools,
             tool_choice,
             stream: true,
+            max_tokens,
+            max_completion_tokens,
+            stream_options,
         };
 
         let mut request = self.client.post(&url).json(&body);
@@ -204,6 +278,8 @@ impl Provider for OpenAiCompatibleProvider {
             let mut buf = String::new();
             let mut tc_accum: std::collections::HashMap<u32, ToolCallAccum> = std::collections::HashMap::new();
             let mut tc_order: Vec<u32> = Vec::new();
+            // 原始 finish_reason（尾 chunk 携带），配合 compat 推断有效 finish_reason
+            let mut raw_finish: Option<String> = None;
 
             loop {
                 // per-chunk 超时：防止 provider 挂起导致 agent 锁永久持有
@@ -237,6 +313,10 @@ impl Provider for OpenAiCompatibleProvider {
                         if let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
                             let data = data.trim();
                             if data == "[DONE]" {
+                                let has_tc = !tc_accum.is_empty();
+                                if let Some(fr) = self.compat.effective_finish_reason(raw_finish.as_deref(), has_tc) {
+                                    yield StreamEvent::FinishReason(fr);
+                                }
                                 let mut indices: Vec<u32> = tc_order.clone();
                                 indices.sort();
                                 for idx in indices {
@@ -255,29 +335,55 @@ impl Provider for OpenAiCompatibleProvider {
                                 return;
                             }
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                                if let Some(delta) = v.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("delta")) {
-                                    if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                                        if !content.is_empty() {
-                                            yield StreamEvent::TextDelta(content.to_string());
-                                        }
+                                // streaming usage（仅 compat.streaming_usage 时请求+解析；尾包 choices 可能为空）
+                                if self.compat.streaming_usage {
+                                    if let Some(u) = parse_usage(v.get("usage")) {
+                                        yield StreamEvent::Usage(u);
                                     }
-                                    if let Some(tcs) = delta.get("tool_calls") {
-                                        if let Some(tcs_arr) = tcs.as_array() {
-                                            for tc in tcs_arr {
-                                                let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
-                                                if !tc_order.contains(&idx) {
-                                                    tc_order.push(idx);
+                                }
+                                let choice = v.get("choices").and_then(|c| c.get(0));
+                                if let Some(choice) = choice {
+                                    // finish_reason 由尾 chunk 携带，先记录原始值
+                                    if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                                        raw_finish = Some(fr.to_string());
+                                    }
+                                    if let Some(delta) = choice.get("delta") {
+                                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                            if !content.is_empty() {
+                                                yield StreamEvent::TextDelta(content.to_string());
+                                            }
+                                        }
+                                        // reasoning 折回 content（Ollama / Llama.cpp 深度思考模型）
+                                        if self.compat.reasoning_to_content {
+                                            if let Some(r) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+                                                if !r.is_empty() {
+                                                    yield StreamEvent::TextDelta(r.to_string());
                                                 }
-                                                let acc = tc_accum.entry(idx).or_default();
-                                                if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                                                    acc.id = id.to_string();
+                                            }
+                                            if let Some(t) = delta.get("thinking").and_then(|c| c.as_str()) {
+                                                if !t.is_empty() {
+                                                    yield StreamEvent::TextDelta(t.to_string());
                                                 }
-                                                if let Some(func) = tc.get("function") {
-                                                    if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                                                        acc.name = name.to_string();
+                                            }
+                                        }
+                                        if let Some(tcs) = delta.get("tool_calls") {
+                                            if let Some(tcs_arr) = tcs.as_array() {
+                                                for tc in tcs_arr {
+                                                    let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                                                    if !tc_order.contains(&idx) {
+                                                        tc_order.push(idx);
                                                     }
-                                                    if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
-                                                        acc.arguments.push_str(args);
+                                                    let acc = tc_accum.entry(idx).or_default();
+                                                    if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                                                        acc.id = id.to_string();
+                                                    }
+                                                    if let Some(func) = tc.get("function") {
+                                                        if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                                                            acc.name = name.to_string();
+                                                        }
+                                                        if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                                            acc.arguments.push_str(args);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -288,6 +394,10 @@ impl Provider for OpenAiCompatibleProvider {
                         }
                     }
                 }
+            }
+            let has_tc = !tc_accum.is_empty();
+            if let Some(fr) = self.compat.effective_finish_reason(raw_finish.as_deref(), has_tc) {
+                yield StreamEvent::FinishReason(fr);
             }
             let mut indices: Vec<u32> = tc_order.clone();
             indices.sort();
@@ -410,4 +520,188 @@ struct ChatCompletionsStreamRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
     stream: bool,
+    /// `max_tokens`：仅 compat.max_tokens_field = MaxTokens 且持有值时发送
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    /// `max_completion_tokens`：仅 compat.max_tokens_field = MaxCompletionTokens 且持有值时发送
+    #[serde(
+        rename = "max_completion_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    max_completion_tokens: Option<u32>,
+    /// 流式 usage 开关：仅 compat.streaming_usage 时发送（请求尾包带 usage）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::compat::Compat;
+    use crate::provider::ChatMessage;
+    use serde_json::json;
+
+    fn sse(obj: serde_json::Value) -> String {
+        format!("data: {}\n\n", obj)
+    }
+
+    fn done() -> String {
+        "data: [DONE]\n\n".to_string()
+    }
+
+    #[tokio::test]
+    async fn default_bare_no_normalization() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(format!(
+                "{}{}",
+                sse(json!({"choices":[{"delta":{"content":"hello"}}]})),
+                done()
+            ))
+            .create();
+        let p = OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::default())
+            .unwrap();
+        let msgs = vec![ChatMessage::user("hi")];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+        };
+        let resp = p.chat(&req).await.unwrap();
+        assert_eq!(resp.text.as_deref(), Some("hello"));
+        assert!(resp.tool_calls.is_empty());
+        assert!(resp.usage.is_none());
+        assert!(resp.finish_reason.is_none());
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn ollama_folds_reasoning_and_parses_usage() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(format!(
+                "{}{}{}{}{}",
+                sse(json!({"choices":[{"delta":{"reasoning_content":"I think...","content":""}}]})),
+                sse(json!({"choices":[{"delta":{"content":"The answer is 42"}}]})),
+                sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"/tmp\"}"}}]}}]})),
+                sse(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}})),
+                done()
+            ))
+            .create();
+        let p = OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::ollama())
+            .unwrap();
+        let msgs = vec![ChatMessage::user("hi")];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+        };
+        let resp = p.chat(&req).await.unwrap();
+        // reasoning_content 折回 content
+        assert!(resp.text.as_deref().unwrap().contains("I think..."));
+        assert!(resp.text.as_deref().unwrap().contains("The answer is 42"));
+        // tool_calls 解析
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "file_read");
+        // usage 解析
+        let u = resp.usage.expect("usage should be present");
+        assert_eq!(u.total_tokens, 15);
+        // finish_reason 原值保留
+        assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn llamacpp_infers_finish_reason_without_raw() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(format!(
+                "{}{}{}{}",
+                sse(json!({"choices":[{"delta":{"thinking":"hmm","content":""}}]})),
+                sse(json!({"choices":[{"delta":{"content":"done"}}]})),
+                sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"web_fetch","arguments":"{}"}}]}}]})),
+                done()
+            ))
+            .create();
+        let p =
+            OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::llamacpp())
+                .unwrap();
+        let msgs = vec![ChatMessage::user("hi")];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+        };
+        let resp = p.chat(&req).await.unwrap();
+        // thinking 折回 content
+        assert!(resp.text.as_deref().unwrap().contains("hmm"));
+        assert!(resp.text.as_deref().unwrap().contains("done"));
+        // 无 finish_reason 但有 tool_calls → 推断 tool_calls
+        assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));
+        // 流式未带 usage → None
+        assert!(resp.usage.is_none());
+        m.assert();
+    }
+
+    #[test]
+    fn max_tokens_field_selection() {
+        let v = Some(100usize);
+        assert_eq!(
+            select_max_tokens_fields(&Compat::default(), v),
+            (None, None)
+        );
+        let c = Compat {
+            max_tokens_field: MaxTokensField::MaxTokens,
+            ..Default::default()
+        };
+        assert_eq!(select_max_tokens_fields(&c, v), (Some(100), None));
+        let c2 = Compat {
+            max_tokens_field: MaxTokensField::MaxCompletionTokens,
+            ..Default::default()
+        };
+        assert_eq!(select_max_tokens_fields(&c2, v), (None, Some(100)));
+        // 无值则不发送
+        assert_eq!(select_max_tokens_fields(&c, None), (None, None));
+    }
+
+    #[test]
+    fn assistant_placeholder_after_tool() {
+        let msgs = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant_with_tools(
+                "",
+                vec![ToolCall {
+                    id: "1".into(),
+                    name: "file_read".into(),
+                    arguments: json!({}),
+                }],
+            ),
+            ChatMessage::tool("ok", "1"),
+        ];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+        };
+        // ollama 预设：requires_assistant_after_tool = true
+        let with_ph = build_openai_messages(&req, &Compat::ollama());
+        assert_eq!(with_ph.last().unwrap().role, "assistant");
+        // 默认：不补占位
+        let no_ph = build_openai_messages(&req, &Compat::default());
+        assert_eq!(no_ph.last().unwrap().role, "tool");
+        // 不以 tool 结尾时不补
+        let msgs2 = vec![ChatMessage::user("hi")];
+        let req2 = ChatRequest {
+            messages: &msgs2,
+            tools: None,
+        };
+        assert_eq!(build_openai_messages(&req2, &Compat::ollama()).len(), 1);
+    }
 }

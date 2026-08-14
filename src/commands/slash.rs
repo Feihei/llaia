@@ -464,6 +464,7 @@ mod tests {
                 provider_type: "openai_compatible".into(),
                 base_url: "http://localhost:8080/v1".into(),
                 api_key: String::new(),
+                compat: None,
                 model: [(
                     "small".into(),
                     ModelConfig {
@@ -483,6 +484,7 @@ mod tests {
                 provider_type: "openai_compatible".into(),
                 base_url: "http://localhost:8081/v1".into(),
                 api_key: String::new(),
+                compat: None,
                 model: [(
                     "big".into(),
                     ModelConfig {

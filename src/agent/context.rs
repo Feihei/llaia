@@ -280,6 +280,8 @@ mod compact_tests {
             Ok(ChatResponse {
                 text: Some("summary of old".into()),
                 tool_calls: vec![],
+                usage: None,
+                finish_reason: None,
             })
         }
         async fn chat_stream(

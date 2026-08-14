@@ -339,6 +339,8 @@ impl Provider for GeminiProvider {
         Ok(ChatResponse {
             text: if text.is_empty() { None } else { Some(text) },
             tool_calls,
+            usage: None,
+            finish_reason: None,
         })
     }
 

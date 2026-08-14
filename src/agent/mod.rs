@@ -536,6 +536,8 @@ impl Agent {
                     StreamEvent::ToolCall(tc) => {
                         calls.push(tc);
                     }
+                    StreamEvent::Usage(_) => {}
+                    StreamEvent::FinishReason(_) => {}
                     StreamEvent::Done => break,
                     StreamEvent::Error(msg) => {
                         let _ = event_tx
@@ -930,6 +932,8 @@ mod tests {
             Ok(ChatResponse {
                 text: Some(self.description.clone()),
                 tool_calls: vec![],
+                usage: None,
+                finish_reason: None,
             })
         }
         async fn chat_stream(&self, _req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {

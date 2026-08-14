@@ -130,6 +130,8 @@ mod tests {
             Ok(ChatResponse {
                 text: Some(self.reply.clone()),
                 tool_calls: vec![],
+                usage: None,
+                finish_reason: None,
             })
         }
 
@@ -238,6 +240,8 @@ mod tests {
                         name: "file_read".into(),
                         arguments: serde_json::json!({}),
                     }],
+                    usage: None,
+                    finish_reason: None,
                 })
             }
             async fn chat_stream(

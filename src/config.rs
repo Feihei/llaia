@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::provider::compat::CompatConfig;
+
 /// 顶层配置。对应 ~/.llaia/config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -112,6 +114,10 @@ pub struct ProviderConfig {
     /// TOML 中 `[provider.<id>.<model_alias>]` 的子表
     #[serde(flatten, default)]
     pub model: HashMap<String, ModelConfig>,
+    /// 兼容覆盖层 `[provider.<id>.compat.*]`；优先级高于 base_url 自动探测。
+    /// 未设置时按 base_url 子串探测（ollama / llamacpp），其余走 bare 行为。
+    #[serde(default)]
+    pub compat: Option<CompatConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -730,6 +736,7 @@ impl Config {
                 provider_type: "openai_compatible".into(),
                 base_url: "http://localhost:11434/v1".into(),
                 api_key: String::new(),
+                compat: None,
                 model: models,
             },
         );

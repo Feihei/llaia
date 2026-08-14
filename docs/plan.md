@@ -30,7 +30,7 @@
 
 ## P5 — 未来计划（下一步）
 
-**状态**：⏳ 计划中
+**状态**：🚧 进行中（P5-1 已交付，其余按推荐顺序推进）
 
 > 来自 `docs/issues/` 反馈与扩展评估的候选池。下方条目按主题分组，并标注**必要性**（高/中/低，不做会持续踩坑或已影响正确性→高；明显改善体验→中；锦上添花→低）与**难度**（★☆☆ 半天内单点 / ★★☆ 一到数天跨模块 / ★★★ 结构性改造，动手前先出 ADR），便于排期。
 
@@ -38,7 +38,7 @@
 
 按「是否动 agent 主循环 / 是否改 sqlite schema」分层：先打低风险、自包含的特性，把最难回滚的留到最后。
 
-1. **provider 接入优化**（[ADR-0026](adr/0026-provider-compat.md)）— 纯增量、零回归，起手最稳
+1. **provider 接入优化**（[ADR-0026](adr/0026-provider-compat.md)）— ✅ 已交付（Compat 层 + 自动探测 + 配置覆盖 + 单测）
 2. **系统提示词优化 / MEMORY 预算**（[ADR-0025](adr/0025-system-prompt-memory-budget.md)）— 单点插入 `system_prompt_base`，每轮省 token
 3. **统一搜索 search**（[ADR-0023](adr/0023-unified-search.md)）— 新增工具，趟通「条件注册新工具」模式
 4. **规划后执行 todo**（[ADR-0024](adr/0024-planning-todo.md)）— 新增工具，复用 #3 模式
@@ -50,7 +50,7 @@
 
 ### 模型与 Provider
 
-- [ ] provider 接入优化：针对 Ollama / Llama.cpp 等 OpenAI 兼容端点的格式与行为做专项适配（必要性：**中** / 难度：★★☆）
+- [x] provider 接入优化：针对 Ollama / Llama.cpp 等 OpenAI 兼容端点的格式与行为做专项适配（必要性：**中** / 难度：★★☆）— ✅ 已交付
   - **现状**：`Provider` trait（`chat`/`chat_stream`/`native_tool_calling`/`detect_context_size`/`label`，`src/provider/mod.rs`）已干净；`openai_compat` 是 bare 实现（仅 role 序列化 + tool calls），**无** developer role / reasoning 归一化 / `max_completion_tokens` 字段切换 / finish_reason 推断 / streaming usage 兜底。llama.cpp 需 `--jinja` 才支持 tool calling。
   - **借鉴（pi `packages/ai`）**：`compat` 标志集 + `detectCompat()` 按 base_url 启发式探测 + 显式覆盖优先；llama.cpp 作为 extension provider 完整示例（context window 从 `/models` 探测、vision 探测、`maxTokens` 字段、`compat` 固定）。
   - **方向已确认**：给 `OpenAiCompatibleProvider` 加精简 `Compat` 结构（**不做** pi 的 25 开关全集，只覆盖 llaia 实际跑的本地端点子集）；**按 base_url 自动探测**（含 `ollama`→ollama 适配、`llama`→llamacpp 适配）+ `[provider.<id>].compat.*` 显式覆盖；优先覆盖 Ollama/Llama.cpp 高频差异（tool-call 格式、`reasoning→text` 降级、`max_completion_tokens`、streaming usage 落位、finish_reason 推断）。非破坏性（默认 `Compat::default()` 即当前 bare 行为）。

@@ -6,6 +6,36 @@
 
 ---
 
+## P5 — 进行中（v0.2.2 候选）
+
+> P5 各条目按 `plan.md` 推荐顺序逐条交付，每完成一条在此累加勾选清单。
+
+### ✅ P5-1 Provider Compat 层（[ADR-0026](adr/0026-provider-compat.md)）
+
+针对 Ollama / Llama.cpp 等 OpenAI 兼容端点的格式与行为差异，做**非破坏性**专项适配。
+
+**新增**
+- `src/provider/compat.rs`：`Compat` 结构体（6 个归一化开关）+ `MaxTokensField` 枚举（`none`/`max_tokens`/`max_completion_tokens`）。
+  - `Compat::default()` = bare 行为（与改造前完全一致）。
+  - `Compat::detect(base_url)` 按 host 子串自动探测：`ollama` → 全开归一化；`llamacpp` → 同上但 `requires_assistant_after_tool=false`；其余（含 LMStudio `1234`）保持 bare。
+  - `ollama()` / `llamacpp()` 预设构造函数；`apply_override(CompatConfig)` 让 `[provider.<id>].compat.*` 显式覆盖探测结果。
+- `OpenAiCompatibleProvider` 消费 `Compat`：
+  - **reasoning 归一化**：`reasoning_content` / `thinking` delta 折回 `content`。
+  - **max_tokens 字段切换**：随 `max_tokens_field` 发 `max_tokens` 或 `max_completion_tokens`；配合 `[provider.<id>].model.<alias>.max_tokens` 上限值。
+  - **streaming usage**：`stream_options.include_usage=true` + 解析末帧 `usage`，落 `ChatResponse.usage`。
+  - **finish_reason 推断**：缺失但有 tool_calls 时推断为 `tool_calls`。
+  - **assistant 占位**：`requires_assistant_after_tool` 时在 tool 消息后补空 assistant。
+- `ChatResponse` 新增 `usage: Option<Usage>` 与 `finish_reason: Option<String>`；`StreamEvent` 新增 `Usage(Usage)` 变体（带 `usage` 的流式末帧）。
+- `[provider.<id>].compat` 配置子表（`CompatConfig`，全字段 `Option`，可单独覆盖）。
+
+**验证**
+- 新增 11 个单元测试（mockito 模拟 Ollama/Llama.cpp SSE：reasoning 折叠、usage 解析、finish_reason 推断、字段选择、assistant 占位、detect 探测、override 覆盖、default 回归）。
+- 既有 `provider_http` / `provider_stream` 集成测试通过；`cargo clippy --all-targets -D warnings` 与 `cargo fmt --all --check` 全绿。
+
+**影响面**：所有 `ChatResponse` / `StreamEvent::Usage` 构造点同步更新（anthropic / gemini / fallback / context / mod mock）。
+
+---
+
 ## v0.2.1 (2026-08-14)
 
 **Patch release** — stability and WebUI consistency fixes accumulated since v0.2.0. No breaking changes.

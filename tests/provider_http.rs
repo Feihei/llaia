@@ -1,3 +1,4 @@
+use llaia::provider::compat::Compat;
 use llaia::provider::openai_compat::OpenAiCompatibleProvider;
 use llaia::provider::{ChatMessage, ChatRequest, Provider};
 use serde_json::json;
@@ -36,7 +37,15 @@ async fn test_native_tool_calling() {
         .create_async()
         .await;
 
-    let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
+    let provider = OpenAiCompatibleProvider::new(
+        server.url(),
+        "",
+        "test-model",
+        true,
+        None,
+        Compat::default(),
+    )
+    .unwrap();
     let msgs = vec![ChatMessage::user("read /tmp/x")];
     let req = ChatRequest {
         messages: &msgs,
@@ -69,7 +78,15 @@ async fn test_text_response() {
         .create_async()
         .await;
 
-    let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
+    let provider = OpenAiCompatibleProvider::new(
+        server.url(),
+        "",
+        "test-model",
+        true,
+        None,
+        Compat::default(),
+    )
+    .unwrap();
     let msgs = vec![ChatMessage::user("hi")];
     let req = ChatRequest {
         messages: &msgs,
@@ -93,7 +110,15 @@ async fn test_error_response() {
         .create_async()
         .await;
 
-    let provider = OpenAiCompatibleProvider::new(server.url(), "", "test-model", true).unwrap();
+    let provider = OpenAiCompatibleProvider::new(
+        server.url(),
+        "",
+        "test-model",
+        true,
+        None,
+        Compat::default(),
+    )
+    .unwrap();
     let msgs = vec![ChatMessage::user("hi")];
     let req = ChatRequest {
         messages: &msgs,

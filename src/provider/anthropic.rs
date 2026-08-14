@@ -228,6 +228,8 @@ impl Provider for AnthropicProvider {
             match ev? {
                 StreamEvent::TextDelta(d) => text.push_str(&d),
                 StreamEvent::ToolCall(tc) => tool_calls.push(tc),
+                StreamEvent::Usage(_) => {}
+                StreamEvent::FinishReason(_) => {}
                 StreamEvent::Done => break,
                 StreamEvent::Error(msg) => return Err(anyhow!("stream error: {}", msg)),
             }
@@ -235,6 +237,8 @@ impl Provider for AnthropicProvider {
         Ok(ChatResponse {
             text: if text.is_empty() { None } else { Some(text) },
             tool_calls,
+            usage: None,
+            finish_reason: None,
         })
     }
 

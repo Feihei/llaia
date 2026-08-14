@@ -74,6 +74,42 @@ MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消�
   - `native_tool_calling = false` → system prompt 注入 `<tool_call>...</tool_call>` 协议
 - 流式输出：`Provider` trait 已定义 `chat_stream`（SSE）接口，但 chat 主路径当前仍整块返回，未启用流式。
 
+### Provider Compat 层（ADR-0026）
+
+OpenAI 兼容端点各家实现参差，`OpenAiCompatibleProvider` 通过 `Compat` 结构体做响应归一化，抹平以下差异：
+
+| 字段 | 含义 | 默认（bare） |
+|---|---|---|
+| `supports_developer_role` | 是否支持 `developer` role（Ollama/Llama.cpp 等不支持，自动并入 system） | `false` |
+| `reasoning_to_content` | 把 `reasoning_content` / `thinking` 折回 `content` | `false` |
+| `max_tokens_field` | 发送上限字段名：`none` / `max_tokens` / `max_completion_tokens` | `none`（不发送） |
+| `streaming_usage` | 流式带 `stream_options.include_usage` 并解析末帧 `usage` | `false` |
+| `infer_finish_reason` | 无 `finish_reason` 但含 tool_calls 时推断为 `tool_calls` | `false` |
+| `requires_assistant_after_tool` | tool 消息后补空 assistant 占位（Ollama 某些版本要求） | `false` |
+
+**自动探测**：`Compat::detect(base_url)` 按 host 子串匹配，命中即套用预设——
+- `ollama`（含 `11434` / `ollama`）→ 开启除 `supports_developer_role` 外的全部归一化
+- `llamacpp`（含 `llama` / `8080` / `completion`）→ 同上但 `requires_assistant_after_tool=false`
+- 其余（含 LMStudio `1234`）→ 保持 bare，不改动原行为
+
+**手动覆盖**：在 `config.toml` 的 `[provider.<id>]` 下加 `[provider.<id>.compat]` 子表，任一字段均可单独覆盖探测结果：
+
+```toml
+[provider.ollama_local]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"   # 自动探测命中 ollama 预设
+model = [["default", { model = "qwen3:14b", native_tool_calling = true }]]
+
+[provider.ollama_local.compat]
+reasoning_to_content = true
+max_tokens_field = "max_completion_tokens"   # 该模型用 max_completion_tokens
+requires_assistant_after_tool = false          # 覆盖预设里的 true
+```
+
+`[provider.<id>].model.<alias>.max_tokens`（usize，可选）会随着 `max_tokens_field` 选定的字段名发送上限。`ChatResponse` 现额外返回 `usage: Option<Usage>` 与 `finish_reason: Option<String>`，便于上层做 token 统计与结束判定。
+
+详见 [docs/adr/0026-provider-compat.md](docs/adr/0026-provider-compat.md) 与规划 [docs/plans/2026-08-14-provider-compat.md](docs/plans/2026-08-14-provider-compat.md)。
+
 详见 [docs/adr/0005-provider-and-tool-calling.md](docs/adr/0005-provider-and-tool-calling.md)。
 
 ## 工具集
