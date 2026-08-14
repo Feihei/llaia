@@ -6,6 +6,21 @@
 
 ---
 
+## v0.2.1 (2026-08-14)
+
+**Patch release** — stability and WebUI consistency fixes accumulated since v0.2.0. No breaking changes.
+
+**Bug fixes**
+- **QQ channel**: text/media send paths now self-heal on token expiry. When QQ returns code `11244` ("token not exist or expire"), the send loop refreshes the app access token once and retries, instead of reusing the stale token for all attempts (previously only the WS reconnect path refreshed). Fixes repeated failures, especially under a dual-instance setup sharing one `app_id`/`app_secret` (e.g. podman + native).
+- **QQ media**: reject 0-byte files early (`send_image`/`send_file` tools and the upload path) so an empty TTS/audio output fails with a clear error instead of QQ's opaque `"file data empty"` (code 10000).
+
+**WebUI**
+- Removed the deprecated `workspace` / `soul` / `user` / `memory` inputs from the agent form — these fields are ignored at runtime (the agent home dir is derived from `--config-dir`); they were misleading dead controls.
+- The config save now surfaces the backend's real hot-reload note (provider / runtime / skills / MCP / cron / sub-agents are reloaded in-process) instead of a hardcoded "restart to take effect" alert.
+- **Hot-reload for cron/mcp raw editors**: editing `cron.toml` / `mcp.toml` via the WebUI raw TOML editors now hot-reloads immediately (was write-only, required a restart). Both the structured config save and the raw editors now share the same reload logic.
+
+---
+
 ## v0.2.0 (2026-08-13)
 
 **Milestone**: First minor release after v0.1.0. The headline change is the breaking workspace directory migration, plus accumulated capability expansions from P1.5–P4+ and several stability fixes.
