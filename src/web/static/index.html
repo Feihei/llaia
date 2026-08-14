@@ -289,7 +289,7 @@
                   <button @click="saveCronRaw()">Save</button>
                   <span class="cron-msg" x-text="cronRawMsg"></span>
                 </div>
-                <div class="hint">Saving cron.toml requires restarting <code>llaia serve</code> to take effect.</div>
+                <div class="hint">Saving cron.toml hot-reloads the scheduler immediately; no restart needed.</div>
               </div>
             </template>
           </div>
@@ -342,7 +342,7 @@
                   <button @click="loadMcp()">Refresh</button>
                   <span class="cron-msg" x-text="mcpMsg"></span>
                 </div>
-                <div class="hint">Tools are named <code>&lt;server&gt;__&lt;tool&gt;</code>. Restart <code>llaia serve</code> after editing mcp.toml.</div>
+                <div class="hint">Tools are named <code>&lt;server&gt;__&lt;tool&gt;</code>. Editing mcp.toml hot-reloads the connection; no restart needed.</div>
               </div>
             </template>
 
@@ -353,7 +353,7 @@
                   <button @click="saveMcpRaw()">Save</button>
                   <span class="cron-msg" x-text="mcpRawMsg"></span>
                 </div>
-                <div class="hint">Saving mcp.toml requires restarting <code>llaia serve</code> to take effect.</div>
+                <div class="hint">Saving mcp.toml hot-reloads the MCP connection immediately; no restart needed.</div>
               </div>
             </template>
           </div>

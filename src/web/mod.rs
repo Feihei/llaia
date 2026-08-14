@@ -427,13 +427,30 @@ async fn reload_all(state: &AppState, merged: &Config, config_dir: &Path) -> Vec
     }
     notes.push("agent runtime + skills reloaded".into());
 
-    // 2. MCP 重连
+    // 2. MCP 热重连（写入内存工具集，供子 agent 重建复用）
+    let (mcp_note, mcp_tools) = reconnect_mcp(state).await;
+    notes.push(mcp_note);
+
+    // 3. cron 热重载
+    notes.push(reload_cron(state).await);
+
+    // 4. 子 Agent 重建
+    registry
+        .rebuild_sub_agents(merged, config_dir, mcp_tools, &skills)
+        .await;
+    notes.push("sub-agents rebuilt".into());
+
+    notes
+}
+
+/// MCP 热重连：重读 mcp.toml，连接所有 enabled server，替换内存中的工具集。
+/// 返回 (人类可读结果, 新工具列表) —— 工具列表需交给子 agent 重建复用。
+async fn reconnect_mcp(state: &AppState) -> (String, Vec<Arc<dyn crate::tools::Tool>>) {
     let mcp_cfg = match crate::mcp::McpConfig::load(&state.mcp_path) {
         Ok(c) => c,
         Err(e) => {
-            notes.push(format!("mcp config load failed: {e}"));
-            // 仍继续其它子系统的热加载；mcp 配置缺失时等价于空配置
-            crate::mcp::McpConfig::default()
+            tracing::warn!(error = %e, "mcp.toml load failed during reload");
+            return (format!("mcp config load failed: {e}"), Vec::new());
         }
     };
     let new_mcp = Arc::new(crate::mcp::client::McpRegistry::connect_all(&mcp_cfg.server).await);
@@ -446,6 +463,7 @@ async fn reload_all(state: &AppState, merged: &Config, config_dir: &Path) -> Vec
         )));
     }
     *state.mcp_registry.lock().unwrap() = Some(new_mcp.clone());
+    let registry = state.registry.clone();
     registry
         .main
         .lock()
@@ -457,26 +475,21 @@ async fn reload_all(state: &AppState, merged: &Config, config_dir: &Path) -> Vec
             a.lock().await.tools.replace_mcp_tools(mcp_tools.clone());
         }
     }
-    notes.push(format!("mcp reconnected ({} tools)", mcp_tools.len()));
+    (format!("mcp reconnected ({} tools)", mcp_tools.len()), mcp_tools)
+}
 
-    // 3. cron 热重载（复用已运行的调度器实例，不重启后台 ticker）
-    // 注意：先把 Option<Arc<CronHandle>> clone 出锁，避免 std::sync::MutexGuard
+/// cron 热重载：重读 cron.toml，复用已运行的调度器实例重排任务（不重启后台 ticker）。
+async fn reload_cron(state: &AppState) -> String {
+    // 先把 Option<Arc<CronHandle>> clone 出锁，避免 std::sync::MutexGuard
     // 跨 await 存活导致 future 非 Send（axum handler 要求 Send）。
     let cron_handle = state.cron_scheduler.lock().unwrap().clone();
-    if let Some(handle) = cron_handle {
-        match handle.reload(&state.cron_path).await {
-            Ok(()) => notes.push("cron rescheduled".into()),
-            Err(e) => notes.push(format!("cron reload failed: {e}")),
-        }
+    match cron_handle {
+        Some(handle) => match handle.reload(&state.cron_path).await {
+            Ok(()) => "cron rescheduled".into(),
+            Err(e) => format!("cron reload failed: {e}"),
+        },
+        None => "cron scheduler not running".into(),
     }
-
-    // 4. 子 Agent 重建
-    registry
-        .rebuild_sub_agents(merged, config_dir, mcp_tools, &skills)
-        .await;
-    notes.push("sub-agents rebuilt".into());
-
-    notes
 }
 
 /// 根据 runtime.compact_model 构建 compact_provider。
@@ -918,13 +931,16 @@ pub async fn put_cron_raw(
     if let Err(e) = std::fs::write(&state.cron_path, &body.raw) {
         return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e));
     }
+    // 写盘后热重载，无需重启
+    let note = reload_cron(&state).await;
     tracing::info!(
         tasks = cfg.task.len(),
-        "cron.toml updated (reload requires restart)"
+        note = %note,
+        "cron.toml updated (hot-reloaded)"
     );
     axum::Json(serde_json::json!({
         "ok": true,
-        "note": "cron.toml saved (restart serve to apply)"
+        "note": format!("cron.toml saved; {}", note)
     }))
     .into_response()
 }
@@ -990,13 +1006,16 @@ pub async fn put_mcp_raw(
     if let Err(e) = std::fs::write(&state.mcp_path, &body.raw) {
         return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e));
     }
+    // 写盘后热重连，无需重启
+    let (note, _tools) = reconnect_mcp(&state).await;
     tracing::info!(
         servers = cfg.server.len(),
-        "mcp.toml updated (reload requires restart)"
+        note = %note,
+        "mcp.toml updated (hot-reloaded)"
     );
     axum::Json(serde_json::json!({
         "ok": true,
-        "note": "mcp.toml saved (restart serve to apply)"
+        "note": format!("mcp.toml saved; {}", note)
     }))
     .into_response()
 }

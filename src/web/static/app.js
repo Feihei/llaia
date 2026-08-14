@@ -363,7 +363,7 @@ function llaiaApp() {
       if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
-      if (r.ok) { this.cronRawMsg = '✓ Saved (restart serve to apply)'; }
+      if (r.ok) { this.cronRawMsg = '✓ ' + (j.note || 'Saved (hot-reloaded).'); }
       else { this.cronRawMsg = '✗ ' + (j.error || r.status) + (j.line ? ' (char: ' + j.line + ')' : ''); }
     },
     async triggerCron(id) {
@@ -412,7 +412,7 @@ function llaiaApp() {
       if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
-      if (r.ok) { this.mcpRawMsg = '✓ Saved (restart serve to apply)'; }
+      if (r.ok) { this.mcpRawMsg = '✓ ' + (j.note || 'Saved (hot-reloaded).'); }
       else { this.mcpRawMsg = '✗ ' + (j.error || r.status); }
     },
     async testMcp(id) {
