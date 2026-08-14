@@ -313,7 +313,6 @@ impl QqChannel {
         content: &str,
         msg_id: Option<&str>,
     ) -> Result<()> {
-        let token = self.get_access_token().await?;
         let url = format!("{}/v2/users/{}/messages", self.api_base, user_openid);
         let mut body = serde_json::json!({
             "content": content,
@@ -327,7 +326,11 @@ impl QqChannel {
 
         let delays = [200u64, 400, 800];
         let mut last_err: Option<anyhow::Error> = None;
+        // token 过期（code 11244）仅强制刷新一次，避免无限循环
+        let mut token_refreshed = false;
         for (attempt, delay) in delays.iter().enumerate() {
+            // 每次重试都取 token：首次失效或刷新后会拿到新 token
+            let token = self.get_access_token().await?;
             let resp = self
                 .http
                 .post(&url)
@@ -344,7 +347,20 @@ impl QqChannel {
                 Ok(r) => {
                     let status = r.status();
                     let text = r.text().await.unwrap_or_default();
-                    tracing::warn!(attempt, %status, %text, "qq send failed, retrying");
+                    // QQ 返回 token 失效（11244）时，强制刷新一次后重试，
+                    // 否则会带着旧 token 把 3 次重试全耗光（podman/native 双实例共用凭证时高频触发）
+                    if !token_refreshed
+                        && (text.contains("token not exist or expire") || text.contains("11244"))
+                    {
+                        tracing::warn!(
+                            attempt,
+                            "qq send rejected: token expired, force refreshing and retrying"
+                        );
+                        self.invalidate_token().await;
+                        token_refreshed = true;
+                    } else {
+                        tracing::warn!(attempt, %status, %text, "qq send failed, retrying");
+                    }
                     last_err = Some(anyhow!("status: {}, body: {}", status, text));
                 }
                 Err(e) => {
@@ -366,7 +382,6 @@ impl QqChannel {
         kind: crate::agent::MediaKind,
         msg_id: Option<&str>,
     ) -> Result<()> {
-        let token = self.get_access_token().await?;
         let file_type = match kind {
             crate::agent::MediaKind::Image => 1, // 1=图片
             crate::agent::MediaKind::File => 4,  // 4=文件
@@ -376,37 +391,61 @@ impl QqChannel {
         let file_bytes = tokio::fs::read(path)
             .await
             .map_err(|e| anyhow!("read media file {:?}: {}", path, e))?;
+        if file_bytes.is_empty() {
+            // QQ 对空文件返回 "file data empty" (code 10000)，这里提前给出明确错误
+            return Err(anyhow!("media file is empty (0 bytes): {:?}", path));
+        }
         let file_name = std::path::Path::new(path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file")
             .to_string();
 
+        // 构造 multipart 表单的闭包（token 过期刷新后需重建）
+        let build_form = || {
+            let part = reqwest::multipart::Part::bytes(file_bytes.clone())
+                .file_name(file_name.clone())
+                .mime_str("application/octet-stream")
+                .expect("mime_str");
+            reqwest::multipart::Form::new()
+                .text("file_type", file_type.to_string())
+                .part("file", part)
+        };
+
         // 1. 上传媒体到 QQ 文件服务
         let upload_url = format!("{}/v2/users/{}/files", self.api_base, user_openid);
-        let part = reqwest::multipart::Part::bytes(file_bytes)
-            .file_name(file_name.clone())
-            .mime_str("application/octet-stream")?;
-        let form = reqwest::multipart::Form::new()
-            .text("file_type", file_type.to_string())
-            .part("file", part);
-
-        let resp = self
-            .http
-            .post(&upload_url)
-            .header("Authorization", format!("QQBot {}", token))
-            .multipart(form)
-            .send()
-            .await?;
+        let do_upload = || async {
+            let token = self.get_access_token().await?;
+            let resp = self
+                .http
+                .post(&upload_url)
+                .header("Authorization", format!("QQBot {}", token))
+                .multipart(build_form())
+                .send()
+                .await?;
+            Ok::<_, anyhow::Error>(resp)
+        };
+        let resp = do_upload().await?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(anyhow!(
-                "upload media failed: status={}, body={}",
-                status,
-                text
-            ));
-        }
+        let text = if !status.is_success() {
+            // token 失效（11244）：刷新一次后重试
+            if text.contains("token not exist or expire") || text.contains("11244") {
+                tracing::warn!("qq media upload rejected: token expired, force refreshing and retrying");
+                self.invalidate_token().await;
+                let resp = do_upload().await?;
+                let s = resp.status();
+                let t = resp.text().await.unwrap_or_default();
+                if !s.is_success() {
+                    return Err(anyhow!("upload media failed: status={}, body={}", s, t));
+                }
+                t
+            } else {
+                return Err(anyhow!("upload media failed: status={}, body={}", status, text));
+            }
+        } else {
+            text
+        };
         let v: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| anyhow!("parse upload response: {}, body={}", e, text))?;
         let file_info = v
@@ -429,7 +468,8 @@ impl QqChannel {
             body["msg_seq"] = serde_json::Value::from(self.next_msg_seq());
         }
 
-        let resp = self
+        let mut token = self.get_access_token().await?;
+        let mut resp = self
             .http
             .post(&send_url)
             .header("Authorization", format!("QQBot {}", token))
@@ -437,8 +477,24 @@ impl QqChannel {
             .json(&body)
             .send()
             .await?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let mut status = resp.status();
+        let mut text = resp.text().await.unwrap_or_default();
+        // token 失效（11244）：刷新一次后重试
+        if !status.is_success() && (text.contains("token not exist or expire") || text.contains("11244")) {
+            tracing::warn!("qq media send rejected: token expired, force refreshing and retrying");
+            self.invalidate_token().await;
+            token = self.get_access_token().await?;
+            resp = self
+                .http
+                .post(&send_url)
+                .header("Authorization", format!("QQBot {}", token))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await?;
+            status = resp.status();
+            text = resp.text().await.unwrap_or_default();
+        }
         if !status.is_success() {
             return Err(anyhow!(
                 "send media message failed: status={}, body={}",

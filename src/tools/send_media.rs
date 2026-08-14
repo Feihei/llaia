@@ -69,9 +69,12 @@ impl Tool for SendImage {
                 resolved
             ));
         }
-        tokio::fs::metadata(&resolved)
+        let meta = tokio::fs::metadata(&resolved)
             .await
             .map_err(|e| anyhow!("access {:?}: {}", resolved, e))?;
+        if meta.len() == 0 {
+            return Err(anyhow!("image file {:?} is empty (0 bytes)", resolved));
+        }
         Ok(format!("image ready: {}", resolved.display()))
     }
 
@@ -93,9 +96,12 @@ impl Tool for SendImage {
                 resolved
             ));
         }
-        tokio::fs::metadata(&resolved)
+        let meta = tokio::fs::metadata(&resolved)
             .await
             .map_err(|e| anyhow!("access {:?}: {}", resolved, e))?;
+        if meta.len() == 0 {
+            return Err(anyhow!("image file {:?} is empty (0 bytes)", resolved));
+        }
 
         // 通过事件通知 channel 发送图片
         if let Some(tx) = event_tx {
@@ -139,9 +145,12 @@ impl Tool for SendFile {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'path' argument"))?;
         let resolved = resolve_within(&self.workspace, path)?;
-        tokio::fs::metadata(&resolved)
+        let meta = tokio::fs::metadata(&resolved)
             .await
             .map_err(|e| anyhow!("access {:?}: {}", resolved, e))?;
+        if meta.len() == 0 {
+            return Err(anyhow!("file {:?} is empty (0 bytes)", resolved));
+        }
         Ok(format!("file ready: {}", resolved.display()))
     }
 
@@ -156,9 +165,12 @@ impl Tool for SendFile {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing 'path' argument"))?;
         let resolved = resolve_within(&self.workspace, path)?;
-        tokio::fs::metadata(&resolved)
+        let meta = tokio::fs::metadata(&resolved)
             .await
             .map_err(|e| anyhow!("access {:?}: {}", resolved, e))?;
+        if meta.len() == 0 {
+            return Err(anyhow!("file {:?} is empty (0 bytes)", resolved));
+        }
 
         if let Some(tx) = event_tx {
             let _ = tx
