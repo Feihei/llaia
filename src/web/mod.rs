@@ -475,7 +475,10 @@ async fn reconnect_mcp(state: &AppState) -> (String, Vec<Arc<dyn crate::tools::T
             a.lock().await.tools.replace_mcp_tools(mcp_tools.clone());
         }
     }
-    (format!("mcp reconnected ({} tools)", mcp_tools.len()), mcp_tools)
+    (
+        format!("mcp reconnected ({} tools)", mcp_tools.len()),
+        mcp_tools,
+    )
 }
 
 /// cron 热重载：重读 cron.toml，复用已运行的调度器实例重排任务（不重启后台 ticker）。

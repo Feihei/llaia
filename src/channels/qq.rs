@@ -431,7 +431,9 @@ impl QqChannel {
         let text = if !status.is_success() {
             // token 失效（11244）：刷新一次后重试
             if text.contains("token not exist or expire") || text.contains("11244") {
-                tracing::warn!("qq media upload rejected: token expired, force refreshing and retrying");
+                tracing::warn!(
+                    "qq media upload rejected: token expired, force refreshing and retrying"
+                );
                 self.invalidate_token().await;
                 let resp = do_upload().await?;
                 let s = resp.status();
@@ -441,7 +443,11 @@ impl QqChannel {
                 }
                 t
             } else {
-                return Err(anyhow!("upload media failed: status={}, body={}", status, text));
+                return Err(anyhow!(
+                    "upload media failed: status={}, body={}",
+                    status,
+                    text
+                ));
             }
         } else {
             text
@@ -480,7 +486,9 @@ impl QqChannel {
         let mut status = resp.status();
         let mut text = resp.text().await.unwrap_or_default();
         // token 失效（11244）：刷新一次后重试
-        if !status.is_success() && (text.contains("token not exist or expire") || text.contains("11244")) {
+        if !status.is_success()
+            && (text.contains("token not exist or expire") || text.contains("11244"))
+        {
             tracing::warn!("qq media send rejected: token expired, force refreshing and retrying");
             self.invalidate_token().await;
             token = self.get_access_token().await?;
