@@ -97,6 +97,35 @@
                 <div class="form-row"><label>type</label><input x-model="p.type"></div>
                 <div class="form-row"><label>base_url</label><input x-model="p.base_url" style="width:400px"></div>
                 <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
+                <div class="compat-section">
+                  <button type="button" class="collapse-toggle" @click="toggleCompat(pid)">
+                    <span x-text="compatOpen[pid] ? '▾' : '▸'"></span> Compatibility
+                    <span class="hint" x-show="p.compat">overrides set</span>
+                  </button>
+                  <div class="compat-body" x-show="compatOpen[pid]">
+                    <div class="hint">Endpoint differences are auto-detected from base_url (ollama/llama → preset). Override only when needed.</div>
+                    <template x-if="!p.compat">
+                      <button type="button" class="inline-add" @click="enableCompat(pid)">+ Add compatibility overrides</button>
+                    </template>
+                    <template x-if="p.compat">
+                      <div class="compat-fields">
+                        <label class="switch"><input type="checkbox" x-model="p.compat.reasoning_to_content"> reasoning → content (fold thinking)</label>
+                        <label class="switch"><input type="checkbox" x-model="p.compat.streaming_usage"> streaming usage</label>
+                        <label class="switch"><input type="checkbox" x-model="p.compat.infer_finish_reason"> infer finish_reason = tool_calls</label>
+                        <label class="switch"><input type="checkbox" x-model="p.compat.requires_assistant_after_tool"> assistant placeholder after tool</label>
+                        <label class="switch"><input type="checkbox" x-model="p.compat.supports_developer_role"> supports developer role</label>
+                        <label class="switch">max_tokens field:
+                          <select x-model="p.compat.max_tokens_field">
+                            <option :value="null">inherit (auto)</option>
+                            <option value="max_tokens">max_tokens</option>
+                            <option value="max_completion_tokens">max_completion_tokens</option>
+                          </select>
+                        </label>
+                        <button type="button" class="btn-delete" @click="disableCompat(pid)">Remove overrides (use auto-detect)</button>
+                      </div>
+                    </template>
+                  </div>
+                </div>
                 <h4>Models</h4>
                 <template x-for="(m, alias) in p.model" :key="alias">
                   <div class="model-row">

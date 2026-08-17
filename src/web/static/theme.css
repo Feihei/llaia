@@ -275,6 +275,28 @@ option { background: var(--bg-input); color: var(--text); }
 }
 #config-pane .tag-add select { min-width: 220px; }
 
+/* ---------- Provider 兼容性高级面板 ---------- */
+#config-pane .compat-section {
+  margin: 10px 0 4px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-elev);
+}
+#config-pane .collapse-toggle {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--green-bright); font: inherit; font-size: 13px;
+  padding: 0; display: flex; align-items: center; gap: 6px; width: 100%;
+}
+#config-pane .collapse-toggle .hint { font-weight: normal; }
+#config-pane .compat-body { margin-top: 8px; }
+#config-pane .compat-fields {
+  display: flex; flex-direction: column; gap: 7px; margin-top: 6px;
+}
+#config-pane .compat-fields .switch {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--text); font-size: 13px;
+}
+#config-pane .compat-fields .switch select { margin-left: 4px; }
+
 /* ---------- Cron / MCP（Config 内嵌 section） ---------- */
 .subtabs { margin-bottom: 14px; }
 

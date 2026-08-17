@@ -14,6 +14,7 @@ function llaiaApp() {
     ws: null,
     // config
     cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{}} },
+    compatOpen: {},
     configSection: 'runtime',
     rawToml: '',
     rawMsg: '',
@@ -216,8 +217,9 @@ function llaiaApp() {
         for (const pid in data.provider) {
           const p = data.provider[pid];
           if (!p.model) p.model = {};
+          this.compatOpen[pid] = false;
           for (const k of Object.keys(p).slice()) {
-            if (k !== 'type' && k !== 'base_url' && k !== 'api_key' && k !== 'model') {
+            if (k !== 'type' && k !== 'base_url' && k !== 'api_key' && k !== 'model' && k !== 'compat') {
               p.model[k] = p[k];
               delete p[k];
             }
@@ -262,6 +264,10 @@ function llaiaApp() {
           for (const alias in p.model) { p[alias] = p.model[alias]; }
           delete p.model;
         }
+        // 全 null 的 compat 覆盖层等价于未设置，丢弃以免在 TOML 写入空 compat = {}
+        if (p.compat && Object.values(p.compat).every(v => v === null)) {
+          delete p.compat;
+        }
       }
       console.log('PUT /api/config body:', JSON.stringify(cfgToSend).slice(0, 300));
       const r = await this.apiFetch('/api/config', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(cfgToSend) });
@@ -277,10 +283,30 @@ function llaiaApp() {
       if (!id || !id.trim()) return;
       if (this.cfg.provider[id]) { alert('Provider already exists: ' + id); return; }
       this.cfg.provider[id] = { type: 'openai_compatible', base_url: '', api_key: '', model: {} };
+      this.compatOpen[id] = false;
     },
     deleteProvider(pid) {
       if (!confirm('Delete provider ' + pid + '? All agents referencing it will break.')) return;
       delete this.cfg.provider[pid];
+    },
+    // ---- provider compat (provider-level, NOT a model) ----
+    toggleCompat(pid) {
+      this.compatOpen[pid] = !this.compatOpen[pid];
+    },
+    enableCompat(pid) {
+      // 创建覆盖层对象：所有字段留 null = 继承探测结果（等价于不覆盖）
+      this.cfg.provider[pid].compat = {
+        supports_developer_role: null,
+        reasoning_to_content: null,
+        max_tokens_field: null,
+        streaming_usage: null,
+        infer_finish_reason: null,
+        requires_assistant_after_tool: null,
+      };
+    },
+    disableCompat(pid) {
+      // 回到 null = 完全不覆盖，纯按 base_url 探测
+      this.cfg.provider[pid].compat = null;
     },
     addModel(pid) {
       const alias = prompt('Enter new model alias (e.g., qwen3, gpt4):');

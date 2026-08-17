@@ -171,7 +171,7 @@ IM 频道在 `[channels.<name>]` 下配置（均含 `enabled`，默认 false，�
 > - **结构化表单保存**（`PUT /api/config`，Config 页各表单的 Save）：用 `toml_edit` 做**定点合并**——只覆盖表单改动的 key，保留未改动段落的注释；`provider`/`agent` 子树走覆盖+删除缺失（支持表单删 provider/agent/model），`runtime`/`log`/`webui`/`channels`/`tools` 走保留缺失（保住表单未暴露的字段如 `runtime.compact_model`/`vision_model`、`provider.compat` 与这些段落的注释）。
 > - **Raw TOML 编辑器**（`PUT /api/config/raw`，Config → Raw TOML 标签）：原文写回，注释完全保留，适合手改 schema 内任意字段（如 `[provider.<id>].compat.*` 覆盖层、agent `fallback`）。
 >
-> 表单目前暴露的 agent 字段：`model`、`fallback`（逗号分隔的备用模型链）、`delegate_timeout`。`fallback` 等 schema 内但表单未单列的项，建议用 Raw TOML 维护。
+> 表单目前暴露的 agent 字段：`model`（下拉选 `provider_id.model_alias`）、`fallback`（可增删的备用模型链标签列表）、`delegate_timeout`；provider 字段：`type`、`base_url`、`api_key`、以及折叠的 **Compatibility** 高级面板（`compat` 覆盖层的 6 个开关，`provider` 级、绝不会混入 model 列表）。schema 内但表单未单列的项，仍可用 Raw TOML 维护。
 
 ```toml
 [webui]
