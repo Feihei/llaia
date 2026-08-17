@@ -96,7 +96,7 @@ You have specialized skills — reusable instruction bundles stored in SKILL.md 
 
 **skill 的 `tools` 字段只是 prompt 提示**，告诉 LLM "这个 skill 推荐用这些工具"，不实际控制工具挂载。
 
-- **内置工具**（file_read / file_write / file_edit / terminal / web_fetch / tavily_search / memory_write / send_image / send_file）：始终全挂载，无成本
+- **内置工具**（file_read / file_write / file_edit / terminal / web_fetch / search / memory_write / send_image / send_file）：始终全挂载，无成本
 - **MCP 工具**：按 server 挂载（P3-d 已设计），与 skill 解耦
 - **skill 的 `tools` 字段**：SKILL.md body 里提示 LLM "本 skill 推荐用 file_read + terminal + filesystem__git_log"，LLM 读 SKILL.md 后知道用哪些工具
 
@@ -158,7 +158,7 @@ You have specialized skills — reusable instruction bundles stored in SKILL.md 
 
 P3-e 随附 3 个示例 skill，放在 `~/.llaia/skills/` 下：
 - `code-review`：代码审查
-- `news-digest`：新闻摘要（依赖 tavily_search）
+- `news-digest`：新闻摘要（依赖 search）
 - `todoist`：提醒（依赖 cron 或 web_fetch）
 
 ## 不做

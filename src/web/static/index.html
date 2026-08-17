@@ -209,8 +209,15 @@
             <h3>terminal</h3>
             <div class="form-row"><label>confirm</label><input x-model="cfg.tools.terminal.confirm"></div>
             <div class="form-row"><label>whitelist (comma separated)</label><input :value="cfg.tools.terminal.whitelist.join(',')" @input="cfg.tools.terminal.whitelist=$event.target.value.split(',')"></div>
+            <h3>search</h3>
+            <div class="form-row"><label>provider</label><input x-model="cfg.tools.search.provider"></div>
+            <div class="form-row"><label>top_k</label><input type="number" x-model="cfg.tools.search.top_k"></div>
             <h3>tavily</h3>
             <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.tavily.api_key"></div>
+            <h3>baidu</h3>
+            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.baidu.api_key"></div>
+            <h3>brave</h3>
+            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.brave.api_key"></div>
             <button @click="saveConfig()">Save</button>
           </div>
         </template>

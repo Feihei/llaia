@@ -55,6 +55,35 @@ MEMORY.md **全量加载**进 system prompt（不懒加载），但受可配置 
 
 ---
 
+### ✅ P5-3 统一搜索 search（[ADR-0023](adr/0023-unified-search.md)）
+
+原 `tavily_search` 单一 provider 工具收敛为统一的 `search` 工具，内部按 `[tools.search].provider` 选定**单一** provider（tavily / baidu / brave）执行，不串试、不聚合（经 zeroclaw / nanobot 复核后的决策）。各搜索源内置实现、归一化为 `SearchResult`，零额外进程。
+
+**新增**
+- `src/tools/search/mod.rs`：`SearchProvider` trait（`search(query, top_k)`）+ `SearchResult { title, url, snippet }` 归一化结构；`UnifiedSearch` 工具（对 agent 只暴露 `search(query, top_k?)`，名称 `search`）；`UnifiedSearch::build(&ToolsConfig)` 按 `provider` 选定、key 缺失/未知则不注册该工具（条件注册，与老 tavily 行为一致）。
+- `src/tools/search/tavily.rs`：从原 `src/tools/tavily.rs` 迁移为 `TavilyProvider`（老配置 `[tools.tavily].api_key` 仍生效）。
+- `src/tools/search/baidu.rs`：`BaiduProvider` — 百度千帆 AI Search（`POST /v2/ai_search/web_search`，Bearer token，响应 `references[]`）。
+- `src/tools/search/brave.rs`：`BraveProvider` — Brave Search API（`GET /res/v1/web/search`，`X-Subscription-Token` 头，响应 `web.results[]`）。
+- `src/tools/search/mod.rs` 单元测试：结果格式化、top_k 覆盖、空结果占位、schema 结构。
+
+**修改**
+- `src/config.rs`：新增 `SearchConfig { provider, top_k }` + `BaiduConfig` / `BraveConfig`；`expand()` 处理各家 key 的 `${VAR}`。
+- `src/channels/cli.rs`：用 `UnifiedSearch::build` 替换原 `TavilySearch` 注册（全频道统一生效）；删除 `src/tools/tavily.rs`。
+- `src/web/mod.rs`：`mask_sensitive` / `merge_masked` 同步掩码 baidu / brave key + 测试。
+- `src/commands/mod.rs`：`init` 模板加 `[tools.search]` 段 + baidu/brave key 段与 `.env` 模板；cron 示例 `tavily_search` → `search`。
+- `src/skill/loader.rs` 示例 skill、`src/tools/cron.rs` schema/测试：`tavily_search` → `search`。
+- 文档：`guide/tools.md` / `glossary.md` / `configuration.md` / `adr/0006` / `adr/0011` / `adr/0013` / `adr/0015` / `AGENTS.md` 工具清单与配置段同步更新。
+
+**未做（已知范围）**
+- **doubao（豆包）provider 暂未实现**：其公开接入只有 MCP/Skill 或 Volcengine SigV4 SDK（access_key+secret_key），没有干净的"单 api_key REST"端点，且 ADR 明确"内置而非 MCP"；手搓 SigV4 不可测、风险高。选定 `provider = "doubao"` 时给清晰报错。后续需要可单独补（届时补 `DoubaoConfig`）。
+- 破坏性变更：cron 任务里若引用旧工具名 `tavily_search`，需改为 `search`。
+
+**验证**
+- `cargo clippy --lib --all-targets` 与 `cargo test --lib`（search/cron/web/config 相关 55 项）通过。
+- 注：`provider/openai_compat` 的 mockito 测试在沙箱内无法绑定本地端口，属环境问题，与本次改动无关。
+
+---
+
 ## v0.2.1 (2026-08-14)
 
 **Patch release** — stability and WebUI consistency fixes accumulated since v0.2.0. No breaking changes.

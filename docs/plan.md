@@ -40,7 +40,7 @@
 
 1. **provider 接入优化**（[ADR-0026](adr/0026-provider-compat.md)）— ✅ 已交付（Compat 层 + 自动探测 + 配置覆盖 + 单测）
 2. **系统提示词优化 / MEMORY 预算**（[ADR-0025](adr/0025-system-prompt-memory-budget.md)）— ✅ 已交付（trim + 配置预算 + 缓存 + /memory-compact）
-3. **统一搜索 search**（[ADR-0023](adr/0023-unified-search.md)）— 新增工具，趟通「条件注册新工具」模式
+3. **统一搜索 search**（[ADR-0023](adr/0023-unified-search.md)）— ✅ 已交付（统一 `search` 工具 + tavily/baidu/brave 内置 provider，单一 provider 路由，doubao 暂未实现）
 4. **规划后执行 todo**（[ADR-0024](adr/0024-planning-todo.md)）— 新增工具，复用 #3 模式
 5. **ask_user**（[ADR-0022](adr/0022-ask-user-suspend-resume.md)）— 首个动 turn 循环的特性（复用 ApprovalGate）
 6. **skill 自管**（[ADR-0027](adr/0027-skill-authoring.md)）— 新工具 + 元 skill
@@ -100,8 +100,8 @@
 
 ### 搜索提供方扩展
 
-- [ ] 在当前 `tavily` 之外，增加更多搜索 API：豆包（Doubao）、百度（Baidu）、Brave
-  - **方向已确认**：统一 `search` 抽象（一个 `search` 工具按配置路由/兜底 provider），豆包/百度/Brave 均**内置**实现（仿 `src/tools/tavily.rs`，按 `[tools.search.providers]` + 各 provider api_key 条件注册），不走纯 MCP
+- [x] 在当前 `tavily` 之外，增加更多搜索 API：豆包（Doubao）、百度（Baidu）、Brave
+  - **方向已确认**：统一 `search` 抽象（一个 `search` 工具按配置选定**单一** provider，不串试不聚合；经 zeroclaw/nanobot 复核后的决策），tavily/百度/Brave 均**内置**实现，不走纯 MCP；豆包因仅 MCP/SigV4 接入暂未实现
   - 详见 [plans/2026-08-14-unified-search.md](plans/2026-08-14-unified-search.md) / [ADR-0023](adr/0023-unified-search.md)（必要性：**中** / 难度：★☆☆~★★☆）
 
 ---

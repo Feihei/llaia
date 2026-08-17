@@ -346,13 +346,13 @@ const EXAMPLE_NEWS_DIGEST: &str = r#"---
 name: news-digest
 description: Search and summarize today's hot news / tech briefs. Use when the user asks "what's the news today" or "any recent highlights".
 duration: turn
-tools: ["tavily_search", "web_fetch"]
+tools: ["search", "web_fetch"]
 ---
 
 # News Digest
 
 ## Workflow
-1. Use tavily_search for hot topics in the user's area of interest (default AI/tech if unspecified)
+1. Use search for hot topics in the user's area of interest (default AI/tech if unspecified)
 2. Open the key articles with web_fetch to verify details (2-3 is enough; don't over-fetch)
 3. Summarize into 3-5 briefs
 
@@ -365,7 +365,7 @@ Each brief:
 End with one sentence summing up the day's overall takeaways. Be concise; avoid long verbatim translations.
 
 ## Notes
-- If tavily_search is unavailable (no api_key) → explain and ask the user to configure or provide news URLs
+- If search is unavailable (no api_key) → explain and ask the user to configure or provide news URLs
 - Note the information freshness ("as of X date"); never fabricate news
 "#;
 

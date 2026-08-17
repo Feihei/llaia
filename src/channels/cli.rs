@@ -14,8 +14,8 @@ use crate::tools::cron::CronTool;
 use crate::tools::delegate::DelegateTool;
 use crate::tools::file::{FileEdit, FileRead, FileWrite};
 use crate::tools::memory::MemoryWrite;
+use crate::tools::search::UnifiedSearch;
 use crate::tools::send_media::{SendFile, SendImage};
-use crate::tools::tavily::TavilySearch;
 use crate::tools::terminal::Terminal;
 use crate::tools::web::WebFetch;
 use crate::tools::Tool;
@@ -453,10 +453,8 @@ pub async fn build_single_agent(
         Arc::new(SendImage::new(workspace.clone())),
         Arc::new(SendFile::new(workspace.clone())),
     ];
-    if !config.tools.tavily.api_key.is_empty() {
-        all_tools.push(Arc::new(TavilySearch::new(
-            config.tools.tavily.api_key.clone(),
-        )?));
+    if let Some(search_tool) = UnifiedSearch::build(&config.tools)? {
+        all_tools.push(search_tool);
     }
     // MCP 工具（共享 registry，受下方 denied_tools 过滤）
     all_tools.extend(mcp_tools);

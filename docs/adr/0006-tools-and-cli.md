@@ -18,7 +18,7 @@
 | `file_edit` | 改文件（精确替换） | |
 | `terminal` | 跑终端命令 | 含 ls/grep 等子命令，不单列 |
 | `web_fetch` | 获取网页 | |
-| `tavily_search` | 搜索 | 需配置 api_key |
+| `search` | 搜索 | 需配置对应 provider 的 api_key |
 | `memory_read` | 读 MEMORY.md | 内部实现，不暴露给 LLM |
 | `memory_write` | 写 MEMORY.md | 暴露给 LLM 用于自动记忆 |
 | `session_*` | 会话 sqlite 读写 | 内部实现，不暴露给 LLM |

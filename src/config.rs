@@ -516,6 +516,15 @@ pub struct ToolsConfig {
     pub terminal: TerminalToolConfig,
     #[serde(default)]
     pub tavily: TavilyConfig,
+    /// 统一搜索配置：选定单一 provider + 默认返回条数
+    #[serde(default)]
+    pub search: SearchConfig,
+    /// 百度千帆 AI Search provider key（Bearer token）
+    #[serde(default)]
+    pub baidu: BaiduConfig,
+    /// Brave Search API key
+    #[serde(default)]
+    pub brave: BraveConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,6 +576,45 @@ fn default_command_whitelist() -> Vec<String> {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TavilyConfig {
+    #[serde(default)]
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchConfig {
+    /// 选定的单一搜索 provider：tavily / baidu / brave（doubao 暂未实现）
+    #[serde(default = "default_search_provider")]
+    pub provider: String,
+    /// 默认返回条数
+    #[serde(default = "default_search_top_k")]
+    pub top_k: usize,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_search_provider(),
+            top_k: default_search_top_k(),
+        }
+    }
+}
+
+fn default_search_provider() -> String {
+    "tavily".into()
+}
+
+fn default_search_top_k() -> usize {
+    8
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BaiduConfig {
+    #[serde(default)]
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BraveConfig {
     #[serde(default)]
     pub api_key: String,
 }
@@ -710,6 +758,8 @@ impl Config {
         self.channels.feishu.app_secret = expand(&self.channels.feishu.app_secret)?;
         self.webui.token = expand(&self.webui.token)?;
         self.tools.tavily.api_key = expand(&self.tools.tavily.api_key)?;
+        self.tools.baidu.api_key = expand(&self.tools.baidu.api_key)?;
+        self.tools.brave.api_key = expand(&self.tools.brave.api_key)?;
         self.log.dir = expand(&self.log.dir)?;
         Ok(())
     }
@@ -875,6 +925,8 @@ dir = "~/.llaia-test/logs"
         // tools
         assert_eq!(config.tools.terminal.confirm, "always");
         assert_eq!(config.tools.tavily.api_key, "tvly-test");
+        assert_eq!(config.tools.search.provider, "tavily");
+        assert_eq!(config.tools.search.top_k, 8);
 
         // log
         assert_eq!(config.log.level, "debug");

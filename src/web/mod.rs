@@ -270,6 +270,12 @@ pub fn mask_sensitive(mut config: Config) -> Config {
     if !config.tools.tavily.api_key.is_empty() {
         config.tools.tavily.api_key = MASK.into();
     }
+    if !config.tools.baidu.api_key.is_empty() {
+        config.tools.baidu.api_key = MASK.into();
+    }
+    if !config.tools.brave.api_key.is_empty() {
+        config.tools.brave.api_key = MASK.into();
+    }
     config
 }
 
@@ -291,6 +297,12 @@ pub fn merge_masked(old: &Config, new: &Config) -> Config {
     }
     if merged.tools.tavily.api_key == MASK {
         merged.tools.tavily.api_key = old.tools.tavily.api_key.clone();
+    }
+    if merged.tools.baidu.api_key == MASK {
+        merged.tools.baidu.api_key = old.tools.baidu.api_key.clone();
+    }
+    if merged.tools.brave.api_key == MASK {
+        merged.tools.brave.api_key = old.tools.brave.api_key.clone();
     }
     merged
 }
@@ -1480,6 +1492,8 @@ mod tests {
         c.provider.get_mut("default").unwrap().api_key = "sk-secret".into();
         c.channels.qq.app_secret = "qq-secret".into();
         c.tools.tavily.api_key = "tvly-secret".into();
+        c.tools.baidu.api_key = "bd-secret".into();
+        c.tools.brave.api_key = "br-secret".into();
         c
     }
 
@@ -1489,6 +1503,8 @@ mod tests {
         assert_eq!(masked.provider.get("default").unwrap().api_key, "••••");
         assert_eq!(masked.channels.qq.app_secret, "••••");
         assert_eq!(masked.tools.tavily.api_key, "••••");
+        assert_eq!(masked.tools.baidu.api_key, "••••");
+        assert_eq!(masked.tools.brave.api_key, "••••");
     }
 
     #[test]

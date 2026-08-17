@@ -85,11 +85,20 @@ max_tokens = 8192                     # Anthropic 必传，未配默认 4096
 | `command_whitelist` | `[]` | 仅 `policy=whitelist` 时生效。 |
 | `whitelist` | `[ls, cat, grep, pwd, dir]` | 旧字段，兼容保留。 |
 
-## `[tools.tavily]`
+## `[tools.search]`
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `provider` | `tavily` | 选定的单一搜索 provider：`tavily` / `baidu` / `brave`（doubao 暂未实现）。 |
+| `top_k` | `8` | 默认返回条数。 |
+
+统一 `search` 工具：对外只暴露一个 `search`，内部按 `provider` 路由到对应源，不串试、不聚合。所选 provider 的 key 缺失则不注册该工具。
+
+## `[tools.tavily]` / `[tools.baidu]` / `[tools.brave]`
 
 | 字段 | 说明 |
 |---|---|
-| `api_key` | Tavily 搜索 key，支持 `${VAR}`。留空则搜索工具不可用。 |
+| `api_key` | 对应搜索源的 key，支持 `${VAR}`。留空则该 provider 不可用。 |
 
 ## `[channels.*]`
 

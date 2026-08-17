@@ -98,7 +98,7 @@ impl Tool for CronTool {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "tool": { "type": "string", "description": "工具名（如 tavily_search、memory_write）" },
+                            "tool": { "type": "string", "description": "工具名（如 search、memory_write）" },
                             "args": { "type": "object", "description": "工具参数。支持 {{prev}}（上一步输出）和 {{now}}（当前 RFC3339 时间）占位符。" }
                         },
                         "required": ["tool"]
@@ -314,7 +314,7 @@ mod tests {
             "mode": "tools",
             "channel": "web",
             "steps": [
-                { "tool": "tavily_search", "args": { "query": "llaia" } },
+                { "tool": "search", "args": { "query": "llaia" } },
                 { "tool": "memory_write", "args": { "entry": "checked at {{now}}" } }
             ]
         });
@@ -323,7 +323,7 @@ mod tests {
         assert!(task.prompt.is_none());
         let steps = task.steps.unwrap();
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].tool, "tavily_search");
+        assert_eq!(steps[0].tool, "search");
         assert_eq!(steps[1].args["entry"], "checked at {{now}}");
     }
 

@@ -41,7 +41,7 @@ mode = "tools"
 channel = "web"
 enabled = true
 steps = [
-  { tool = "tavily_search", args = { query = "llaia" } },
+  { tool = "search", args = { query = "llaia" } },
   { tool = "memory_write", args = { text = "checked at {{now}}" } },
 ]
 ```

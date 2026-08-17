@@ -95,8 +95,16 @@ confirm = "none"
 command_policy = "blacklist"
 command_whitelist = []
 
+[tools.search]
+provider = "tavily"            # search provider: tavily / baidu / brave
+top_k = 8                      # default number of results
+
 [tools.tavily]
 api_key = ""                   # supports "${TAVILY_API_KEY}" env var reference
+[tools.baidu]
+api_key = ""                   # Baidu Qianfan AI Search; supports "${BAIDU_API_KEY}"
+[tools.brave]
+api_key = ""                   # Brave Search API; supports "${BRAVE_API_KEY}"
 "#;
 
 /// Default .env template for `init`: secrets live here, kept out of config.toml plaintext.
@@ -114,6 +122,8 @@ const ENV_TEMPLATE: &str = r#"# LLAIA environment variables (do not commit this 
 # FEISHU_APP_ID=
 # FEISHU_APP_SECRET=
 # TAVILY_API_KEY=
+# BAIDU_API_KEY=
+# BRAVE_API_KEY=
 "#;
 
 /// Default cron.toml template for `init`: all tasks commented out, docs only.
@@ -144,7 +154,7 @@ const CRON_TEMPLATE: &str = r#"# LLAIA cron schedule configuration
 # channel = "web"
 # enabled = true
 # steps = [
-#   { tool = "tavily_search", args = { query = "llaia" } },
+#   { tool = "search", args = { query = "llaia" } },
 #   { tool = "memory_write", args = { text = "checked at {{now}}" } },
 # ]
 "#;

@@ -10,7 +10,7 @@
 
 P1.5 引入 QQ channel 时，因 QQ 下无法弹 stdin 等用户确认，设计了 `confirm_mode` 三档（`always` / `whitelist` / `none`），让 QQ channel 默认拒绝所有 `requires_confirm() == true` 的工具。结果：
 
-- QQ 只能聊天 + 调只读工具（`file_read` / `web_fetch` / `tavily_search`）
+- QQ 只能聊天 + 调只读工具（`file_read` / `web_fetch` / `search`）
 - 终端命令在 QQ 下完全不可用
 - 用户必须切到 CLI 才能完成"让 agent 干活"的任务
 

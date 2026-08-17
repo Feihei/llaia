@@ -1,12 +1,16 @@
 # P5: 统一搜索抽象（unified search） 实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: 使用 superpowers:executing-plans 按任务顺序实现。步骤用 checkbox (`- [ ]`) 标记追踪。
+> 本文件是 **2026-08-14 初稿**，原草稿按「providers 列表 + 顺序兜底」设计；**后续经 zeroclaw / nanobot 复核，改为 ADR-0023 的单一 provider 方案**，本计划已就地对齐 ADR，旧草稿作废。
 
-**Goal:** 用单一 `search` 工具替代/收敛多个搜索 provider，内部按配置路由/兜底到 tavily / 百度 / 豆包 / Brave。各 provider 内置实现（仿 `tavily.rs`），归一化结果，零额外进程。
+**Goal:** 用单一 `search` 工具收敛原 `tavily_search`，内部按 `[tools.search].provider` 选定的**单一** provider（tavily / baidu / brave）执行，各 provider 内置实现、归一化结果，零额外进程。
 
-**Architecture:** `SearchProvider` trait + `SearchResult` 归一化结构；`UnifiedSearch` 工具持有 provider 列表，按 `[tools.search].providers` 顺序请求、任一成功即返回、全失败兜底。tavily 作为其中一个 provider 迁移接入（保留老配置兼容）。
+**设计决策（ADR-0023，用户已确认）**
+- 单一 `search` 工具，对 agent 只暴露 `query` + 可选 `top_k`；**provider 选择完全由配置决定**，agent 不可指定。
+- 单 `search` 调用只走 `provider` 指定的那一个；**不顺序串试、不聚合合并**。
+- 无内置无 key 兜底（不引入 DuckDuckGo 类隐形依赖）；所选 provider 缺 key / 未知时**不注册** `search` 工具（条件注册）。
+- 内置而非 MCP；`tavily` 作为其中一个 provider 迁移接入（老配置 `[tools.tavily]` 仍生效）。
 
-**Tech Stack:** Rust + reqwest + serde + tokio（复用现有依赖）
+**Tech Stack:** Rust + reqwest + serde + tokio（复用现有依赖，不引入新依赖）
 
 **参考设计:** [ADR-0023](../adr/0023-unified-search.md)
 
@@ -15,105 +19,36 @@
 ## 文件结构
 
 **新建：**
-- `src/tools/search/mod.rs` — `SearchProvider` trait + `SearchResult` + `UnifiedSearch` 工具（路由/兜底）
-- `src/tools/search/tavily.rs` — 现有 `TavilySearch` 迁为 provider
-- `src/tools/search/baidu.rs` — `BaiduSearch` provider
-- `src/tools/search/doubao.rs` — `DoubaoSearch` provider
-- `src/tools/search/brave.rs` — `BraveSearch` provider
-- `tests/search_providers.rs` — 各 provider 归一化 + 路由单测（mock HTTP）
+- `src/tools/search/mod.rs` — `SearchProvider` trait + `SearchResult` + `UnifiedSearch` 工具 + `build()` 条件注册
+- `src/tools/search/tavily.rs` — `TavilyProvider`（原 `src/tools/tavily.rs` 迁移）
+- `src/tools/search/baidu.rs` — `BaiduProvider`（百度千帆 AI Search）
+- `src/tools/search/brave.rs` — `BraveProvider`（Brave Search API）
 
 **修改：**
-- `src/tools/mod.rs` — 加 `pub mod search;`
-- `src/channels/cli.rs` — 用 `UnifiedSearch` 替换原 `TavilySearch` 注册（条件注册）
-- `src/config.rs` — 配置结构：`[tools.search]` + `[tools.<provider>]`
+- `src/tools/mod.rs` — `pub mod tavily;` → `pub mod search;`
+- `src/channels/cli.rs` — 用 `UnifiedSearch::build` 替换原 `TavilySearch` 注册
+- `src/config.rs` — `SearchConfig { provider, top_k }` + `BaiduConfig` / `BraveConfig`
+- `src/web/mod.rs` — 掩码 baidu/brave key
 - `src/commands/mod.rs` — `init` 模板加 `[tools.search]` 段
+- 文档与示例：`guide/*`、`adr/0006|0011|0013|0015`、`AGENTS.md`、示例 skill / cron
 
 ---
 
-## Task 1: SearchProvider trait + 归一化结构
+## Provider 实现要点（实现前已核对官方文档）
 
-**Files:** Create `src/tools/search/mod.rs`
+- **Tavily**：`POST https://api.tavily.com/search`，body 含 `api_key`/`query`/`max_results`，响应 `results[]`（title/url/content）。
+- **Baidu（千帆 AI Search）**：`POST https://qianfan.baidubce.com/v2/ai_search/web_search`，头 `Authorization: Bearer <key>`，body 含 `messages`+`search_source=baidu_search_v2`+`resource_type_filter`，响应 `references[]`（title/url/snippet|content）。
+- **Brave**：`GET https://api.search.brave.com/res/v1/web/search?q=&count=`，头 `X-Subscription-Token`，响应 `web.results[]`（title/url/description）。
 
-- [ ] 定义：
+## 未做：doubao（豆包）
 
-```rust
-pub struct SearchResult { pub title: String, pub url: String, pub snippet: String }
-
-#[async_trait]
-pub trait SearchProvider: Send + Sync {
-    fn name(&self) -> &str;
-    async fn search(&self, query: &str, top_k: usize) -> anyhow::Result<Vec<SearchResult>>;
-}
-```
-
-- [ ] `UnifiedSearch`：持有 `Vec<Arc<dyn SearchProvider>>`，`execute` 按序请求，返回首个成功的归一化结果；全失败返回错误（含各 provider 失败原因）。
-
----
-
-## Task 2: 各 provider 实现
-
-**Files:** Create `src/tools/search/{tavily,baidu,doubao,brave}.rs`
-
-- [ ] `TavilySearch`：把现有 `src/tools/tavily.rs` 逻辑包成 `SearchProvider`（结果已是 `SearchResult` 形态则直接复用）。
-- [ ] `BaiduSearch`：百度搜索 API（如 百度 AI 搜索 / 百度搜索开放平台），POST query → 解析 `{"result":[{title,url,content}]}` → 归一化。
-- [ ] `DoubaoSearch`：豆包/字节搜索 API（参考其搜索接口文档），归一化。
-- [ ] `BraveSearch`：Brave Search API `GET https://api.search.brave.com/res/v1/web/search?q=`，解析 `web.results[]` → 归一化。
-- [ ] 每个 provider 实现 `requires_confirm()=false`（只读），并在 api_key 缺失时 `search` 返回 Err（由 `UnifiedSearch` 跳过）。
-
-> 注：百度/豆包的具体 API endpoint 与字段需在实现前查官方文档确认（Task 2 第一步先核对 3 家文档）。
-
----
-
-## Task 3: 配置与条件注册
-
-**Files:** Modify `src/config.rs`, `src/channels/cli.rs`
-
-- [ ] 配置：
-
-```toml
-[tools.search]
-providers = ["tavily", "baidu", "doubao", "brave"]
-top_k = 8
-
-[tools.tavily]
-api_key = "${TAVILY_API_KEY}"
-[tools.baidu]
-api_key = "${BAIDU_API_KEY}"
-[tools.doubao]
-api_key = "${DOUBAO_API_KEY}"
-[tools.brave]
-api_key = "${BRAVE_API_KEY}"
-```
-
-- [ ] `config.rs` 加 `SearchConfig { providers: Vec<String>, top_k, tavily/baidu/doubao/brave: ProviderKeyConfig }`，`expand` 时处理 `${VAR}`。
-- [ ] cli.rs：遍历 `providers`，key 非空则构造对应 provider 加入 `UnifiedSearch`；至少 1 个可用才注册 `search` 工具（全空则不注册，与现有 tavily 行为一致）。
-
----
-
-## Task 4: 替换原 tavily 注册
-
-**Files:** Modify `src/channels/cli.rs`, 可选删除 `src/tools/tavily.rs`
-
-- [ ] 移除 cli.rs 中独立的 `TavilySearch` 注册，改由 `UnifiedSearch` 统一承载（tavily 作为其内部 provider）。
-- [ ] 老配置 `[tools.tavily].api_key` 仍生效（Task 3 已兼容）。
-- [ ] 视情况保留 `src/tools/tavily.rs` 作为 `search/tavily.rs` 或删除，避免重复。
-
----
-
-## Task 5: 单测 + 集成验证
-
-**Files:** Create `tests/search_providers.rs`
-
-- [ ] mock HTTP（用 `wiremock` 或本地 handler）验证：每家 provider 响应正确归一化为 `SearchResult`；`UnifiedSearch` 路由（首成功即返回）、兜底（全失败报错）。
-- [ ] `cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test`
-- [ ] 手动：`llaia chat` → "搜一下 Rust 异步最佳实践" 验证走统一 `search`；配置仅留 baidu 验证单 provider 也能用。
-- [ ] 更新 `docs/plan.md` 本条目状态。
+豆包公开接入只有 MCP/Skill 或 Volcengine SigV4 SDK（access_key+secret_key），没有干净的"单 api_key REST"端点；ADR 明确"内置而非 MCP"，手搓 SigV4 不可测、风险高。故 `provider = "doubao"` 暂不实现（给清晰报错），待后续单独补 `DoubaoConfig` + provider。
 
 ---
 
 ## 自查
 
-- 单一 `search` 工具 + provider 路由/兜底 ✅；豆包/百度/Brave 内置（非 MCP）✅
-- tavily 兼容迁移 ✅；结果归一化 `SearchResult` ✅
-- 类型一致性：SearchProvider/SearchResult/UnifiedSearch 在 mod + 各 provider + cli 一致 ✅
-- 待确认：百度/豆包具体 API 文档（Task 2 第一步）✅ 已列为前置动作
+- 单一 `search` 工具 + 单一 provider 路由 ✅；tavily/百度/Brave 内置（非 MCP）✅
+- tavily 兼容迁移（老 `[tools.tavily].api_key` 生效）✅；结果归一化 `SearchResult` ✅
+- 条件注册：key 缺失/未知则不注册 `search` 工具 ✅
+- 破坏性：cron 任务引用旧名 `tavily_search` 需改为 `search` ✅ 已在文档/示例中同步

@@ -10,8 +10,8 @@ pub mod delegate;
 pub mod file;
 pub mod mcp;
 pub mod memory;
+pub mod search;
 pub mod send_media;
-pub mod tavily;
 pub mod terminal;
 pub mod web;
 

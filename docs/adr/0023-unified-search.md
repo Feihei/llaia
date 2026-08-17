@@ -75,3 +75,8 @@ api_key = "${BRAVE_API_KEY}"
 - 需新增：3 个 provider 实现 + 归一化 + 路由/兜底 + 配置解析 + 测试。改动集中、风险低。
 - `tavily` 现状：保留 `TavilySearch` 作为 `search` 的一个 provider（迁移而非删除），保持向后兼容，老配置 `[tools.tavily]` 仍生效。
 - 不引入新依赖（均用现有 `reqwest` / `serde` / `tokio`）。
+
+## 实施记录
+
+- **doubao（豆包）provider 暂未实现**：其公开接入只有 MCP/Skill 或 Volcengine SigV4 SDK（access_key+secret_key），没有干净的"单 api_key REST"端点；本 ADR 明确"内置而非 MCP"，手搓 SigV4 不可测、风险高。故 `provider = "doubao"` 当前不注册 `search` 工具（给清晰报错），待后续单独补 `DoubaoConfig` + provider。tavily/baidu/brave 已实现。
+- 工具名由旧 `tavily_search` 收敛为 `search`；cron 任务若引用旧名需改为 `search`。

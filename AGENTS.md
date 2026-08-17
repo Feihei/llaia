@@ -121,7 +121,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 | `file_read` / `file_write` / `file_edit` | `tools/file` | 文件读写、精确修改 |
 | `terminal` | `tools/terminal` | 终端命令（含 ls/grep 等，不单列），受 `tools.terminal` 命令策略约束 |
 | `web_fetch` | `tools/web` | 获取网页 |
-| `tavily_search` | `tools/tavily` | 搜索（需 `tools.tavily.api_key`） |
+| `search` | `tools/search` | 联网搜索（统一 `search` 工具，按 `[tools.search].provider` 路由到 tavily/baidu/brave，需对应 provider 的 api_key）|
 | `memory_write` | `tools/memory` | 写 MEMORY.md |
 | `delegate` | `tools/delegate` | 后台委派子 Agent 执行长任务（脱离主回合，结果回传） |
 | `cron` | `tools/cron` | 注册/执行定时任务（Agent 模式 / Step 模式） |
@@ -159,7 +159,7 @@ CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 Web
   workspace/                 # agent 家目录（固定）：SOUL.md / USER.md / MEMORY.md / sessions.db / uploads/ / subagent/
 ```
 
-- 配置格式：toml，命名式 section（`[provider.<id>]` / `[provider.<id>.<model_alias>]` / `[agent.<alias>]` / `[webui]` / `[channels.<qq|telegram|dingtalk|wechat|mail|feishu>]` / `[tools.terminal]` / `[tools.tavily]` / `[runtime]`）
+- 配置格式：toml，命名式 section（`[provider.<id>]` / `[provider.<id>.<model_alias>]` / `[agent.<alias>]` / `[webui]` / `[channels.<qq|telegram|dingtalk|wechat|mail|feishu>]` / `[tools.terminal]` / `[tools.search]` / `[tools.tavily]` / `[tools.baidu]` / `[tools.brave]` / `[runtime]`）
 - `workspace`（agent 家目录，固定）同时作为 state dir；文件/终端工具的实时作用域是 `workspace_root`，可被 `/move` 切换（详见「持久化」）
 - 错误处理：`anyhow::Result`
 - 日志：tracing，输出到文件 + stderr；`log.dir` 未配置时跟随 config 目录下的 `logs/`

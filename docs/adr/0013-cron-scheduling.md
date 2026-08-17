@@ -42,7 +42,7 @@ enabled = true
 
 # mode = "agent" 时：注入到主 agent 上下文的提示词
 prompt = """
-现在是早上 8:00。请用 tavily_search 查今天的 AI 科技热点，
+现在是早上 8:00。请用 search 查今天的 AI 科技热点，
 整理成 3-5 条简讯，每条一句话 + 链接，最后推送给我。
 """
 
@@ -55,7 +55,7 @@ prompt = """
 # channel = "web"
 # enabled = true
 # steps = [
-#   { tool = "tavily_search", args = { query = "llaia release notes" } },
+#   { tool = "search", args = { query = "llaia release notes" } },
 #   { tool = "memory_write", args = { text = "last check at {{now}}" } },
 # ]
 # # 最后一步 memory_write 的输出自动推送到 web channel
@@ -70,7 +70,7 @@ prompt = """
 1. 构造一条系统消息：`[cron:<id>] <prompt>`
 2. 通过 `run_turn` 走完整 agent 循环（system prompt + 工具调用 + 回复）
 3. agent 输出的最终回复作为结果推送到指定 channel
-4. agent 可自主调工具（tavily_search / file_write / memory_write 等）
+4. agent 可自主调工具（search / file_write / memory_write 等）
 
 特点：灵活，能处理复杂任务；消耗 LLM token；agent 可能跑偏（需要好提示词）
 

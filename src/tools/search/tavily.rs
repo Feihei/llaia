@@ -1,17 +1,19 @@
-use crate::tools::Tool;
+//! Tavily provider（从原 `src/tools/tavily.rs` 迁移为 `SearchProvider` 实现）。
+
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::Value;
+
+use super::{SearchProvider, SearchResult};
 
 const TAVILY_URL: &str = "https://api.tavily.com/search";
 
-pub struct TavilySearch {
+pub struct TavilyProvider {
     client: reqwest::Client,
     api_key: String,
 }
 
-impl TavilySearch {
+impl TavilyProvider {
     pub fn new(api_key: String) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder().build()?,
@@ -33,40 +35,19 @@ struct TavilyResult {
 }
 
 #[async_trait]
-impl Tool for TavilySearch {
+impl SearchProvider for TavilyProvider {
     fn name(&self) -> &str {
-        "tavily_search"
+        "tavily"
     }
-    fn description(&self) -> &str {
-        "Search the web via Tavily."
-    }
-    fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" },
-                "max_results": { "type": "integer", "default": 5 }
-            },
-            "required": ["query"]
-        })
-    }
-    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
+
+    async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
         if self.api_key.is_empty() {
             return Err(anyhow!("tavily api_key not configured"));
         }
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing 'query'"))?;
-        let max_results = args
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5);
-
         let body = serde_json::json!({
             "api_key": self.api_key,
             "query": query,
-            "max_results": max_results,
+            "max_results": top_k,
         });
         let resp = self
             .client
@@ -85,16 +66,26 @@ impl Tool for TavilySearch {
             .await
             .map_err(|e| anyhow!("tavily parse: {}", e))?;
 
-        let mut out = String::new();
-        for (i, r) in parsed.results.iter().enumerate() {
-            out.push_str(&format!(
-                "{}. {}\n   URL: {}\n   {}\n\n",
-                i + 1,
-                r.title,
-                r.url,
-                r.content
-            ));
-        }
-        Ok(out)
+        Ok(parsed
+            .results
+            .into_iter()
+            .map(|r| SearchResult {
+                title: r.title,
+                url: r.url,
+                snippet: r.content,
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructs_with_api_key() {
+        // 不发起网络请求，仅验证构造成功
+        let p = TavilyProvider::new("tvly-test".into()).unwrap();
+        assert_eq!(p.name(), "tavily");
     }
 }
