@@ -167,6 +167,12 @@ CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 Web
 
 IM 频道在 `[channels.<name>]` 下配置（均含 `enabled`，默认 false，及单用户安全锁字段）；Web UI 是顶层 `[webui]`（**不是** `[channels.web]`，旧写法会在 `Config::load` 时自动迁移到 `[webui]`）：
 
+> **WebUI 配置保存的两种路径**
+> - **结构化表单保存**（`PUT /api/config`，Config 页各表单的 Save）：用 `toml_edit` 做**定点合并**——只覆盖表单改动的 key，保留未改动段落的注释；`provider`/`agent` 子树走覆盖+删除缺失（支持表单删 provider/agent/model），`runtime`/`log`/`webui`/`channels`/`tools` 走保留缺失（保住表单未暴露的字段如 `runtime.compact_model`/`vision_model`、`provider.compat` 与这些段落的注释）。
+> - **Raw TOML 编辑器**（`PUT /api/config/raw`，Config → Raw TOML 标签）：原文写回，注释完全保留，适合手改 schema 内任意字段（如 `[provider.<id>].compat.*` 覆盖层、agent `fallback`）。
+>
+> 表单目前暴露的 agent 字段：`model`、`fallback`（逗号分隔的备用模型链）、`delegate_timeout`。`fallback` 等 schema 内但表单未单列的项，建议用 Raw TOML 维护。
+
 ```toml
 [webui]
 host = "127.0.0.1"           # 默认仅本机；改 0.0.0.0 需自担风险

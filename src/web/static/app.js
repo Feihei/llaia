@@ -45,6 +45,8 @@ function llaiaApp() {
     skillEditing: null,
     skillContent: '',
     skillContentMsg: '',
+    // per-agent fallback draft (dropdown selection before "Add")
+    fallbackDraft: {},
 
     async init() {
       // prefer URL query token, then localStorage
@@ -222,6 +224,9 @@ function llaiaApp() {
           }
         }
         this.cfg = data;
+        // 初始化每个 agent 的 fallback 草稿（下拉选择暂存）
+        this.fallbackDraft = {};
+        for (const alias in this.cfg.agent) this.fallbackDraft[alias] = '';
         console.log('cfg after transform:', JSON.stringify(this.cfg).slice(0, 200));
       } else {
         console.error('Failed to load config:', r.status, await r.text());
@@ -243,7 +248,7 @@ function llaiaApp() {
       this.$nextTick(() => this.initEditor());
     },
     async saveConfig() {
-      if (!confirm('Structured save will rewrite config.toml. Original comments and fields not in the schema will be lost.\nTo preserve comments, use the "Raw TOML" editor.\n\nContinue?')) return;
+      if (!confirm('Structured save preserves comments on unchanged sections and applies provider/agent deletions.\nUse the "Raw TOML" editor for full manual control.\n\nContinue?')) return;
       // expand model back to provider top level (adapt for serde flatten)
       // strip NaN (empty input[type=number] yields NaN, JSON.stringify turns it to null, backend u32 parse fails)
       const cfgToSend = JSON.parse(JSON.stringify(this.cfg, (key, value) => {
@@ -293,8 +298,33 @@ function llaiaApp() {
       if (this.cfg.agent[alias]) { alert('Agent already exists: ' + alias); return; }
       this.cfg.agent[alias] = {
         model: '', workspace: '',
-        denied_tools: [], delegate_timeout: 120,
+        denied_tools: [], delegate_timeout: 120, fallback: [],
       };
+      this.fallbackDraft[alias] = '';
+    },
+    // 所有可选项的 model ref 列表（provider_id.model_alias）
+    modelRefs() {
+      const refs = [];
+      const p = this.cfg.provider || {};
+      for (const pid in p) {
+        const models = p[pid].model || {};
+        for (const m in models) refs.push(pid + '.' + m);
+      }
+      return refs;
+    },
+    addFallback(alias) {
+      const ref = this.fallbackDraft[alias];
+      if (!ref) return;
+      const ag = this.cfg.agent[alias];
+      if (!ag) return;
+      if (!Array.isArray(ag.fallback)) ag.fallback = [];
+      if (!ag.fallback.includes(ref)) ag.fallback.push(ref);
+      this.fallbackDraft[alias] = '';
+    },
+    removeFallback(alias, i) {
+      const ag = this.cfg.agent[alias];
+      if (!ag || !Array.isArray(ag.fallback)) return;
+      ag.fallback.splice(i, 1);
     },
     deleteAgent(alias) {
       if (alias === 'main') { alert('Cannot delete main agent'); return; }

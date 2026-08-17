@@ -122,7 +122,38 @@
                   <h3 x-text="alias"></h3>
                   <button class="btn-delete" @click="deleteAgent(alias)" x-show="alias !== 'main'" title="main agent 不可删除">Delete</button>
                 </div>
-                <div class="form-row"><label>model</label><input x-model="a.model" placeholder="provider_id.model_alias"></div>
+                <div class="form-row"><label>model</label>
+                  <select x-model="a.model">
+                    <option value="" disabled>— select a model —</option>
+                    <template x-for="ref in modelRefs()" :key="ref">
+                      <option :value="ref" x-text="ref"></option>
+                    </template>
+                  </select>
+                </div>
+                <div class="form-row" style="align-items:flex-start">
+                  <label>fallback</label>
+                  <div style="flex:1">
+                    <div class="tag-list">
+                      <template x-for="(fb, i) in (a.fallback || [])" :key="fb">
+                        <span class="tag">
+                          <span x-text="fb"></span>
+                          <button class="tag-remove" type="button" :title="'remove ' + fb" @click="removeFallback(alias, i)">×</button>
+                        </span>
+                      </template>
+                    </div>
+                    <div class="tag-add">
+                      <select x-model="fallbackDraft[alias]">
+                        <option value="">— add fallback model —</option>
+                        <template x-for="ref in modelRefs()" :key="ref">
+                          <option :value="ref" x-text="ref"
+                                  :disabled="(a.fallback || []).includes(ref) || ref === a.model"></option>
+                        </template>
+                      </select>
+                      <button type="button" @click="addFallback(alias)">+ Add</button>
+                    </div>
+                    <div class="hint">主模型失败时按序降级；已在列表内或与主 model 相同的条目会被禁用。</div>
+                  </div>
+                </div>
                 <div class="form-row"><label>delegate_timeout</label><input type="number" x-model.number="a.delegate_timeout"></div>
               </div>
             </template>

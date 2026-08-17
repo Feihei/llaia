@@ -248,6 +248,33 @@ option { background: var(--bg-input); color: var(--text); }
 }
 #config-pane .model-row label { width: auto; min-width: 90px; color: var(--text-dim); }
 
+/* ---------- 标签列表（fallback 可增删） ---------- */
+#config-pane .tag-list {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin: 4px 0; max-width: 100%;
+}
+#config-pane .tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 4px 2px 10px;
+  background: rgba(56, 224, 123, .08);
+  border: 1px solid var(--green-deep);
+  color: var(--green-bright);
+  font-size: 13px; line-height: 1.4;
+}
+#config-pane .tag .tag-remove {
+  padding: 0 6px; font-size: 14px; line-height: 1;
+  color: var(--red); border-color: #6b2c2c; background: transparent;
+}
+#config-pane .tag .tag-remove::before,
+#config-pane .tag .tag-remove::after { content: ""; margin: 0; }
+#config-pane .tag .tag-remove:hover:not(:disabled) {
+  background: var(--red); color: #1a0404; border-color: var(--red);
+}
+#config-pane .tag-add {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+}
+#config-pane .tag-add select { min-width: 220px; }
+
 /* ---------- Cron / MCP（Config 内嵌 section） ---------- */
 .subtabs { margin-bottom: 14px; }
 

@@ -10,8 +10,10 @@ use rand::Rng;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
+use toml_edit::{DocumentMut, Entry, Item, Table};
 
 /// 共享状态：所有 handler 共用
 #[derive(Clone)]
@@ -338,9 +340,25 @@ pub async fn put_config(
         );
     }
 
-    let toml_str = match toml::to_string_pretty(&merged) {
-        Ok(s) => s,
-        Err(e) => return json_err(StatusCode::BAD_REQUEST, &format!("serialize: {}", e)),
+    let toml_str = match std::fs::read_to_string(&state.config_path) {
+        Ok(disk) => match merge_config_preserving_comments(&disk, &merged) {
+            Ok(s) => s,
+            Err(e) => {
+                // 合并失败（如盘上 TOML 临时不可解析）不阻断保存：退回全量重写
+                tracing::warn!(error = %e, "config comment-preserving merge failed; falling back to plain serialize");
+                match toml::to_string_pretty(&merged) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return json_err(StatusCode::BAD_REQUEST, &format!("serialize: {}", e))
+                    }
+                }
+            }
+        },
+        // 盘上无文件（极少见：serve 已加载才走到这）：退回全量重写
+        Err(_) => match toml::to_string_pretty(&merged) {
+            Ok(s) => s,
+            Err(e) => return json_err(StatusCode::BAD_REQUEST, &format!("serialize: {}", e)),
+        },
     };
 
     // 先尝试构建新 provider：失败则不写盘、不更新内存（回滚到旧 config）
@@ -369,6 +387,76 @@ pub async fn put_config(
         "note": format!("config saved; {}", notes.join("; "))
     }))
     .into_response()
+}
+
+/// 结构化保存时保留磁盘上未改动段落的注释（替代旧的 `toml::to_string_pretty`
+/// 全量重写——后者会丢掉所有注释）。
+///
+/// 做法：解析磁盘现有 TOML（含注释）→ 把 `merged` 序列化成 TOML 文档 → 逐 key 合并：
+/// - `provider` / `agent` 子树走「覆盖 + 删除缺失」（replace 模式），以支持表单删除
+///   provider / agent / model；
+/// - `runtime` / `log` / `webui` / `channels` / `tools` 走「保留缺失」（preserve 模式），
+///   保住表单未暴露的字段（如 `runtime.compact_model` / `vision_model`、`provider.compat`）
+///   与这些段落的注释。
+///
+/// 注释之所以能保留：表单加载时会把完整 `Config`（含隐藏字段）回传，`merged` 是完整的，
+/// 因此合并不会误删未改动项，仅覆盖表单实际改动的值。
+fn merge_config_preserving_comments(disk_text: &str, merged: &Config) -> Result<String, String> {
+    let mut disk_doc = DocumentMut::from_str(disk_text)
+        .map_err(|e| format!("parse existing config.toml: {}", e))?;
+    let new_toml = toml::to_string(merged).map_err(|e| format!("serialize config: {}", e))?;
+    let new_doc =
+        DocumentMut::from_str(&new_toml).map_err(|e| format!("parse serialized config: {}", e))?;
+
+    let disk_tbl = disk_doc.as_table_mut();
+    let new_tbl = new_doc.as_table();
+    for (key, src_item) in new_tbl.iter() {
+        // provider / agent 由表单完整管理，允许删除缺失项（表单删 provider/agent/model）
+        let replace = key == "provider" || key == "agent";
+        match disk_tbl.entry(key) {
+            Entry::Occupied(mut e) => merge_item(e.get_mut(), src_item, replace),
+            Entry::Vacant(e) => {
+                e.insert(src_item.clone());
+            }
+        }
+    }
+    Ok(disk_doc.to_string())
+}
+
+/// 合并单个 item：两边都是表则递归；否则（标量 / 数组）直接覆盖。
+fn merge_item(target: &mut Item, src: &Item, replace: bool) {
+    match target {
+        Item::Table(tt) => {
+            if let Item::Table(st) = src {
+                merge_tables(tt, st, replace);
+            } else {
+                *target = src.clone();
+            }
+        }
+        _ => *target = src.clone(),
+    }
+}
+
+fn merge_tables(target: &mut Table, src: &Table, replace: bool) {
+    for (key, src_item) in src.iter() {
+        match target.entry(key) {
+            Entry::Occupied(mut e) => merge_item(e.get_mut(), src_item, replace),
+            Entry::Vacant(e) => {
+                e.insert(src_item.clone());
+            }
+        }
+    }
+    // replace 模式：删除 target 中 src 不存在的 key（表单删除的 provider/agent/model）
+    if replace {
+        let absent: Vec<String> = target
+            .iter()
+            .filter(|(k, _)| !src.contains_key(k))
+            .map(|(k, _)| k.to_string())
+            .collect();
+        for k in absent {
+            target.remove(&k);
+        }
+    }
 }
 
 fn json_err(code: StatusCode, msg: &str) -> Response {
@@ -1420,5 +1508,118 @@ mod tests {
         new.provider.get_mut("default").unwrap().api_key = "sk-new".into();
         let merged = merge_masked(&old, &new);
         assert_eq!(merged.provider.get("default").unwrap().api_key, "sk-new");
+    }
+
+    #[test]
+    fn test_merge_config_preserves_comments_and_deletes_provider() {
+        // 模拟盘上 TOML：多段落带注释 + 两个 provider + agent 无 fallback
+        let disk = r#"
+# 顶部注释：应保留
+[runtime]
+# runtime 注释：应保留
+context_threshold = 0.7
+
+[provider.local]
+# local 注释：应保留
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.cloud]
+# cloud 注释：应被删除（表单删了此 provider）
+type = "openai_compatible"
+base_url = "http://cloud"
+
+[agent.main]
+# main 注释：应保留
+model = "local.m"
+workspace = ""
+"#;
+        // 表单回传的 merged：改了 runtime、删了 cloud provider、给 main 加了 fallback
+        let mut merged: Config = toml::from_str(disk).expect("disk should parse");
+        merged.runtime.context_threshold = 0.5;
+        merged.provider.remove("cloud");
+        merged
+            .agent
+            .get_mut("main")
+            .unwrap()
+            .fallback
+            .push("local.m".into());
+
+        let out = merge_config_preserving_comments(disk, &merged).expect("merge ok");
+
+        // 注释保留
+        assert!(
+            out.contains("# 顶部注释：应保留"),
+            "top comment lost:\n{}",
+            out
+        );
+        assert!(
+            out.contains("# runtime 注释：应保留"),
+            "runtime comment lost:\n{}",
+            out
+        );
+        assert!(
+            out.contains("# local 注释：应保留"),
+            "local comment lost:\n{}",
+            out
+        );
+        assert!(
+            out.contains("# main 注释：应保留"),
+            "main comment lost:\n{}",
+            out
+        );
+        // 表单改动生效
+        assert!(
+            out.contains("context_threshold = 0.5"),
+            "runtime change lost:\n{}",
+            out
+        );
+        assert!(out.contains("fallback"), "fallback not written:\n{}", out);
+        // 表单删除生效（cloud provider 整段移除）
+        assert!(
+            !out.contains("provider.cloud"),
+            "deleted provider still present:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("# cloud 注释"),
+            "deleted provider comment still present:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_merge_config_keeps_hidden_runtime_fields() {
+        // runtime 表单只暴露部分字段；compact_model / vision_model 不应被丢
+        let disk = r#"
+[runtime]
+context_threshold = 0.7
+compact_model = "local.small"
+vision_model = "local.vision"
+
+[agent.main]
+model = "local.m"
+workspace = ""
+"#;
+        let mut merged: Config = toml::from_str(disk).expect("disk should parse");
+        // 仅改动 context_threshold（模拟表单保存）
+        merged.runtime.context_threshold = 0.8;
+
+        let out = merge_config_preserving_comments(disk, &merged).expect("merge ok");
+        assert!(
+            out.contains("compact_model = \"local.small\""),
+            "hidden compact_model lost:\n{}",
+            out
+        );
+        assert!(
+            out.contains("vision_model = \"local.vision\""),
+            "hidden vision_model lost:\n{}",
+            out
+        );
+        assert!(
+            out.contains("context_threshold = 0.8"),
+            "change lost:\n{}",
+            out
+        );
     }
 }
