@@ -40,6 +40,39 @@ pub struct ToolCallRow {
     pub created_at: String,
 }
 
+/// 会话列表项：SessionRow + 消息数（WebUI 会话历史，P5 W1）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionListItem {
+    pub session_uuid: String,
+    pub channel: String,
+    pub created_at: String,
+    pub last_activity: String,
+    pub token_count: i64,
+    pub state: String,
+    pub message_count: i64,
+}
+
+/// 消息 + 关联工具调用（WebUI 会话详情，P5 W1）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MessageDetail {
+    pub id: i64,
+    pub role: String,
+    pub content: String,
+    pub reasoning_content: Option<String>,
+    pub created_at: String,
+    pub tool_calls: Vec<ToolCallDetail>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolCallDetail {
+    pub id: i64,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub payload: String,
+    pub outcome: Option<String>,
+    pub created_at: String,
+}
+
 impl SessionStore {
     pub fn open(db_path: &PathBuf) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
@@ -325,6 +358,118 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
         }
         Ok(out)
     }
+
+    /// 会话列表（含消息数），按 last_activity 降序，分页（P5 W1 WebUI 会话历史）。
+    pub fn list_sessions(&self, limit: i64, offset: i64) -> Result<Vec<SessionListItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.session_uuid, s.channel, s.created_at, s.last_activity, s.token_count, s.state,
+                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
+             FROM sessions s
+             ORDER BY s.last_activity DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit, offset], |row| {
+            Ok(SessionListItem {
+                session_uuid: row.get(0)?,
+                channel: row.get(1)?,
+                created_at: row.get(2)?,
+                last_activity: row.get(3)?,
+                token_count: row.get(4)?,
+                state: row.get(5)?,
+                message_count: row.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 按 session_uuid 查会话，返回 (内部 id, 行)；不存在返回 None（P5 W1）。
+    pub fn session_by_uuid(&self, uuid: &str) -> Result<Option<(i64, SessionRow)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_uuid, channel, created_at, last_activity, token_count, state
+             FROM sessions WHERE session_uuid = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![uuid])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some((
+                row.get(0)?,
+                SessionRow {
+                    session_uuid: row.get(1)?,
+                    channel: row.get(2)?,
+                    created_at: row.get(3)?,
+                    last_activity: row.get(4)?,
+                    token_count: row.get(5)?,
+                    state: row.get(6)?,
+                },
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 单会话完整消息（含 tool_calls），按 id 升序（P5 W1 会话详情）。
+    /// 单个 Mutex 作用域内完成，避免嵌套 lock 死锁。
+    pub fn messages_with_tool_calls(&self, session_id: i64) -> Result<Vec<MessageDetail>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, role, content, reasoning_content, created_at
+             FROM messages WHERE session_id = ?1 ORDER BY id ASC",
+        )?;
+        let msgs: Vec<(i64, String, String, Option<String>, String)> = stmt
+            .query_map(rusqlite::params![session_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        let mut out = Vec::with_capacity(msgs.len());
+        for (msg_id, role, content, reasoning, created) in msgs {
+            let mut tc_stmt = conn.prepare(
+                "SELECT id, tool_call_id, tool_name, payload, outcome, created_at
+                 FROM tool_calls WHERE message_id = ?1 ORDER BY id ASC",
+            )?;
+            let tool_calls = tc_stmt
+                .query_map(rusqlite::params![msg_id], |r| {
+                    Ok(ToolCallDetail {
+                        id: r.get(0)?,
+                        tool_call_id: r.get(1)?,
+                        tool_name: r.get(2)?,
+                        payload: r.get(3)?,
+                        outcome: r.get(4)?,
+                        created_at: r.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            out.push(MessageDetail {
+                id: msg_id,
+                role,
+                content,
+                reasoning_content: reasoning,
+                created_at: created,
+                tool_calls,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 删除会话（cascade 删 messages/tool_calls）。返回是否真的删了（P5 W1）。
+    pub fn delete_session(&self, uuid: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM sessions WHERE session_uuid = ?1",
+            rusqlite::params![uuid],
+        )?;
+        Ok(n > 0)
+    }
 }
 
 #[cfg(test)]
@@ -489,5 +634,103 @@ mod tests {
         let t = store.last_user_message_time().unwrap();
         assert!(t.is_some());
         assert!(t.unwrap().contains('T'));
+    }
+
+    // ---- P5 W1 WebUI 会话历史 ----
+
+    #[test]
+    fn test_list_sessions_with_message_count() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid1 = store.create_session("uuid-1", "cli").unwrap();
+        let sid2 = store.create_session("uuid-2", "web").unwrap();
+        store.append_message(sid1, &Role::User, "a").unwrap();
+        store.append_message(sid1, &Role::Assistant, "b").unwrap();
+        store.append_message(sid2, &Role::User, "c").unwrap();
+
+        let items = store.list_sessions(10, 0).unwrap();
+        // 按 last_activity 降序：uuid-2 后创建在前
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].session_uuid, "uuid-2");
+        assert_eq!(items[0].message_count, 1);
+        assert_eq!(items[1].session_uuid, "uuid-1");
+        assert_eq!(items[1].message_count, 2);
+        assert_eq!(items[1].channel, "cli");
+    }
+
+    #[test]
+    fn test_list_sessions_pagination() {
+        let store = SessionStore::open_in_memory().unwrap();
+        for i in 0..5 {
+            store.create_session(&format!("uuid-{}", i), "cli").unwrap();
+        }
+        let page = store.list_sessions(2, 1).unwrap();
+        assert_eq!(page.len(), 2);
+        // offset=1 跳过最新一条
+        assert_eq!(page[0].session_uuid, "uuid-3");
+        assert_eq!(page[1].session_uuid, "uuid-2");
+    }
+
+    #[test]
+    fn test_session_by_uuid_found_and_missing() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("uuid-x", "cli").unwrap();
+        let (found_id, row) = store.session_by_uuid("uuid-x").unwrap().unwrap();
+        assert_eq!(found_id, sid);
+        assert_eq!(row.channel, "cli");
+        assert!(store.session_by_uuid("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_messages_with_tool_calls() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("uuid-y", "cli").unwrap();
+        let m1 = store.append_message(sid, &Role::User, "hi").unwrap();
+        let m2 = store
+            .append_message(sid, &Role::Assistant, "let me check")
+            .unwrap();
+        store
+            .append_tool_call(
+                m2,
+                "call_1",
+                "file_read",
+                r#"{"path":"x"}"#,
+                Some("content"),
+            )
+            .unwrap();
+
+        let details = store.messages_with_tool_calls(sid).unwrap();
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0].role, "user");
+        assert_eq!(details[0].tool_calls.len(), 0);
+        assert_eq!(details[1].role, "assistant");
+        assert_eq!(details[1].tool_calls.len(), 1);
+        assert_eq!(details[1].tool_calls[0].tool_name, "file_read");
+        assert_eq!(details[1].tool_calls[0].outcome.as_deref(), Some("content"));
+        assert_eq!(details[0].id, m1);
+    }
+
+    #[test]
+    fn test_delete_session_cascades() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("uuid-z", "cli").unwrap();
+        let m = store.append_message(sid, &Role::User, "hello").unwrap();
+        store
+            .append_tool_call(m, "call_1", "terminal", "{}", Some("out"))
+            .unwrap();
+
+        assert!(store.delete_session("uuid-z").unwrap());
+        // cascade：messages/tool_calls 一并删除
+        let conn = store.conn.lock().unwrap();
+        let msg_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        let tc_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(msg_count, 0);
+        assert_eq!(tc_count, 0);
+        drop(conn);
+        // 二次删除返回 false
+        assert!(!store.delete_session("uuid-z").unwrap());
     }
 }

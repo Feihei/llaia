@@ -27,6 +27,7 @@
     <div class="tabs">
       <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">Config</div>
       <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
+      <div class="tab" :class="{active: tab==='sessions'}" @click="switchSessions()">Sessions</div>
     </div>
   </header>
   <main>
@@ -79,6 +80,54 @@
             <div class="todo-item" x-show="goal.progress"><span class="todo-mark note">≡</span><span class="todo-task todo-progress" x-text="goal.progress"></span></div>
           </div>
         </template>
+      </div>
+    </div>
+
+    <!-- 会话历史（P5 W1）：sessions.db 只读浏览 + 删除 + 导出 -->
+    <div id="sessions-pane" class="pane" :class="{active: tab==='sessions'}">
+      <div class="sessions-layout">
+        <div class="session-list">
+          <div class="config-head">&#x276F; SESSIONS <button class="inline-add" @click="loadSessions()">Refresh</button></div>
+          <div class="hint">Click a session to view its message history. Delete removes it from sessions.db (does not affect the live context).</div>
+          <div x-show="sessionMsg" class="err" x-text="sessionMsg"></div>
+          <template x-for="s in sessions" :key="s.session_uuid">
+            <div class="session-item" :class="{active: selectedSession === s.session_uuid}" @click="openSession(s.session_uuid)">
+              <div class="session-item-title"><b x-text="s.channel"></b> <span class="hint" x-text="s.message_count + ' msgs'"></span></div>
+              <div class="hint" x-text="fmtTime(s.last_activity)"></div>
+            </div>
+          </template>
+          <div class="hint" x-show="sessions.length === 0">No sessions recorded yet.</div>
+        </div>
+        <div class="session-detail">
+          <template x-if="sessionDetail">
+            <div>
+              <div class="config-head">&#x276F; SESSION <span class="hint" x-text="sessionDetail.session ? sessionDetail.session.session_uuid : ''"></span>
+                <button class="btn-delete" @click="deleteSession(sessionDetail.session.session_uuid)">Delete</button>
+                <button @click="exportSession(sessionDetail.session.session_uuid)">Export JSON</button>
+              </div>
+              <template x-for="m in sessionDetail.messages" :key="m.id">
+                <div class="msg" :class="m.role">
+                  <div><b x-text="m.role"></b> <span class="hint" x-text="fmtTime(m.created_at)"></span></div>
+                  <div class="msg-content" x-text="m.content"></div>
+                  <template x-if="m.tool_calls && m.tool_calls.length">
+                    <details>
+                      <summary x-text="m.tool_calls.length + ' tool call(s)'"></summary>
+                      <template x-for="tc in m.tool_calls" :key="tc.id">
+                        <div class="toolcall">
+                          <b x-text="tc.tool_name"></b> <span class="hint" x-text="tc.tool_call_id"></span>
+                          <pre x-text="tc.payload"></pre>
+                          <template x-if="tc.outcome !== null && tc.outcome !== undefined"><pre class="toolcall-outcome" x-text="tc.outcome"></pre></template>
+                        </div>
+                      </template>
+                    </details>
+                  </template>
+                </div>
+              </template>
+              <div class="hint" x-show="!sessionDetail.messages || sessionDetail.messages.length === 0">No messages in this session.</div>
+            </div>
+          </template>
+          <div class="hint" x-show="!sessionDetail">Select a session on the left to view its history.</div>
+        </div>
       </div>
     </div>
 

@@ -144,19 +144,44 @@ pub struct TokenQuery {
     pub token: Option<String>,
 }
 
+/// GET /api/sessions 的查询参数（P5 W1）：token + 分页。
+#[derive(Deserialize)]
+pub struct SessionListQuery {
+    pub token: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
 #[derive(Deserialize)]
 pub struct FilePathQueryWithToken {
     pub path: String,
     pub token: Option<String>,
 }
 
+/// 提供 token 的查询参数（TokenQuery / SessionListQuery 等共用 authorize）。
+pub trait TokenProvider {
+    fn token(&self) -> Option<&str>;
+}
+
+impl TokenProvider for TokenQuery {
+    fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+}
+
+impl TokenProvider for SessionListQuery {
+    fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+}
+
 /// 综合鉴权：header + cookie + query
-pub fn authorize(state: &AppState, headers: &HeaderMap, q: &TokenQuery) -> bool {
+pub fn authorize<T: TokenProvider>(state: &AppState, headers: &HeaderMap, q: &T) -> bool {
     let cookie = headers
         .get(axum::http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let provided = extract_token(headers, cookie, q.token.as_deref());
+    let provided = extract_token(headers, cookie, q.token());
     match provided {
         Some(t) => check_token(&t, state.token.as_str()),
         None => false,
@@ -1438,6 +1463,141 @@ pub async fn get_goal(
         .into_response()
 }
 
+// ---- P5 W1 WebUI 会话历史 ----
+
+/// GET /api/sessions → 会话列表（含消息数），按 last_activity 降序，分页。
+pub async fn list_sessions_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SessionListQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let sessions = agent
+        .session_store
+        .list_sessions(limit, offset)
+        .unwrap_or_default();
+    let json = serde_json::json!({ "sessions": sessions });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
+/// GET /api/sessions/:uuid → 单会话完整消息（含 tool_calls）。
+pub async fn get_session_detail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    let Some((sid, row)) = agent.session_store.session_by_uuid(&uuid).unwrap_or(None) else {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "session not found" })),
+        )
+            .into_response();
+    };
+    let messages = agent
+        .session_store
+        .messages_with_tool_calls(sid)
+        .unwrap_or_default();
+    let json = serde_json::json!({
+        "session": row,
+        "messages": messages,
+    });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
+/// DELETE /api/sessions/:uuid → 删除会话（cascade 删 messages/tool_calls）。
+pub async fn delete_session_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    let deleted = agent.session_store.delete_session(&uuid).unwrap_or(false);
+    if deleted {
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "deleted": uuid })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "session not found" })),
+        )
+            .into_response()
+    }
+}
+
+/// GET /api/sessions/:uuid/export → 导出会话为 JSON（消息 + 工具调用完整留底）。
+pub async fn export_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    let Some((sid, row)) = agent.session_store.session_by_uuid(&uuid).unwrap_or(None) else {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "session not found" })),
+        )
+            .into_response();
+    };
+    let messages = agent
+        .session_store
+        .messages_with_tool_calls(sid)
+        .unwrap_or_default();
+    let json = serde_json::json!({
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "session": row,
+        "messages": messages,
+    });
+    let body = serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".into());
+    let disposition = axum::http::HeaderValue::from_str(&format!(
+        "attachment; filename=\"session-{}.json\"",
+        uuid
+    ))
+    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("attachment"));
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+            ),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 /// 构建系统级 Web 路由（不含 WS）。
 /// 返回 `Router<AppState>`，由调用方合并 WS 路由后统一 `with_state`。
 pub fn build_system_routes() -> axum::Router<AppState> {
@@ -1484,6 +1644,16 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/questions", axum::routing::get(get_questions))
         // 长期目标（ADR-0021）：只读展示 goal.md 状态
         .route("/api/goal", axum::routing::get(get_goal))
+        // 会话历史（P5 W1）：列表 / 详情 / 删除 / 导出
+        .route("/api/sessions", axum::routing::get(list_sessions_api))
+        .route(
+            "/api/sessions/:uuid",
+            axum::routing::get(get_session_detail).delete(delete_session_api),
+        )
+        .route(
+            "/api/sessions/:uuid/export",
+            axum::routing::get(export_session),
+        )
         .route("/api/skills/:name", axum::routing::delete(delete_skill))
         .route(
             "/api/skills/:name/active",

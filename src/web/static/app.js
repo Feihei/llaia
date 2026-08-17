@@ -54,6 +54,11 @@ function llaiaApp() {
     skillContentMsg: '',
     // per-agent fallback draft (dropdown selection before "Add")
     fallbackDraft: {},
+    // 会话历史（P5 W1）
+    sessions: [],
+    selectedSession: null,
+    sessionDetail: null,
+    sessionMsg: '',
 
     async init() {
       // prefer URL query token, then localStorage
@@ -109,6 +114,80 @@ function llaiaApp() {
           this.goal = j.goal || null;
         }
       } catch (e) { /* 非致命：UI 静默跳过 */ }
+    },
+
+    // ---- 会话历史（P5 W1） ----
+    async switchSessions() {
+      this.tab = 'sessions';
+      if (this.sessions.length === 0) await this.loadSessions();
+    },
+    async loadSessions() {
+      try {
+        const r = await this.apiFetch('/api/sessions?limit=200');
+        if (r.ok) {
+          const j = await r.json();
+          this.sessions = j.sessions || [];
+          this.sessionMsg = '';
+        }
+      } catch (e) {
+        this.sessionMsg = 'Failed to load sessions: ' + e.message;
+      }
+    },
+    async openSession(uuid) {
+      this.selectedSession = uuid;
+      try {
+        const r = await this.apiFetch('/api/sessions/' + encodeURIComponent(uuid));
+        if (r.ok) {
+          this.sessionDetail = await r.json();
+          this.sessionMsg = '';
+        } else if (r.status === 404) {
+          this.sessionDetail = null;
+          this.sessionMsg = 'Session not found (deleted?)';
+          await this.loadSessions();
+        } else {
+          this.sessionMsg = 'Failed to load session: ' + r.status;
+        }
+      } catch (e) {
+        this.sessionMsg = 'Failed to load session: ' + e.message;
+      }
+    },
+    async deleteSession(uuid) {
+      if (!confirm('Delete this session permanently? Messages and tool calls will be removed from sessions.db. The live conversation context is NOT affected.')) return;
+      try {
+        const r = await this.apiFetch('/api/sessions/' + encodeURIComponent(uuid), { method: 'DELETE' });
+        if (r.ok) {
+          this.sessionDetail = null;
+          this.selectedSession = null;
+          await this.loadSessions();
+        } else {
+          this.sessionMsg = 'Delete failed: ' + r.status;
+        }
+      } catch (e) {
+        this.sessionMsg = 'Delete failed: ' + e.message;
+      }
+    },
+    async exportSession(uuid) {
+      try {
+        const r = await this.apiFetch('/api/sessions/' + encodeURIComponent(uuid) + '/export');
+        if (r.ok) {
+          const blob = await r.blob();
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'session-' + uuid + '.json';
+          a.click();
+          URL.revokeObjectURL(a.href);
+        } else {
+          this.sessionMsg = 'Export failed: ' + r.status;
+        }
+      } catch (e) {
+        this.sessionMsg = 'Export failed: ' + e.message;
+      }
+    },
+    fmtTime(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleString();
     },
     async verifyToken() {
       this.authing = true;
