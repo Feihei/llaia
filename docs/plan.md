@@ -46,7 +46,7 @@
 6. **skill 自管**（[ADR-0027](adr/0027-skill-authoring.md)）— ✅ 已交付（skill_create/skill_edit 工具 + 内置 skill-authoring 元 skill + 路径安全 + frontmatter 长度约束）
 7. **/goal 长期目标**（[ADR-0021](adr/0021-goal-system.md)）— ✅ 已交付（goal.md 文件方案 + 每轮 Runtime Context 注入 + `goal` 工具 + 四 slash 命令 + WebUI GOAL 面板）
 
-> 注：WebUI 增强、敏感信息存储、环境探测、TTS、自然对话 MCP 等条目尚未建 ADR/plan，不属于可开工队列，待补 ADR 后再进序列。
+> 注：以下未勾选条目的评估、细化设计与实施计划已统一收录于 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（含决策分支，待集体评审）。「自然对话 MCP」经现状核实（ADR-0014 已把 MCP 工具接入主 agent 工具集，`cli.rs:482` + WebUI 热加载）实质已完成，待勾选。
 
 ### 模型与 Provider
 
@@ -63,24 +63,30 @@
 ### WebUI 增强
 
 - [ ] session.db 会话历史在 WebUI 中可查询/修改，参考 AstrBot（必要性：**中** / 难度：★★☆）
+  - 已出计划：只读 v1 + 可编辑 v2 决策分支、API 设计（list/detail/delete/export）见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§W1）
 - [ ] WebUI provider API 探测可用模型，点击添加到 models；添加按钮检查可用性，参考 AstrBot（必要性：**中** / 难度：★★☆）
+  - 已出计划：v1 仅 OpenAI 兼容端点探测（`GET /models`），勾选生成 model 条目走既有 `PUT /api/config`，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§W2）
 
 ### 安全
 
 - [ ] 敏感信息存储：api-key 等自动写入 `.env`，config 只保留环境引用；探讨二进制（如 db）存储避免明文（必要性：**高** / 难度：★★☆）
+  - 已出计划：保存时自动转存 + `GET /api/config` 脱敏 + `/migrate-secrets` 存量迁移；二进制存储决策为不做（key 管理无解），见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§S1）
 
 ### 生态与工具
 
 - [ ] 环境探测：本地 shell / python / node / rust / go 等环境探测，据情况提示 agent 优化行为（必要性：**中** / 难度：★☆☆）
-- [ ] skill 增强：让 agent 自管 skill（`skill_create`/`skill_edit` 工具 + 内置元 skill 引导），对齐 deepseek 元技能思路（必要性：**中** / 难度：★★☆）
+  - 已出计划：探测结果以 Runtime Context 尾部注入（复用 todo/goal 机制）+ `/env` 手动刷新，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§E1）
+- [x] skill 增强：让 agent 自管 skill（`skill_create`/`skill_edit` 工具 + 内置元 skill 引导），对齐 deepseek 元技能思路（必要性：**中** / 难度：★★☆）
   - **现状（已扎实）**：`src/skill/loader.rs` + `prompt.rs` 已实现 progressive disclosure（name+desc+path 进 prompt，全文 `file_read`）；`skills.json` 管 active 开关；目录名=标识；frontmatter name/description 校验；`resolve_skill_path` 防越权；WebUI 可创建（`default_skill_template`）。
   - **决策**：①**不做** npx-skills 的"搜索 + 自动安装"（用户更愿自己甄选 skill，避免 hermes 式繁杂 skill 集）；②加 `skill_create`/`skill_edit` **工具**——直接写/改 SKILL.md，因 skill 目录（`~/.workbuddy/skills/` 用户级、`{workspace}/.workbuddy/skills/` 项目级）在主 agent 文件作用域外，文件工具够不到；默认落**用户级**，可选 `scope:"project"` 切项目级；路径经 `resolve_skill_path` 校验防越权；③加一个**内置元 skill**（如 `skill-authoring`）引导 agent 如何按 llaia 约定（frontmatter 约束、progressive disclosure、路径安全）创建/审查/整理 skill；④补 frontmatter 长度/字符约束（对齐 pi）。
   - 详见 [plans/2026-08-14-skill-authoring.md](plans/2026-08-14-skill-authoring.md) / [ADR-0027](adr/0027-skill-authoring.md)（必要性：**中** / 难度：★★☆）
-- [ ] 自然对话给主 agent 添加 MCP 工具（必要性：**中** / 难度：★★☆）
+- [x] 自然对话给主 agent 添加 MCP 工具（必要性：**中** / 难度：★★☆）
+  - **现状核实（2026-08-17）**：ADR-0014 交付时已把 MCP 工具接入主 agent 工具集（`cli.rs:482` `all_tools.extend(mcp_tools)` + WebUI `replace_mcp_tools` 热加载），「配置好 MCP server → 自然对话直接调用」已成立；agent 自主配置 MCP server 与描述增强两选项经评审不做（见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md) §M1）
 
 ### 语音
 
 - [ ] TTS 服务接入、发语音（必要性：**低** / 难度：★★☆）
+  - 已出计划：v1 edge-tts（免 key、中文音质好），合成与发送分离复用 send_file/MediaOutput，QQ silk 转码不做，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§T1）
 
 ### 目标系统
 
