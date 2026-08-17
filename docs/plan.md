@@ -86,7 +86,7 @@
 ### 语音
 
 - [ ] TTS 服务接入、发语音（必要性：**低** / 难度：★★☆）
-  - 已出计划：v1 edge-tts（免 key、中文音质好），合成与发送分离复用 send_file/MediaOutput，QQ silk 转码不做，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§T1）
+  - 已出计划：v1 已实施 OpenAI 兼容 `/audio/speech`（原拟 edge-tts，实为 WS+Sec-MS-GEC 签名协议、不可测，降级 v2）；合成（`tts` 工具）与发送（`send_file`）分离，WebUI 按扩展名渲染 `<audio>`，QQ silk 转码不做，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§T1）
 
 ### 目标系统
 

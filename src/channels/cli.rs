@@ -462,6 +462,11 @@ pub async fn build_single_agent(
     if let Some(search_tool) = UnifiedSearch::build(&config.tools)? {
         all_tools.push(search_tool);
     }
+    // TTS（P5 T1）：enabled 且有 api_key 时注册 tts 工具（合成到 workspace/tts/）。
+    if let Some(tts_tool) = crate::tools::tts::TtsTool::build(&config.tools.tts, workspace.clone())?
+    {
+        all_tools.push(tts_tool);
+    }
     // skill 自管工具（ADR-0027）：仅 main agent 注册。
     // agent 通过它们直接写/改 skill 目录（落在 workspace 之外，file_write 够不到）。
     if is_main {

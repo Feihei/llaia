@@ -223,25 +223,25 @@
 
 **决策 1：TTS provider**
 
-- **A（推荐 v1）：edge-tts**——微软 Edge 免费 TTS，中文音质好、无需 key；reqwest 直连其接口（不引入重依赖）。非官方接口，存在变更风险（版本锁 pin 即可）。
-- **B（v2）：OpenAI TTS API**——已有 provider key 的场景可选；需付费。
+- **A（v1 已实施，2026-08-17 修订）：OpenAI TTS API**——`POST /audio/speech`（OpenAI 兼容端点，可配 base_url），实现简单稳定、mock 可测。原计划拟用 edge-tts，实为 **WebSocket + Sec-MS-GEC 签名协议**（非 HTTP 接口），不可测且接口脆弱易变，**降级为 v2 待研究**。
+- **B（v2）：edge-tts**——免费、中文音质好、无需 key；需 WS 握手 + Sec-MS-GEC 签名，留待后续验证。
 - 本地引擎（espeak-ng / piper）离线但音质/安装成本差，**不做**。
 
 **决策 2：合成与发送分离**（对齐 send_image 模式）
 
-- 新工具 `tts { text, voice?, path? }`：合成到 `workspace/tts/<uuid>.mp3`，返回路径（`requires_confirm: false`，只写 workspace 内）。
-- 发送：复用 `send_file`（或新增 `send_audio` 别名）走 MediaOutput。
-- 默认 voice：`zh-CN-XiaoxiaoNeural`，`[tools.tts]` 可配。
+- 新工具 `tts { text, voice? }`：合成到 `workspace/tts/<uuid>.mp3`，返回路径（`requires_confirm: false`，只写 workspace 内）。
+- 发送：复用 `send_file` 走 MediaOutput；WebUI 按扩展名（.mp3/.wav/.ogg/.m4a）渲染 `<audio>` 播放器。
+- 默认 voice：`alloy`，`[tools.tts]` 可配（enabled / base_url / api_key / model / voice）。
 
 **决策 3：channel 格式兼容**
 
 - WebUI：`<audio>` 直接播 mp3 ✅
-- Telegram：支持 ogg/opus，mp3 也可发（客户端转码）✅
+- Telegram：mp3 可发（客户端转码）✅
 - QQ：需 silk 转码，**v1 不做**（文档标注不支持，agent 侧提示降级为文字+链接）。
 
-**配置**：`[tools.tts]`（`enabled` 默认 false、`provider` = edge|openai、`voice`、`api_key` 可选）。
+**配置**：`[tools.tts]`（`enabled` 默认 false、`provider` 由 base_url 决定、`voice`、`api_key` 可选）。
 
-**风险**：低-中。外部服务依赖（edge-tts 接口变更 → 降级为提示）；格式兼容受限。
+**风险**：低-中。外部服务依赖（OpenAI 接口变更 → 降级为提示）；需 api_key（edge-tts v2 可免 key）。
 
 **工作项**：
 
@@ -310,7 +310,7 @@
 | D6 | S1 二进制存储 | .env / sqlite 加密 / OS keyring | **.env**（不做二进制，key 管理无解） |
 | D7 | E1 注入方式 | Runtime Context 每轮注入 / system prompt 一次性 | **Runtime Context**（复用 todo/goal 机制，KV 缓存友好） |
 | D8 | M1 自然对话 MCP | 勾选完成 / agent 自主配置 / 描述增强 | **勾选完成**（现状已支持）；B/C 不做 |
-| D9 | T1 provider | edge-tts / OpenAI TTS / 本地引擎 | **edge-tts v1**；QQ silk 转码不做 |
+| D9 | T1 provider | edge-tts / OpenAI TTS / 本地引擎 | **OpenAI TTS v1（已实施，edge-tts 为 WS+签名协议不可测，降级 v2）**；QQ silk 转码不做 |
 
 ---
 

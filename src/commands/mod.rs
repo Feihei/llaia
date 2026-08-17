@@ -120,6 +120,12 @@ api_key = ""                   # supports "${TAVILY_API_KEY}" env var reference
 api_key = ""                   # Baidu Qianfan AI Search; supports "${BAIDU_API_KEY}"
 [tools.brave]
 api_key = ""                   # Brave Search API; supports "${BRAVE_API_KEY}"
+[tools.tts]                    # P5 T1: OpenAI-compatible /audio/speech
+enabled = false
+base_url = "https://api.openai.com/v1"
+api_key = ""                   # supports "${TTS_API_KEY}"
+model = "tts-1"
+voice = "alloy"
 "#;
 
 /// Default .env template for `init`: secrets live here, kept out of config.toml plaintext.
@@ -139,6 +145,7 @@ const ENV_TEMPLATE: &str = r#"# LLAIA environment variables (do not commit this 
 # TAVILY_API_KEY=
 # BAIDU_API_KEY=
 # BRAVE_API_KEY=
+# TTS_API_KEY=
 "#;
 
 /// Default cron.toml template for `init`: all tasks commented out, docs only.

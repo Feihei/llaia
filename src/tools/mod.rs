@@ -18,6 +18,7 @@ pub mod skill_create;
 pub mod skill_edit;
 pub mod terminal;
 pub mod todo;
+pub mod tts;
 pub mod web;
 
 #[async_trait]

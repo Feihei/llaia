@@ -19,7 +19,7 @@ function llaiaApp() {
     _todoTimer: null,
     ws: null,
     // config
-    cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{}} },
+    cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{},tts:{}} },
     compatOpen: {},
     configSection: 'runtime',
     rawToml: '',

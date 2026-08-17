@@ -39,7 +39,21 @@
             <template x-if="m.role==='assistant'"><div><b>Assistant:</b> <div x-html="renderMd(m.text)"></div></div></template>
             <template x-if="m.role==='tool'"><div><b>Tool:</b> <span x-text="m.text"></span></div></template>
             <template x-if="m.role==='media'">
-              <div><b>Media:</b> <img :src="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)"></div>
+              <div>
+                <b>Media:</b>
+                <!-- 音频（P5 T1 TTS 产物 mp3/wav/ogg/m4a）→ <audio> 播放 -->
+                <template x-if="/\.(mp3|wav|ogg|m4a)$/i.test(m.path)">
+                  <audio controls :src="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)"></audio>
+                </template>
+                <!-- 图片 -->
+                <template x-if="!/\.(mp3|wav|ogg|m4a)$/i.test(m.path) && /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(m.path)">
+                  <img :src="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)">
+                </template>
+                <!-- 其他文件 → 链接 -->
+                <template x-if="!/\.(mp3|wav|ogg|m4a)$/i.test(m.path) && !/\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(m.path)">
+                  <a :href="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)" target="_blank" x-text="m.path"></a>
+                </template>
+              </div>
             </template>
           </div>
         </template>
@@ -315,6 +329,12 @@
             <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.baidu.api_key"></div>
             <h3>brave</h3>
             <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.brave.api_key"></div>
+            <h3>tts <span class="hint">(P5 T1, OpenAI-compatible /audio/speech)</span></h3>
+            <div class="form-row"><label>enabled</label><input type="checkbox" x-model="cfg.tools.tts.enabled"></div>
+            <div class="form-row"><label>base_url</label><input x-model="cfg.tools.tts.base_url" style="width:320px"></div>
+            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.tts.api_key"></div>
+            <div class="form-row"><label>model</label><input x-model="cfg.tools.tts.model"></div>
+            <div class="form-row"><label>voice</label><input x-model="cfg.tools.tts.voice"></div>
             <button @click="saveConfig()">Save</button>
           </div>
         </template>

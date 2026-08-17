@@ -538,6 +538,9 @@ pub struct ToolsConfig {
     /// Brave Search API key
     #[serde(default)]
     pub brave: BraveConfig,
+    /// TTS（P5 T1）：OpenAI 兼容 /audio/speech
+    #[serde(default)]
+    pub tts: TtsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -630,6 +633,52 @@ pub struct BaiduConfig {
 pub struct BraveConfig {
     #[serde(default)]
     pub api_key: String,
+}
+
+/// TTS 配置（P5 T1）：OpenAI 兼容 `/audio/speech` 端点。
+/// v1 用 OpenAI TTS API（可测、稳定）；edge-tts（WS + Sec-MS-GEC 签名、
+/// 不可测且接口脆弱）记 v2 待研究。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TtsConfig {
+    /// 是否注册 `tts` 工具（还需 api_key 非空）
+    #[serde(default)]
+    pub enabled: bool,
+    /// OpenAI 兼容 TTS 端点，默认官方
+    #[serde(default = "default_tts_base_url")]
+    pub base_url: String,
+    /// TTS API key，支持 ${VAR} 引用 .env
+    #[serde(default)]
+    pub api_key: String,
+    /// 合成模型，默认 tts-1
+    #[serde(default = "default_tts_model")]
+    pub model: String,
+    /// 默认音色，默认 alloy
+    #[serde(default = "default_tts_voice")]
+    pub voice: String,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: default_tts_base_url(),
+            api_key: String::new(),
+            model: default_tts_model(),
+            voice: default_tts_voice(),
+        }
+    }
+}
+
+fn default_tts_base_url() -> String {
+    "https://api.openai.com/v1".into()
+}
+
+fn default_tts_model() -> String {
+    "tts-1".into()
+}
+
+fn default_tts_voice() -> String {
+    "alloy".into()
 }
 
 impl Config {
@@ -773,6 +822,7 @@ impl Config {
         self.tools.tavily.api_key = expand(&self.tools.tavily.api_key)?;
         self.tools.baidu.api_key = expand(&self.tools.baidu.api_key)?;
         self.tools.brave.api_key = expand(&self.tools.brave.api_key)?;
+        self.tools.tts.api_key = expand(&self.tools.tts.api_key)?;
         self.log.dir = expand(&self.log.dir)?;
         Ok(())
     }

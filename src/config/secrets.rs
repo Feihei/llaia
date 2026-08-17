@@ -28,6 +28,7 @@ pub enum SecretField {
     TavilyApiKey,
     BaiduApiKey,
     BraveApiKey,
+    TtsApiKey,
     WebuiToken,
 }
 
@@ -134,6 +135,11 @@ pub fn collect_plaintext_secrets(cfg: &Config) -> Vec<SecretEntry> {
         &cfg.tools.brave.api_key
     );
     push!(
+        SecretField::TtsApiKey,
+        "LLAIA_TTS_API_KEY",
+        &cfg.tools.tts.api_key
+    );
+    push!(
         SecretField::WebuiToken,
         "LLAIA_WEBUI_TOKEN",
         &cfg.webui.token
@@ -162,6 +168,7 @@ pub fn apply_refs(cfg: &mut Config, entries: &[SecretEntry]) {
             SecretField::TavilyApiKey => cfg.tools.tavily.api_key = var_ref,
             SecretField::BaiduApiKey => cfg.tools.baidu.api_key = var_ref,
             SecretField::BraveApiKey => cfg.tools.brave.api_key = var_ref,
+            SecretField::TtsApiKey => cfg.tools.tts.api_key = var_ref,
             SecretField::WebuiToken => cfg.webui.token = var_ref,
         }
     }
@@ -231,6 +238,7 @@ pub fn expand_config_secrets(cfg: &mut Config) {
     cfg.tools.tavily.api_key = expand(&cfg.tools.tavily.api_key);
     cfg.tools.baidu.api_key = expand(&cfg.tools.baidu.api_key);
     cfg.tools.brave.api_key = expand(&cfg.tools.brave.api_key);
+    cfg.tools.tts.api_key = expand(&cfg.tools.tts.api_key);
     cfg.webui.token = expand(&cfg.webui.token);
 }
 
@@ -319,6 +327,7 @@ pub fn migrate_config_secrets(config_path: &Path) -> Result<usize> {
             SecretField::BraveApiKey => {
                 set_nested(&mut doc, &["tools", "brave", "api_key"], &var_ref)
             }
+            SecretField::TtsApiKey => set_nested(&mut doc, &["tools", "tts", "api_key"], &var_ref),
             SecretField::WebuiToken => set_nested(&mut doc, &["webui", "token"], &var_ref),
         };
         if !ok {

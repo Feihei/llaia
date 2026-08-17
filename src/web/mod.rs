@@ -310,6 +310,9 @@ pub fn mask_sensitive(mut config: Config) -> Config {
     if !config.tools.brave.api_key.is_empty() {
         config.tools.brave.api_key = MASK.into();
     }
+    if !config.tools.tts.api_key.is_empty() {
+        config.tools.tts.api_key = MASK.into();
+    }
     config
 }
 
@@ -356,6 +359,9 @@ pub fn merge_masked(old: &Config, new: &Config) -> Config {
     }
     if merged.tools.brave.api_key == MASK {
         merged.tools.brave.api_key = old.tools.brave.api_key.clone();
+    }
+    if merged.tools.tts.api_key == MASK {
+        merged.tools.tts.api_key = old.tools.tts.api_key.clone();
     }
     merged
 }
