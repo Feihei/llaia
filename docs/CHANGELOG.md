@@ -140,6 +140,37 @@ MEMORY.md **全量加载**进 system prompt（不懒加载），但受可配置 
 
 ---
 
+### ✅ P5-6 Skill 自管（[ADR-0027](adr/0027-skill-authoring.md)）
+
+agent 通过 `skill_create` / `skill_edit` 工具直接写/改 SKILL.md（skill 目录落在 workspace 之外，file_write 够不到），路径安全校验；加内置 `skill-authoring` 元 skill 引导方法论。不做 npx 式搜索 / 自动安装（用户保留甄选权）。
+
+**新增**
+- `src/tools/skill_create.rs`：`SkillCreateTool`（`name="skill_create"`），参数 `name` / `description` / `content` / `scope?`。
+  - `name` 经 `is_valid_skill_name` 校验（kebab-case，无 `/` 与 `..`）；`scope` 仅允许 `user`（默认，`<config_dir>/skills`）/ `project`（`<workspace>/.workbuddy/skills`）。
+  - `content` 为 skill body（markdown）：自带 `---` frontmatter 则原样采用，否则自动生成 `name`/`description`/`duration: turn` frontmatter。
+  - 写盘前经 `ensure_within_skills_dir` 词法防穿越兜底，`validate_skill_md` 校验；已存在则拒绝覆盖（改请用 `skill_edit`）。
+  - `requires_confirm = true`（写 skills 目录属有副作用操作，走审批门）。
+- `src/tools/skill_edit.rs`：`SkillEditTool`（`name="skill_edit"`），参数 `name` / `content | patch` / `scope?`。
+  - `content`：整文件替换；`patch`：字符串（追加到 body，保留 frontmatter）或对象 `{find, replace}`（单次精确替换，找不到报错）。
+  - 已存在校验 + 原子写（临时文件 + rename，避免半写损坏）+ `validate_skill_md`。`requires_confirm = true`。
+- `resolve_skills_dir(config_dir, workspace, scope)` 共享的 scope → skills 目录解析（两工具复用）。
+- `src/skill/loader.rs`：`validate_skill_md` 补长度约束（name ≤ 64、description ≤ 1024，对齐 pi）；新增 `META_SKILL_AUTHORING` 内置元 skill 常量 + `ensure_builtin_meta_skills()`，在 `load_skills` 中幂等确保（不覆盖用户改动），老用户首次启动即拿到元 skill。
+- 内置元 skill `skill-authoring`：引导 agent 何时该建 skill（可复用、跨会话、非平凡）vs 直接做；`skill_create`/`skill_edit` 用法；frontmatter 约束（name kebab-case、description ≤1024 必填、progressive disclosure）；路径安全（用专用工具而非 file_write）；`validate_skill_md` 规则；审查/整理已有 skill。
+
+**修改**
+- `src/tools/mod.rs`：注册 `skill_create` / `skill_edit` 模块。
+- `src/channels/cli.rs` `build_single_agent`：两工具**仅 main agent** 注册（scope 解析需要 `config_dir` + `workspace`）；受 `denied_tools` 过滤。
+- 文档：`docs/guide/skills.md` 补「agent 自管（skill_create / skill_edit）」段；`plan.md` 标记 P5-6 ✅；本文件补本节。
+
+**已知范围（非缺陷）**
+- 项目级 skill（`scope="project"`）写出后**不**自动注入 system prompt——当前仅用户级 skills 目录参与 Progressive Disclosure 扫描（`cli.rs` 只 `load_skills(config_dir/skills)`）；需重启 + 不在 prompt 注入范围内。用户级 skill 创建后即被扫描加载。
+- 不引入引擎级 skill import / npx 式自动安装（ADR-0027 决策 #1、#5）。
+
+**验证**
+- `cargo fmt --all --check` / `cargo clippy --lib --all-targets` / `cargo test --lib`（367 项，含两工具单测：路径越权被拒、name 校验、scope 两值、user/project 落盘、覆盖拒绝、patch 追加/查找替换、校验失败不改坏原文件）通过。
+
+---
+
 ## v0.2.1 (2026-08-14)
 
 **Patch release** — stability and WebUI consistency fixes accumulated since v0.2.0. No breaking changes.

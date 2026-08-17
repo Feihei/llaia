@@ -30,7 +30,7 @@
 
 ## P5 — 未来计划（下一步）
 
-**状态**：🚧 进行中（P5-1、P5-2 已交付，其余按推荐顺序推进）
+**状态**：🚧 进行中（P5-1 ~ P5-6 已交付，仅 P5-7 /goal 待做）
 
 > 来自 `docs/issues/` 反馈与扩展评估的候选池。下方条目按主题分组，并标注**必要性**（高/中/低，不做会持续踩坑或已影响正确性→高；明显改善体验→中；锦上添花→低）与**难度**（★☆☆ 半天内单点 / ★★☆ 一到数天跨模块 / ★★★ 结构性改造，动手前先出 ADR），便于排期。
 
@@ -43,7 +43,7 @@
 3. **统一搜索 search**（[ADR-0023](adr/0023-unified-search.md)）— ✅ 已交付（统一 `search` 工具 + tavily/baidu/brave 内置 provider，单一 provider 路由，doubao 暂未实现）
 4. **规划后执行 todo**（[ADR-0024](adr/0024-planning-todo.md)）— ✅ 已交付（单一 `todo` 工具 + 每会话落盘 + Runtime Context 注入 + WebUI 只读面板）
 5. **ask_user**（[ADR-0022](adr/0022-ask-user-suspend-resume.md)）— ✅ 已交付（ask_user 工具 + ApprovalGate 复用 + 单 pending 续答 + /answer /cancel + WebUI 只读面板）
-6. **skill 自管**（[ADR-0027](adr/0027-skill-authoring.md)）— 新工具 + 元 skill
+6. **skill 自管**（[ADR-0027](adr/0027-skill-authoring.md)）— ✅ 已交付（skill_create/skill_edit 工具 + 内置 skill-authoring 元 skill + 路径安全 + frontmatter 长度约束）
 7. **/goal 长期目标**（[ADR-0021](adr/0021-goal-system.md)）— 最后：唯一需改 `sessions` schema（加 `metadata` 列），迁移最不好回滚
 
 > 注：WebUI 增强、敏感信息存储、环境探测、TTS、自然对话 MCP 等条目尚未建 ADR/plan，不属于可开工队列，待补 ADR 后再进序列。

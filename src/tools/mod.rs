@@ -13,6 +13,8 @@ pub mod mcp;
 pub mod memory;
 pub mod search;
 pub mod send_media;
+pub mod skill_create;
+pub mod skill_edit;
 pub mod terminal;
 pub mod todo;
 pub mod web;

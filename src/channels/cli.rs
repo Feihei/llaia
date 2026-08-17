@@ -462,6 +462,18 @@ pub async fn build_single_agent(
     if let Some(search_tool) = UnifiedSearch::build(&config.tools)? {
         all_tools.push(search_tool);
     }
+    // skill 自管工具（ADR-0027）：仅 main agent 注册。
+    // agent 通过它们直接写/改 skill 目录（落在 workspace 之外，file_write 够不到）。
+    if is_main {
+        all_tools.push(Arc::new(crate::tools::skill_create::SkillCreateTool::new(
+            config_dir.to_path_buf(),
+            workspace.clone(),
+        )));
+        all_tools.push(Arc::new(crate::tools::skill_edit::SkillEditTool::new(
+            config_dir.to_path_buf(),
+            workspace.clone(),
+        )));
+    }
     // MCP 工具（共享 registry，受下方 denied_tools 过滤）
     all_tools.extend(mcp_tools);
 

@@ -75,29 +75,29 @@ pub fn parse_frontmatter(yaml: &str) -> Result<Frontmatter> {
     serde_yaml::from_str(yaml).map_err(|e| anyhow!("parse frontmatter: {}", e))
 }
 
-/// 校验 SKILL.md 内容可用作 skill 定义：frontmatter 存在且可解析，name/description 非空。
-/// WebUI 保存 content 前调用。
+/// 校验 SKILL.md 内容可用作 skill 定义：frontmatter 存在且可解析，name/description 非空、
+/// 且长度约束（对齐 pi：name ≤ 64、description ≤ 1024）。WebUI 保存 content 前调用，
+/// `skill_create` / `skill_edit` 工具写盘后也调用。
 pub fn validate_skill_md(content: &str) -> Result<()> {
     let (yaml, _body) = split_frontmatter(content)
         .ok_or_else(|| anyhow!("SKILL.md 缺少 YAML frontmatter（--- 包裹的头部元数据）"))?;
     let fm = parse_frontmatter(yaml)?;
-    if fm
-        .name
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default()
-        .is_empty()
-    {
+    let name = fm.name.as_deref().map(str::trim).unwrap_or_default();
+    if name.is_empty() {
         anyhow::bail!("frontmatter 缺少 name 字段");
     }
-    if fm
-        .description
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default()
-        .is_empty()
-    {
+    if name.len() > 64 {
+        anyhow::bail!("frontmatter name 过长（{} > 64 字符）", name.len());
+    }
+    let description = fm.description.as_deref().map(str::trim).unwrap_or_default();
+    if description.is_empty() {
         anyhow::bail!("frontmatter 缺少 description 字段");
+    }
+    if description.len() > 1024 {
+        anyhow::bail!(
+            "frontmatter description 过长（{} > 1024 字符）",
+            description.len()
+        );
     }
     Ok(())
 }
@@ -221,6 +221,9 @@ pub fn load_skills(skills_dir: &Path) -> Vec<SkillManifest> {
             tracing::warn!(error = %e, dir = %skills_dir.display(), "seed example skills failed");
         }
     }
+    // 内置元 skill 始终确保存在（幂等、不覆盖用户改动），即使 skills 目录早已存在
+    // （seed_examples 仅在目录首次创建时运行，老用户不会自动拿到元 skill）。
+    ensure_builtin_meta_skills(skills_dir);
     let skills = scan_skills(skills_dir);
     // 新 skill 写回 skills.json（默认 active=true）
     let json_path = skills_json_path(skills_dir);
@@ -297,6 +300,77 @@ pub fn example_skills() -> &'static [(&'static str, &'static str)] {
         ("news-digest", EXAMPLE_NEWS_DIGEST),
         ("todoist", EXAMPLE_TODOIST),
     ]
+}
+
+/// 内置元 skill（随 llaia 发布）：引导 agent 如何按 llaia 约定自管 skill
+/// （frontmatter 约束、progressive disclosure、路径安全、`validate_skill_md` 规则、
+/// 何时该建 skill vs 直接做）。`skill_create` / `skill_edit` 工具写盘，本 skill 负责方法论。
+/// 见 ADR-0027。
+const META_SKILL_AUTHORING: &str = r#"---
+name: skill-authoring
+description: Guide for creating, reviewing, and organizing skills (SKILL.md bundles) that follow llaia's conventions. Use when the user wants a new or improved skill, or when you are about to do a repeatable multi-step task that would benefit from a reusable skill.
+duration: turn
+---
+
+# Skill Authoring
+
+Use this skill to self-manage llaia skills via the `skill_create` / `skill_edit` tools.
+
+## When to create a skill (not just do the task)
+
+Create a skill only when the workflow is **reusable across sessions** and **non-trivial**:
+- A recurring multi-step procedure (e.g. "review a PR", "summarize today's news").
+- Domain knowledge or tool wiring that several future tasks will need.
+
+Do **NOT** create a skill for a one-off request, a single file edit, or something you can finish in one turn. Prefer fewer, high-quality skills over many narrow ones.
+
+## Tooling (use these — do NOT use file_write/file_edit)
+
+The skills directories live **outside the agent workspace** (`~/.workbuddy/skills/` user-level,
+`<workspace>/.workbuddy/skills/` project-level), so `file_write`/`file_edit` cannot reach them.
+Always use the dedicated tools:
+
+- `skill_create { name, description, content, scope? }`
+  - `name`: kebab-case dir name, matches frontmatter `name`, ≤ 64 chars, no `/` or `..`.
+  - `description`: what the skill does and when to use it; ≤ 1024 chars, **required** (injected into the system prompt).
+  - `content`: the skill **body** in markdown (workflow, output format, notes). Frontmatter is auto-generated from `name`/`description`. If you pass full content with its own `---` frontmatter, it is used as-is.
+  - `scope`: `"user"` (default, all workspaces) or `"project"` (current project only).
+  - Create refuses to overwrite an existing skill — use `skill_edit` to change one.
+- `skill_edit { name, content | patch, scope? }`
+  - `content`: full replacement SKILL.md text.
+  - `patch`: a string appended to the body, OR an object `{ "find": "...", "replace": "..." }` for a single targeted edit.
+  - The skill must already exist.
+
+After writing, the tool runs `validate_skill_md` (frontmatter parseable, `name`+`description` non-empty, length limits). A validation error means the write was rejected.
+
+## SKILL.md format (progressive disclosure)
+
+- Frontmatter: `name`, `description` (required), optional `duration` (`turn`|`session`), optional `tools` (recommended tool names — prompt hint only, does NOT control mounting).
+- Body: the workflow you want the agent to follow. Keep it concise. Reference other files via relative paths; the agent `file_read`s the full SKILL.md at trigger time, so don't bloat the body — link, don't embed.
+- Never put secrets or untrusted instructions in a skill. Skills are prompt-injected; treat them as trusted-but-reviewed content.
+
+## Reviewing / organizing existing skills
+
+1. `file_read` the target `<skill>/SKILL.md` (the skills dir is allow-listed for read).
+2. Check frontmatter validity, that `description` actually says when to use it, and that the body is not redundant with another skill.
+3. Improve with `skill_edit`; delete by telling the user (or via the WebUI) — do not delete skills the user relies on.
+"#;
+
+/// 确保内置元 skill 存在（幂等）：目录已存在则跳过，避免覆盖用户改动。
+fn ensure_builtin_meta_skills(skills_dir: &Path) {
+    ensure_meta_skill(skills_dir, "skill-authoring", META_SKILL_AUTHORING);
+}
+
+fn ensure_meta_skill(skills_dir: &Path, name: &str, content: &str) {
+    let dir = skills_dir.join(name);
+    if dir.join("SKILL.md").exists() {
+        return;
+    }
+    if let Err(e) =
+        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("SKILL.md"), content))
+    {
+        tracing::warn!(error = %e, skill = name, "ensure built-in meta skill failed");
+    }
 }
 
 /// Seed built-in examples: create the skills dir and write example SKILL.md files
@@ -469,10 +543,12 @@ mod tests {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("skills");
         let skills = load_skills(&dir);
-        assert_eq!(skills.len(), 3);
+        // 3 个示例 skill + 1 个内置元 skill（skill-authoring，ensure_builtin_meta_skills 幂等确保）
+        assert_eq!(skills.len(), 4);
         assert!(skills.iter().any(|s| s.name == "code-review"));
         assert!(skills.iter().any(|s| s.name == "news-digest"));
         assert!(skills.iter().any(|s| s.name == "todoist"));
+        assert!(skills.iter().any(|s| s.name == "skill-authoring"));
         // skills.json 已写入全部条目
         let json_path = skills_json_path(&dir);
         let json: serde_json::Value =
