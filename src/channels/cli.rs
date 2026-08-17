@@ -456,6 +456,8 @@ pub async fn build_single_agent(
         Arc::new(SendFile::new(workspace.clone())),
         // todo 工具无条件注册（无需 api_key）：agent 自管当前会话子步骤清单。
         Arc::new(crate::tools::todo::TodoTool::new(todo_store.clone())),
+        // ask_user 工具无条件注册（无需 api_key）：agent 执行中主动向用户抛问题并阻塞等待。
+        Arc::new(crate::tools::ask_user::AskUserTool),
     ];
     if let Some(search_tool) = UnifiedSearch::build(&config.tools)? {
         all_tools.push(search_tool);

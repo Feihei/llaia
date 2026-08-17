@@ -104,7 +104,7 @@ provider 返回结构化的 `tool_calls` 字段，无需文本解析。
 
 ### Tool
 主 Agent 可调用的能力。P1 最小集：`file_read`、`file_write`、`file_edit`、
-`terminal`、`web_fetch`、`search`、`todo`、`memory_write`。
+`terminal`、`web_fetch`、`search`、`todo`、`ask_user`、`memory_write`。
 `memory_read` 和 `session_*` 为内部实现，不暴露给 LLM。
 P2 引入工具白名单，按子 Agent 过滤可见工具。
 

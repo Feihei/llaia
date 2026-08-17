@@ -1,5 +1,6 @@
 use crate::agent::approval::{
-    approval_decision, format_approval_prompt, ApprovalAction, ApprovalContext,
+    approval_decision, format_approval_prompt, is_interactive_channel, ApprovalAction,
+    ApprovalContext,
 };
 use crate::agent::TurnEvent;
 use crate::provider::{ChatMessage, ToolCall};
@@ -93,6 +94,72 @@ pub async fn execute_tool_calls(
                 continue;
             }
         };
+
+        // ask_user 阻塞式澄清（ADR-0022）：在审批判定之前拦截。
+        // 交互频道 → 注册 pending question + 占位结果 + 本轮暂停（deferred）；
+        // 非交互频道（mail 等）→ 直接返回"按最合理假设继续"，不暂停。
+        if call.name == crate::tools::ask_user::ASK_USER_TOOL_NAME {
+            match crate::tools::ask_user::parse_ask_user_args(&call.arguments) {
+                Ok((question, choices)) => {
+                    if is_interactive_channel(channel) {
+                        let id = gate
+                            .register_question(
+                                &question,
+                                choices.clone(),
+                                channel,
+                                agent_alias,
+                                ctx.ask_user_timeout_secs,
+                            )
+                            .await;
+                        let choice_hint = match &choices {
+                            Some(cs) => format!(
+                                "\n   可选答案：{}（回复选项文本或序号即可）",
+                                cs.iter()
+                                    .enumerate()
+                                    .map(|(i, c)| format!("{}. {}", i + 1, c))
+                                    .collect::<Vec<_>>()
+                                    .join("  ")
+                            ),
+                            None => String::new(),
+                        };
+                        let prompt = format!(
+                            "\n❓ 需要你回答一个问题（id={}）：\n   {}\n   {}直接回复你的答案即可（多个待回答时用 `/answer {} 你的答案` 消歧）。\n",
+                            id, question, choice_hint, id
+                        );
+                        tracing::info!(id = %id, question = %question, "pending question registered");
+                        if let Some(tx) = event_tx {
+                            let _ = tx
+                                .send(TurnEvent::Chunk {
+                                    delta: prompt.clone(),
+                                })
+                                .await;
+                        }
+                        results.push(ChatMessage::tool(
+                            format!(
+                                "[⏳ 等待用户回答] 已将问题提交给你（id={}），请回复答案后我继续。",
+                                id
+                            ),
+                            &call.id,
+                        ));
+                        deferred = true;
+                        continue;
+                    } else {
+                        results.push(ChatMessage::tool(
+                            "[无法询问用户] 当前频道非交互式，无法等待回答，已按最合理假设继续。",
+                            &call.id,
+                        ));
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    results.push(ChatMessage::tool(
+                        format!("[ask_user error: {}]", e),
+                        &call.id,
+                    ));
+                    continue;
+                }
+            }
+        }
 
         match approval_decision(tool.as_ref(), &call.arguments, workspace, profile, channel) {
             // 直接执行
@@ -252,6 +319,7 @@ mod tests {
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,
+                ask_user_timeout_secs: 0,
             },
             None,
         )
@@ -282,6 +350,7 @@ mod tests {
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,
+                ask_user_timeout_secs: 0,
             },
             None,
         )
@@ -334,6 +403,7 @@ mod tests {
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,
+                ask_user_timeout_secs: 0,
             },
             None,
         )
@@ -354,6 +424,7 @@ mod tests {
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,
+                ask_user_timeout_secs: 0,
             },
             None,
         )
@@ -373,6 +444,7 @@ mod tests {
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,
+                ask_user_timeout_secs: 0,
             },
             None,
         )

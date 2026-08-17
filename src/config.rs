@@ -53,6 +53,11 @@ pub struct RuntimeConfig {
     /// None（默认）= "default"。非法值 warn + 置 None。
     #[serde(default)]
     pub permission: Option<String>,
+    /// ask_user 阻塞式澄清的超时秒数（ADR-0022）。
+    /// pending question 在 timeout_secs 内未收到回答，下一条用户消息到达时
+    /// 自动按"用户未回答，已按最合理假设继续"续跑。默认 300（对齐 zeroclaw）。
+    #[serde(default = "default_ask_user_timeout")]
+    pub ask_user_timeout_secs: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -64,6 +69,7 @@ impl Default for RuntimeConfig {
             timezone: None,
             vision_model: None,
             permission: None,
+            ask_user_timeout_secs: default_ask_user_timeout(),
         }
     }
 }
@@ -74,6 +80,10 @@ fn default_threshold() -> f64 {
 
 fn default_max_iterations() -> u32 {
     10
+}
+
+fn default_ask_user_timeout() -> usize {
+    300
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

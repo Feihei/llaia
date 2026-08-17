@@ -48,3 +48,12 @@ llaia 已有 ADR-0020 的 `ApprovalGate` 挂起-回传机制（`/ok` `/deny` 审
 - 需在 runner/agent loop 支持"工具返回值是异步等待的用户输入"——但 ADR-0020 已验证 suspend/resume 可行，本 ADR 是同一机制的语义扩展，风险可控。
 - 新增：`PendingQuestion` 结构、slash `/answer` 与 `/cancel`、CLI stdin 直问分支、WebUI 问题卡片。
 - 属结构性改动（agent 循环 + pending 注册表扩展），故立此 ADR。
+
+## 实现补记（P5-5 交付）
+
+- **复用 ApprovalGate**：`PendingKind::{Approval, Question}` 两型共用注册表与续跑机制。审批走 `/ok` `/deny`，提问走 `单 pending 时用户下一条普通消息即答案` 或 `/answer <id> <text>` 显式消歧，`/cancel <id>` 取消任一 pending。
+- **runner 拦截**：`execute_tool_calls` 在审批判定前按工具名 `ask_user` 拦截——交互频道注册 pending question + 占位结果 + `deferred`（turn 软暂停）；非交互频道（mail/cron）直接返回"按最合理假设继续"。
+- **续答集中点**：`Agent::handle_input_streaming` 检测单 pending question，把下一条普通消息包装为答案跑 continuation turn，所有频道自动受益（无需逐频道改）。同 SLASH 层先过 `try_handle`，故 `/answer` `/cancel` 不会被误判为答案。
+- **feishu** 已补入 `is_interactive_channel` 白名单。
+- **WebUI**：`GET /api/questions` 只读展示 pending，聊天页底部只读面板（5s 轮询）。
+- **已知限制**：纯静默超时自动续跑（用户始终不回复）未做后台定时巡检；超时字段与判定函数已就绪，且仅在"用户下一条消息到达"时一并判定（超时则丢弃 pending 并注入超时说明，走普通流程）。后续可加轻量后台巡检实现全自动续跑。

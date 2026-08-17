@@ -60,6 +60,16 @@
           </div>
         </template>
       </div>
+      <!-- ask_user（ADR-0022）：当前待回答问题只读展示 -->
+      <div class="todo-panel" x-show="questions.length" style="border-left-color:#d9b34a;">
+        <div class="todo-head" style="color:#d9b34a;">&#x276F; QUESTIONS <span class="todo-count" x-text="questions.length"></span></div>
+        <template x-for="q in questions" :key="q.id">
+          <div class="todo-item">
+            <span class="todo-mark in_progress">?</span>
+            <span class="todo-task" x-text="q.question"></span>
+          </div>
+        </template>
+      </div>
     </div>
 
     <div id="config-pane" class="pane" :class="{active: tab==='config'}">

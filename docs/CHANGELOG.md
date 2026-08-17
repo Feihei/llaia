@@ -112,6 +112,34 @@ MEMORY.md **全量加载**进 system prompt（不懒加载），但受可配置 
 
 ---
 
+### ✅ P5-5 ask_user 阻塞式澄清（[ADR-0022](adr/0022-ask-user-suspend-resume.md)）
+
+复用 ADR-0020 的 ApprovalGate 挂起-回传机制，新增 `ask_user` 工具：agent 在执行中主动向用户抛问题、**阻塞等待回答、再继续**，复杂/歧义任务不再"猜着做"。
+
+**新增**
+- `src/tools/ask_user.rs`：
+  - `AskUserTool`（`name="ask_user"`，schema：`question` 必填 + 可选 `choices` 结构化单选）；`ASK_USER_TOOL_NAME` 常量；`parse_ask_user_args` 解析 helper（含单测）。工具无条件注册（无需 api_key）。
+  - 实际挂起由 agent 循环处理，`execute` 仅为完整接口占位（正常路径不触发）。
+- `src/agent/approval.rs`：
+  - `PendingKind::{Approval, Question}` 两型；`PendingApproval` 增加 `kind/question/choices/created_at/timeout_secs`。
+  - 新增 `register_question` / `take_question` / `questions` / `single_question` / `is_question_expired`；`feishu` 补入 `is_interactive_channel` 白名单。
+
+**修改**
+- `src/agent/runner.rs` `execute_tool_calls`：在审批判定前按工具名拦截 `ask_user`——交互频道注册 pending question + 占位结果 + `deferred`（turn 软暂停）；非交互频道（mail/cron）直接返回"按最合理假设继续"。`ApprovalContext` 增加 `ask_user_timeout_secs`（取自 `[runtime].ask_user_timeout_secs`）。
+- `src/agent/mod.rs` `handle_input_streaming`：集中检测单 pending question，把用户下一条普通消息包装为答案跑 continuation turn（所有频道自动受益）；`map_ask_user_choice` 把 `choices` 的序号/原文映射回选项；超时则丢弃 pending 并注入超时说明。
+- `src/commands/slash.rs`：新增 `/answer <id> <text>`（显式消歧+回答，走 Resume）与 `/cancel <id>`（取消 question 或 approval）；help 文本同步。
+- `src/config.rs` `RuntimeConfig`：新增 `ask_user_timeout_secs`（默认 300，对齐 zeroclaw）。
+- `src/web/mod.rs`：新增 `GET /api/questions`；`src/web/static/{app.js,index.html}`：聊天页底部只读 pending 问题面板（5s 轮询）。
+
+**设计说明（详见 ADR-0022「实现补记」）**
+- 复用 ApprovalGate 而非另造；审批 `/ok` `/deny` 与提问续答共用注册表与 resume 路径。
+- 纯静默超时自动续跑（用户始终不回复）为已知限制：超时字段与判定就绪，仅在下一条消息到达时一并判定；后续可加轻量后台巡检实现全自动续跑。
+
+**验证**
+- `cargo fmt --all --check` / `cargo clippy --lib --all-targets` / `cargo test --lib`（ask_user 解析 + 全量回归）通过。
+
+---
+
 ## v0.2.1 (2026-08-14)
 
 **Patch release** — stability and WebUI consistency fixes accumulated since v0.2.0. No breaking changes.

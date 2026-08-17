@@ -39,7 +39,7 @@ pub async fn try_handle(
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -77,6 +77,46 @@ pub async fn try_handle(
                 ))),
                 Err(e) => Ok(SlashOutcome::Handled(format!("[{} failed: {}]", cmd, e))),
             }
+        }
+        "/answer" => {
+            if args.is_empty() {
+                return Ok(SlashOutcome::Handled(
+                    "usage: /answer <id> <answer>".into(),
+                ));
+            }
+            let (id, text) = match args.split_once(' ') {
+                Some((i, t)) if !t.trim().is_empty() => (i.trim(), t.trim().to_string()),
+                _ => {
+                    return Ok(SlashOutcome::Handled(
+                        "usage: /answer <id> <answer>  (multiple pending questions require the id)".into(),
+                    ))
+                }
+            };
+            match resolve_question(agent, id, &text).await {
+                Ok(Some((notice, message))) => Ok(SlashOutcome::Resume { notice, message }),
+                Ok(None) => Ok(SlashOutcome::Handled(format!(
+                    "[/answer] no pending question {}",
+                    id
+                ))),
+                Err(e) => Ok(SlashOutcome::Handled(format!("[answer failed: {}]", e))),
+            }
+        }
+        "/cancel" => {
+            if args.is_empty() {
+                return Ok(SlashOutcome::Handled("usage: /cancel <id>".into()));
+            }
+            let id = args.trim();
+            // 先尝试取消 pending question，再尝试审批
+            if let Some(q) = agent.approval_gate.take_question(id).await {
+                return Ok(SlashOutcome::Handled(format!(
+                    "[cancelled question {}] {}",
+                    id, q.question
+                )));
+            }
+            if agent.approval_gate.take(id).await.is_some() {
+                return Ok(SlashOutcome::Handled(format!("[cancelled approval {}]", id)));
+            }
+            Ok(SlashOutcome::Handled(format!("[/cancel] no pending {}", id)))
         }
         "/move" | "/cd" => {
             let arg = args.trim();
@@ -391,6 +431,25 @@ async fn resolve_approval(
         pending.tool_name
     );
     Ok(Some((notice, result)))
+}
+
+/// 解析一条待回答问题：取出 pending question，把 text 作为用户回答，
+/// 返回 Resume 让模型基于答案继续（与审批 resume 同路径）。
+async fn resolve_question(
+    agent: &mut Agent,
+    id: &str,
+    text: &str,
+) -> Result<Option<(String, String)>> {
+    let q = match agent.approval_gate.take_question(id).await {
+        Some(q) => q,
+        None => return Ok(None),
+    };
+    let notice = format!("[answered {}] {}", id, q.question);
+    let message = format!(
+        "[用户对你刚才提出的问题给出了回答]\n问题：{}\n回答：{}",
+        q.question, text
+    );
+    Ok(Some((notice, message)))
 }
 
 /// 把 config 中所有 provider/model 组合 flatten 成有序 model ref 列表

@@ -42,7 +42,7 @@
 2. **系统提示词优化 / MEMORY 预算**（[ADR-0025](adr/0025-system-prompt-memory-budget.md)）— ✅ 已交付（trim + 配置预算 + 缓存 + /memory-compact）
 3. **统一搜索 search**（[ADR-0023](adr/0023-unified-search.md)）— ✅ 已交付（统一 `search` 工具 + tavily/baidu/brave 内置 provider，单一 provider 路由，doubao 暂未实现）
 4. **规划后执行 todo**（[ADR-0024](adr/0024-planning-todo.md)）— ✅ 已交付（单一 `todo` 工具 + 每会话落盘 + Runtime Context 注入 + WebUI 只读面板）
-5. **ask_user**（[ADR-0022](adr/0022-ask-user-suspend-resume.md)）— 首个动 turn 循环的特性（复用 ApprovalGate）
+5. **ask_user**（[ADR-0022](adr/0022-ask-user-suspend-resume.md)）— ✅ 已交付（ask_user 工具 + ApprovalGate 复用 + 单 pending 续答 + /answer /cancel + WebUI 只读面板）
 6. **skill 自管**（[ADR-0027](adr/0027-skill-authoring.md)）— 新工具 + 元 skill
 7. **/goal 长期目标**（[ADR-0021](adr/0021-goal-system.md)）— 最后：唯一需改 `sessions` schema（加 `metadata` 列），迁移最不好回滚
 
@@ -91,7 +91,7 @@
 
 ### 任务编排与交互
 
-- [ ] `ask_user` 工具：agent 在执行中主动向用户抛澄清问题并**阻塞等待**回答，再继续
+- [x] `ask_user` 工具：agent 在执行中主动向用户抛澄清问题并**阻塞等待**回答，再继续（ADR-0022）— ✅ 已交付（复用 ApprovalGate 挂起-回传、单 pending 续答、/answer /cancel、feishu 入白名单、超时默认 300）
   - **方向已确认**：复用现有消息式审批流（`/ok` `/deny`）的"挂起—回传"机制；无 stdin 的频道（QQ/Telegram/微信/飞书）走消息回传，CLI 走 stdin 直问；一个 pending question 绑定当前 turn，支持超时/放弃与多问题排队
   - 详见 [plans/2026-08-14-ask-user.md](plans/2026-08-14-ask-user.md) / [ADR-0022](adr/0022-ask-user-suspend-resume.md)（必要性：**中** / 难度：★★☆）
 - [x] 规划后执行工具：复杂任务先产出 todo 清单再逐步执行，执行中可勾选/增删

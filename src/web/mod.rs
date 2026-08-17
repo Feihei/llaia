@@ -1375,6 +1375,39 @@ pub async fn get_todos(
         .into_response()
 }
 
+/// GET /api/questions → 当前待回答问题（只读展示，ADR-0022）。
+pub async fn get_questions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    let questions: Vec<serde_json::Value> = agent
+        .approval_gate
+        .questions()
+        .await
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "question": p.question,
+                "choices": p.choices,
+                "channel": p.channel,
+            })
+        })
+        .collect();
+    let json = serde_json::json!({ "questions": questions });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
 /// 构建系统级 Web 路由（不含 WS）。
 /// 返回 `Router<AppState>`，由调用方合并 WS 路由后统一 `with_state`。
 pub fn build_system_routes() -> axum::Router<AppState> {
@@ -1417,6 +1450,8 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         )
         // 规划后执行（ADR-0024）：只读展示当前会话 todo 清单
         .route("/api/todos", axum::routing::get(get_todos))
+        // ask_user（ADR-0022）：只读展示当前待回答问题
+        .route("/api/questions", axum::routing::get(get_questions))
         .route("/api/skills/:name", axum::routing::delete(delete_skill))
         .route(
             "/api/skills/:name/active",

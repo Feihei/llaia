@@ -10,20 +10,38 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
-/// 一次待确认的审批请求
+/// pending 类型：审批（待执行操作需批准）或提问（ask_user 待回答）。
+/// 二者共用注册表与续跑机制，但语义/UI/路由不同。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PendingKind {
+    Approval,
+    Question,
+}
+
+/// 一次待确认/待回答的请求
 #[derive(Clone)]
 pub struct PendingApproval {
     pub id: String,
+    pub kind: PendingKind,
     pub tool_name: String,
     pub args: Value,
     /// 原始 tool_call 的 id（用于把结果写回对应 tool 消息）
     pub tool_call_id: String,
     pub channel: String,
     pub agent_alias: String,
-    /// 操作是否落在 workspace 内（用于提示文案）
+    /// 操作是否落在 workspace 内（用于审批提示文案）
     pub within_workspace: bool,
+    /// ask_user 的问题文本（kind==Question 时有效）
+    pub question: String,
+    /// ask_user 的可选结构化单选选项（kind==Question 时有效）
+    pub choices: Option<Vec<String>>,
+    /// 注册时的 unix 时间戳（秒），用于超时判定
+    pub created_at: u64,
+    /// 超时秒数（kind==Question 时有效；0 = 不超时）
+    pub timeout_secs: u64,
 }
 
 /// 审批门控：保存当前待确认请求。独立锁，避免与 agent 锁相互阻塞。
@@ -40,7 +58,14 @@ impl ApprovalGate {
         })
     }
 
-    /// 注册一条待确认请求，返回 id
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// 注册一条待确认（操作）请求，返回 id
     pub async fn register(
         &self,
         tool_name: &str,
@@ -54,12 +79,47 @@ impl ApprovalGate {
         let id = format!("ap{}", n);
         let pending = PendingApproval {
             id: id.clone(),
+            kind: PendingKind::Approval,
             tool_name: tool_name.to_string(),
             args: args.clone(),
             tool_call_id: tool_call_id.to_string(),
             channel: channel.to_string(),
             agent_alias: agent_alias.to_string(),
             within_workspace,
+            question: String::new(),
+            choices: None,
+            created_at: Self::now_secs(),
+            timeout_secs: 0,
+        };
+        self.inner.lock().await.insert(id.clone(), pending);
+        id
+    }
+
+    /// 注册一条待回答（ask_user）请求，返回 id。
+    /// `timeout_secs` 为 0 表示永不超时。
+    pub async fn register_question(
+        &self,
+        question: &str,
+        choices: Option<Vec<String>>,
+        channel: &str,
+        agent_alias: &str,
+        timeout_secs: u64,
+    ) -> String {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let id = format!("q{}", n);
+        let pending = PendingApproval {
+            id: id.clone(),
+            kind: PendingKind::Question,
+            tool_name: "ask_user".to_string(),
+            args: Value::Null,
+            tool_call_id: String::new(),
+            channel: channel.to_string(),
+            agent_alias: agent_alias.to_string(),
+            within_workspace: false,
+            question: question.to_string(),
+            choices,
+            created_at: Self::now_secs(),
+            timeout_secs,
         };
         self.inner.lock().await.insert(id.clone(), pending);
         id
@@ -70,9 +130,47 @@ impl ApprovalGate {
         self.inner.lock().await.remove(id)
     }
 
-    /// 列出当前所有待确认（用于审计/调试）
+    /// 取出一条待回答问题（仅 Question 类，消费式）
+    pub async fn take_question(&self, id: &str) -> Option<PendingApproval> {
+        let mut g = self.inner.lock().await;
+        match g.get(id) {
+            Some(p) if p.kind == PendingKind::Question => g.remove(id),
+            _ => None,
+        }
+    }
+
+    /// 列出当前所有待确认/待回答（用于审计/调试）
     pub async fn list(&self) -> Vec<PendingApproval> {
         self.inner.lock().await.values().cloned().collect()
+    }
+
+    /// 列出所有待回答问题
+    pub async fn questions(&self) -> Vec<PendingApproval> {
+        self.inner
+            .lock()
+            .await
+            .values()
+            .filter(|p| p.kind == PendingKind::Question)
+            .cloned()
+            .collect()
+    }
+
+    /// 若当前恰有一个待回答问题，返回它（用于"单 pending 时用户下一条消息即答案"）。
+    /// 多个或零个 pending 时返回 None（需显式 /answer <id>）。
+    pub async fn single_question(&self) -> Option<PendingApproval> {
+        let qs = self.questions().await;
+        if qs.len() == 1 {
+            Some(qs.into_iter().next().unwrap())
+        } else {
+            None
+        }
+    }
+
+    /// 判断一条待回答问题是否已超时（timeout_secs>0 且超过）
+    pub fn is_question_expired(p: &PendingApproval, now: u64) -> bool {
+        p.kind == PendingKind::Question
+            && p.timeout_secs > 0
+            && now.saturating_sub(p.created_at) > p.timeout_secs
     }
 }
 
@@ -84,13 +182,15 @@ pub struct ApprovalContext {
     pub gate: Arc<ApprovalGate>,
     pub agent_alias: String,
     pub audit: Option<Arc<crate::audit::AuditLog>>,
+    /// ask_user 超时秒数（ADR-0022），构造自 `[runtime].ask_user_timeout_secs`
+    pub ask_user_timeout_secs: u64,
 }
 
-/// 是否交互式频道（能等待用户 /ok /deny）
+/// 是否交互式频道（能等待用户 /ok /deny /answer）
 pub fn is_interactive_channel(channel: &str) -> bool {
     matches!(
         channel,
-        "cli" | "qq" | "telegram" | "dingtalk" | "wechat" | "web"
+        "cli" | "qq" | "telegram" | "dingtalk" | "wechat" | "feishu" | "web"
     )
 }
 

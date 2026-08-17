@@ -20,6 +20,7 @@
 | `web_fetch` | 获取网页 | |
 | `search` | 搜索 | 需配置对应 provider 的 api_key |
 | `todo` | 规划后执行：每会话待办清单（add/list/update/done） | 自动注入 Runtime Context（ADR-0024）|
+| `ask_user` | 执行中阻塞式澄清（软暂停+续跑） | 需交互频道；非交互频道按最合理假设继续（ADR-0022）|
 | `memory_read` | 读 MEMORY.md | 内部实现，不暴露给 LLM |
 | `memory_write` | 写 MEMORY.md | 暴露给 LLM 用于自动记忆 |
 | `session_*` | 会话 sqlite 读写 | 内部实现，不暴露给 LLM |

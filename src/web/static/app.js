@@ -13,6 +13,7 @@ function llaiaApp() {
     uploaded: [],
     // todo (ADR-0024, read-only display; v1 no click-to-toggle from UI)
     todos: [],
+    questions: [],
     _todoTimer: null,
     ws: null,
     // config
@@ -71,6 +72,9 @@ function llaiaApp() {
         if (this.authed) {
           this.loadTodos();
           this._todoTimer = setInterval(() => this.loadTodos(), 5000);
+          // ask_user（ADR-0022）：只读轮询待回答问题
+          this.loadQuestions();
+          this._questionTimer = setInterval(() => this.loadQuestions(), 5000);
         }
       }
     },
@@ -80,6 +84,15 @@ function llaiaApp() {
         if (r.ok) {
           const j = await r.json();
           this.todos = j.todos || [];
+        }
+      } catch (e) { /* 非致命：UI 静默跳过 */ }
+    },
+    async loadQuestions() {
+      try {
+        const r = await this.apiFetch('/api/questions');
+        if (r.ok) {
+          const j = await r.json();
+          this.questions = j.questions || [];
         }
       } catch (e) { /* 非致命：UI 静默跳过 */ }
     },

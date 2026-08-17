@@ -330,8 +330,56 @@ impl Agent {
         channel: &str,
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<String> {
+        // ask_user 续答（ADR-0022）：若当前恰有一个 pending question，
+        // 则把本次输入当作对该问题的回答，跑一轮 continuation turn。
+        // 多 pending 时不清，需用户显式 /answer <id> 消歧。
+        if let Some(answer) = self.pending_answer_message(user_input, channel).await {
+            return self
+                .handle_message_streaming(ChatMessage::user(&answer), channel, event_tx)
+                .await;
+        }
         self.handle_message_streaming(ChatMessage::user(user_input), channel, event_tx)
             .await
+    }
+
+    /// 检测单 pending question 并把当前输入当作答案。
+    /// 返回 Some(包装后的答案文本) 时，调用方应据此跑 continuation turn；
+    /// 返回 None 表示无需续答（普通消息走原流程）。
+    ///
+    /// 若唯一 pending 已超时，则丢弃它并注入超时说明（走普通流程）。
+    async fn pending_answer_message(&mut self, user_input: &str, channel: &str) -> Option<String> {
+        use crate::agent::approval::{is_interactive_channel, ApprovalGate};
+        if !is_interactive_channel(channel) {
+            return None;
+        }
+        let q = self.approval_gate.single_question().await?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if ApprovalGate::is_question_expired(&q, now) {
+            // 超时：丢弃 pending，注入说明，交给普通流程（用户的真实消息照常到达）
+            self.approval_gate.take_question(&q.id).await;
+            let note = format!(
+                "[系统提示] 你之前向用户提出的问题（id={}）在 {} 秒内未收到回答，已按最合理假设继续。",
+                q.id, q.timeout_secs
+            );
+            self.context.push(ChatMessage::system(&note));
+            return None;
+        }
+
+        // 消费 pending，构造答案
+        self.approval_gate.take_question(&q.id).await;
+        let raw = user_input.trim();
+        let answered = match &q.choices {
+            Some(cs) => map_ask_user_choice(raw, cs),
+            None => raw.to_string(),
+        };
+        Some(format!(
+            "[用户对你刚才提出的问题给出了回答]\n问题：{}\n回答：{}",
+            q.question, answered
+        ))
     }
 
     /// 图片描述降级：消息含图片且配置了 vision_provider 时，用 vision_provider
@@ -645,6 +693,7 @@ impl Agent {
                 gate: self.approval_gate.clone(),
                 agent_alias: self.alias.clone(),
                 audit: self.audit.clone(),
+                ask_user_timeout_secs: self.config.runtime.ask_user_timeout_secs as u64,
             };
             let (tool_msgs, deferred) =
                 execute_tool_calls(&self.tools, &calls, channel, &ctx, Some(&event_tx)).await?;
@@ -690,6 +739,25 @@ impl Agent {
         let _ = event_tx.send(TurnEvent::Done).await;
         Ok(fallback.into())
     }
+}
+
+/// ask_user 结构化单选：把用户原始回答映射到选项文本。
+/// - 纯数字且落在 1..=len 范围内 → 对应选项
+/// - 与某选项（忽略大小写/首尾空格）相等 → 该选项
+/// - 否则原样返回
+fn map_ask_user_choice(raw: &str, choices: &[String]) -> String {
+    let raw = raw.trim();
+    if let Ok(n) = raw.parse::<usize>() {
+        if n >= 1 && n <= choices.len() {
+            return choices[n - 1].clone();
+        }
+    }
+    for c in choices {
+        if c.trim().eq_ignore_ascii_case(raw) {
+            return c.clone();
+        }
+    }
+    raw.to_string()
 }
 
 /// 重复工具调用警告：三级渐进式
