@@ -17,6 +17,9 @@ pub struct Context {
     /// 长期目标（/goal，ADR-0021）的注入文本：每轮 turn 起点从 goal.md 读取、
     /// 仅 active 时注入。与 todo_state 同区，不进 system 前缀（KV 缓存友好）。
     pub goal_state: Option<String>,
+    /// 环境探测（P5 E1）的注入文本：进程启动时对 main agent 探测一次、
+    /// `/env` 命令手动刷新。与 todo/goal 同区，不进 system 前缀（KV 缓存友好）。
+    pub env_state: Option<String>,
 }
 
 impl Context {
@@ -27,6 +30,7 @@ impl Context {
             summary: None,
             todo_state: None,
             goal_state: None,
+            env_state: None,
         }
     }
 
@@ -61,6 +65,13 @@ impl Context {
         if let Some(goal) = &self.goal_state {
             if !goal.is_empty() {
                 msgs.push(ChatMessage::user(goal.clone()));
+            }
+        }
+        // 环境探测（P5 E1）：本机工具链快照，让模型知道环境里有什么、避免建议不存在的工具。
+        // 启动探测一次 + /env 手动刷新；不进 system 前缀（KV 缓存友好）。
+        if let Some(env) = &self.env_state {
+            if !env.is_empty() {
+                msgs.push(ChatMessage::user(env.clone()));
             }
         }
         msgs
@@ -275,6 +286,26 @@ mod tests {
         assert!(!msgs
             .iter()
             .any(|m| m.content.as_text().contains("Goal (active)")));
+    }
+
+    #[test]
+    fn test_env_state_injected_when_set() {
+        let mut ctx = Context::new("SOUL".into());
+        ctx.push(ChatMessage::user("hi"));
+        ctx.env_state = Some("[env] python 3.13.2 · node 22.22.2".into());
+        let msgs = ctx.to_messages(&None);
+        let env_msg = msgs
+            .iter()
+            .find(|m| m.content.as_text().contains("[env] python 3.13.2"));
+        assert!(env_msg.is_some(), "env line should be injected");
+    }
+
+    #[test]
+    fn test_env_state_skipped_when_none() {
+        let mut ctx = Context::new("SOUL".into());
+        ctx.env_state = None;
+        let msgs = ctx.to_messages(&None);
+        assert!(!msgs.iter().any(|m| m.content.as_text().contains("[env]")));
     }
 
     #[test]

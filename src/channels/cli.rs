@@ -588,6 +588,13 @@ pub async fn build_single_agent(
     // 记录 system 前缀与 tool-instructions 标记，供热加载 skills 时重建
     agent.init_system_meta(system_prompt_base, has_tool_instructions);
 
+    // 环境探测（P5 E1）：仅 main agent 启动时探测一次，注入 Runtime Context；
+    // 子 agent（委派任务）不探测，避免启动开销。/env 命令可手动刷新。
+    if is_main {
+        let env_text = crate::envprobe::probe().await;
+        agent.context.env_state = (!env_text.is_empty()).then_some(env_text);
+    }
+
     Ok((
         Arc::new(Mutex::new(agent)),
         delegate_tool,

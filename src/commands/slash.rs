@@ -40,7 +40,7 @@ pub async fn try_handle(
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -359,6 +359,20 @@ tools: {:?}
                 Ok(()) => Ok(SlashOutcome::Handled("[goal cancelled]".into())),
                 Err(e) => Ok(SlashOutcome::Handled(format!("[goal-cancel failed: {}]", e))),
             }
+        }
+        "/env" => {
+            // 手动刷新环境探测（P5 E1）：重探本机工具链并更新注入文本。
+            let env_text = crate::envprobe::probe().await;
+            agent.context.env_state = (!env_text.is_empty()).then_some(env_text);
+            let cur = agent
+                .context
+                .env_state
+                .clone()
+                .unwrap_or_else(|| "[env] (none detected)".into());
+            Ok(SlashOutcome::Handled(format!(
+                "[env refreshed] {}",
+                cur
+            )))
         }
         "/delegate-list" => {
             match &registry {
