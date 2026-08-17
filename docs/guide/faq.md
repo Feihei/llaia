@@ -35,7 +35,7 @@
 
 ## 我的数据都在哪？
 
-默认 `~/.llaia/`：`config.toml`、`.env`、`cron.toml`、`mcp.toml`、`logs/`、`skills/`、`workspace/`（含 SOUL/USER/MEMORY、uploads、subagent、sessions.db）。用 `--config-dir` 可整体换地方。
+默认 `~/.llaia/`：`config.toml`、`.env`、`cron.toml`、`mcp.toml`、`logs/`、`skills/`、`workspace/`（含 SOUL/USER/MEMORY、goal.md、uploads、subagent、sessions.db）。用 `--config-dir` 可整体换地方。
 
 ## 怎么备份 / 回滚记忆？
 

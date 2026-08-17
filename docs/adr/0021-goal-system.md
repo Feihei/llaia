@@ -1,8 +1,23 @@
 # ADR-0021: 长期目标系统（/goal）
 
-- 状态：提议（P5 实施）
+- 状态：已采纳（文件方案，见「修订 2026-08-17」节）
 - 日期：2026-08-14
 - 关联：P5 目标系统；参考 zeroclaw、hermes、nanobot
+
+## 修订（2026-08-17）：持久化改为 `goal.md` 文件，不进 session schema
+
+P5-7 实施前复核，将原先「决策 #2：sessions 表加 `metadata` 列」整体推翻，改为**文件持久化**。理由：
+
+1. **语义**：长期目标是跨多轮持续推进的同一意图，本就跨 session；而 llaia 的 `sessions` 一行 = 一场对话（[`src/memory/sqlite.rs`](../src/memory/sqlite.rs)）。把跨会话意图绑在单场会话 metadata 上语义拧，新开会话也不会再注入。
+2. **零迁移 / 零回滚风险**：虽 `ALTER TABLE sessions ADD COLUMN metadata TEXT` 本身非破坏、向后兼容，但为低频功能引入 schema 仍不必要；文件方案彻底不碰 `sessions`。
+3. **更干净**：goal 根本不进消息历史，省 token、无需"压缩时永留"的特殊处理；每轮直接从文件重新注入，永远新鲜。
+4. **一致**：`<config_dir>/workspace/goal.md`（默认 `~/.llaia/workspace/goal.md`）与 SOUL.md/USER.md/MEMORY.md/sessions.db 同处 agent 家目录；该路径对 `file_write`/`file_edit` 不可见（`config_dir` agent 工具不可访问，[`src/agent/mod.rs`](../src/agent/mod.rs)），由专用 `/goal` 命令 + 专用 `goal` 工具读写，不蹭通用文件工具。
+
+**新决策（取代原决策 #2）**：
+- 单活跃 goal，持久化于 `<config_dir>/workspace/goal.md`（YAML frontmatter：`status`/`created_at`/`updated_at` + 正文 `# Goal` 目标与 `## Progress` agent 维护进度）。
+- 不新增 `sessions` 任何列；原决策 #2 引用的「压缩时永留」随之作废（goal 不入历史）。
+- 原决策 #3（Runtime Context 注入）、#5（slash 命令）、#6（双轨完成）、#7（WebUI 可视化）不变。
+- 难度从 ★★☆ 降为 ★☆☆。
 
 ## 背景
 

@@ -44,7 +44,7 @@
 4. **规划后执行 todo**（[ADR-0024](adr/0024-planning-todo.md)）— ✅ 已交付（单一 `todo` 工具 + 每会话落盘 + Runtime Context 注入 + WebUI 只读面板）
 5. **ask_user**（[ADR-0022](adr/0022-ask-user-suspend-resume.md)）— ✅ 已交付（ask_user 工具 + ApprovalGate 复用 + 单 pending 续答 + /answer /cancel + WebUI 只读面板）
 6. **skill 自管**（[ADR-0027](adr/0027-skill-authoring.md)）— ✅ 已交付（skill_create/skill_edit 工具 + 内置 skill-authoring 元 skill + 路径安全 + frontmatter 长度约束）
-7. **/goal 长期目标**（[ADR-0021](adr/0021-goal-system.md)）— 最后：唯一需改 `sessions` schema（加 `metadata` 列），迁移最不好回滚
+7. **/goal 长期目标**（[ADR-0021](adr/0021-goal-system.md)）— 文件方案（`<config_dir>/workspace/goal.md`，**不**改 sessions schema）；难度 ★☆☆，无迁移风险
 
 > 注：WebUI 增强、敏感信息存储、环境探测、TTS、自然对话 MCP 等条目尚未建 ADR/plan，不属于可开工队列，待补 ADR 后再进序列。
 
@@ -85,9 +85,10 @@
 ### 目标系统
 
 - [ ] `/goal` 长期目标（跨多轮持续推进的同一目标，区别于 cron 的"定时触发一次"），参考 zeroclaw、hermes、**nanobot**
-  - nanobot 做法：`/goal` 把目标写进 session metadata（`{status:"active", objective, ui_summary}`），激活后在 Runtime Context 注入目标文本，且**该 turn 豁免 LLM wall-clock 超时**（长任务不被掐断）；WebUI 通过 WS `goal_state` 事件展示进度
-  - **方向已确认**：单活跃 goal + session 持久化；落地要点：持久化进 session metadata（sqlite 落盘、压缩时永留），配套 `/goal` 设目标、`/goal-list` 查看、`/goal-cancel` 取消；进度可视化（WebUI 时间线 + CLI 状态行）
-  - 详见 [plans/2026-08-14-goal.md](plans/2026-08-14-goal.md) / [ADR-0021](adr/0021-goal-system.md)（必要性：**中** / 难度：★★☆）
+  - nanobot 做法：`/goal` 把目标写进 session metadata（`{status:"active", objective, ui_summary}`），激活后在 Runtime Context 注入目标文本；WebUI 通过 WS `goal_state` 事件展示进度（其"长目标 turn 豁免超时"经验证对 llaia 不适用，已作废，见 ADR-0021 决策 #4）
+  - **方向已确认（2026-08-17 修订）**：单活跃 goal，但**持久化改为文件** `<config_dir>/workspace/goal.md`（默认 `~/.llaia/workspace/goal.md`，与 SOUL/USER/MEMORY 同处 agent 家目录），**不进 session schema**。理由：长期目标本就跨 session、不该绑单场会话；文件方案零迁移、goal 不进消息历史故天然无需压缩保留
+  - 落地要点：frontmatter（status/created_at/updated_at）+ 正文（`# Goal` + `## Progress`），每轮注入 Runtime Context；配套 `/goal` 设目标、`/goal-list` 查看、`/goal-done` 收尾、`/goal-cancel` 取消；专用 `goal` 工具供 agent 自维护 `## Progress` / 内部标记完成；进度可视化（WebUI 只读面板 + CLI 状态行）
+  - 详见 [plans/2026-08-14-goal.md](plans/2026-08-14-goal.md) / [ADR-0021](adr/0021-goal-system.md)（必要性：**中** / 难度：★☆☆）
 
 ### 任务编排与交互
 
