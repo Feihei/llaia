@@ -70,6 +70,16 @@
           </div>
         </template>
       </div>
+      <!-- 长期目标（ADR-0021）：goal.md 状态只读展示 -->
+      <div class="todo-panel" x-show="goal" style="border-left-color:#6c9eff;">
+        <div class="todo-head" style="color:#6c9eff;">&#x276F; GOAL <span class="todo-count" x-text="goal ? goal.status : ''"></span></div>
+        <template x-if="goal">
+          <div>
+            <div class="todo-item"><span class="todo-mark active">◎</span><span class="todo-task" x-text="goal.objective"></span></div>
+            <div class="todo-item" x-show="goal.progress"><span class="todo-mark note">≡</span><span class="todo-task todo-progress" x-text="goal.progress"></span></div>
+          </div>
+        </template>
+      </div>
     </div>
 
     <div id="config-pane" class="pane" :class="{active: tab==='config'}">

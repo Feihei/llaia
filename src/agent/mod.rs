@@ -490,6 +490,11 @@ impl Agent {
             Some(todo_text)
         };
 
+        // 长期目标（ADR-0021）：每轮从 agent 家目录 goal.md 重新读取，仅 active 注入。
+        // 路径用 self.workspace（家目录，固定不随 /move 变化），与 SOUL/USER/MEMORY 同处。
+        let goal_line = crate::goal::read_active_goal_line(&self.workspace);
+        self.context.goal_state = goal_line;
+
         // 拿 provider snapshot：整个 turn 用这个 snapshot，reload 不影响进行中的 turn
         let provider = match self.provider_snapshot().await {
             Some(p) => p,

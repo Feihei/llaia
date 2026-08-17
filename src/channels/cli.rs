@@ -473,6 +473,10 @@ pub async fn build_single_agent(
             config_dir.to_path_buf(),
             workspace.clone(),
         )));
+        // 长期目标工具（ADR-0021）：仅 main agent 注册，落盘到 agent 家目录 goal.md。
+        all_tools.push(Arc::new(crate::tools::goal::GoalTool::new(
+            workspace.clone(),
+        )));
     }
     // MCP 工具（共享 registry，受下方 denied_tools 过滤）
     all_tools.extend(mcp_tools);

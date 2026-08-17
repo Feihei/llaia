@@ -171,6 +171,33 @@ agent 通过 `skill_create` / `skill_edit` 工具直接写/改 SKILL.md（skill 
 
 ---
 
+### ✅ P5-7 长期目标 /goal（[ADR-0021](adr/0021-goal-system.md) 文件方案修订）
+
+把跨 session 持续推进的「长期目标」持久化为 `goal.md` 文件（**不进 `sessions` schema**，零迁移），每轮从文件重新注入 Runtime Context。
+
+**设计取舍（ADR-0021 修订 2026-08-17）**
+- 原方案「单活跃 goal 存 session metadata」被推翻：goal 是跨会话语义，绑单场会话既名实不符又需改 schema。改文件方案后，**零 schema、零迁移、零回滚风险**，省 token（不进会话历史）、人可读可手改可 git 跟踪。
+- 落盘位置：`<config_dir>/workspace/goal.md`（默认 `~/.llaia/workspace/goal.md`），与 SOUL/USER/MEMORY 同处 agent 家目录；对 `file_write` 等工具不可见（家目录不进工具作用域），由专用 `/goal` 命令 + `goal` 工具管理。
+- 仅 v1 workspace（用户级）范围；用户级全局 goal 留作以后扩展。
+
+**新增**
+- `src/goal/mod.rs`：`GoalStatus`(active/done/cancelled) / `GoalState`，`goal.md` 读写与解析（frontmatter + `# Goal` / `## Progress` 正文拆分，`status` 不可识别则整体视为无目标）。函数：`read_goal` / `read_active_goal_line` / `set_goal` / `update_status` / `update_progress` / `goal_runtime_lines`（仅 active 返回 `Goal (active): <objective> / Summary: <progress>`）。原子写（临时文件 + rename）。
+- `src/tools/goal.rs`：`GoalTool`（`name="goal"`），动作 `done` / `cancel` / `progress <text>` / `set <text>`；供 agent 在执行中回写进度、判定达成后标记 done（ADR-0021 决策 #6 路径①）。`requires_confirm = false`。
+- `src/commands/slash.rs`：`/goal <text>`（设定/重置，置 active）、`/goal-list`（只读展示状态+进度）、`/goal-done`、`/goal-cancel`；`/help` 同步。
+- `src/web/mod.rs` + 前端：`GET /api/goal`（只读展示 goal.md 状态，无目标返回 `{goal:null}`）+ WebUI `GOAL` 只读面板（5s 轮询，复用 todo 面板样式，active 蓝）。
+
+**修改**
+- `src/agent/context.rs`：`Context` 新增 `goal_state: Option<String>`，`to_messages` 尾部（status_bar 之后、todo 之后）注入 active goal。
+- `src/agent/mod.rs` `handle_message_streaming`：每轮 turn 起点从 `self.workspace`（家目录）`read_active_goal_line` 现读现注。
+- `src/channels/cli.rs` `build_single_agent`：仅 main agent 注册 `GoalTool`（落盘需家目录）。
+- `src/lib.rs`：新增 `pub mod goal;`。
+- 文档：`docs/plan.md` 标记 P5-7 ✅；`docs/adr/0021`、`docs/plans/2026-08-14-goal.md`、`docs/guide/faq.md` 已在设计阶段同步修订（文件方案）。
+
+**验证**
+- `cargo fmt --all --check` / `cargo clippy --lib --all-targets` / `cargo test --lib`（380 项，含 goal 解析/读写/状态切换/roundtrip 单测、Context 注入单测、工具 action 单测）全绿；`cargo build` 通过。
+
+---
+
 ## v0.2.1 (2026-08-14)
 
 **Patch release** — stability and WebUI consistency fixes accumulated since v0.2.0. No breaking changes.

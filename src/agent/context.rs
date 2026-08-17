@@ -14,6 +14,9 @@ pub struct Context {
     /// 规划后执行（ADR-0024）的当前 todo 清单文本，每轮由 agent 在 turn 起点写入；
     /// 作为 Runtime Context 追加到尾部（与 status_bar 同区，不进 system 前缀，KV 缓存友好）。
     pub todo_state: Option<String>,
+    /// 长期目标（/goal，ADR-0021）的注入文本：每轮 turn 起点从 goal.md 读取、
+    /// 仅 active 时注入。与 todo_state 同区，不进 system 前缀（KV 缓存友好）。
+    pub goal_state: Option<String>,
 }
 
 impl Context {
@@ -23,6 +26,7 @@ impl Context {
             history: Vec::new(),
             summary: None,
             todo_state: None,
+            goal_state: None,
         }
     }
 
@@ -50,6 +54,13 @@ impl Context {
         if let Some(todo) = &self.todo_state {
             if !todo.is_empty() {
                 msgs.push(ChatMessage::user(todo.clone()));
+            }
+        }
+        // 长期目标（ADR-0021）：active 时注入，让模型每轮都知道"在朝哪个大目标推进"。
+        // 不进 system 前缀，逐轮重新从文件读取（KV 缓存友好 + 省 token，不进历史）。
+        if let Some(goal) = &self.goal_state {
+            if !goal.is_empty() {
+                msgs.push(ChatMessage::user(goal.clone()));
             }
         }
         msgs
@@ -241,6 +252,29 @@ mod tests {
         assert!(last.content.as_text().contains("Asia/Shanghai"));
         // 状态栏只在 to_messages 里现算，不落进 history
         assert_eq!(ctx.history.len(), 1);
+    }
+
+    #[test]
+    fn test_goal_state_injected_when_set() {
+        let mut ctx = Context::new("SOUL".into());
+        ctx.push(ChatMessage::user("hi"));
+        ctx.goal_state = Some("Goal (active): ship P5 / Summary: in progress".into());
+        let msgs = ctx.to_messages(&None);
+        // 末尾两项应为 todo/goal 注入 + 状态栏；goal 在状态栏之前
+        let goal_msg = msgs
+            .iter()
+            .find(|m| m.content.as_text().contains("Goal (active): ship P5"));
+        assert!(goal_msg.is_some(), "goal line should be injected");
+    }
+
+    #[test]
+    fn test_goal_state_skipped_when_none() {
+        let mut ctx = Context::new("SOUL".into());
+        ctx.goal_state = None;
+        let msgs = ctx.to_messages(&None);
+        assert!(!msgs
+            .iter()
+            .any(|m| m.content.as_text().contains("Goal (active)")));
     }
 
     #[test]

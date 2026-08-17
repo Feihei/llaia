@@ -1408,6 +1408,36 @@ pub async fn get_questions(
         .into_response()
 }
 
+/// GET /api/goal → 当前长期目标（只读展示，ADR-0021）。
+/// 文件不存在或无法解析时返回 `{ "goal": null }`。
+pub async fn get_goal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    // goal.md 在 agent 家目录（workspace），与 WebUI 的 workspace_root 不同。
+    let agent = state.registry.main.lock().await;
+    let goal = crate::goal::read_goal(&agent.workspace).map(|g| {
+        serde_json::json!({
+            "status": g.status.as_str(),
+            "objective": g.objective,
+            "progress": g.progress,
+            "created_at": g.created_at,
+            "updated_at": g.updated_at,
+        })
+    });
+    let json = serde_json::json!({ "goal": goal });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
 /// 构建系统级 Web 路由（不含 WS）。
 /// 返回 `Router<AppState>`，由调用方合并 WS 路由后统一 `with_state`。
 pub fn build_system_routes() -> axum::Router<AppState> {
@@ -1452,6 +1482,8 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/todos", axum::routing::get(get_todos))
         // ask_user（ADR-0022）：只读展示当前待回答问题
         .route("/api/questions", axum::routing::get(get_questions))
+        // 长期目标（ADR-0021）：只读展示 goal.md 状态
+        .route("/api/goal", axum::routing::get(get_goal))
         .route("/api/skills/:name", axum::routing::delete(delete_skill))
         .route(
             "/api/skills/:name/active",
