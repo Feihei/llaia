@@ -6,6 +6,21 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 
+/// P5 S1：启动时扫描 config.toml 明文敏感字段并 log warn（不自动迁移）。
+/// 读原始 TOML（内存 config 已被 expand_paths 展开为明文，不能用作判断）。
+fn warn_plaintext_secrets(config_dir: &Path) {
+    let config_path = config_dir.join("config.toml");
+    match crate::config::secrets::count_plaintext_secrets(&config_path) {
+        Ok(n) if n > 0 => {
+            tracing::warn!(
+                count = n,
+                "plaintext secrets found in config.toml; run /migrate-secrets or save via WebUI to move them into .env"
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Default config template for `init`: provider/agent placeholders commented out, all channels off by default.
 /// Paths inside the template use ~/.llaia as a placeholder; Config::load expands ~ at load time.
 const CONFIG_TEMPLATE: &str = r#"# LLAIA configuration file
@@ -269,6 +284,7 @@ fn write_file_if_needed(path: &Path, content: &str, force: bool) -> Result<()> {
 /// 终端交互模式：只启动 CliChannel，不连 QQ 等后台频道
 pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
     let config = load_config_or_init(config_dir)?;
+    warn_plaintext_secrets(config_dir);
 
     // 目录结构迁移
     if crate::migrate::migrate_if_needed(config_dir)? {
@@ -305,6 +321,7 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
 /// 守护进程模式：启动所有非 CLI 的后台频道（QQ、未来 WebUI 等），不启动终端交互
 pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     let config = load_config_or_init(config_dir)?;
+    warn_plaintext_secrets(config_dir);
 
     // 目录结构迁移
     if crate::migrate::migrate_if_needed(config_dir)? {

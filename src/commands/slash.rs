@@ -40,7 +40,7 @@ pub async fn try_handle(
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -373,6 +373,25 @@ tools: {:?}
                 "[env refreshed] {}",
                 cur
             )))
+        }
+        "/migrate-secrets" => {
+            // 敏感信息 .env 自动化（P5 S1）：把 config.toml 里的明文敏感字段
+            // 迁移到 .env（config 改为 ${VAR} 引用），保留注释。
+            let config_path = agent.config_dir.join("config.toml");
+            match crate::config::secrets::migrate_config_secrets(&config_path) {
+                Ok(0) => Ok(SlashOutcome::Handled(
+                    "[no plaintext secrets found] config.toml already uses ${VAR} refs".into(),
+                )),
+                Ok(n) => Ok(SlashOutcome::Handled(format!(
+                    "[migrated {} secret(s) to {}] config.toml now uses ${{VAR}} references; restart serve for env expansion",
+                    n,
+                    agent.config_dir.join(".env").display()
+                ))),
+                Err(e) => Ok(SlashOutcome::Handled(format!(
+                    "[migrate-secrets failed: {}]",
+                    e
+                ))),
+            }
         }
         "/delegate-list" => {
             match &registry {

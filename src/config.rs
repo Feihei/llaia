@@ -5,6 +5,9 @@ use std::path::PathBuf;
 
 use crate::provider::compat::CompatConfig;
 
+/// 敏感信息 .env 自动化（P5 S1）：收集明文敏感字段、写入 .env、替换为 `${VAR}` 引用。
+pub mod secrets;
+
 /// 顶层配置。对应 ~/.llaia/config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

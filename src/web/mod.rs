@@ -286,8 +286,17 @@ pub fn mask_sensitive(mut config: Config) -> Config {
             p.api_key = MASK.into();
         }
     }
-    if !config.channels.qq.app_secret.is_empty() {
-        config.channels.qq.app_secret = MASK.into();
+    for (ch, v) in [
+        (&mut config.channels.qq.app_secret, true),
+        (&mut config.channels.telegram.bot_token, true),
+        (&mut config.channels.dingtalk.client_secret, true),
+        (&mut config.channels.mail.imap_pass, true),
+        (&mut config.channels.mail.smtp_pass, true),
+        (&mut config.channels.feishu.app_secret, true),
+    ] {
+        if v && !ch.is_empty() {
+            *ch = MASK.into();
+        }
     }
     if !config.webui.token.is_empty() {
         config.webui.token = MASK.into();
@@ -314,9 +323,28 @@ pub fn merge_masked(old: &Config, new: &Config) -> Config {
             }
         }
     }
-    if merged.channels.qq.app_secret == MASK {
-        merged.channels.qq.app_secret = old.channels.qq.app_secret.clone();
+    macro_rules! keep {
+        ($dst:expr, $src:expr) => {
+            if $dst == MASK {
+                $dst = $src.clone();
+            }
+        };
     }
+    keep!(merged.channels.qq.app_secret, old.channels.qq.app_secret);
+    keep!(
+        merged.channels.telegram.bot_token,
+        old.channels.telegram.bot_token
+    );
+    keep!(
+        merged.channels.dingtalk.client_secret,
+        old.channels.dingtalk.client_secret
+    );
+    keep!(merged.channels.mail.imap_pass, old.channels.mail.imap_pass);
+    keep!(merged.channels.mail.smtp_pass, old.channels.mail.smtp_pass);
+    keep!(
+        merged.channels.feishu.app_secret,
+        old.channels.feishu.app_secret
+    );
     if merged.webui.token == MASK {
         merged.webui.token = old.webui.token.clone();
     }
@@ -367,7 +395,29 @@ pub async fn put_config(
         }
     };
     let old = state.config.read().await.clone();
-    let merged = merge_masked(&old, &new_config);
+    let mut merged = merge_masked(&old, &new_config);
+
+    // P5 S1 敏感信息 .env 自动化：明文敏感字段先写入 .env（成功才替换为 ${VAR} 引用，
+    // 失败保留明文 + warn 降级，保证配置保存不因安全改造而失败）。
+    let secrets = crate::config::secrets::collect_plaintext_secrets(&merged);
+    if !secrets.is_empty() {
+        let env_path = state.config_path.parent().map(|p| p.join(".env"));
+        if let Some(env_path) = env_path {
+            let updates: Vec<(String, String)> = secrets
+                .iter()
+                .map(|e| (e.var.clone(), e.value.clone()))
+                .collect();
+            match crate::config::secrets::upsert_env(&env_path, &updates) {
+                Ok(()) => {
+                    crate::config::secrets::apply_refs(&mut merged, &secrets);
+                    tracing::info!(count = secrets.len(), "plaintext secrets moved to .env");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, ".env write failed; secrets kept inline in config.toml");
+                }
+            }
+        }
+    }
 
     // main agent 不可删除：[agent.main] 是系统必需 section
     if !merged.agent.contains_key("main") {
@@ -398,8 +448,12 @@ pub async fn put_config(
         },
     };
 
-    // 先尝试构建新 provider：失败则不写盘、不更新内存（回滚到旧 config）
-    if let Err(e) = build_provider_from_config(&merged) {
+    // 先尝试构建新 provider：失败则不写盘、不更新内存（回滚到旧 config）。
+    // 注意：写盘保留 ${VAR} 引用，但内存态须展开为明文（build_provider 不认 ${VAR}；
+    // 下次启动 Config::load → expand_paths 再展开，行为一致）。
+    let mut runtime_config = merged.clone();
+    crate::config::secrets::expand_config_secrets(&mut runtime_config);
+    if let Err(e) = build_provider_from_config(&runtime_config) {
         return json_err(
             StatusCode::BAD_REQUEST,
             &format!("provider 构建失败，配置未保存：{}", e),
@@ -409,16 +463,17 @@ pub async fn put_config(
     if let Err(e) = std::fs::write(&state.config_path, &toml_str) {
         return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e));
     }
-    *state.config.write().await = merged.clone();
+    *state.config.write().await = runtime_config.clone();
 
     // provider 热加载（失败仅 warn，不阻断其它子系统的热加载）
-    if let Err(e) = hot_reload_providers(&state, &merged).await {
+    if let Err(e) = hot_reload_providers(&state, &runtime_config).await {
         tracing::warn!(error = %e, "hot_reload_providers failed (config saved)");
     }
 
     // 全量热加载：runtime / skills / mcp / cron / sub-agents（P4-f 轻量版）
+    // 用展开后的 runtime_config（子 agent 构建同样需要真实 api_key）
     let config_dir = state.config_path.parent().unwrap_or_else(|| Path::new("."));
-    let notes = reload_all(&state, &merged, config_dir).await;
+    let notes = reload_all(&state, &runtime_config, config_dir).await;
     axum::Json(serde_json::json!({
         "ok": true,
         "note": format!("config saved; {}", notes.join("; "))
