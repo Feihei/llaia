@@ -36,6 +36,25 @@
 
 ---
 
+### ✅ P5-2 系统提示词 MEMORY 上限（[ADR-0025](adr/0025-system-prompt-memory-budget.md)）
+
+MEMORY.md **全量加载**进 system prompt（不懒加载），但受可配置 token 预算约束；超限时最旧溢出段经 `compact_provider` 摘要压缩（无则硬截断保留近期），SOUL/USER 永留全量、不计入预算。
+
+**新增**
+- `src/memory/trim.rs`：`trim_memory_to_budget(memory, budget, compact_provider)` — 复用 `chars()/4` token 启发式；MEMORY 按空行分段为条目，从末尾贪心累加近期条目，旧段经 `compact_provider` 摘要成前缀（摘要失败降级为丢弃），无 `compact_provider` 时硬截断保留末尾预算内条目；单条巨长条目自行截断。结果按 `(内容 hash, 预算, 是否含 provider)` 缓存，避免每轮重摘要导致 system prompt 抖动。
+- `src/config.rs`：`[agent.<alias>].memory_token_budget`（默认 4000，单位复用 `chars()/4` 启发式），`AgentConfig` 新增字段。
+- `src/channels/cli.rs` `build_single_agent`：拼 `system_prompt_base` 前对 MEMORY 套用预算裁剪；裁剪结果经 `init_system_meta` 缓存，全频道共享且 skills 热重载稳定。
+- `src/commands/slash.rs`：新增 `/memory-compact` 斜杠命令，复用 `src/memory/markdown.rs::compress_memory` 把 MEMORY.md **持久化**压缩（写前备份到 `workspace/backups/`，不丢原文于 sqlite）。
+
+**验证**
+- 8 个单元测试覆盖：不超限原样返回、超限无 provider 硬截断、超限有 provider 摘要、单条巨长条目截断、缓存稳定性。
+- `cargo clippy --lib --all-targets` 与 `cargo test --lib`（trim/config 相关）通过。
+- 注：`provider/openai_compat` 的 mockito 测试在沙箱内无法绑定本地端口，属环境问题，与本次改动无关。
+
+**影响面**：仅 system prompt 拼装路径；SOUL/USER 永留全量（人格/画像不削减）。
+
+---
+
 ## v0.2.1 (2026-08-14)
 
 **Patch release** — stability and WebUI consistency fixes accumulated since v0.2.0. No breaking changes.

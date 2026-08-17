@@ -49,6 +49,8 @@ pub trait Channel: Send + Sync + 'static {
 
 MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消息从内存移除但 sqlite 留底。
 
+> **系统提示词 MEMORY 上限（ADR-0025）**：`build_single_agent` 把 MEMORY.md **全量**塞进 `system_prompt_base`，但在拼装前经 `src/memory/trim.rs::trim_memory_to_budget` 按 `[agent.<alias>].memory_token_budget`（默认 4000，chars/4 启发式）裁剪——超限时最旧溢出段交给 `compact_provider` 摘要、无则硬截断保留近期；SOUL/USER **永留全量、不计入预算**。裁剪结果由 `init_system_meta` 缓存，全频道共享且 skill 热重载稳定。主动持久化压缩用斜杠命令 `/memory-compact`（写前备份到 `workspace/backups/`）。
+
 > **两个 `workspace` 的区别**：agent 家目录（SOUL/USER/MEMORY/sessions.db 所在，**固定不变**，位于 `config_dir/workspace/`）与文件/终端工具的实时作用域 `workspace_root`（可被 `/move` 切换）。`migrate.rs` 在 v0.2 后将旧版散落在 `~/.llaia/` 根的文件自动迁入 `workspace/`（写 `.migrated_v0.2` 标记，幂等）。
 
 详见 [docs/adr/0003-persistence-model.md](docs/adr/0003-persistence-model.md)。

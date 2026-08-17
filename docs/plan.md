@@ -30,7 +30,7 @@
 
 ## P5 — 未来计划（下一步）
 
-**状态**：🚧 进行中（P5-1 已交付，其余按推荐顺序推进）
+**状态**：🚧 进行中（P5-1、P5-2 已交付，其余按推荐顺序推进）
 
 > 来自 `docs/issues/` 反馈与扩展评估的候选池。下方条目按主题分组，并标注**必要性**（高/中/低，不做会持续踩坑或已影响正确性→高；明显改善体验→中；锦上添花→低）与**难度**（★☆☆ 半天内单点 / ★★☆ 一到数天跨模块 / ★★★ 结构性改造，动手前先出 ADR），便于排期。
 
@@ -39,7 +39,7 @@
 按「是否动 agent 主循环 / 是否改 sqlite schema」分层：先打低风险、自包含的特性，把最难回滚的留到最后。
 
 1. **provider 接入优化**（[ADR-0026](adr/0026-provider-compat.md)）— ✅ 已交付（Compat 层 + 自动探测 + 配置覆盖 + 单测）
-2. **系统提示词优化 / MEMORY 预算**（[ADR-0025](adr/0025-system-prompt-memory-budget.md)）— 单点插入 `system_prompt_base`，每轮省 token
+2. **系统提示词优化 / MEMORY 预算**（[ADR-0025](adr/0025-system-prompt-memory-budget.md)）— ✅ 已交付（trim + 配置预算 + 缓存 + /memory-compact）
 3. **统一搜索 search**（[ADR-0023](adr/0023-unified-search.md)）— 新增工具，趟通「条件注册新工具」模式
 4. **规划后执行 todo**（[ADR-0024](adr/0024-planning-todo.md)）— 新增工具，复用 #3 模式
 5. **ask_user**（[ADR-0022](adr/0022-ask-user-suspend-resume.md)）— 首个动 turn 循环的特性（复用 ApprovalGate）
@@ -55,7 +55,7 @@
   - **借鉴（pi `packages/ai`）**：`compat` 标志集 + `detectCompat()` 按 base_url 启发式探测 + 显式覆盖优先；llama.cpp 作为 extension provider 完整示例（context window 从 `/models` 探测、vision 探测、`maxTokens` 字段、`compat` 固定）。
   - **方向已确认**：给 `OpenAiCompatibleProvider` 加精简 `Compat` 结构（**不做** pi 的 25 开关全集，只覆盖 llaia 实际跑的本地端点子集）；**按 base_url 自动探测**（含 `ollama`→ollama 适配、`llama`→llamacpp 适配）+ `[provider.<id>].compat.*` 显式覆盖；优先覆盖 Ollama/Llama.cpp 高频差异（tool-call 格式、`reasoning→text` 降级、`max_completion_tokens`、streaming usage 落位、finish_reason 推断）。非破坏性（默认 `Compat::default()` 即当前 bare 行为）。
   - 详见 [plans/2026-08-14-provider-compat.md](plans/2026-08-14-provider-compat.md) / [ADR-0026](adr/0026-provider-compat.md)（必要性：**中** / 难度：★★☆）
-- [ ] 系统提示词优化：MEMORY 限定 token 预算并全量加载（hermes 式），SOUL/USER 永留全量（必要性：**中** / 难度：★☆☆）
+- [x] 系统提示词优化：MEMORY 限定 token 预算并全量加载（hermes 式），SOUL/USER 永留全量（必要性：**中** / 难度：★☆☆）— ✅ 已交付
   - **现状（基座 `src/channels/cli.rs:474`）**：`# SOUL` + `# USER` + `# MEMORY` + `# WORKSPACE` 全量塞入 system prompt；仅此处拼装一次，存入 `agent.context.system`，所有频道共享；`init_system_meta` 缓存 `system_prompt_base` 供 skill 热重载重建。token 估算统一用 `chars()/4`（`src/agent/context.rs:48`）。
   - **决策（对齐 hermes，区别于 pi）**：MEMORY.md **全量加载**（不懒加载——llaia 是个人助理记忆，非 coding agent 的项目开发史），但设**可配置 token 预算**（默认 ~4000，复用 `chars()/4`）；超限时把最旧溢出段用 `compact_provider` **摘要压缩**、保留近期条目原文（无 compact_provider 时降级为硬截断保留近期）；SOUL/USER 仍永留全量（人格/画像，体积极小）。削减逻辑插在 `system_prompt_base` 拼装处，全频道自动生效；不引入 pi 式 tools 懒加载（llaia 工具集已精简）。
   - 详见 [plans/2026-08-14-memory-budget.md](plans/2026-08-14-memory-budget.md) / [ADR-0025](adr/0025-system-prompt-memory-budget.md)（必要性：**中** / 难度：★☆☆）

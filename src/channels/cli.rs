@@ -6,6 +6,7 @@ use crate::channels::Channel;
 use crate::commands::slash::{try_handle, SlashOutcome};
 use crate::config::{AgentConfig, Config};
 use crate::memory::sqlite::SessionStore;
+use crate::memory::trim::trim_memory_to_budget;
 use crate::memory::{ensure_template, load_md, MEMORY_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE};
 use crate::provider::Provider;
 use crate::tool_call::build_tool_instructions;
@@ -351,14 +352,14 @@ pub async fn build_single_agent(
 
     let soul = load_md(&soul_path).await?;
     let user = load_md(&user_path).await?;
-    let memory = load_md(&memory_path).await?;
+    let raw_memory = load_md(&memory_path).await?;
     tracing::info!(
         agent = alias,
         workspace = %workspace.display(),
         soul_path = %soul_path.display(),
         soul_len = soul.len(),
         user_len = user.len(),
-        memory_len = memory.len(),
+        memory_len = raw_memory.len(),
         "loaded soul/user/memory"
     );
 
@@ -413,6 +414,21 @@ pub async fn build_single_agent(
         },
         _ => None,
     };
+
+    // MEMORY 预算裁剪（ADR-0025）：超限时旧段经 compact_provider 摘要、或硬截断保留近期。
+    // 裁剪结果进入 system_prompt_base 与 init_system_meta 缓存，全频道共享且热重载稳定。
+    let memory = trim_memory_to_budget(
+        &raw_memory,
+        agent_cfg.memory_token_budget,
+        compact_provider.as_ref(),
+    )
+    .await;
+    tracing::debug!(
+        agent = alias,
+        memory_trimmed_len = memory.len(),
+        memory_token_budget = agent_cfg.memory_token_budget,
+        "trimmed MEMORY to budget"
+    );
 
     // 构建完整工具集（用新字段）
     let skills_dir = config_dir.join("skills");
@@ -636,6 +652,7 @@ pub async fn build_agent(
             denied_tools: Vec::new(),
             delegate_timeout: 120,
             fallback: Vec::new(),
+            memory_token_budget: crate::config::default_memory_token_budget(),
         }
     });
     let (main_agent, delegate_tool, cron_tool, main_workspace) = build_single_agent(

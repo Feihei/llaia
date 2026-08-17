@@ -163,6 +163,15 @@ pub struct AgentConfig {
     /// 例：fallback = ["local.small", "cloud.big"]
     #[serde(default)]
     pub fallback: Vec<String>,
+    /// MEMORY.md 注入 system prompt 的 token 预算（chars/4 启发式）。
+    /// 超限时最旧溢出段经 compact_provider 摘要压缩（无则硬截断保留近期）。
+    /// 默认 4000。SOUL/USER 永留全量、不计入此预算（见 ADR-0025）。
+    #[serde(default = "default_memory_token_budget")]
+    pub memory_token_budget: usize,
+}
+
+pub fn default_memory_token_budget() -> usize {
+    4000
 }
 
 impl AgentConfig {
@@ -753,6 +762,7 @@ impl Config {
                 denied_tools: Vec::new(),
                 delegate_timeout: default_delegate_timeout(),
                 fallback: Vec::new(),
+                memory_token_budget: default_memory_token_budget(),
             },
         );
 

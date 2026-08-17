@@ -3,6 +3,7 @@ use crate::agent::Agent;
 use crate::agent::AgentRegistry;
 use crate::config::Config;
 use crate::cron::{CronMode, CronTask};
+use crate::memory::markdown::compress_memory;
 use anyhow::Result;
 use serde_json::json;
 use std::sync::Arc;
@@ -38,7 +39,7 @@ pub async fn try_handle(
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -137,6 +138,33 @@ pub async fn try_handle(
                 "[compact failed: provider not configured]".into(),
             )),
         },
+        "/memory-compact" => {
+            // 先 compact_provider，否则主 provider；两者皆无则降级报错（ADR-0025 显式持久化压缩路径）
+            let provider = match agent.compact_provider_snapshot().await {
+                Some(p) => p,
+                None => match agent.provider_snapshot().await {
+                    Some(p) => p,
+                    None => {
+                        return Ok(SlashOutcome::Handled(
+                            "[memory-compact failed: no provider configured; set [provider.default] or runtime.compact_model first]"
+                                .into(),
+                        ))
+                    }
+                },
+            };
+            let memory_path = agent.workspace.join("MEMORY.md");
+            let backup_dir = agent.workspace.join("backups");
+            let tz = agent.timezone().await;
+            match compress_memory(&memory_path, provider.as_ref(), &backup_dir, &tz).await {
+                Ok(_) => Ok(SlashOutcome::Handled(
+                    "[memory-compact] MEMORY.md compressed and saved (backup in workspace/backups/). Restart to apply in the running session.".into(),
+                )),
+                Err(e) => Ok(SlashOutcome::Handled(format!(
+                    "[memory-compact failed: {}]",
+                    e
+                ))),
+            }
+        }
         "/stats" => {
             let tokens = agent.context.estimate_tokens();
             let threshold_tokens = (agent.context_size as f64 * agent.context_threshold) as usize;
@@ -509,6 +537,7 @@ mod tests {
                 denied_tools: vec![],
                 delegate_timeout: 120,
                 fallback: vec![],
+                memory_token_budget: crate::config::default_memory_token_budget(),
             },
         );
         config
