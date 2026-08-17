@@ -176,6 +176,24 @@
                 <div class="form-row"><label>type</label><input x-model="p.type"></div>
                 <div class="form-row"><label>base_url</label><input x-model="p.base_url" style="width:400px"></div>
                 <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
+                <!-- 模型探测（P5 W2）：向 OpenAI 兼容端点 GET /models 拉取列表，勾选后加入 Models -->
+                <div class="probe-section">
+                  <button type="button" class="inline-add" @click="probeModels(pid)" :disabled="probing===pid">
+                    <span x-text="probing===pid ? 'Probing…' : 'Probe models'"></span>
+                  </button>
+                  <span class="hint" x-show="probeMsg[pid]" x-text="probeMsg[pid]"></span>
+                  <div class="probe-models" x-show="probeModels[pid] && probeModels[pid].length">
+                    <template x-for="m in probeModels[pid]" :key="m.id">
+                      <div class="probe-model-row">
+                        <label>
+                          <input type="checkbox" :checked="probeChecked[pid] && probeChecked[pid][m.id]" @change="toggleProbeModel(pid, m.id)">
+                          <span x-text="m.id"></span>
+                        </label>
+                      </div>
+                    </template>
+                    <button type="button" class="inline-add" @click="addProbedModels(pid)">+ Add selected to models</button>
+                  </div>
+                </div>
                 <div class="compat-section">
                   <button type="button" class="collapse-toggle" @click="toggleCompat(pid)">
                     <span x-text="compatOpen[pid] ? '▾' : '▸'"></span> Compatibility

@@ -54,6 +54,11 @@ function llaiaApp() {
     skillContentMsg: '',
     // per-agent fallback draft (dropdown selection before "Add")
     fallbackDraft: {},
+    // 模型探测（P5 W2）
+    probing: null,
+    probeMsg: {},
+    probeModels: {},
+    probeChecked: {},
     // 会话历史（P5 W1）
     sessions: [],
     selectedSession: null,
@@ -440,6 +445,61 @@ function llaiaApp() {
     deleteModel(pid, alias) {
       if (!confirm('Delete model ' + pid + '.' + alias + '?')) return;
       delete this.cfg.provider[pid].model[alias];
+    },
+
+    // ---- 模型探测（P5 W2） ----
+    async probeModels(pid) {
+      const p = this.cfg.provider[pid];
+      this.probing = pid;
+      this.probeMsg[pid] = '';
+      try {
+        const r = await this.apiFetch('/api/providers/' + encodeURIComponent(pid) + '/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ base_url: p.base_url, api_key: p.api_key })
+        });
+        const j = await r.json();
+        if (j.ok) {
+          this.probeModels[pid] = j.models || [];
+          this.probeChecked[pid] = {};
+          this.probeMsg[pid] = this.probeModels[pid].length
+            ? this.probeModels[pid].length + ' model(s) found'
+            : 'Endpoint reachable but no models returned.';
+        } else {
+          this.probeModels[pid] = [];
+          this.probeMsg[pid] = 'Probe failed: ' + (j.error || r.status);
+        }
+      } catch (e) {
+        this.probeModels[pid] = [];
+        this.probeMsg[pid] = 'Probe failed: ' + e.message;
+      }
+      this.probing = null;
+    },
+    toggleProbeModel(pid, id) {
+      if (!this.probeChecked[pid]) this.probeChecked[pid] = {};
+      this.probeChecked[pid][id] = !this.probeChecked[pid][id];
+    },
+    // 生成模型 alias：取 id 尾段 sanitize，冲突时加序号
+    genModelAlias(pid, id) {
+      let base = id.split(/[/:]/).pop().toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+      if (!base) base = 'model';
+      const models = this.cfg.provider[pid].model;
+      let alias = base, n = 2;
+      while (models[alias]) { alias = base + '_' + n; n++; }
+      return alias;
+    },
+    addProbedModels(pid) {
+      const checked = this.probeChecked[pid] || {};
+      const picked = (this.probeModels[pid] || []).filter(m => checked[m.id]);
+      if (picked.length === 0) { alert('Select at least one model first.'); return; }
+      const models = this.cfg.provider[pid].model;
+      for (const m of picked) {
+        const alias = this.genModelAlias(pid, m.id);
+        models[alias] = { model: m.id, native_tool_calling: true, context_size: null };
+      }
+      this.probeModels[pid] = [];
+      this.probeChecked[pid] = {};
+      this.probeMsg[pid] = picked.length + ' model(s) added — click Save to persist.';
     },
     addAgent() {
       const alias = prompt('Enter new agent alias (e.g., coder, translator):');

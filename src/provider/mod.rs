@@ -9,6 +9,7 @@ pub mod compat;
 pub mod fallback;
 pub mod gemini;
 pub mod openai_compat;
+pub mod probe;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

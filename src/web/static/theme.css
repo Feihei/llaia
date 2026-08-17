@@ -531,3 +531,13 @@ option { background: var(--bg-input); color: var(--text); }
 #sessions-pane details summary { cursor: pointer; color: var(--cyan); font-size: 12px; }
 #sessions-pane .hint { color: var(--text-faint); font-size: 12px; margin-top: 6px; }
 #sessions-pane .err { color: var(--red); font-size: 12px; margin-top: 6px; }
+
+/* ---- 模型探测（P5 W2） ---- */
+#config-pane .probe-section { margin: 6px 0 10px; }
+#config-pane .probe-models {
+  margin: 8px 0 4px; padding: 8px 10px;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-left: 3px solid var(--cyan);
+}
+#config-pane .probe-model-row { padding: 2px 0; font-size: 13px; }
+#config-pane .probe-model-row label { display: flex; align-items: center; gap: 8px; color: var(--text); }

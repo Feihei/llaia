@@ -1598,6 +1598,52 @@ pub async fn export_session(
         .into_response()
 }
 
+// ---- P5 W2 WebUI provider 模型探测 ----
+
+/// POST /api/providers/:id/models 的请求体：可覆盖 base_url / api_key（默认用当前配置）。
+#[derive(Deserialize)]
+pub struct ProbeModelsBody {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+/// POST /api/providers/:id/models → 探测该 provider 的可用模型列表。
+/// v1 仅 OpenAI 兼容端点（GET /models）。成功 `{ok:true, models:[{id,name}]}`，
+/// 失败 `{ok:false, error}`（HTTP 200，便于前端统一渲染错误文本）。
+pub async fn probe_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<ProbeModelsBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let cfg = state.config.read().await;
+    let Some(provider) = cfg.provider.get(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "provider not found" })),
+        )
+            .into_response();
+    };
+    let base_url = body.base_url.as_deref().unwrap_or(&provider.base_url);
+    let api_key = body.api_key.as_deref().unwrap_or(&provider.api_key);
+    match crate::provider::probe::probe_openai_compatible(base_url, Some(api_key)).await {
+        Ok(models) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": true, "models": models })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// 构建系统级 Web 路由（不含 WS）。
 /// 返回 `Router<AppState>`，由调用方合并 WS 路由后统一 `with_state`。
 pub fn build_system_routes() -> axum::Router<AppState> {
@@ -1653,6 +1699,11 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route(
             "/api/sessions/:uuid/export",
             axum::routing::get(export_session),
+        )
+        // 模型探测（P5 W2）：POST /api/providers/:id/models
+        .route(
+            "/api/providers/:id/models",
+            axum::routing::post(probe_models),
         )
         .route("/api/skills/:name", axum::routing::delete(delete_skill))
         .route(
