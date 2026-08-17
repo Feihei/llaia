@@ -517,7 +517,14 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     }
     pushers.insert("web".into(), web_pusher_for_cron);
     // cli：无持久连接，不注册 pusher（channel="cli" 的任务会用 NoopPusher 丢弃结果）
-    let _cron = match crate::cron::CronHandle::start(&cron_path, registry.clone(), pushers).await {
+    let _cron = match crate::cron::CronHandle::start(
+        &cron_path,
+        registry.clone(),
+        pushers,
+        crate::time::resolve_tz(&config.runtime.timezone),
+    )
+    .await
+    {
         Ok(s) => {
             tracing::info!("CronScheduler started");
             // 注入给 WebChannel（共享槽，build_router 读取快照填 AppState）

@@ -152,8 +152,12 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
 
     pub fn latest_session(&self) -> Result<Option<(i64, String)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT id, session_uuid FROM sessions ORDER BY last_activity DESC LIMIT 1")?;
+        // 排除 cron/dream 自动会话：主对话 session 的 source 为 main/web/cli 等，
+        // 而复活的 cron 会话会把 last_activity 刷到最新，若不加过滤会把主对话路由进
+        // cron 会话（ADR-0013 会话隔离）。详见 cron 任务诊断。
+        let mut stmt = conn.prepare(
+            "SELECT id, session_uuid FROM sessions WHERE channel NOT LIKE 'cron:%' ORDER BY last_activity DESC LIMIT 1",
+        )?;
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
             Ok(Some((row.get(0)?, row.get(1)?)))

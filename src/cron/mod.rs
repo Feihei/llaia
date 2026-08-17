@@ -1,11 +1,14 @@
 pub mod dream;
 pub mod runner;
 
-use crate::agent::AgentRegistry;
+use crate::agent::{Agent, AgentRegistry};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
 /// cron.toml 根配置
@@ -121,6 +124,9 @@ pub struct CronScheduler {
     registry: Arc<AgentRegistry>,
     /// cron.toml 路径（add/update/remove 时回写）
     cron_path: std::path::PathBuf,
+    /// 调度时区：cron 表达式按此时区解释（默认 UTC → 需配置 [runtime].timezone）。
+    /// None 时退化为 UTC（保持历史行为，但会与本地时间偏差 8h，如 Asia/Shanghai）。
+    timezone: Option<Tz>,
 }
 
 impl CronScheduler {
@@ -130,6 +136,7 @@ impl CronScheduler {
         cron_path: &Path,
         registry: Arc<AgentRegistry>,
         pushers: HashMap<String, Arc<dyn ProactivePusher>>,
+        timezone: Option<Tz>,
     ) -> anyhow::Result<Self> {
         let cfg = CronConfig::load(cron_path)?;
         let scheduler = tokio_cron_scheduler::JobScheduler::new()
@@ -144,7 +151,7 @@ impl CronScheduler {
                 tracing::info!(task = %task.id, "cron task disabled, skip");
                 continue;
             }
-            let job = build_job(task, &pushers, &registry)?;
+            let job = build_job(task, &pushers, &registry, timezone)?;
             let uuid = scheduler
                 .add(job)
                 .await
@@ -170,7 +177,7 @@ impl CronScheduler {
                 idle_minutes: Some(30), // 距上次对话 ≥30 分钟才跑
             };
             tasks_map.insert(dream_task.id.clone(), dream_task.clone());
-            let job = build_job(&dream_task, &pushers, &registry)?;
+            let job = build_job(&dream_task, &pushers, &registry, timezone)?;
             let uuid = scheduler
                 .add(job)
                 .await
@@ -192,6 +199,7 @@ impl CronScheduler {
             pushers,
             registry,
             cron_path: cron_path.to_path_buf(),
+            timezone,
         })
     }
 
@@ -208,19 +216,7 @@ impl CronScheduler {
             Some(t) => t,
             None => anyhow::bail!("cron task not found: {}", task_id),
         };
-        let pusher = self.pushers.get(&task.channel).cloned();
-        let noop = Arc::new(NoopPusher) as Arc<dyn ProactivePusher>;
-        let pusher = match pusher {
-            Some(p) => p,
-            None => {
-                tracing::warn!(
-                    task = %task.id,
-                    channel = %task.channel,
-                    "no pusher for channel on manual trigger, result will be lost"
-                );
-                noop
-            }
-        };
+        let pusher = build_fanout_pusher(&self.pushers, &task.channel);
         let agent = self.registry.main.clone();
         tokio::spawn(async move {
             tracing::info!(task = %task.id, "cron task manually triggered");
@@ -239,7 +235,7 @@ impl CronScheduler {
             anyhow::bail!("cron task id already exists: {}", task.id);
         }
         if task.enabled {
-            let job = build_job(&task, &self.pushers, &self.registry)?;
+            let job = build_job(&task, &self.pushers, &self.registry, self.timezone)?;
             let uuid = self
                 .scheduler
                 .add(job)
@@ -275,7 +271,7 @@ impl CronScheduler {
         }
         // 注册新 job
         if task.enabled {
-            let job = build_job(&task, &self.pushers, &self.registry)?;
+            let job = build_job(&task, &self.pushers, &self.registry, self.timezone)?;
             let uuid = self
                 .scheduler
                 .add(job)
@@ -373,7 +369,7 @@ impl CronScheduler {
                 tracing::info!(task = %task.id, "cron task disabled, skip");
                 continue;
             }
-            let job = build_job(task, &pushers, &self.registry)?;
+            let job = build_job(task, &pushers, &self.registry, self.timezone)?;
             let uuid = self
                 .scheduler
                 .add(job)
@@ -399,7 +395,7 @@ impl CronScheduler {
                 idle_minutes: Some(30),
             };
             tasks_map.insert(dream_task.id.clone(), dream_task.clone());
-            let job = build_job(&dream_task, &pushers, &self.registry)?;
+            let job = build_job(&dream_task, &pushers, &self.registry, self.timezone)?;
             let uuid = self
                 .scheduler
                 .add(job)
@@ -463,6 +459,7 @@ impl CronHandle {
         cron_path: &Path,
         registry: Arc<AgentRegistry>,
         pushers: HashMap<String, Arc<dyn ProactivePusher>>,
+        timezone: Option<Tz>,
     ) -> anyhow::Result<Arc<Self>> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CronCommand>();
         let (sched_tx, sched_rx) = tokio::sync::oneshot::channel::<Arc<CronScheduler>>();
@@ -480,7 +477,8 @@ impl CronHandle {
                 }
             };
             rt.block_on(async move {
-                let sched = match CronScheduler::start(&cron_path, registry, pushers).await {
+                let sched =
+                    match CronScheduler::start(&cron_path, registry, pushers, timezone).await {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::error!(error = %e, "failed to start cron scheduler");
@@ -532,38 +530,61 @@ impl CronHandle {
 }
 
 /// 构造一个 cron Job：捕获 agent / task / pusher，到点调用 runner::run_task。
+/// `tz` 为调度时区：Some 时按该时区解释 cron 表达式（如 Asia/Shanghai），
+/// None 时退化为 UTC（与历史行为一致，但会与本地时间偏差）。
 fn build_job(
     task: &CronTask,
     pushers: &HashMap<String, Arc<dyn ProactivePusher>>,
     registry: &Arc<AgentRegistry>,
+    tz: Option<Tz>,
 ) -> anyhow::Result<tokio_cron_scheduler::Job> {
-    let pusher = pushers.get(&task.channel).cloned();
+    // 组合推送：任务指定 channel + web（WebUI 是主交互界面，
+    // 把结果/失败都叠加推到 web，确保用户在 WebUI 也能看到 cron 产出）。
+    let pusher = build_fanout_pusher(pushers, &task.channel);
     let agent = registry.main.clone();
     let task_clone = task.clone();
     let six_field = to_six_field(&task.schedule);
-    let job = tokio_cron_scheduler::Job::new_async(six_field.as_str(), move |_uuid, _l| {
-        let agent = agent.clone();
-        let task = task_clone.clone();
-        let pusher = pusher.clone();
-        Box::pin(async move {
-            let noop = NoopPusher;
-            let pusher_ref: &dyn ProactivePusher = match &pusher {
-                Some(p) => p.as_ref(),
-                None => {
-                    tracing::warn!(
-                        task = %task.id,
-                        channel = %task.channel,
-                        "no pusher for channel, cron result will be lost"
-                    );
-                    &noop
-                }
-            };
-            tracing::info!(task = %task.id, "cron task triggered");
-            runner::run_task(agent, &task, pusher_ref).await;
-        })
-    })
-    .map_err(|e| anyhow::anyhow!("parse cron expr '{}': {}", task.schedule, e))?;
+    // 闭包必须**内联**传给 new_async / new_async_tz（见 cron_run_future 注释）。
+    let job = match tz {
+        Some(tz) => {
+            let a = agent.clone();
+            let t = task_clone.clone();
+            let p = pusher.clone();
+            tokio_cron_scheduler::Job::new_async_tz(six_field.as_str(), tz, move |_uuid, _l| {
+                cron_run_future(a.clone(), t.clone(), p.clone())
+            })
+            .map_err(|e| anyhow::anyhow!("parse cron expr '{}': {}", task.schedule, e))?
+        }
+        None => {
+            let a = agent.clone();
+            let t = task_clone.clone();
+            let p = pusher.clone();
+            tokio_cron_scheduler::Job::new_async(six_field.as_str(), move |_uuid, _l| {
+                cron_run_future(a.clone(), t.clone(), p.clone())
+            })
+            .map_err(|e| anyhow::anyhow!("parse cron expr '{}': {}", task.schedule, e))?
+        }
+    };
     Ok(job)
+}
+
+/// cron 任务执行闭包的实际工作体：把 `agent` / `task` / `pusher` 搬进一个
+/// `Pin<Box<dyn Future<Output = ()> + Send>>`，供 `Job::new_async(_tz)` 直接消费。
+///
+/// 之所以抽成独立函数并显式标注返回类型，是因为 `Job::new_async` / `new_async_tz`
+/// 要求闭包返回 `Pin<Box<dyn Future + Send>>`。若写成 `let run = move |..| { .. };`
+/// 再把 `run` 传进 `match` 的两个分支，闭包返回类型会在独立推断时**缺失 `Send`
+/// 义务**，导致无法 coerce 为 `Pin<Box<dyn Future + Send>>`（编译报 E0271）。
+/// 把返回类型固定为本函数签名，并在调用点**内联**传闭包，即可让期望类型正确流入。
+fn cron_run_future(
+    agent: Arc<tokio::sync::Mutex<Agent>>,
+    task: CronTask,
+    pusher: Arc<dyn ProactivePusher>,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        tracing::info!(task = %task.id, "cron task triggered");
+        runner::run_task(agent, &task, pusher.as_ref()).await;
+    })
 }
 
 /// 校验任务定义：id 非空、mode/prompt/steps 一致性。
@@ -611,6 +632,61 @@ struct NoopPusher;
 impl ProactivePusher for NoopPusher {
     async fn push(&self, _message: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+}
+
+/// 组合推送器：把同一条消息依次推送到内部多个 pusher。
+/// 只要有一个 channel 推送成功即视为成功；单个失败只记 warn，不阻断其它 channel。
+struct FanoutPusher {
+    pushers: Vec<Arc<dyn ProactivePusher>>,
+}
+
+#[async_trait::async_trait]
+impl ProactivePusher for FanoutPusher {
+    async fn push(&self, message: &str) -> anyhow::Result<()> {
+        let mut any_ok = false;
+        for p in &self.pushers {
+            match p.push(message).await {
+                Ok(()) => any_ok = true,
+                Err(e) => tracing::warn!(error = %e, "fanout push to one channel failed"),
+            }
+        }
+        if any_ok {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("all fanout pushers failed"))
+        }
+    }
+}
+
+/// 构造一个推送器：以任务指定 channel 为主，额外叠加 web channel（主交互界面）。
+/// 两者为同一 Arc 时去重，避免重复推送；都为空时返回 NoopPusher（结果静默丢弃）。
+fn build_fanout_pusher(
+    pushers: &HashMap<String, Arc<dyn ProactivePusher>>,
+    channel: &str,
+) -> Arc<dyn ProactivePusher> {
+    let primary = pushers.get(channel).cloned();
+    let web = pushers.get("web").cloned();
+    let mut list: Vec<Arc<dyn ProactivePusher>> = Vec::new();
+    if let Some(p) = &primary {
+        list.push(p.clone());
+    }
+    if let Some(w) = &web {
+        let dup = primary.as_ref().map(|p| Arc::ptr_eq(p, w)).unwrap_or(false);
+        if !dup {
+            list.push(w.clone());
+        }
+    }
+    if list.is_empty() {
+        if primary.is_none() {
+            tracing::warn!(
+                channel = channel,
+                "no pusher for cron channel and no web pusher, result will be lost"
+            );
+        }
+        Arc::new(NoopPusher)
+    } else {
+        Arc::new(FanoutPusher { pushers: list })
     }
 }
 

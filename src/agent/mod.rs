@@ -303,6 +303,11 @@ impl Agent {
     /// - `session_id`：独立会话 id（由调用方通过 session_store.create_session 创建）
     ///
     /// 返回 agent 最终回复文本。无论成功失败，原 session_id 和 context 都会恢复。
+    /// cron 独立 turn 顶层超时（秒）。防止 provider 流式挂起（如 SSE keepalive 使
+    /// per-chunk 120s 超时永不触发）导致整个 turn 无限悬挂、永久持有 agent 锁且永不
+    /// 推送结果——表现为"cron 静默无消息"。超时即返回 Err，runner 会推送失败通知。
+    const CRON_TURN_TIMEOUT_SECS: u64 = 300;
+
     pub async fn run_isolated_turn(
         &mut self,
         prompt: &str,
@@ -316,11 +321,24 @@ impl Agent {
             crate::agent::context::Context::new(saved_system),
         );
         self.session_id = session_id;
-        let result = self.handle_input(prompt, channel).await;
-        // 无论成功失败都恢复原状态
+        // 顶层超时兜底：包裹整个 handle_input（含多轮工具调用 + 最终合成）。
+        // 超时后 inner future 被丢弃并释放对 self 的借用，随后在仍持有 agent 锁期间
+        // 恢复原 session/context，避免污染主会话。
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(Self::CRON_TURN_TIMEOUT_SECS),
+            self.handle_input(prompt, channel),
+        )
+        .await;
+        // 无论成功/超时/取消，都恢复原状态
         self.session_id = saved_session_id;
         self.context = saved_context;
-        result
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!(
+                "cron isolated turn timed out after {}s",
+                Self::CRON_TURN_TIMEOUT_SECS
+            )),
+        }
     }
 
     /// 流式版本：通过 event_tx 推送 TurnEvent
