@@ -6,9 +6,9 @@
 
 ---
 
-## P5 — 进行中（v0.2.2 候选）
+## P5 — 已完成（v0.2.2 候选）
 
-> P5 各条目按 `plan.md` 推荐顺序逐条交付，每完成一条在此累加勾选清单。
+> P5 各条目按 `plan.md` 推荐顺序逐条交付，每完成一条在此累加勾选清单。P5-1 ~ P5-7 + 剩余项（E1/W1/W2/S1/T1/M1）全部交付。
 
 ### ✅ P5-1 Provider Compat 层（[ADR-0026](adr/0026-provider-compat.md)）
 
@@ -195,6 +195,44 @@ agent 通过 `skill_create` / `skill_edit` 工具直接写/改 SKILL.md（skill 
 
 **验证**
 - `cargo fmt --all --check` / `cargo clippy --lib --all-targets` / `cargo test --lib`（380 项，含 goal 解析/读写/状态切换/roundtrip 单测、Context 注入单测、工具 action 单测）全绿；`cargo build` 通过。
+
+---
+
+### ✅ P5 剩余项（E1 环境探测 / W1-W2 WebUI 增强 / S1 敏感信息 / T1 TTS / M1 收尾）
+
+对 `plan.md` P5 中未勾选的 6 个条目做现状核实、设计评审后全部交付；评估与设计见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)。
+
+**E1 环境探测**（★☆☆）
+- `src/envprobe.rs`：启动时对 main agent 探测本机工具链（shell/python/node/npm/rustc/cargo/go/git/docker，2s/命令 timeout，只列存在且版本可解析的项），以 Runtime Context 尾部注入（`Context.env_state`，与 todo/goal 同区、KV 缓存友好）；`/env` 斜杠命令手动刷新；子 agent 不探测（避免启动开销）。
+
+**W1 WebUI 会话历史**（★★★）
+- `SessionStore` 新增 `list_sessions`（含消息数）/ `session_by_uuid` / `messages_with_tool_calls`（含 tool_calls 明细）/ `delete_session`（cascade）。
+- API：`GET /api/sessions`、`GET|DELETE /api/sessions/:uuid`、`GET /api/sessions/:uuid/export`；`authorize` 泛型化为 `TokenProvider` trait（复用 SessionListQuery）。
+- WebUI 新增 Sessions tab：会话列表 + 消息详情（role 徽标、tool_calls 折叠、时间戳）+ 删除（二次确认）+ 导出 JSON。只读 v1；编辑 v2（仅落 sqlite、不同步内存 Context）留待后续。
+
+**W2 WebUI 模型探测**（★★☆）
+- `src/provider/probe.rs`：OpenAI 兼容端点 `GET /models` 探测（5s connect / 10s total timeout，纯解析函数可单测）。
+- API：`POST /api/providers/:id/models`（可覆盖 base_url/api_key，失败返回 `{ok:false,error}`）。
+- WebUI Config 页 "Probe models" 按钮：列表勾选 → 生成 `[provider.<id>].model.<alias>` 条目 → 走既有 `PUT /api/config` 保存。v1 仅 OpenAI 兼容；Anthropic 无 models 端点、Gemini 留 v2。
+
+**S1 敏感信息 .env 自动化**（★★☆，必要性高）
+- `src/config/secrets.rs`：`collect_plaintext_secrets`（provider api_key / 频道 token/secret / 搜索 key / TTS key / webui token，跳过空与 `${VAR}` 引用）+ `upsert_env`（幂等、保注释、Unix 0600）+ `apply_refs` + `expand_config_secrets` + `migrate_config_secrets`（toml_edit 定点替换保注释）+ `count_plaintext_secrets`。
+- `PUT /api/config` 保存时自动转存：**先写 .env 成功才替换为 `${VAR}` 引用**，失败保留明文 + warn 降级；写盘用 `${VAR}`、内存态展开回明文供热加载（`build_provider_from_config` 不认 `${VAR}`）。
+- `/migrate-secrets` 斜杠命令迁移存量 config.toml；启动时扫描明文敏感字段 log warn。
+- `mask_sensitive` / `merge_masked` 补全 telegram/dingtalk/mail/feishu/tts 字段（掩码 `••••`，保存时空输入 = 保留原值）。
+- 二进制存储决策：**不做**（key 管理无解，单用户本地场景 .env + 0600 已够）。
+
+**T1 TTS**（★★☆，必要性低）
+- `src/tools/tts.rs`：`tts` 工具（OpenAI 兼容 `POST /audio/speech`，`[tools.tts]` 配置 enabled/base_url/api_key/model/voice，合成到 `workspace/tts/<uuid>.mp3`，发送复用 `send_file`）；`tts.api_key` 纳入 .env 敏感管线。
+- WebUI 聊天页按扩展名渲染媒体：`.mp3/.wav/.ogg/.m4a` → `<audio>` 播放器（顺带修复 File 类媒体此前不显示的问题）。
+- **决策修订**：原拟 edge-tts，实为 **WebSocket + Sec-MS-GEC 签名协议**（非 HTTP），不可测且接口脆弱，**降级 v2**；v1 用 OpenAI 兼容端点（mock 可测、稳定）。QQ silk 转码不做。
+
+**M1 自然对话 MCP**（收尾，无代码）
+- 现状核实：ADR-0014 已把 MCP 工具接入主 agent 工具集（`cli.rs` `all_tools.extend(mcp_tools)` + WebUI `replace_mcp_tools` 热加载），"配置好 MCP server → 自然对话直接调用"已成立；agent 自主配置 MCP server 与描述增强两选项经评审不做。
+
+**验证**
+- `cargo fmt --all --check` / `cargo clippy --lib --all-targets` 全绿；`cargo test --lib` **408 项全部通过**（新增 envprobe 4、context env 注入 2、sqlite 会话历史 6、probe 解析 3、secrets 11、tts 5）。
+- 提交：`730d875`（E1）、`752acea`（W1）、`109f683`（W2）、`ca67fcc`（S1）、`40b6d0a`（T1）。
 
 ---
 

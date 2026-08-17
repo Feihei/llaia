@@ -129,6 +129,9 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 | `cron` | `tools/cron` | 注册/执行定时任务（Agent 模式 / Step 模式） |
 | `mcp` | `tools/mcp` | 接入外部 MCP server 暴露的工具 |
 | `send_media` | `tools/send_media` | 向频道回传图片/文件等媒体 |
+| `tts` | `tools/tts` | 文本合成语音（`[tools.tts]` 配置，OpenAI 兼容 `/audio/speech`，产物落 workspace/tts/，发送走 `send_file`；P5 T1） |
+
+> **环境探测（P5 E1，非工具）**：`src/envprobe.rs` 启动时对 main agent 探测一次本机工具链（shell/python/node/npm/rustc/cargo/go/git/docker，2s/命令 timeout），以 Runtime Context 尾部注入（与 todo/goal 同区，KV 缓存友好）；`/env` 命令手动刷新。
 
 终端命令安全：由 `[tools.terminal]` 控制——
 - `confirm`（`none` / `whitelist` 默认 / `always`）：是否需要交互式确认
@@ -145,7 +148,9 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 - `whitelist`：已废弃，加载时 warn 并 fallback 到 `none`
 
 CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道）/ `llaia init`（生成配置骨架）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
-斜杠命令：`/new` `/exit` `/stop` `/compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/dream` `/dream-rollback` `/delegate-list` `/delegate-cancel <id>` `/help`。
+斜杠命令：`/new` `/exit` `/stop` `/compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/dream` `/dream-rollback` `/goal <text>` `/goal-list` `/goal-done` `/goal-cancel` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
+
+> **敏感信息 .env 自动化（P5 S1）**：`src/config/secrets.rs`。WebUI `PUT /api/config` 保存时，明文敏感字段（provider api_key、频道 token/secret、搜索 key、TTS key、webui token）**先写入 `<config_dir>/.env`**（幂等 upsert、Unix 0600 权限），config.toml 只保留 `${VAR}` 引用；内存态再展开回明文供热加载（`build_provider_from_config` 不认 `${VAR}`）。`.env` 写入失败 → 保留明文 + warn 降级。存量迁移用 `/migrate-secrets`（toml_edit 定点替换保注释）；启动时扫描明文敏感字段并 warn。`GET /api/config` 返回时敏感字段掩码为 `••••`（保存时空输入 = 保留原值，见 `mask_sensitive`/`merge_masked`）。
 
 详见 [docs/adr/0006-tools-and-cli.md](docs/adr/0006-tools-and-cli.md) 与 [docs/adr/0009-qq-channel.md](docs/adr/0009-qq-channel.md)。
 

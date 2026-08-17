@@ -30,7 +30,7 @@
 
 ## P5 — 未来计划（下一步）
 
-**状态**：✅ 全部已交付（P5-1 ~ P5-7 均完成，详见 `docs/CHANGELOG.md`）
+**状态**：✅ 全部已交付（P5-1 ~ P5-7 + 剩余项 E1/W1/W2/S1/T1/M1 均完成，详见 `docs/CHANGELOG.md`）
 
 > 来自 `docs/issues/` 反馈与扩展评估的候选池。下方条目按主题分组，并标注**必要性**（高/中/低，不做会持续踩坑或已影响正确性→高；明显改善体验→中；锦上添花→低）与**难度**（★☆☆ 半天内单点 / ★★☆ 一到数天跨模块 / ★★★ 结构性改造，动手前先出 ADR），便于排期。
 
@@ -46,7 +46,14 @@
 6. **skill 自管**（[ADR-0027](adr/0027-skill-authoring.md)）— ✅ 已交付（skill_create/skill_edit 工具 + 内置 skill-authoring 元 skill + 路径安全 + frontmatter 长度约束）
 7. **/goal 长期目标**（[ADR-0021](adr/0021-goal-system.md)）— ✅ 已交付（goal.md 文件方案 + 每轮 Runtime Context 注入 + `goal` 工具 + 四 slash 命令 + WebUI GOAL 面板）
 
-> 注：以下未勾选条目的评估、细化设计与实施计划已统一收录于 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（含决策分支，待集体评审）。「自然对话 MCP」经现状核实（ADR-0014 已把 MCP 工具接入主 agent 工具集，`cli.rs:482` + WebUI 热加载）实质已完成，待勾选。
+8. **环境探测 env**（[plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md) §E1）— ✅ 已交付（启动探测 + Runtime Context 注入 + `/env`）
+9. **WebUI 会话历史**（§W1）— ✅ 已交付（Sessions tab：列表/详情/删除/导出）
+10. **WebUI 模型探测**（§W2）— ✅ 已交付（Probe models + 勾选添加）
+11. **敏感信息 .env**（§S1）— ✅ 已交付（保存自动转存 + 脱敏 + /migrate-secrets + 启动 warn）
+12. **TTS**（§T1）— ✅ 已交付（tts 工具 + WebUI 音频播放；edge-tts 降级 v2）
+13. **自然对话 MCP**（§M1）— ✅ 现状核实：ADR-0014 已把 MCP 工具接入主 agent 工具集
+
+> 注：剩余项的评估、细化设计与实施记录见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)。
 
 ### 模型与 Provider
 
@@ -62,20 +69,20 @@
 
 ### WebUI 增强
 
-- [ ] session.db 会话历史在 WebUI 中可查询/修改，参考 AstrBot（必要性：**中** / 难度：★★☆）
-  - 已出计划：只读 v1 + 可编辑 v2 决策分支、API 设计（list/detail/delete/export）见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§W1）
-- [ ] WebUI provider API 探测可用模型，点击添加到 models；添加按钮检查可用性，参考 AstrBot（必要性：**中** / 难度：★★☆）
-  - 已出计划：v1 仅 OpenAI 兼容端点探测（`GET /models`），勾选生成 model 条目走既有 `PUT /api/config`，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§W2）
+- [x] session.db 会话历史在 WebUI 中可查询/修改，参考 AstrBot（必要性：**中** / 难度：★★☆）— ✅ 已交付
+  - Sessions tab：列表（含消息数）+ 详情（消息 + tool_calls 折叠）+ 删除（cascade）+ 导出 JSON；只读 v1（编辑 v2 仅落 sqlite 不同步内存 Context，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md) §W1）
+- [x] WebUI provider API 探测可用模型，点击添加到 models；添加按钮检查可用性，参考 AstrBot（必要性：**中** / 难度：★★☆）— ✅ 已交付
+  - Config 页 "Probe models"：POST `/api/providers/:id/models` 探测 OpenAI 兼容 `GET /models`，勾选生成 model 条目走既有 `PUT /api/config`（见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md) §W2）
 
 ### 安全
 
-- [ ] 敏感信息存储：api-key 等自动写入 `.env`，config 只保留环境引用；探讨二进制（如 db）存储避免明文（必要性：**高** / 难度：★★☆）
-  - 已出计划：保存时自动转存 + `GET /api/config` 脱敏 + `/migrate-secrets` 存量迁移；二进制存储决策为不做（key 管理无解），见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§S1）
+- [x] 敏感信息存储：api-key 等自动写入 `.env`，config 只保留环境引用；探讨二进制（如 db）存储避免明文（必要性：**高** / 难度：★★☆）— ✅ 已交付
+  - 保存配置时自动转存 `.env`（成功才替换为 `${VAR}`，失败保留明文降级）+ `GET /api/config` 掩码 + `/migrate-secrets` 存量迁移（toml_edit 保注释）+ 启动扫描 warn；二进制存储决策为不做（key 管理无解），见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§S1）
 
 ### 生态与工具
 
-- [ ] 环境探测：本地 shell / python / node / rust / go 等环境探测，据情况提示 agent 优化行为（必要性：**中** / 难度：★☆☆）
-  - 已出计划：探测结果以 Runtime Context 尾部注入（复用 todo/goal 机制）+ `/env` 手动刷新，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§E1）
+- [x] 环境探测：本地 shell / python / node / rust / go 等环境探测，据情况提示 agent 优化行为（必要性：**中** / 难度：★☆☆）— ✅ 已交付
+  - 启动探测一次（main agent，2s/命令 timeout）以 Runtime Context 尾部注入（复用 todo/goal 机制）+ `/env` 手动刷新，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§E1）
 - [x] skill 增强：让 agent 自管 skill（`skill_create`/`skill_edit` 工具 + 内置元 skill 引导），对齐 deepseek 元技能思路（必要性：**中** / 难度：★★☆）
   - **现状（已扎实）**：`src/skill/loader.rs` + `prompt.rs` 已实现 progressive disclosure（name+desc+path 进 prompt，全文 `file_read`）；`skills.json` 管 active 开关；目录名=标识；frontmatter name/description 校验；`resolve_skill_path` 防越权；WebUI 可创建（`default_skill_template`）。
   - **决策**：①**不做** npx-skills 的"搜索 + 自动安装"（用户更愿自己甄选 skill，避免 hermes 式繁杂 skill 集）；②加 `skill_create`/`skill_edit` **工具**——直接写/改 SKILL.md，因 skill 目录（`~/.workbuddy/skills/` 用户级、`{workspace}/.workbuddy/skills/` 项目级）在主 agent 文件作用域外，文件工具够不到；默认落**用户级**，可选 `scope:"project"` 切项目级；路径经 `resolve_skill_path` 校验防越权；③加一个**内置元 skill**（如 `skill-authoring`）引导 agent 如何按 llaia 约定（frontmatter 约束、progressive disclosure、路径安全）创建/审查/整理 skill；④补 frontmatter 长度/字符约束（对齐 pi）。
@@ -85,8 +92,8 @@
 
 ### 语音
 
-- [ ] TTS 服务接入、发语音（必要性：**低** / 难度：★★☆）
-  - 已出计划：v1 已实施 OpenAI 兼容 `/audio/speech`（原拟 edge-tts，实为 WS+Sec-MS-GEC 签名协议、不可测，降级 v2）；合成（`tts` 工具）与发送（`send_file`）分离，WebUI 按扩展名渲染 `<audio>`，QQ silk 转码不做，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§T1）
+- [x] TTS 服务接入、发语音（必要性：**低** / 难度：★★☆）— ✅ 已交付
+  - `tts` 工具（OpenAI 兼容 `/audio/speech`，合成到 workspace/tts/，发送复用 `send_file`）+ WebUI 按扩展名渲染 `<audio>`；原拟 edge-tts（WS+Sec-MS-GEC 签名、不可测）降级 v2，QQ silk 转码不做，见 [plans/2026-08-17-p5-remaining.md](plans/2026-08-17-p5-remaining.md)（§T1）
 
 ### 目标系统
 
