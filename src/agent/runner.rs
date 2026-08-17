@@ -3,6 +3,7 @@ use crate::agent::approval::{
 };
 use crate::agent::TurnEvent;
 use crate::provider::{ChatMessage, ToolCall};
+use crate::tools::todo::TodoStore;
 use crate::tools::Tool;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -11,6 +12,9 @@ use tokio::sync::mpsc;
 
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    /// 规划后执行（ADR-0024）的共享 todo 存储：agent 每轮写入 current_session，
+    /// todo 工具按它路由；未挂真实 workspace 时（测试/降级）为禁用态。
+    pub todo_store: Arc<TodoStore>,
 }
 
 impl Default for ToolRegistry {
@@ -23,6 +27,7 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
+            todo_store: Arc::new(TodoStore::disabled()),
         }
     }
     pub fn register(&self, tool: Arc<dyn Tool>) {

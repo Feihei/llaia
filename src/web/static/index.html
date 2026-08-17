@@ -50,6 +50,16 @@
         <button @click="stop()" :disabled="!busy">Stop</button>
         <span x-text="uploaded.map(u=>u.path).join(', ')"></span>
       </div>
+      <!-- 规划后执行（ADR-0024）：当前会话 todo 清单只读展示 -->
+      <div class="todo-panel" x-show="todos.length">
+        <div class="todo-head">&#x276F; TODO <span class="todo-count" x-text="todos.length"></span></div>
+        <template x-for="t in todos" :key="t.id">
+          <div class="todo-item">
+            <span class="todo-mark" :class="t.status" x-text="t.status === 'done' ? '✓' : (t.status === 'in_progress' ? '~' : '○')"></span>
+            <span class="todo-task" :class="{done: t.status === 'done'}" x-text="t.task"></span>
+          </div>
+        </template>
+      </div>
     </div>
 
     <div id="config-pane" class="pane" :class="{active: tab==='config'}">

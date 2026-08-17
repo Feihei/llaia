@@ -460,3 +460,39 @@ option { background: var(--bg-input); color: var(--text); }
   line-height: 1.5;
   white-space: pre;
 }
+
+/* 规划后执行（ADR-0024）：当前会话 todo 清单只读面板 */
+.todo-panel {
+  margin: 8px 14px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--green);
+  background: #070a07;
+}
+.todo-head {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--green);
+  margin-bottom: 6px;
+}
+.todo-count {
+  color: var(--text-dim);
+}
+.todo-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 13px;
+}
+.todo-mark {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-weight: bold;
+}
+.todo-mark.done { color: var(--green); }
+.todo-mark.in_progress { color: #d9b34a; }
+.todo-task.done {
+  text-decoration: line-through;
+  color: var(--text-dim);
+}

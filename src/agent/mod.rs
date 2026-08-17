@@ -428,6 +428,20 @@ impl Agent {
             .append_message(self.session_id, &Role::User, &text_for_store)?;
         self.context.push(user_msg);
 
+        // 规划后执行（ADR-0024）：把当前 session_uuid 写入共享 TodoStore，
+        // 并刷新本轮回注的 todo 清单文本（Runtime Context）。
+        let current_uuid = self
+            .session_store
+            .session_uuid(self.session_id)?
+            .unwrap_or_else(|| format!("session-{}", self.session_id));
+        self.tools.todo_store.set_current_session(&current_uuid);
+        let todo_text = self.tools.todo_store.current_list_text();
+        self.context.todo_state = if todo_text.is_empty() {
+            None
+        } else {
+            Some(todo_text)
+        };
+
         // 拿 provider snapshot：整个 turn 用这个 snapshot，reload 不影响进行中的 turn
         let provider = match self.provider_snapshot().await {
             Some(p) => p,

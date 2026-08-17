@@ -84,6 +84,34 @@ MEMORY.md **全量加载**进 system prompt（不懒加载），但受可配置 
 
 ---
 
+### ✅ P5-4 规划后执行 todo（[ADR-0024](adr/0024-planning-todo.md)）
+
+内置轻量 `todo` 工具（非外包 todoist/MCP），让 agent 对**非平凡任务**先拆步骤清单、逐步推进，清单每轮注入 Runtime Context，复杂任务执行更可靠。
+
+**新增**
+- `src/tools/todo.rs`：
+  - `TodoStore`：按 `session_uuid` 分桶的共享状态（agent 与工具共享同一实例）；in-memory + 落盘 `workspace/todos/<session_uuid>.json`（首次访问懒加载）；`set_current_session(uuid)` 由 agent 每轮写入，后续 todo 操作据此路由；`current_list_text()` 供 Runtime Context 注入。
+  - `TodoTool`：单一 `todo` 工具，`action` ∈ `add` / `list` / `update` / `done`（`update` 带 `status: pending|in_progress|done`）；`requires_confirm = false`（廉价工作记忆，低副作用）；无条件注册（无需 api_key）。
+  - 单元测试：id 自增、done/update 状态、session 隔离、无 session 报错、清单渲染、`TodoTool` 工具调用 roundtrip。
+
+**修改**
+- `src/agent/runner.rs` `ToolRegistry`：新增 `todo_store: Arc<TodoStore>` 字段（`new()` 默认禁用态），作为 agent 与工具的共享挂载点（不改动 `Agent::new` 签名）。
+- `src/channels/cli.rs` `build_single_agent`：创建真实（带 workspace 落盘）`TodoStore`，构造 `TodoTool` 注册，并替换 registry 默认禁用态。
+- `src/agent/mod.rs` `handle_message_streaming`：每轮起点用 `session_store.session_uuid(session_id)` 解析当前 uuid，写入 `todo_store.current_session`，并把 `todo_store.current_list_text()` 写入 `Context.todo_state`。
+- `src/agent/context.rs` `Context`：新增 `todo_state: Option<String>`，`to_messages` 在尾部（与 status_bar 同 Runtime Context 区）追加，system 前缀保持稳定（KV 缓存友好）。
+- `src/memory/sqlite.rs` `SessionStore`：新增 `session_uuid(session_id)` 反查。
+- `src/web/mod.rs`：新增 `GET /api/todos`（只读返回当前会话清单）；`src/web/static/{app.js,index.html,theme.css}`：聊天页底部只读 todo 面板（5s 轮询）。
+- 文档：`AGENTS.md` / `guide/tools.md` / `glossary.md` / `adr/0006` 工具清单同步；`ADR-0024` 补"实现补记"。
+
+**设计偏离（已在 ADR-0024 记录）**
+- 工具形态采用**单一 `todo` 工具 + `action` 分发**，而非 ADR 草稿里列的 4 个独立工具名（`todo_add` 等）——复用 P5-3 `search` 的"单工具 + action"模式，与 `cron` 工具约定一致。
+
+**验证**
+- `cargo clippy --lib --all-targets` 与 `cargo test --lib`（todo 相关 + 全量回归）通过。
+- 注：`provider/openai_compat` 的 mockito 测试在沙箱内无法绑定本地端口，属环境问题，与本次改动无关。
+
+---
+
 ## v0.2.1 (2026-08-14)
 
 **Patch release** — stability and WebUI consistency fixes accumulated since v0.2.0. No breaking changes.

@@ -129,6 +129,14 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
         }
     }
 
+    /// 由 session_id 反查 session_uuid（ADR-0024 todo 按 session_uuid 分桶落盘用）。
+    pub fn session_uuid(&self, session_id: i64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT session_uuid FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![session_id])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
     pub fn append_message(&self, session_id: i64, role: &Role, content: &str) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         let role_str = match role {

@@ -432,6 +432,8 @@ pub async fn build_single_agent(
 
     // 构建完整工具集（用新字段）
     let skills_dir = config_dir.join("skills");
+    // 规划后执行（ADR-0024）：每会话一份 todo 清单，agent 与工具共享同一 TodoStore。
+    let todo_store = Arc::new(crate::tools::todo::TodoStore::new(workspace.clone()));
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(FileRead::new(
             workspace_root.clone(),
@@ -452,6 +454,8 @@ pub async fn build_single_agent(
         ),
         Arc::new(SendImage::new(workspace.clone())),
         Arc::new(SendFile::new(workspace.clone())),
+        // todo 工具无条件注册（无需 api_key）：agent 自管当前会话子步骤清单。
+        Arc::new(crate::tools::todo::TodoTool::new(todo_store.clone())),
     ];
     if let Some(search_tool) = UnifiedSearch::build(&config.tools)? {
         all_tools.push(search_tool);
@@ -464,7 +468,9 @@ pub async fn build_single_agent(
         agent_cfg.denied_tools.iter().map(|s| s.as_str()).collect();
     let mut delegate_tool: Option<Arc<DelegateTool>> = None;
     let mut cron_tool: Option<Arc<CronTool>> = None;
-    let registry = ToolRegistry::new();
+    let mut registry = ToolRegistry::new();
+    // 用真实（带 workspace 落盘）的 TodoStore 替换默认禁用态。
+    registry.todo_store = todo_store;
     for tool in all_tools {
         if !denied.contains(tool.name()) {
             registry.register(tool);

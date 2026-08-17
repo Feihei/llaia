@@ -13,6 +13,7 @@ pub mod memory;
 pub mod search;
 pub mod send_media;
 pub mod terminal;
+pub mod todo;
 pub mod web;
 
 #[async_trait]

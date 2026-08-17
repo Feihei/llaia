@@ -1355,6 +1355,26 @@ pub async fn put_skill_content(
     .into_response()
 }
 
+/// GET /api/todos → 当前会话 todo 清单（只读展示，ADR-0024）。
+pub async fn get_todos(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    let items = agent.tools.todo_store.list().unwrap_or_default();
+    let json = serde_json::json!({ "todos": items });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
 /// 构建系统级 Web 路由（不含 WS）。
 /// 返回 `Router<AppState>`，由调用方合并 WS 路由后统一 `with_state`。
 pub fn build_system_routes() -> axum::Router<AppState> {
@@ -1395,6 +1415,8 @@ pub fn build_system_routes() -> axum::Router<AppState> {
             "/api/skills",
             axum::routing::get(list_skills).post(create_skill),
         )
+        // 规划后执行（ADR-0024）：只读展示当前会话 todo 清单
+        .route("/api/todos", axum::routing::get(get_todos))
         .route("/api/skills/:name", axum::routing::delete(delete_skill))
         .route(
             "/api/skills/:name/active",

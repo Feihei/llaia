@@ -19,6 +19,7 @@
 | `terminal` | 跑终端命令 | 含 ls/grep 等子命令，不单列 |
 | `web_fetch` | 获取网页 | |
 | `search` | 搜索 | 需配置对应 provider 的 api_key |
+| `todo` | 规划后执行：每会话待办清单（add/list/update/done） | 自动注入 Runtime Context（ADR-0024）|
 | `memory_read` | 读 MEMORY.md | 内部实现，不暴露给 LLM |
 | `memory_write` | 写 MEMORY.md | 暴露给 LLM 用于自动记忆 |
 | `session_*` | 会话 sqlite 读写 | 内部实现，不暴露给 LLM |

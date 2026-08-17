@@ -59,3 +59,10 @@ todo 列表每轮注入 Runtime Context（类似 goal_state），让模型始终
 - 一个小工具 + 一条 prompt 约定，实现成本低（★☆☆~★★☆），直接提升复杂任务执行可靠性。
 - 与 `goal`（长期目标）、`cron`（定时）、`delegate`（子任务）正交互补：todo 是"当前任务的步骤清单"。
 - 不引入新依赖。
+
+## 实现补记（P5-4 交付时）
+
+- **工具形态采用单一 `todo` 工具 + `action` 分发**（add/list/update/done），而非 §2 草稿里列的 4 个独立工具名（`todo_add`/`todo_list`/`todo_update`/`todo_done`）。理由：复用 P5-3 `search` 工具的"单工具 + action"模式，与本项目 `cron` 工具约定一致，减少 prompt 内工具条目数。
+- **共享状态挂载点**：`TodoStore` 挂在共享的 `ToolRegistry` 上（`todo_store` 字段）。agent 每轮在 `handle_message_streaming` 起点把当前 `session_uuid` 写入 `current_session`，todo 工具据此路由；同时把当前清单文本写入 `Context.todo_state`，在 `to_messages` 尾部（Runtime Context 区，与 status_bar 同区）注入，每轮可见"还差哪几步"。未挂真实 workspace（`ToolRegistry::new()` 默认）时为禁用态（测试/降级用）。
+- **持久化**：每会话一份，落盘 `workspace/todos/<session_uuid>.json`，首次访问懒加载；`/new` 后新会话天然空清单、旧会话文件保留。
+- **WebUI**：`GET /api/todos` 只读返回当前清单；聊天页底部加了只读 todo 面板（5s 轮询）。点击勾选回传（plan mode / 可交互）留待后续。

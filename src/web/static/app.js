@@ -11,6 +11,9 @@ function llaiaApp() {
     inputText: '',
     busy: false,
     uploaded: [],
+    // todo (ADR-0024, read-only display; v1 no click-to-toggle from UI)
+    todos: [],
+    _todoTimer: null,
     ws: null,
     // config
     cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{}} },
@@ -64,7 +67,21 @@ function llaiaApp() {
         if (this.authed && this.tab === 'config') {
           this.switchConfig();
         }
+        // 规划后执行（ADR-0024）：只读轮询当前会话 todo 清单
+        if (this.authed) {
+          this.loadTodos();
+          this._todoTimer = setInterval(() => this.loadTodos(), 5000);
+        }
       }
+    },
+    async loadTodos() {
+      try {
+        const r = await this.apiFetch('/api/todos');
+        if (r.ok) {
+          const j = await r.json();
+          this.todos = j.todos || [];
+        }
+      } catch (e) { /* 非致命：UI 静默跳过 */ }
     },
     async verifyToken() {
       this.authing = true;

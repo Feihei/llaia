@@ -122,6 +122,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 | `terminal` | `tools/terminal` | 终端命令（含 ls/grep 等，不单列），受 `tools.terminal` 命令策略约束 |
 | `web_fetch` | `tools/web` | 获取网页 |
 | `search` | `tools/search` | 联网搜索（统一 `search` 工具，按 `[tools.search].provider` 路由到 tavily/baidu/brave，需对应 provider 的 api_key）|
+| `todo` | `tools/todo` | 规划后执行：每会话一份待办清单（`add`/`list`/`update`/`done`），自动注入 Runtime Context（ADR-0024）|
 | `memory_write` | `tools/memory` | 写 MEMORY.md |
 | `delegate` | `tools/delegate` | 后台委派子 Agent 执行长任务（脱离主回合，结果回传） |
 | `cron` | `tools/cron` | 注册/执行定时任务（Agent 模式 / Step 模式） |

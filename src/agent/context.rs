@@ -11,6 +11,9 @@ pub struct Context {
     pub system: String,
     pub history: Vec<ChatMessage>,
     pub summary: Option<String>,
+    /// 规划后执行（ADR-0024）的当前 todo 清单文本，每轮由 agent 在 turn 起点写入；
+    /// 作为 Runtime Context 追加到尾部（与 status_bar 同区，不进 system 前缀，KV 缓存友好）。
+    pub todo_state: Option<String>,
 }
 
 impl Context {
@@ -19,6 +22,7 @@ impl Context {
             system,
             history: Vec::new(),
             summary: None,
+            todo_state: None,
         }
     }
 
@@ -41,6 +45,13 @@ impl Context {
         }
         msgs.extend(self.history.iter().cloned());
         msgs.push(ChatMessage::user(crate::time::status_bar(tz)));
+        // 规划后执行（ADR-0024）：当前 todo 清单作为 Runtime Context 追加在尾部，
+        // 让模型每轮都知道"还差哪几步"。无清单时跳过，不影响 system 前缀稳定性。
+        if let Some(todo) = &self.todo_state {
+            if !todo.is_empty() {
+                msgs.push(ChatMessage::user(todo.clone()));
+            }
+        }
         msgs
     }
 

@@ -12,6 +12,7 @@ agent 在对话中可以调用的工具。模型通过「原生 function calling
 | `terminal` | 跑终端命令（含 ls/grep 等） | 视命令而定 |
 | `web_fetch` | 抓取网页 | 否 |
 | `search` | 联网搜索（统一工具，按 `[tools.search].provider` 路由到 tavily/baidu/brave，需对应 key） | 否 |
+| `todo` | 规划后执行：每会话一份待办清单（`add`/`list`/`update`/`done`），自动注入 Runtime Context（ADR-0024） | 否 |
 | `memory_write` | 写 `MEMORY.md` 长期记忆 | 是 |
 | `send_media` | 发送图片/媒体 | 否 |
 | `delegate` | 委派子 agent 异步任务 | 视委派内容 |
