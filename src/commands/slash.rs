@@ -8,6 +8,7 @@ use crate::memory::markdown::compress_memory;
 use anyhow::Result;
 use serde_json::json;
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub enum SlashOutcome {
     Handled(String),
@@ -161,6 +162,16 @@ pub async fn try_handle(
             }
         }
         "/new" => {
+            // 真正开启一个新会话：新建 session 并切换到它（沿用当前会话的 channel），
+            // 而非仅清空内存 context。否则所有"新"对话都会继续追加到同一个旧会话里。
+            let channel = agent
+                .session_store
+                .channel_of(agent.session_id)?
+                .unwrap_or_else(|| "cli".to_string());
+            let new_id = agent
+                .session_store
+                .create_session(&Uuid::new_v4().to_string(), &channel)?;
+            agent.session_id = new_id;
             agent.context.clear();
             agent.context.summary = None;
             Ok(SlashOutcome::Handled("[new session]".into()))

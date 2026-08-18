@@ -129,18 +129,39 @@ pub async fn run_agent_mode(
 
     let cron_prompt = format!("[cron:{}] {}", task.id, prompt);
 
-    // 创建独立 session（source 标记 cron:<id>，便于 WebUI 历史过滤）
+    // 复用同一 cron 任务的会话（按 channel = `cron:<id>` 精确查找），
+    // 否则每次触发都新建一个会话、历史被碎片化。找不到时才新建。
+    let channel = format!("cron:{}", task.id);
     let session_id = {
         let a = agent.lock().await;
-        let uuid = uuid::Uuid::new_v4().to_string();
-        a.session_store
-            .create_session(&uuid, &format!("cron:{}", task.id))?
+        match a.session_store.session_by_channel(&channel)? {
+            Some(id) => id,
+            None => {
+                let uuid = uuid::Uuid::new_v4().to_string();
+                a.session_store.create_session(&uuid, &channel)?
+            }
+        }
     };
 
-    // 跑独立 turn
-    let result = {
-        let mut a = agent.lock().await;
-        a.run_isolated_turn(&cron_prompt, "cron", session_id).await
+    // 派生独立 agent 跑 turn，避免整轮持全局锁冻结主会话 / WebUI。
+    // 顶层超时兜底：provider 流式挂起（SSE keepalive 使 per-chunk 120s 超时不触发）时，
+    // 300s 后丢弃 inner future 并推送失败通知，而不是无限占着资源。
+    const CRON_TURN_TIMEOUT_SECS: u64 = 300;
+    let mut forked = {
+        let a = agent.lock().await;
+        a.fork_for_isolated(session_id)
+    };
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(CRON_TURN_TIMEOUT_SECS),
+        forked.handle_input(&cron_prompt, "cron"),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => Err(anyhow::anyhow!(
+            "cron isolated turn timed out after {}s",
+            CRON_TURN_TIMEOUT_SECS
+        )),
     };
 
     match result {

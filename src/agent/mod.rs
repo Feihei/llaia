@@ -341,6 +341,48 @@ impl Agent {
         }
     }
 
+    /// 为 cron / 委派等「独立 turn」派生一个共享底层资源、但拥有独立 `context` 与
+    /// `session_id` 的 Agent 副本，使其能在**不持有全局 `Arc<Mutex<Agent>>`** 的情况下并发执行。
+    ///
+    /// 设计动机：之前 `run_agent_mode` 用 `agent.lock().await` 把全局锁持了整整一轮 turn
+    /// （含所有 web_fetch / 搜索 / 最终合成的网络调用）。一旦 turn 偏长或某步卡住（如 provider
+    /// 流式因 SSE keepalive 绕开 per-chunk 超时），主会话与 WebUI（/api/sessions 也要拿这把锁）
+    /// 会一起被冻结，直到 300s 顶层超时或手动重启。派生独立副本后，cron 与主会话真正并发、
+    /// 互不影响；主 agent 的 `session_id` / `context` 永不被 cron 触碰。
+    ///
+    /// 复制的字段全都是 `Arc` 共享资源（provider、session_store、tools、config、审批门等），
+    /// 仅 `context` / `session_id` / `turn_tool_calls` 是独立新实例。并发写 `sessions.db` 由
+    /// `SessionStore` 内部的 `Mutex<Connection>` 串行化，安全无竞争。
+    pub fn fork_for_isolated(&self, session_id: i64) -> Agent {
+        let saved_system = self.context.system.clone();
+        Agent {
+            provider: self.provider.clone(),
+            compact_provider: self.compact_provider.clone(),
+            vision_provider: self.vision_provider.clone(),
+            tools: self.tools.clone(),
+            context: crate::agent::context::Context::new(saved_system),
+            session_store: self.session_store.clone(),
+            session_id,
+            context_size: self.context_size,
+            context_threshold: self.context_threshold,
+            max_iterations: self.max_iterations,
+            confirm_mode: self.confirm_mode.clone(),
+            approval_gate: self.approval_gate.clone(),
+            permission_profile: self.permission_profile.clone(),
+            workspace: self.workspace.clone(),
+            workspace_root: self.workspace_root.clone(),
+            config_dir: self.config_dir.clone(),
+            is_main: false,
+            alias: self.alias.clone(),
+            audit: self.audit.clone(),
+            turn_tool_calls: Vec::new(),
+            config: self.config.clone(),
+            live_config: self.live_config.clone(),
+            system_prompt_base: self.system_prompt_base.clone(),
+            system_has_tool_instructions: self.system_has_tool_instructions,
+        }
+    }
+
     /// 流式版本：通过 event_tx 推送 TurnEvent
     pub async fn handle_input_streaming(
         &mut self,
@@ -940,6 +982,35 @@ mod tests {
             agent.context.history[1].content.as_text(),
             "prior assistant msg"
         );
+    }
+
+    #[tokio::test]
+    async fn test_fork_for_isolated_does_not_touch_main_agent() {
+        let rounds = vec![vec![
+            StreamEvent::TextDelta("cron reply".into()),
+            StreamEvent::Done,
+        ]];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        agent.context.push(ChatMessage::user("prior user msg"));
+        let original_session_id = agent.session_id;
+        let original_history_len = agent.context.history.len();
+
+        // fork 拥有独立 session_id 与全新的（空）context
+        let cron_sid = agent
+            .session_store
+            .create_session("cron-uuid-fork", "cron:test")
+            .unwrap();
+        let mut fork = agent.fork_for_isolated(cron_sid);
+        assert_eq!(fork.session_id, cron_sid);
+        assert_ne!(fork.session_id, original_session_id);
+        assert_eq!(fork.context.history.len(), 0);
+
+        // 在 fork 上跑一轮，主 agent 的 session_id / context 必须完全不受影响
+        let reply = fork.handle_input("do the task", "cron").await;
+        assert!(reply.is_ok(), "fork handle_input failed: {:?}", reply.err());
+        assert_eq!(reply.unwrap(), "cron reply");
+        assert_eq!(agent.session_id, original_session_id);
+        assert_eq!(agent.context.history.len(), original_history_len);
     }
 
     #[tokio::test]

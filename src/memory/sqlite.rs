@@ -166,6 +166,26 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
         }
     }
 
+    /// 按 channel 精确查找最近一次（last_activity 最大）的会话 id。
+    /// cron 复用同一任务会话时用：同一 `cron:<id>` 只应有一个活跃会话，
+    /// 历史重复的孤儿会话取最新者复用，避免每次触发都新建会话。
+    pub fn session_by_channel(&self, channel: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM sessions WHERE channel = ?1 ORDER BY last_activity DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![channel])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
+    /// 反查某会话的 channel（/new 新建会话时沿用当前会话的 channel）。
+    pub fn channel_of(&self, session_id: i64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT channel FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![session_id])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
     /// 由 session_id 反查 session_uuid（ADR-0024 todo 按 session_uuid 分桶落盘用）。
     pub fn session_uuid(&self, session_id: i64) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
@@ -566,6 +586,30 @@ mod tests {
         assert_eq!(rows[0].channel, "cron:health_check");
         assert_eq!(rows[0].state, "idle");
         assert_eq!(rows[0].token_count, 0);
+    }
+
+    #[test]
+    fn test_session_by_channel_returns_latest() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let s1 = store.create_session("uuid1", "cron:morning_news").unwrap();
+        // 推进 last_activity，使 s2 成为最新
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let s2 = store.create_session("uuid2", "cron:morning_news").unwrap();
+        // 非该 channel 的会话不应被命中
+        store.create_session("uuid3", "cli").unwrap();
+
+        let got = store.session_by_channel("cron:morning_news").unwrap();
+        assert_eq!(got, Some(s2));
+        assert_ne!(got, Some(s1));
+        assert_eq!(store.session_by_channel("cron:nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn test_channel_of() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("uuid1", "web").unwrap();
+        assert_eq!(store.channel_of(sid).unwrap(), Some("web".to_string()));
+        assert_eq!(store.channel_of(99999).unwrap(), None);
     }
 
     #[test]

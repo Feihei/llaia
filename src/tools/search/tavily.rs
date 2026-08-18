@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::time::Duration;
 
 use super::{SearchProvider, SearchResult};
 
@@ -19,7 +20,10 @@ pub struct TavilyProvider {
 impl TavilyProvider {
     pub fn new(api_key: String) -> Result<Self> {
         Ok(Self {
-            client: reqwest::Client::builder().build()?,
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                .build()?,
             api_key,
         })
     }
