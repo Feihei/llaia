@@ -447,7 +447,21 @@ pub async fn build_single_agent(
             config.tools.terminal.command_whitelist.clone(),
             workspace_root.clone(),
         )),
-        Arc::new(WebFetch::new()?),
+        Arc::new({
+            // web_fetch 正文抽取：若启用且配置了 Tavily key，则复用其做服务端抽取。
+            let tavily = if config.tools.web_fetch.use_tavily_extract
+                && !config.tools.tavily.api_key.is_empty()
+            {
+                Some(Arc::new(
+                    crate::tools::search::tavily::TavilyProvider::new(
+                        config.tools.tavily.api_key.clone(),
+                    )?,
+                ))
+            } else {
+                None
+            };
+            WebFetch::new(config.tools.web_fetch.max_chars, tavily)?
+        }),
         Arc::new(
             MemoryWrite::new(memory_path.clone(), user_path.clone(), is_main)
                 .with_timezone(config.runtime.timezone.clone()),

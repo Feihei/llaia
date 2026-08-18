@@ -541,6 +541,9 @@ pub struct ToolsConfig {
     /// TTS（P5 T1）：OpenAI 兼容 /audio/speech
     #[serde(default)]
     pub tts: TtsConfig,
+    /// web_fetch 正文抽取与体积上限
+    #[serde(default)]
+    pub web_fetch: WebFetchConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -594,6 +597,36 @@ fn default_command_whitelist() -> Vec<String> {
 pub struct TavilyConfig {
     #[serde(default)]
     pub api_key: String,
+}
+
+/// `web_fetch` 工具配置：控制正文抽取与体积上限。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebFetchConfig {
+    /// 返回文本的最大字符数；超出截断并追加提示。默认 20000（约 6~8k token），
+    /// 足够覆盖一篇新闻正文，又避免把整站 HTML/JS 灌进上下文。
+    #[serde(default = "default_web_fetch_max_chars")]
+    pub max_chars: usize,
+    /// 复用 `[tools.tavily].api_key` 走 Tavily `/extract` 服务端抽取（对反爬 / JS 渲染页
+    /// 成功率更高，对应 AstrBot 的做法）。仅在 Tavily key 非空时生效；否则自动退化为本地抽取。
+    #[serde(default = "default_web_fetch_use_tavily")]
+    pub use_tavily_extract: bool,
+}
+
+impl Default for WebFetchConfig {
+    fn default() -> Self {
+        Self {
+            max_chars: default_web_fetch_max_chars(),
+            use_tavily_extract: default_web_fetch_use_tavily(),
+        }
+    }
+}
+
+fn default_web_fetch_max_chars() -> usize {
+    20_000
+}
+
+fn default_web_fetch_use_tavily() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

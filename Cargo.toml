@@ -64,6 +64,13 @@ async-imap = { version = "0.11", default-features = false, features = ["runtime-
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 # 飞书/Lark 长连接 WS 使用 protobuf 二进制帧（pbbp2.proto），运行时编解码事件帧
 prost = "0.13"
+# web_fetch 正文抽取：readability 取主内容（新闻/文章场景），html2text 作全页兜底。
+# readability 默认 features 含 reqwest 0.11（from_url 便利方法），本仓库自带 reqwest 0.12 且
+# 自己抓页面，故关掉 default-features 去掉那条冗余依赖链。
+readability = { version = "0.3.0", default-features = false }
+html2text = "0.17.1"
+# readability::extractor::extract 需要 url::Url 入参；作为直接依赖显式引入。
+url = "2"
 
 [dev-dependencies]
 mockito = "1"
