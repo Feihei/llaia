@@ -292,17 +292,21 @@ impl Agent {
     /// 非流式版本（保留向后兼容）：内部调 handle_input_streaming + 收集
     pub async fn handle_input(&mut self, user_input: &str, channel: &str) -> Result<String> {
         let (tx, mut rx) = mpsc::channel(64);
-        let result = self.handle_input_streaming(user_input, channel, tx).await;
-        let mut text = String::new();
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                TurnEvent::Chunk { delta } => text.push_str(&delta),
-                TurnEvent::Error { message } => {
-                    return Err(anyhow::anyhow!(message));
+        // 并发 drain：必须边跑边消费。若等 turn 结束再 drain，turn 内事件数一旦超过
+        // channel 容量（64），`event_tx.send().await` 会永远阻塞（接收端尚未启动），
+        // 整个 turn 冻结到顶层超时才被 kill——dream stage2 挂 600s×3 的根因
+        // （stage2 输出完整 MEMORY 文件，逐 token delta 必然超 64 事件）。
+        let drain = tokio::spawn(async move {
+            let mut text = String::new();
+            while let Some(ev) = rx.recv().await {
+                if let TurnEvent::Chunk { delta } = ev {
+                    text.push_str(&delta);
                 }
-                _ => {}
             }
-        }
+            text
+        });
+        let result = self.handle_input_streaming(user_input, channel, tx).await;
+        let text = drain.await.unwrap_or_default();
         result?;
         Ok(text)
     }
@@ -361,7 +365,7 @@ impl Agent {
         let isolated_system = system_override.unwrap_or(&saved_system).to_string();
         let saved_context = std::mem::replace(
             &mut self.context,
-            crate::agent::context::Context::new(isolated_system),
+            crate::agent::context::Context::new(isolated_system.clone()),
         );
         self.disable_tools = disable_tools;
         self.disable_thinking = disable_thinking;
@@ -369,10 +373,12 @@ impl Agent {
         // 顶层超时兜底 + 重试：包裹整个 handle_input（含多轮工具调用 + 最终合成）。
         // 超时 / 错误后 inner future 被丢弃并释放对 self 的借用，随后在仍持有 agent 锁期间
         // 恢复原 session/context，避免污染主会话；并重试直到成功或达到最大次数。
-        // 每次重试都从全新 context 重发同一 prompt（隔离 turn 不加载历史，故不会重复上下文）。
+        // 每次重试都重置隔离 context：上一次失败尝试残留的 user 消息会被清掉，
+        // 否则重试请求体里 prompt 会逐次翻倍（实测 attempt2 出现双份 user prompt）。
         let mut attempt = 0usize;
         let result = loop {
             attempt += 1;
+            self.context = crate::agent::context::Context::new(isolated_system.clone());
             let r = tokio::time::timeout(
                 std::time::Duration::from_secs(Self::CRON_TURN_TIMEOUT_SECS),
                 self.handle_input(prompt, channel),
@@ -930,6 +936,8 @@ mod tests {
     struct MockProvider {
         native: bool,
         rounds: Arc<StdMutex<std::collections::VecDeque<Vec<StreamEvent>>>>,
+        /// 记录每次 chat_stream 收到的 disable_thinking / tools 形态（回归断言用）
+        seen: Arc<StdMutex<Vec<(bool, bool)>>>,
     }
 
     impl MockProvider {
@@ -937,6 +945,7 @@ mod tests {
             Self {
                 native,
                 rounds: Arc::new(StdMutex::new(rounds.into())),
+                seen: Arc::new(StdMutex::new(Vec::new())),
             }
         }
     }
@@ -946,7 +955,11 @@ mod tests {
         async fn chat(&self, _req: &ChatRequest<'_>) -> Result<ChatResponse> {
             unreachable!()
         }
-        async fn chat_stream(&self, _req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
+        async fn chat_stream(&self, req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((req.disable_thinking, req.tools.is_some()));
             let events = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
             let s = try_stream! {
                 for ev in events {
@@ -961,9 +974,21 @@ mod tests {
     }
 
     async fn make_agent_with_rounds(native: bool, rounds: Vec<Vec<StreamEvent>>) -> Agent {
+        make_agent_with_rounds_seen(native, rounds, Arc::new(StdMutex::new(Vec::new()))).await
+    }
+
+    async fn make_agent_with_rounds_seen(
+        native: bool,
+        rounds: Vec<Vec<StreamEvent>>,
+        seen: Arc<StdMutex<Vec<(bool, bool)>>>,
+    ) -> Agent {
         let store = SessionStore::open_in_memory().unwrap();
         let sid = store.create_session("test", "test").unwrap();
-        let provider: Arc<dyn Provider> = Arc::new(MockProvider::new(native, rounds));
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+            native,
+            rounds: Arc::new(StdMutex::new(rounds.into())),
+            seen,
+        });
         let tools = Arc::new(ToolRegistry::new());
         let config = Config::default_for_workspace("/tmp/llaia-test");
         Agent::new(
@@ -1050,6 +1075,55 @@ mod tests {
             agent.context.history[1].content.as_text(),
             "prior assistant msg"
         );
+    }
+
+    /// 回归（dream stage2 挂 600s×3 的真根因）：回复 delta 数超过事件 channel 容量（64）时
+    /// `handle_input` 必须正常完成。旧实现等 turn 结束才 drain channel，第 65 次
+    /// `event_tx.send().await` 永久阻塞（接收端未启动）→ 整个 turn 冻结到 600s 顶层超时。
+    /// dream stage2 输出完整 MEMORY 文件（逐 token delta 必然超 64）故必挂，stage1 短回复侥幸不挂。
+    #[tokio::test]
+    async fn test_handle_input_no_deadlock_over_channel_capacity() {
+        // 100 个 delta，远超 channel(64) 容量
+        let mut events: Vec<StreamEvent> = (0..100)
+            .map(|i| StreamEvent::TextDelta(format!("t{} ", i)))
+            .collect();
+        events.push(StreamEvent::Done);
+        let mut agent = make_agent_with_rounds(true, vec![events]).await;
+        // 若死锁，此调用会永远挂起（测试框架超时判败）
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            agent.handle_input("hi", "cron"),
+        )
+        .await
+        .expect("handle_input deadlocked: channel 容量超限时必须并发 drain")
+        .unwrap();
+        assert!(reply.starts_with("t0 t1 "));
+        assert!(reply.contains("t99 "));
+    }
+
+    /// 回归（issue 2026-08-18 cron 隔离 turn 超时）：dream 两阶段的隔离 turn 必须把
+    /// `disable_thinking=true` 一路透传到 provider 请求，并关掉工具暴露。思考没关时
+    /// 推理模型会持续吐 reasoning chunk 刷新空闲计时，直到 600s 顶层超时才被 kill。
+    #[tokio::test]
+    async fn test_isolated_turn_propagates_disable_thinking_and_tools() {
+        let rounds = vec![vec![StreamEvent::TextDelta("ok".into()), StreamEvent::Done]];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_with_rounds_seen(true, rounds, seen.clone()).await;
+        let sid = agent
+            .session_store
+            .create_session("iso-uuid", "cron:dream:dream-stage1")
+            .unwrap();
+
+        let reply = agent
+            .run_isolated_turn_with("prompt", "cron", sid, Some("minimal system"), true, true)
+            .await
+            .unwrap();
+        assert_eq!(reply, "ok");
+        // 请求到达 provider 时：disable_thinking=true 且 tools 未暴露
+        assert_eq!(*seen.lock().unwrap(), vec![(true, false)]);
+        // turn 结束后主 agent 状态复原，普通交互不受影响
+        assert!(!agent.disable_thinking);
+        assert!(!agent.disable_tools);
     }
 
     #[tokio::test]

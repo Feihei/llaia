@@ -75,7 +75,9 @@ impl Tool for WebFetch {
         if let Some(tavily) = &self.tavily {
             match tavily.extract(url).await {
                 Ok(text) => return Ok(self.truncate(&text)),
-                Err(e) => tracing::warn!(error = %e, "tavily extract failed, falling back to local parse"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "tavily extract failed, falling back to local parse")
+                }
             }
         }
 
@@ -167,8 +169,14 @@ mod tests {
             <article><p>The quick brown fox jumps over the lazy dog near the river bank this morning.</p></article>\
             </body></html>";
         let text = local_extract_html(html, "https://example.com/news/1");
-        assert!(text.contains("quick brown fox"), "expected readable text, got: {text}");
-        assert!(!text.contains("<article>"), "raw tags must be stripped, got: {text}");
+        assert!(
+            text.contains("quick brown fox"),
+            "expected readable text, got: {text}"
+        );
+        assert!(
+            !text.contains("<article>"),
+            "raw tags must be stripped, got: {text}"
+        );
     }
 
     #[test]
@@ -192,4 +200,3 @@ mod tests {
         assert_eq!(wf.name(), "web_fetch");
     }
 }
-

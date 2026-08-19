@@ -452,11 +452,9 @@ pub async fn build_single_agent(
             let tavily = if config.tools.web_fetch.use_tavily_extract
                 && !config.tools.tavily.api_key.is_empty()
             {
-                Some(Arc::new(
-                    crate::tools::search::tavily::TavilyProvider::new(
-                        config.tools.tavily.api_key.clone(),
-                    )?,
-                ))
+                Some(Arc::new(crate::tools::search::tavily::TavilyProvider::new(
+                    config.tools.tavily.api_key.clone(),
+                )?))
             } else {
                 None
             };

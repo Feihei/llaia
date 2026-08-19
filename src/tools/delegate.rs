@@ -253,6 +253,21 @@ async fn run_child(
 ) -> String {
     let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
     let task_clone = full_task.clone();
+    // 并发 drain + 转发：必须边跑边消费。若等 turn 结束再收，子 agent 输出超 channel
+    // 容量（64）时 send 永久阻塞，整个委派冻结到 timeout（与 handle_input 同款死锁）。
+    let forward_cloned = forward.cloned();
+    let drain = tokio::spawn(async move {
+        let mut output = String::new();
+        while let Some(ev) = rx.recv().await {
+            if let TurnEvent::Chunk { delta } = ev {
+                output.push_str(&delta);
+                if let Some(tx) = &forward_cloned {
+                    let _ = tx.send(TurnEvent::Chunk { delta }).await;
+                }
+            }
+        }
+        output
+    });
     // 子 agent 用独立 channel 标识 "delegate"，不继承主 agent 的 channel。
     let result = tokio::time::timeout(Duration::from_secs(timeout), async {
         sub_agent
@@ -263,16 +278,12 @@ async fn run_child(
     })
     .await;
 
-    // 收集子 Agent 的 Chunk 事件，转发给主 channel 并累积输出
-    let mut output = String::new();
-    while let Ok(ev) = rx.try_recv() {
-        if let TurnEvent::Chunk { delta } = ev {
-            output.push_str(&delta);
-            if let Some(tx) = forward {
-                let _ = tx.send(TurnEvent::Chunk { delta }).await;
-            }
-        }
-    }
+    // drain 任务随 tx 掉落自然结束；超时分支下先 abort 再取回已累积部分
+    let output = match drain.await {
+        Ok(o) => o,
+        Err(e) if e.is_cancelled() => String::new(),
+        Err(_) => String::new(),
+    };
 
     // 从子 agent 本次 turn 的工具调用记录提取产出文件清单
     let output_files: Vec<String> = {

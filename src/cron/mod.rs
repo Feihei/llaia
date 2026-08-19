@@ -479,12 +479,12 @@ impl CronHandle {
             rt.block_on(async move {
                 let sched =
                     match CronScheduler::start(&cron_path, registry, pushers, timezone).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to start cron scheduler");
-                        return;
-                    }
-                };
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to start cron scheduler");
+                            return;
+                        }
+                    };
                 let sched = Arc::new(sched);
                 if sched_tx.send(sched.clone()).is_err() {
                     tracing::error!("cron scheduler handle channel closed before start");

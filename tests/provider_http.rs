@@ -50,6 +50,7 @@ async fn test_native_tool_calling() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
+        disable_thinking: false,
     };
     let resp = provider.chat(&req).await.unwrap();
 
@@ -91,6 +92,7 @@ async fn test_text_response() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
+        disable_thinking: false,
     };
     let resp = provider.chat(&req).await.unwrap();
 
@@ -123,6 +125,7 @@ async fn test_error_response() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
+        disable_thinking: false,
     };
     let result = provider.chat(&req).await;
 

@@ -82,6 +82,7 @@ async fn test_anthropic_stream_text_and_tool() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
+        disable_thinking: false,
     };
     let resp = provider.chat(&req).await.unwrap();
 
@@ -124,6 +125,7 @@ async fn test_anthropic_payload_system_and_tools() {
     let req = ChatRequest {
         messages: &msgs,
         tools: Some(&tools),
+        disable_thinking: false,
     };
     provider.chat(&req).await.unwrap();
     m.assert_async().await;
@@ -145,6 +147,7 @@ async fn test_anthropic_error_status() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
+        disable_thinking: false,
     };
     let err = provider.chat(&req).await.unwrap_err();
     assert!(err.to_string().contains("401"));
@@ -169,6 +172,7 @@ async fn test_anthropic_sse_error_event() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
+        disable_thinking: false,
     };
     let err = provider.chat(&req).await.unwrap_err();
     assert!(err.to_string().contains("overloaded"));
