@@ -13,18 +13,18 @@ use tower::util::ServiceExt;
 fn test_load_skills_seeds_examples_once() {
     let tmp = tempfile::tempdir().unwrap();
     let skills_dir = tmp.path().join("skills");
-    // 首次加载：种子 3 个内置示例
+    // 首次加载：种子 3 个内置示例 + 1 个内置元 skill（skill-authoring）
     let skills = llaia::skill::loader::load_skills(&skills_dir);
-    assert_eq!(skills.len(), 3);
+    assert_eq!(skills.len(), 4);
     // skills.json 生成且全部 active
     let json_path = skills_dir.with_file_name("skills.json");
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(json_path).unwrap()).unwrap();
     assert_eq!(json["skills"]["news-digest"]["active"], true);
-    // 目录已存在时不再种子：手动删掉一个示例，再 load 不会恢复
+    // 目录已存在时不再种子：手动删掉一个示例，再 load 不会恢复（元 skill 仍在）
     std::fs::remove_dir_all(skills_dir.join("todoist")).unwrap();
     let skills = llaia::skill::loader::load_skills(&skills_dir);
-    assert_eq!(skills.len(), 2);
+    assert_eq!(skills.len(), 3);
 }
 
 #[test]
