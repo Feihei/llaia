@@ -60,7 +60,8 @@ max_tokens = 8192                     # Anthropic 必传，未配默认 4096
 |---|---|
 | `model` | `"provider_id.model_alias"` 引用；留空 = 降级模式（仅可配置 Web UI）。 |
 | `fallback` | 备用模型链，如 `["local.small", "cloud.big"]`，主模型失败依序降级。 |
-| `workspace` / `soul` / `user` / `memory` | **已废弃**，自动推导到 `~/.llaia/workspace/`（子 agent 到 `workspace/subagent/<alias>/`）。显式设置会告警并用推导值覆盖。 |
+| `workspace` | **已移除**，自动推导到 `~/.llaia/workspace/`（子 agent 到 `workspace/subagent/<alias>/`）。旧配置里写了该字段会被直接忽略，可安全删除。 |
+| `soul` / `user` / `memory` | **已废弃**，自动从 agent 家目录推导，显式设置不生效。 |
 | `denied_tools` | 子 agent 工具黑名单（主 agent 一般留空）。 |
 | `delegate_timeout` | 委派超时秒数，默认 120（仅子 agent 生效）。 |
 

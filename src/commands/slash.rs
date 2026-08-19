@@ -683,7 +683,6 @@ mod tests {
             "main".into(),
             AgentConfig {
                 model: "a.big".into(),
-                workspace: String::new(),
                 soul: None,
                 user: None,
                 memory: None,

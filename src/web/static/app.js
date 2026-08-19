@@ -506,7 +506,7 @@ function llaiaApp() {
       if (!alias || !alias.trim()) return;
       if (this.cfg.agent[alias]) { alert('Agent already exists: ' + alias); return; }
       this.cfg.agent[alias] = {
-        model: '', workspace: '',
+        model: '',
         denied_tools: [], delegate_timeout: 120, fallback: [],
       };
       this.fallbackDraft[alias] = '';

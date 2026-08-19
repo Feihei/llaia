@@ -157,12 +157,9 @@ fn default_true() -> bool {
 pub struct AgentConfig {
     /// 引用 "provider_id.model_alias"，例如 "default.qwen3"
     pub model: String,
-    /// [deprecated] 该 agent 的 md 文件根目录。P3-a 起自动推导：
-    ///   main → <config_dir>/workspace/
-    ///   子 agent → <config_dir>/workspace/subagent/<alias>/
-    /// 字段保留向后兼容，加载时 warn 并用自动推导值覆盖
-    pub workspace: String,
-    /// [deprecated] 缺省时从 workspace 推导为 <workspace>/SOUL.md 等
+    /// [deprecated] workspace 字段已移除（P3-a 起自动推导，见 derive_workspace），
+    /// 存量配置里的该键由 serde 直接忽略（未开 deny_unknown_fields）。
+    /// [deprecated] 缺省时从 agent 家目录推导为 <workspace>/SOUL.md 等
     pub soul: Option<String>,
     pub user: Option<String>,
     pub memory: Option<String>,
@@ -829,7 +826,6 @@ impl Config {
     fn expand_paths(&mut self) -> Result<()> {
         let expand = |s: &str| -> Result<String> { expand_string(s) };
         for a in self.agent.values_mut() {
-            a.workspace = expand(&a.workspace)?;
             a.soul = a.soul.as_ref().map(|s| expand(s)).transpose()?;
             a.user = a.user.as_ref().map(|s| expand(s)).transpose()?;
             a.memory = a.memory.as_ref().map(|s| expand(s)).transpose()?;
@@ -868,11 +864,8 @@ impl Config {
     }
 
     /// 默认配置（首次启动用），结构最小化
-    /// config_dir 指向 ~/.llaia/，主 agent workspace 自动推导为 ~/.llaia/workspace/
     pub fn default_for_workspace(config_dir: &str) -> Self {
         let config_dir = shellexpand::tilde(config_dir).into_owned();
-        let config_dir_path = std::path::PathBuf::from(&config_dir);
-        let ws = config_dir_path.join("workspace");
 
         let mut provider: HashMap<String, ProviderConfig> = HashMap::new();
         let mut models: HashMap<String, ModelConfig> = HashMap::new();
@@ -901,7 +894,6 @@ impl Config {
             "main".into(),
             AgentConfig {
                 model: "default.qwen".into(),
-                workspace: ws.to_string_lossy().into_owned(),
                 soul: None,
                 user: None,
                 memory: None,
@@ -1011,11 +1003,9 @@ dir = "~/.llaia-test/logs"
         let m2 = p.model.get("qwen2").unwrap();
         assert!(m2.native_tool_calling);
 
-        // agent: workspace 展开，soul/user/memory 缺省为 None
+        // agent: workspace 字段已移除（存量配置中的该键被忽略），soul/user/memory 缺省为 None
         let a = config.agent.get("main").unwrap();
         assert_eq!(a.model, "default.qwen3");
-        assert!(a.workspace.ends_with("custom-ws"));
-        assert!(!a.workspace.contains('~'));
         assert!(a.soul.is_none());
 
         // tools
@@ -1038,9 +1028,6 @@ dir = "~/.llaia-test/logs"
         let a = config.agent.get("main").unwrap();
         assert_eq!(a.model, "default.qwen");
         assert!(a.soul.is_none());
-        // workspace 现在推导为 ~/.llaia/workspace
-        let ws_path = std::path::PathBuf::from(&a.workspace);
-        assert!(ws_path.ends_with(std::path::Path::new(".llaia/workspace")));
         // runtime 默认值
         assert_eq!(config.runtime.context_threshold, 0.7);
         assert_eq!(config.runtime.max_iterations, 10);
@@ -1048,6 +1035,7 @@ dir = "~/.llaia-test/logs"
 
     #[test]
     fn test_minimal_config_uses_defaults() {
+        // 无 workspace 字段的最小配置也能加载（该字段已从 schema 移除）
         let toml = r#"
 [provider.default]
 type = "openai_compatible"
@@ -1058,7 +1046,6 @@ model = "qwen2.5:7b"
 
 [agent.main]
 model = "default.qwen"
-workspace = "~/.llaia"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();

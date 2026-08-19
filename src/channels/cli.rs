@@ -691,7 +691,6 @@ pub async fn build_agent(
         );
         AgentConfig {
             model: String::new(),
-            workspace: String::new(),
             soul: None,
             user: None,
             memory: None,
