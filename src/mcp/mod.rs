@@ -64,6 +64,74 @@ fn default_enabled() -> bool {
     true
 }
 
+/// 解析失败时的笔误提示：识别 `true` / `false` / `None` 的非法变体——
+/// 大写（`True`，Python 习惯）或全角字符（`ｔｒｕｅ`，中文输入法全角模式），
+/// 后者在终端里肉眼看与小写 true 无差别。
+///
+/// toml crate 对无法识别的裸值统一报 `invalid string, expected `"`, `'`，
+/// 误导用户去加引号，进而得到 `invalid type: string, expected a boolean`，
+/// 报错形成死循环；这里补一条带行号、非 ASCII 字符转义显示的修正提示。
+fn bare_value_hint(content: &str) -> Option<String> {
+    for (idx, line) in content.lines().enumerate() {
+        // 去掉行内注释后再看 k = v
+        let bare = line.split('#').next().unwrap_or(line).trim();
+        let Some((_, v)) = bare.split_once('=') else {
+            continue;
+        };
+        let v = v.trim();
+        if v.is_empty() {
+            continue;
+        }
+        let norm = normalize_ascii(v);
+        let reason = match norm.as_str() {
+            "true" | "false" => {
+                if v == norm {
+                    continue; // 已是合法写法，问题在别处
+                }
+                "TOML booleans must be exactly lowercase ASCII `true` / `false`"
+            }
+            "none" => "`None` is not valid TOML (use `false`)",
+            _ => continue,
+        };
+        // 转义非 ASCII 字符，让全角/不可见字符现形
+        let shown: String = v
+            .chars()
+            .map(|c| {
+                if c.is_ascii_graphic() {
+                    c.to_string()
+                } else {
+                    format!("\\u{{{:04x}}}", c as u32)
+                }
+            })
+            .collect();
+        return Some(format!(
+            "hint: line {}: `{}` — {} (value shown with escapes: `{}`)",
+            idx + 1,
+            bare,
+            reason,
+            shown
+        ));
+    }
+    None
+}
+
+/// 归一化比较用：全角字符（U+FF01..U+FF5E）映射回 ASCII，剔除零宽/空白填充字符，
+/// 再转小写。仅用于识别 `true`/`false`/`none` 的变体，不修改原值。
+fn normalize_ascii(v: &str) -> String {
+    v.chars()
+        .filter(|c| !matches!(c, '\u{200b}' | '\u{feff}' | '\u{a0}' | '\u{3000}'))
+        .map(|c| {
+            if ('\u{ff01}'..='\u{ff5e}').contains(&c) {
+                // unwrap 安全：全角区减 0xFEE0 后必落在可打印 ASCII 区
+                char::from_u32(c as u32 - 0xfee0).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 impl McpConfig {
     /// 从文件加载 mcp.toml；文件不存在返回空配置（无 MCP server）。
     /// 加载时对 url / headers / env 值做 `${VAR}` 环境变量插值。
@@ -72,7 +140,8 @@ impl McpConfig {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(path)?;
-        let mut cfg: McpConfig = toml::from_str(&content)?;
+        let mut cfg = Self::parse(&content)
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", path.display(), e))?;
         cfg.expand_env()?;
         cfg.validate()?;
         Ok(cfg)
@@ -80,9 +149,24 @@ impl McpConfig {
 
     /// 仅解析校验（不做 env 插值），供 WebUI 保存前检查。
     pub fn from_str_validate(raw: &str) -> anyhow::Result<Self> {
-        let cfg: McpConfig = toml::from_str(raw)?;
+        let cfg = Self::parse(raw)?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// 解析 TOML；失败时附上常见笔误提示（bare_value_hint）。
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match toml::from_str(raw) {
+            Ok(cfg) => Ok(cfg),
+            Err(e) => {
+                let mut msg = e.to_string();
+                if let Some(hint) = bare_value_hint(raw) {
+                    msg.push('\n');
+                    msg.push_str(&hint);
+                }
+                anyhow::bail!("{}", msg)
+            }
+        }
     }
 
     /// url / headers / env 值做 `${VAR}` 插值（复用 config.toml 的机制）
@@ -256,6 +340,48 @@ command = "echo"
     fn test_load_missing_file_returns_empty() {
         let cfg = McpConfig::load(Path::new("/nonexistent/mcp.toml")).unwrap();
         assert!(cfg.server.is_empty());
+    }
+
+    #[test]
+    fn test_parse_error_hint_for_capitalized_bool() {
+        // Python 风格大写 True：toml crate 报误导性的 "invalid string"，
+        // 我们的提示必须指出行号与正确写法
+        let raw =
+            "[[server]]\nid = \"x\"\ntransport = \"stdio\"\ncommand = \"echo\"\nenabled = True\n";
+        let err = McpConfig::from_str_validate(raw).unwrap_err().to_string();
+        assert!(err.contains("invalid string"), "got: {}", err);
+        assert!(err.contains("line 5"), "got: {}", err);
+        assert!(err.contains("enabled = True"), "got: {}", err);
+        assert!(err.contains("lowercase"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_parse_error_hint_for_fullwidth_true() {
+        // 中文输入法全角模式下的 ｔｒｕｅ：终端里肉眼看与小写 true 无差别，
+        // 提示必须把非 ASCII 字符转义显示出来
+        let raw = "[[server]]\nid = \"x\"\ntransport = \"stdio\"\ncommand = \"echo\"\nenabled = \u{ff54}\u{ff52}\u{ff55}\u{ff45}\n".to_string();
+        let err = McpConfig::from_str_validate(&raw).unwrap_err().to_string();
+        assert!(err.contains("invalid string"), "got: {}", err);
+        assert!(err.contains("\\u{ff54}"), "got: {}", err);
+        assert!(err.contains("lowercase"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_parse_error_hint_ignores_valid_lines() {
+        // 合法小写 true 不触发提示（错误另有原因时不得给出误导 hint）
+        let hint = bare_value_hint("enabled = true\ncommand = \"echo\"\n");
+        assert!(hint.is_none());
+        // 引号包裹的字符串值不误报
+        let hint = bare_value_hint("command = \"True\"\n");
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn test_parse_error_hint_for_none() {
+        let raw =
+            "[[server]]\nid = \"x\"\ntransport = \"stdio\"\ncommand = \"echo\"\nenabled = None\n";
+        let err = McpConfig::from_str_validate(raw).unwrap_err().to_string();
+        assert!(err.contains("enabled = None"), "got: {}", err);
     }
 
     #[test]
