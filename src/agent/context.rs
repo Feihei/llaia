@@ -166,6 +166,7 @@ impl Context {
         let req = ChatRequest {
             messages: &messages,
             tools: None,
+            disable_thinking: false,
         };
         let resp: ChatResponse = provider.chat(&req).await?;
         let summary = resp.text.unwrap_or_default();

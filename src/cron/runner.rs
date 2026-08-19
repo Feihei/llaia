@@ -144,24 +144,49 @@ pub async fn run_agent_mode(
     };
 
     // 派生独立 agent 跑 turn，避免整轮持全局锁冻结主会话 / WebUI。
-    // 顶层超时兜底：provider 流式挂起（SSE keepalive 使 per-chunk 120s 超时不触发）时，
-    // 300s 后丢弃 inner future 并推送失败通知，而不是无限占着资源。
+    // 顶层超时兜底 + 重试：provider 流式挂起（SSE keepalive 使 per-chunk 120s 超时不触发）时
+    // 单次会失败，但往往为瞬时抖动，重试常能恢复；最多重试 CRON_TURN_MAX_ATTEMPTS 次，
+    // 每次重新派生（丢弃上一轮可能残留的上下文）从干净状态重发，避免无限占着资源。
     const CRON_TURN_TIMEOUT_SECS: u64 = 300;
+    const CRON_TURN_MAX_ATTEMPTS: usize = 3;
     let mut forked = {
         let a = agent.lock().await;
-        a.fork_for_isolated(session_id)
+        a.fork_for_isolated(session_id, true)
     };
-    let result = match tokio::time::timeout(
-        std::time::Duration::from_secs(CRON_TURN_TIMEOUT_SECS),
-        forked.handle_input(&cron_prompt, "cron"),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(_) => Err(anyhow::anyhow!(
-            "cron isolated turn timed out after {}s",
-            CRON_TURN_TIMEOUT_SECS
-        )),
+    let mut attempt = 0usize;
+    let result = loop {
+        attempt += 1;
+        let r = match tokio::time::timeout(
+            std::time::Duration::from_secs(CRON_TURN_TIMEOUT_SECS),
+            forked.handle_input(&cron_prompt, "cron"),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!(
+                "cron isolated turn timed out after {}s",
+                CRON_TURN_TIMEOUT_SECS
+            )),
+        };
+        match r {
+            Ok(text) => break Ok(text),
+            Err(e) => {
+                if attempt >= CRON_TURN_MAX_ATTEMPTS {
+                    break Err(e);
+                }
+                tracing::warn!(
+                    task = %task.id,
+                    attempt,
+                    max = CRON_TURN_MAX_ATTEMPTS,
+                    "cron turn attempt failed, retrying"
+                );
+                // 重新派生，丢弃上一轮可能残留的上下文，从干净状态重试
+                forked = {
+                    let a = agent.lock().await;
+                    a.fork_for_isolated(session_id, true)
+                };
+            }
+        }
     };
 
     match result {

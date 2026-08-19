@@ -172,6 +172,7 @@ mod tests {
         let r = ChatRequest {
             messages: &msgs,
             tools: None,
+            disable_thinking: false,
         };
         let resp = fb.chat(&r).await.unwrap();
         assert_eq!(resp.text.as_deref(), Some("ok"));
@@ -188,6 +189,7 @@ mod tests {
         let r = ChatRequest {
             messages: &msgs,
             tools: None,
+            disable_thinking: false,
         };
         let err = fb.chat(&r).await.unwrap_err();
         assert!(err.to_string().contains("bad2"));
@@ -204,6 +206,7 @@ mod tests {
         let r = ChatRequest {
             messages: &msgs,
             tools: None,
+            disable_thinking: false,
         };
         let events: Vec<_> = fb.chat_stream(&r).await.collect().await;
         assert_eq!(events.len(), 2);
@@ -263,6 +266,7 @@ mod tests {
         let r = ChatRequest {
             messages: &msgs,
             tools: None,
+            disable_thinking: false,
         };
         let resp = fb.chat(&r).await.unwrap();
         assert_eq!(resp.tool_calls.len(), 1);

@@ -21,7 +21,7 @@ use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Serialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 流式响应单 chunk 读取超时（秒），与 openai_compat 对齐
 const STREAM_CHUNK_TIMEOUT_SECS: u64 = 120;
@@ -306,12 +306,22 @@ impl Provider for AnthropicProvider {
             let mut tc_name = String::new();
             let mut tc_args = String::new();
             let mut in_tool_block = false;
+            // 空闲计时锚点：仅「真实 data 事件」会刷新；keepalive 注释 `: ping` 不会。
+            let mut last_data = Instant::now();
 
             loop {
-                let chunk = match tokio::time::timeout(
-                    Duration::from_secs(STREAM_CHUNK_TIMEOUT_SECS),
-                    resp.chunk(),
-                ).await {
+                // 空闲超时（idle timeout）：按「距上次真实 data」计算剩余窗口，而非每次
+                // `resp.chunk()` 都重置。SSE keepalive（`: ping`）会不断重置 per-chunk
+                // 计时器，使挂起的流永远卡不到超时。
+                let remaining = STREAM_CHUNK_TIMEOUT_SECS.saturating_sub(last_data.elapsed().as_secs());
+                if remaining == 0 {
+                    yield StreamEvent::Error(format!(
+                        "stream idle timeout (no real data in {}s)",
+                        STREAM_CHUNK_TIMEOUT_SECS
+                    ));
+                    return;
+                }
+                let chunk = match tokio::time::timeout(Duration::from_secs(remaining), resp.chunk()).await {
                     Ok(Ok(Some(c))) => c,
                     Ok(Ok(None)) => break,
                     Ok(Err(e)) => {
@@ -320,13 +330,18 @@ impl Provider for AnthropicProvider {
                     }
                     Err(_) => {
                         yield StreamEvent::Error(format!(
-                            "stream chunk timeout (no data in {}s)",
+                            "stream idle timeout (no real data in {}s)",
                             STREAM_CHUNK_TIMEOUT_SECS
                         ));
                         return;
                     }
                 };
-                buf.push_str(std::str::from_utf8(&chunk).unwrap_or(""));
+                // 该 chunk 是否携带真实 SSE data 事件（keepalive 注释 `: ping` 不含 `data:`）
+                let chunk_str = std::str::from_utf8(&chunk).unwrap_or("");
+                if chunk_str.lines().any(|l| l.trim_start().starts_with("data:")) {
+                    last_data = Instant::now();
+                }
+                buf.push_str(chunk_str);
                 while let Some(pos) = buf.find("\n\n") {
                     let event_str = buf[..pos].to_string();
                     buf = buf[pos + 2..].to_string();

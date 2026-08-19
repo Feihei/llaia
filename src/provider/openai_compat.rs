@@ -9,7 +9,7 @@ use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Serialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 流式响应单 chunk 读取超时（秒）。
 /// LLM 生成可能有间隔，但超过此时间无任何数据视为连接挂起。
@@ -238,6 +238,17 @@ impl Provider for OpenAiCompatibleProvider {
             None
         };
 
+        // disable_thinking：内部/自动化 turn 关掉推理模型的深度思考，避免无谓的长推理撑爆超时。
+        // 仅当 compat 支持（llama.cpp/Ollama 预设）且本请求显式要求时注入。
+        let chat_template_kwargs = if self.compat.disable_thinking_template && req.disable_thinking
+        {
+            Some(ChatTemplateKwargs {
+                enable_thinking: false,
+            })
+        } else {
+            None
+        };
+
         let body = ChatCompletionsStreamRequest {
             model: &self.model,
             messages,
@@ -247,6 +258,7 @@ impl Provider for OpenAiCompatibleProvider {
             max_tokens,
             max_completion_tokens,
             stream_options,
+            chat_template_kwargs,
         };
 
         let mut request = self.client.post(&url).json(&body);
@@ -280,13 +292,23 @@ impl Provider for OpenAiCompatibleProvider {
             let mut tc_order: Vec<u32> = Vec::new();
             // 原始 finish_reason（尾 chunk 携带），配合 compat 推断有效 finish_reason
             let mut raw_finish: Option<String> = None;
+            // 空闲计时锚点：仅「真实 data 事件」会刷新；keepalive 注释 `: ping` 不会。
+            let mut last_data = Instant::now();
 
             loop {
-                // per-chunk 超时：防止 provider 挂起导致 agent 锁永久持有
-                let chunk = match tokio::time::timeout(
-                    Duration::from_secs(STREAM_CHUNK_TIMEOUT_SECS),
-                    resp.chunk(),
-                ).await {
+                // 空闲超时（idle timeout）：按「距上次真实 data」计算剩余窗口，而非每次
+                // `resp.chunk()` 都重置。否则 provider 持续发 SSE keepalive（`: ping`）会
+                // 不断重置 per-chunk 计时器，使挂起的流永远卡不到超时（agnes 流式挂起时
+                // 实测每 ~120s 发一次 keepalive，把 120s 超时拖到 300s 顶层兜底才断）。
+                let remaining = STREAM_CHUNK_TIMEOUT_SECS.saturating_sub(last_data.elapsed().as_secs());
+                if remaining == 0 {
+                    yield StreamEvent::Error(format!(
+                        "stream idle timeout (no real data in {}s)",
+                        STREAM_CHUNK_TIMEOUT_SECS
+                    ));
+                    return;
+                }
+                let chunk = match tokio::time::timeout(Duration::from_secs(remaining), resp.chunk()).await {
                     Ok(Ok(Some(c))) => c,
                     Ok(Ok(None)) => break,
                     Ok(Err(e)) => {
@@ -295,13 +317,18 @@ impl Provider for OpenAiCompatibleProvider {
                     }
                     Err(_) => {
                         yield StreamEvent::Error(format!(
-                            "stream chunk timeout (no data in {}s)",
+                            "stream idle timeout (no real data in {}s)",
                             STREAM_CHUNK_TIMEOUT_SECS
                         ));
                         return;
                     }
                 };
-                buf.push_str(std::str::from_utf8(&chunk).unwrap_or(""));
+                // 该 chunk 是否携带真实 SSE data 事件（keepalive 注释 `: ping` 不含 `data:`）
+                let chunk_str = std::str::from_utf8(&chunk).unwrap_or("");
+                if chunk_str.lines().any(|l| l.trim_start().starts_with("data:")) {
+                    last_data = Instant::now();
+                }
+                buf.push_str(chunk_str);
                 while let Some(pos) = buf.find("\n\n") {
                     let event_str = buf[..pos].to_string();
                     buf = buf[pos + 2..].to_string();
@@ -532,11 +559,21 @@ struct ChatCompletionsStreamRequest<'a> {
     /// 流式 usage 开关：仅 compat.streaming_usage 时发送（请求尾包带 usage）
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    /// 关闭模型「深度思考」：仅 compat.disable_thinking_template 且请求 disable_thinking 时发送。
+    /// llama.cpp / Ollama 等支持，其它 OpenAI 兼容端点忽略即可（无害）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateKwargs>,
 }
 
 #[derive(Serialize)]
 struct StreamOptions {
     include_usage: bool,
+}
+
+#[derive(Serialize)]
+struct ChatTemplateKwargs {
+    #[serde(rename = "enable_thinking")]
+    enable_thinking: bool,
 }
 
 #[cfg(test)]
@@ -572,6 +609,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
+            disable_thinking: false,
         };
         let resp = p.chat(&req).await.unwrap();
         assert_eq!(resp.text.as_deref(), Some("hello"));
@@ -602,6 +640,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
+            disable_thinking: false,
         };
         let resp = p.chat(&req).await.unwrap();
         // reasoning_content 折回 content
@@ -639,6 +678,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
+            disable_thinking: false,
         };
         let resp = p.chat(&req).await.unwrap();
         // thinking 折回 content
@@ -689,6 +729,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
+            disable_thinking: false,
         };
         // ollama 预设：requires_assistant_after_tool = true
         let with_ph = build_openai_messages(&req, &Compat::ollama());
@@ -701,6 +742,7 @@ mod tests {
         let req2 = ChatRequest {
             messages: &msgs2,
             tools: None,
+            disable_thinking: false,
         };
         assert_eq!(build_openai_messages(&req2, &Compat::ollama()).len(), 1);
     }

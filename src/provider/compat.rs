@@ -40,6 +40,10 @@ pub struct Compat {
     pub infer_finish_reason: bool,
     /// `true` 时多轮 tool 结果后补一条空 assistant 占位（Ollama 某些版本需要）。
     pub requires_assistant_after_tool: bool,
+    /// `true` 时允许在请求里注入 `chat_template_kwargs: {enable_thinking: false}` 以关闭
+    /// 推理模型深度思考。仅对支持该参数的端点（llama.cpp / Ollama 等）有效，其它端点忽略即可。
+    /// 仅在请求的 `disable_thinking` 为真时才注入，故不对普通交互请求产生任何影响（零回归）。
+    pub disable_thinking_template: bool,
 }
 
 impl Default for Compat {
@@ -51,6 +55,7 @@ impl Default for Compat {
             streaming_usage: false,
             infer_finish_reason: false,
             requires_assistant_after_tool: false,
+            disable_thinking_template: true,
         }
     }
 }
@@ -65,6 +70,7 @@ impl Compat {
             streaming_usage: true,
             infer_finish_reason: true,
             requires_assistant_after_tool: true,
+            disable_thinking_template: true,
         }
     }
 
@@ -77,6 +83,7 @@ impl Compat {
             streaming_usage: true,
             infer_finish_reason: true,
             requires_assistant_after_tool: false,
+            disable_thinking_template: true,
         }
     }
 
@@ -116,6 +123,9 @@ impl Compat {
         if let Some(v) = o.requires_assistant_after_tool {
             self.requires_assistant_after_tool = v;
         }
+        if let Some(v) = o.disable_thinking_template {
+            self.disable_thinking_template = v;
+        }
     }
 
     /// 纯函数：给定原始 finish_reason 与是否观察到 tool_calls，返回有效 finish_reason。
@@ -154,6 +164,8 @@ pub struct CompatConfig {
     pub infer_finish_reason: Option<bool>,
     #[serde(default)]
     pub requires_assistant_after_tool: Option<bool>,
+    #[serde(default)]
+    pub disable_thinking_template: Option<bool>,
 }
 
 #[cfg(test)]
@@ -169,6 +181,8 @@ mod tests {
         assert!(!c.streaming_usage);
         assert!(!c.infer_finish_reason);
         assert!(!c.requires_assistant_after_tool);
+        // 仅当请求显式 disable_thinking 时才注入 chat_template_kwargs，普通请求零影响。
+        assert!(c.disable_thinking_template);
     }
 
     #[test]

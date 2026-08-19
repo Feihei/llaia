@@ -152,6 +152,11 @@ pub struct ToolSpec {
 pub struct ChatRequest<'a> {
     pub messages: &'a [ChatMessage],
     pub tools: Option<&'a [ToolSpec]>,
+    /// 内部/自动化 turn（cron、dream 等）请求关闭模型「深度思考」。
+    /// 推理模型（Qwen3 等）在结构化合成任务上思考纯属浪费且撑爆超时；
+    /// 关掉后由 provider 注入 `chat_template_kwargs: {enable_thinking: false}`（llama.cpp 等）。
+    /// 普通交互 turn 保持 false。默认 false → 不注入任何额外字段，零回归。
+    pub disable_thinking: bool,
 }
 
 #[derive(Debug, Clone, Default)]

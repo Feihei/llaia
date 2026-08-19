@@ -1,21 +1,27 @@
 //! 做梦（Dream）编排：两阶段管线（见 ADR-0016）。
 //!
-//! stage1 蒸馏：临时 dream 会话读增量历史 → 产出草稿文本 → coordinator 写 dream_draft.md（不进上下文）。
+//! stage1 蒸馏：阶段专用 dream 会话读增量历史 → 产出草稿文本 → coordinator 写 dream_draft.md（不进上下文）。
 //! stage2 整理：基于 draft + 当前 MEMORY.md → 产出完整新 MEMORY.md 内容 → coordinator 备份后覆盖（进上下文）。
 //!
-//! 两阶段都跑在独立 cron 会话（run_isolated_turn），主会话历史零污染。
+//! 两阶段都跑在独立 cron 会话（run_isolated_turn），主会话历史零污染；
+//! 每个阶段用稳定 channel（`cron:<id>:dream-<stage>`）复用同一会话，不会每次触发都新建孤儿会话。
 //! 游标增量（messages.id > last_dream_message_id）保证只消化新内容、可续跑、不重放老历史。
 
 use crate::agent::Agent;
 use crate::cron::CronTask;
 use crate::memory::dream as dream_fs;
-use crate::memory::sqlite::MessageRow;
+use crate::memory::sqlite::{MessageRow, SessionStore};
 use anyhow::{Context, Result};
 
 /// 每轮做梦最多消化的新消息条数（防单次过大）。
 const DREAM_BATCH_LIMIT: i64 = 300;
 /// 保留最近几份 .bak 备份。
 const DREAM_BACKUP_KEEP: usize = 10;
+/// dream 隔离 turn 用的极简 system：不暴露工具、不夹带主 agent 的 SOUL/MEMORY/指令。
+/// 推理模型（qwen 深度思考版等）在超大 system + 全套 tools 下会爆量推理撑过顶层超时，
+/// 或误调 web_fetch 卡死整轮；dream 是纯文本合成，用最小 system + 关工具可稳定 ~30s 出结果。
+const DREAM_SYSTEM_PROMPT: &str =
+    "You are LLAIA's memory consolidation engine. Distill conversation history into durable facts. You never call tools. Output only the requested text.";
 
 /// 去掉 LLM 输出可能夹带的 ```markdown / ``` 代码围栏，返回纯内容。
 /// 同时裁掉常见的「这是更新后的记忆」之类前导/尾巴说明，尽量只留记忆条目本身。
@@ -124,6 +130,21 @@ Rules:
     )
 }
 
+/// 取得（复用或新建）某阶段专用的稳定 cron 会话。
+///
+/// 用 `cron:<id>:dream-<stage>` 作为 channel 锚点，保证每个 dream 任务在每个阶段只
+/// 有一个持久会话、跨多次触发复用，而不是每次跑都新建一个孤儿会话（之前每次触发会新建
+/// `dream-stage1-<uuid>` / `dream-stage2-<uuid>` 两个会话，历史被碎片化且 WebUI 会话列表
+/// 无限增长）。找不到时才新建。
+fn acquire_dream_session(store: &SessionStore, task: &CronTask, stage: &str) -> Result<i64> {
+    let channel = format!("cron:{}:dream-{}", task.id, stage);
+    if let Some(id) = store.session_by_channel(&channel)? {
+        return Ok(id);
+    }
+    let uuid = uuid::Uuid::new_v4().to_string();
+    store.create_session(&uuid, &channel)
+}
+
 /// 执行一次做梦：两阶段 + 游标推进 + 备份 + diff。
 ///
 /// 直接借用 `&mut Agent`（调用方负责持锁：cron 分支 lock 后调用，slash 已持有 &mut）。
@@ -172,15 +193,15 @@ pub async fn run_dream(agent: &mut Agent, task: &CronTask, manual: bool) -> Resu
 
     // 3) stage1 蒸馏 → dream_draft.md
     let existing_draft = dream_fs::read_draft(&draft_path).await?;
-    let stage1_session = store.create_session(
-        &format!("dream-stage1-{}", uuid::Uuid::new_v4()),
-        &format!("cron:{}", task.id),
-    )?;
+    let stage1_session = acquire_dream_session(&store, task, "stage1")?;
     let stage1_reply = agent
-        .run_isolated_turn(
+        .run_isolated_turn_with(
             &stage1_prompt(&history_text, &existing_draft),
             "cron",
             stage1_session,
+            Some(DREAM_SYSTEM_PROMPT),
+            true,
+            true,
         )
         .await
         .context("dream stage1 failed")?;
@@ -201,15 +222,15 @@ pub async fn run_dream(agent: &mut Agent, task: &CronTask, manual: bool) -> Resu
         .await
         .context("backup MEMORY failed")?;
 
-    let stage2_session = store.create_session(
-        &format!("dream-stage2-{}", uuid::Uuid::new_v4()),
-        &format!("cron:{}", task.id),
-    )?;
+    let stage2_session = acquire_dream_session(&store, task, "stage2")?;
     let stage2_reply = agent
-        .run_isolated_turn(
+        .run_isolated_turn_with(
             &stage2_prompt(&draft_content, &current_memory),
             "cron",
             stage2_session,
+            Some(DREAM_SYSTEM_PROMPT),
+            true,
+            true,
         )
         .await
         .context("dream stage2 failed")?;

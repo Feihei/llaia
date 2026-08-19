@@ -46,6 +46,7 @@ async fn summarize_chunk(provider: &DynProvider, chunk: &str) -> String {
     let req = ChatRequest {
         messages: &messages,
         tools: None,
+        disable_thinking: false,
     };
     match provider.chat(&req).await {
         Ok(resp) => resp.text.unwrap_or_default(),
