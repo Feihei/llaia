@@ -8,6 +8,49 @@
   <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
+<!-- 启动失败兜底：Alpine/JS 未初始化时显示可见错误，避免静默黑屏 -->
+<div id="boot-error" style="display:none; position:fixed; inset:0; z-index:9999; background:#0a0d0a; color:#ff5f56; font-family:monospace; padding:48px; line-height:1.7;">
+  <h2 style="color:#ff5f56; margin-top:0;">WebUI failed to start</h2>
+  <p id="boot-error-msg" style="color:#c5d3bd;"></p>
+  <p style="color:#c5d3bd;">Most likely a stale cached frontend after a rebuild. Try a hard refresh
+  (<b>Ctrl+Shift+R</b> / <b>Cmd+Shift+R</b>) or clear site data for this origin, then reload.</p>
+  <p id="boot-error-detail" style="color:#6f8467;"></p>
+</div>
+<script>
+  // 标记是否已成功初始化；app.js 的 init() 会置为 true
+  window.__llaiaBooted = false;
+  window.addEventListener('error', function (e) {
+    // 已正常启动：忽略运行期错误（如聊天图片 404），避免误报
+    if (window.__llaiaBooted) return;
+    var t = e.target;
+    var isAsset = t && (t.tagName === 'SCRIPT' || t.tagName === 'LINK');
+    var isJsError = !!e.message;
+    // 仅当关键资源（脚本/样式）加载失败或真实 JS 异常时才视为启动失败
+    if (!isAsset && !isJsError) return;
+    var box = document.getElementById('boot-error');
+    var msg = document.getElementById('boot-error-msg');
+    var det = document.getElementById('boot-error-detail');
+    if (box && msg) {
+      box.style.display = 'block';
+      msg.textContent = 'Error: ' + (e.message || (e.error && e.error.message) || 'asset failed to load');
+      if (det && e.filename) det.textContent = e.filename + ':' + e.lineno;
+    }
+  }, true);
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      if (!window.__llaiaBooted) {
+        var box = document.getElementById('boot-error');
+        if (box) {
+          box.style.display = 'block';
+          var msg = document.getElementById('boot-error-msg');
+          if (msg && !msg.textContent) {
+            msg.textContent = 'The app did not initialize within 4s (Alpine/JS may have failed to load).';
+          }
+        }
+      }
+    }, 4000);
+  });
+</script>
 <div id="app" x-data="llaiaApp()" x-init="init()">
   <!-- show login overlay when not authenticated -->
   <div id="login-overlay" x-show="!authed">

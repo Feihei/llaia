@@ -66,6 +66,8 @@ function llaiaApp() {
     sessionMsg: '',
 
     async init() {
+      // 标记已成功进入初始化，供 index.html 的启动失败兜底检测使用
+      window.__llaiaBooted = true;
       // prefer URL query token, then localStorage
       const urlParams = new URLSearchParams(location.search);
       const urlToken = urlParams.get('token');

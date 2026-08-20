@@ -133,6 +133,11 @@ fn serve_static_path(path: &str) -> Response {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, mime.as_ref().parse().unwrap());
+            // 每次都重新校验，避免 rebuild 后浏览器粘住旧的嵌入前端（曾导致 WebUI 静默黑屏）
+            headers.insert(
+                header::CACHE_CONTROL,
+                header::HeaderValue::from_static("no-cache"),
+            );
             (StatusCode::OK, headers, Body::from(asset.data.into_owned())).into_response()
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
