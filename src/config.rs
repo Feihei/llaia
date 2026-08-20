@@ -261,6 +261,9 @@ pub struct TelegramConfig {
     /// 只响应此 chat 的消息（单用户安全锁）；0 = 不限制
     #[serde(default)]
     pub allow_chat_id: i64,
+    /// cron 主动推送的默认目标 chat_id（手动指定）；0 = 未指定，回退到 allow_chat_id
+    #[serde(default)]
+    pub owner_chat_id: i64,
     /// API base（测试可指到 mock），默认官方地址
     #[serde(default = "default_telegram_api_base")]
     pub api_base: String,
@@ -272,6 +275,7 @@ impl Default for TelegramConfig {
             enabled: false,
             bot_token: String::new(),
             allow_chat_id: 0,
+            owner_chat_id: 0,
             api_base: default_telegram_api_base(),
         }
     }
@@ -324,6 +328,10 @@ pub struct WechatConfig {
     /// 只响应此 ilink_user_id 的消息（单用户安全锁）；空 = 不限制
     #[serde(default)]
     pub allow_user_id: String,
+    /// cron 主动推送的默认目标 ilink_user_id（手动指定）；空 = 用运行时自动捕获的
+    /// （自动捕获值持久化在 wechat_state.json 的 owner_user_id）
+    #[serde(default)]
+    pub owner_user_id: String,
     /// ilink API base（测试可指到 mock），默认官方地址
     #[serde(default = "default_wechat_base_url")]
     pub base_url: String,
@@ -337,6 +345,7 @@ impl Default for WechatConfig {
         Self {
             enabled: false,
             allow_user_id: String::new(),
+            owner_user_id: String::new(),
             base_url: default_wechat_base_url(),
             cdn_base_url: default_wechat_cdn_base_url(),
         }

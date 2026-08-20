@@ -83,6 +83,7 @@ owner_openid = ""              # optional: default cron push target; auto-learne
 # enabled = false
 # bot_token = "${TELEGRAM_BOT_TOKEN}"  # issued by @BotFather
 # allow_chat_id = 0            # only respond to this chat (single-user lock); 0 = no restriction
+# owner_chat_id = 0            # optional cron push target; 0 = fall back to allow_chat_id
 
 # [channels.dingtalk]
 # enabled = false
@@ -100,6 +101,7 @@ owner_openid = ""              # optional: default cron push target; auto-learne
 # [channels.wechat]
 # enabled = false              # WeChat ClawBot (ilink bot); prints a QR login link on first start, scan with phone
 # allow_user_id = ""           # only respond to this ilink_user_id; empty = no restriction
+# owner_user_id = ""           # optional cron push target; auto-learned from first inbound message otherwise
 
 [webui]
 host = "127.0.0.1"
@@ -400,25 +402,31 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
             None
         };
 
-    // Telegram channel：启用时构造并 spawn（long polling 免公网）
-    // 注：v1 未接 cron ProactivePusher（单用户推送目标尚不明确），被动回复完整可用
-    if config.channels.telegram.enabled {
-        match crate::channels::telegram::TelegramChannel::new(config.channels.telegram.clone()) {
-            Ok(tg) => {
-                let tg = std::sync::Arc::new(tg);
-                let registry = registry.clone();
-                tasks.push(tokio::spawn(async move {
-                    if let Err(e) = crate::channels::Channel::run(tg, registry).await {
-                        tracing::error!(error = %e, "TelegramChannel exited with error");
-                    }
-                }));
-                tracing::info!("TelegramChannel started");
+    // Telegram channel：启用时构造并 spawn（long polling 免公网），克隆一份 Arc 给 cron pusher
+    let tg_pusher_for_cron: Option<std::sync::Arc<dyn crate::cron::ProactivePusher>> =
+        if config.channels.telegram.enabled {
+            match crate::channels::telegram::TelegramChannel::new(config.channels.telegram.clone())
+            {
+                Ok(tg) => {
+                    let tg = std::sync::Arc::new(tg);
+                    let pusher: std::sync::Arc<dyn crate::cron::ProactivePusher> = tg.clone();
+                    let registry = registry.clone();
+                    tasks.push(tokio::spawn(async move {
+                        if let Err(e) = crate::channels::Channel::run(tg, registry).await {
+                            tracing::error!(error = %e, "TelegramChannel exited with error");
+                        }
+                    }));
+                    tracing::info!("TelegramChannel started");
+                    Some(pusher)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "TelegramChannel init failed, disabled");
+                    None
+                }
             }
-            Err(e) => {
-                tracing::error!(error = %e, "TelegramChannel init failed, disabled");
-            }
-        }
-    }
+        } else {
+            None
+        };
 
     // 钉钉 channel：启用时构造并 spawn（Stream Mode WS 免公网）
     if config.channels.dingtalk.enabled {
@@ -434,21 +442,26 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         tracing::info!("DingtalkChannel started");
     }
 
-    // 微信 ClawBot channel：启用时构造并 spawn（扫码登录 + 长轮询免公网）
+    // 微信 ClawBot channel：启用时构造并 spawn（扫码登录 + 长轮询免公网），克隆一份 Arc 给 cron pusher
     // 登录态持久化在 <config_dir>/wechat_state.json
-    if config.channels.wechat.enabled {
-        let wx = std::sync::Arc::new(crate::channels::wechat::WechatChannel::new(
-            config.channels.wechat.clone(),
-            config_dir.to_path_buf(),
-        ));
-        let registry = registry.clone();
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = crate::channels::Channel::run(wx, registry).await {
-                tracing::error!(error = %e, "WechatChannel exited with error");
-            }
-        }));
-        tracing::info!("WechatChannel started");
-    }
+    let wechat_pusher_for_cron: Option<std::sync::Arc<dyn crate::cron::ProactivePusher>> =
+        if config.channels.wechat.enabled {
+            let wx = std::sync::Arc::new(crate::channels::wechat::WechatChannel::new(
+                config.channels.wechat.clone(),
+                config_dir.to_path_buf(),
+            ));
+            let pusher: std::sync::Arc<dyn crate::cron::ProactivePusher> = wx.clone();
+            let registry = registry.clone();
+            tasks.push(tokio::spawn(async move {
+                if let Err(e) = crate::channels::Channel::run(wx, registry).await {
+                    tracing::error!(error = %e, "WechatChannel exited with error");
+                }
+            }));
+            tracing::info!("WechatChannel started");
+            Some(pusher)
+        } else {
+            None
+        };
 
     // 邮箱 channel：启用时构造并 spawn（IMAP 轮询收件 + SMTP 发信）
     // 作为 cron pusher 注册为 "mail"，主动推送结果发往 owner_email。
@@ -512,6 +525,12 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     > = std::collections::HashMap::new();
     if let Some(p) = qq_pusher_for_cron {
         pushers.insert("qq".into(), p);
+    }
+    if let Some(p) = tg_pusher_for_cron {
+        pushers.insert("telegram".into(), p);
+    }
+    if let Some(p) = wechat_pusher_for_cron {
+        pushers.insert("wechat".into(), p);
     }
     if let Some(p) = &mail_pusher_for_cron {
         pushers.insert("mail".into(), p.clone());

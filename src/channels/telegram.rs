@@ -331,6 +331,69 @@ impl crate::channels::Channel for TelegramChannel {
     }
 }
 
+/// 解析主动推送目标 chat_id：优先 `owner_chat_id`，其次回退 `allow_chat_id`。
+/// 两者都为 0（未配置）返回 None，调用方跳过推送。
+fn proactive_chat_id(cfg: &TelegramConfig) -> Option<i64> {
+    if cfg.owner_chat_id != 0 {
+        Some(cfg.owner_chat_id)
+    } else if cfg.allow_chat_id != 0 {
+        Some(cfg.allow_chat_id)
+    } else {
+        None
+    }
+}
+
+impl TelegramChannel {
+    /// 主动推送消息：用于 cron 任务结果推送。
+    /// 目标 chat_id：① `owner_chat_id`（手动指定）② `allow_chat_id`（回退，单用户锁）。
+    /// 都没有则 log + 返回 Ok（不报错，cron 不因此失败）。
+    pub async fn send_proactive(&self, message: &str) -> Result<()> {
+        match proactive_chat_id(&self.config) {
+            Some(chat_id) => self.send_text(chat_id, message).await,
+            None => {
+                tracing::warn!(
+                    "cron push to telegram skipped: no owner chat_id (set [channels.telegram] owner_chat_id or allow_chat_id)"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl crate::cron::ProactivePusher for TelegramChannel {
+    async fn push(&self, message: &str) -> Result<()> {
+        self.send_proactive(message).await
+    }
+}
+
+#[cfg(test)]
+mod proactive_tests {
+    use super::*;
+    use crate::config::TelegramConfig;
+
+    #[test]
+    fn test_proactive_chat_id_owner_priority() {
+        let mut cfg = TelegramConfig::default();
+        cfg.owner_chat_id = 111;
+        cfg.allow_chat_id = 222;
+        assert_eq!(proactive_chat_id(&cfg), Some(111), "owner wins over allow");
+    }
+
+    #[test]
+    fn test_proactive_chat_id_fallback_to_allow() {
+        let mut cfg = TelegramConfig::default();
+        cfg.allow_chat_id = 222;
+        assert_eq!(proactive_chat_id(&cfg), Some(222), "fallback to allow_chat_id");
+    }
+
+    #[test]
+    fn test_proactive_chat_id_none_when_unset() {
+        let cfg = TelegramConfig::default();
+        assert_eq!(proactive_chat_id(&cfg), None, "no target -> skip");
+    }
+}
+
 /// 输出汇聚：缓冲全部文本后整条发送（Telegram 无编辑成本考虑，避免流式刷屏）
 struct TelegramSink {
     tg: Arc<TelegramChannel>,

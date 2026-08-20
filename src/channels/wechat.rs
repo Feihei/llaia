@@ -54,6 +54,10 @@ pub struct WechatState {
     /// ilink_user_id -> 最近一条来信的 context_token（回复凭据）
     #[serde(default)]
     pub context_tokens: HashMap<String, String>,
+    /// 自动捕获的 owner user_id（用于 cron 主动推送，跨重启持久化）；
+    /// 仅在 config.owner_user_id 为空时写入
+    #[serde(default)]
+    pub owner_user_id: String,
 }
 
 pub struct WechatChannel {
@@ -418,6 +422,14 @@ impl WechatChannel {
                     state
                         .context_tokens
                         .insert(from_user_id.clone(), ct.to_string());
+                }
+                // 自动捕获 owner user_id（cron 主动推送目标）；config 手动指定时不覆盖
+                let owner_changed = self.config.owner_user_id.is_empty()
+                    && state.owner_user_id != from_user_id;
+                if owner_changed {
+                    state.owner_user_id = from_user_id.clone();
+                }
+                if changed || owner_changed {
                     drop(state);
                     self.save_state().await;
                 }
@@ -549,6 +561,25 @@ impl WechatChannel {
             "text_item": { "text": text },
         }]);
         self.send_items(user_id, items).await
+    }
+
+    /// 主动推送消息：用于 cron 任务结果推送。
+    /// 目标 user_id：① config `owner_user_id`（手动指定）② state.owner_user_id（自动捕获）。
+    /// 都没有则 log + 返回 Ok（不报错，cron 不因此失败）。
+    pub async fn send_proactive(&self, message: &str) -> Result<()> {
+        let target = {
+            let state = self.state.lock().await;
+            proactive_user_id(&self.config, &state)
+        };
+        match target {
+            Some(user_id) => self.send_text(&user_id, message).await,
+            None => {
+                tracing::warn!(
+                    "cron push to wechat skipped: no owner user_id (set [channels.wechat] owner_user_id, or wait for an inbound message)"
+                );
+                Ok(())
+            }
+        }
     }
 
     /// 发送媒体：getuploadurl → AES-128-ECB 加密 → CDN 上传 → sendmessage
@@ -819,6 +850,25 @@ pub fn aes_ecb_encrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// 解析主动推送目标 user_id：优先 config `owner_user_id`，其次 state.owner_user_id（自动捕获）。
+/// 都没有返回 None，调用方跳过推送。
+fn proactive_user_id(cfg: &WechatConfig, state: &WechatState) -> Option<String> {
+    if !cfg.owner_user_id.trim().is_empty() {
+        Some(cfg.owner_user_id.trim().to_string())
+    } else if !state.owner_user_id.trim().is_empty() {
+        Some(state.owner_user_id.clone())
+    } else {
+        None
+    }
+}
+
+#[async_trait]
+impl crate::cron::ProactivePusher for WechatChannel {
+    async fn push(&self, message: &str) -> Result<()> {
+        self.send_proactive(message).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,5 +923,45 @@ mod tests {
     fn test_urlencode() {
         assert_eq!(urlencode("abc-_.~"), "abc-_.~");
         assert_eq!(urlencode("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn test_proactive_user_id_config_priority() {
+        let mut cfg = WechatConfig::default();
+        cfg.owner_user_id = "cfg_user".into();
+        let state = WechatState {
+            owner_user_id: "auto_user".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            proactive_user_id(&cfg, &state).as_deref(),
+            Some("cfg_user"),
+            "config owner_user_id wins over auto-captured"
+        );
+    }
+
+    #[test]
+    fn test_proactive_user_id_state_fallback() {
+        let cfg = WechatConfig::default();
+        let state = WechatState {
+            owner_user_id: "auto_user".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            proactive_user_id(&cfg, &state).as_deref(),
+            Some("auto_user"),
+            "fallback to auto-captured state"
+        );
+    }
+
+    #[test]
+    fn test_proactive_user_id_none_when_unset() {
+        let cfg = WechatConfig::default();
+        let state = WechatState::default();
+        assert_eq!(
+            proactive_user_id(&cfg, &state),
+            None,
+            "no target -> skip push"
+        );
     }
 }
