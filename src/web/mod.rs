@@ -2297,6 +2297,10 @@ model = "local.m"
             idx.contains("tool-result"),
             "index.html missing tool-result collapsible markup (stale embed?)"
         );
+        assert!(
+            idx.contains("m.role === 'tool'"),
+            "index.html missing tool-message content folding (stale embed?)"
+        );
 
         let js = StaticAsset::get("app.js")
             .expect("app.js embedded")

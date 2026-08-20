@@ -165,7 +165,16 @@
               <template x-for="m in sessionDetail.messages" :key="m.id">
                 <div class="msg" :class="m.role">
                   <div><b x-text="m.role"></b> <span class="hint" x-text="fmtTime(m.created_at)"></span></div>
-                  <div class="msg-content" x-text="m.content"></div>
+                  <template x-if="m.role === 'tool' && m.content">
+                    <div class="tool-result" x-data="{open: false}">
+                      <div class="tool-result-head" @click="open = !open">
+                        <span class="tool-result-caret" x-text="open ? '▾' : '▸'"></span>
+                        <span x-text="'result (' + m.content.length + ' chars)'"></span>
+                      </div>
+                      <div class="msg-content" x-show="open" x-text="m.content"></div>
+                    </div>
+                  </template>
+                  <div class="msg-content" x-text="m.content" x-show="m.role !== 'tool'"></div>
                   <template x-if="m.tool_calls && m.tool_calls.length">
                     <details>
                       <summary x-text="m.tool_calls.length + ' tool call(s)'"></summary>
