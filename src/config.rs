@@ -228,6 +228,10 @@ pub struct QqConfig {
     pub app_secret: String,
     #[serde(default = "default_qq_confirm")]
     pub confirm_mode: String,
+    /// cron 主动推送的默认目标 openid（手动指定；留空则用运行时自动捕获的 openid，
+    /// 自动捕获值持久化在 workspace/channel_state.json）
+    #[serde(default)]
+    pub owner_openid: String,
 }
 
 impl Default for QqConfig {
@@ -237,6 +241,7 @@ impl Default for QqConfig {
             app_id: String::new(),
             app_secret: String::new(),
             confirm_mode: default_qq_confirm(),
+            owner_openid: String::new(),
         }
     }
 }

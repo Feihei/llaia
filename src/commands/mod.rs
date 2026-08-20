@@ -77,6 +77,7 @@ enabled = false
 app_id = ""                    # supports "${QQ_APP_ID}" env var reference
 app_secret = ""                # supports "${QQ_APP_SECRET}" env var reference
 confirm_mode = "none"        # none / always / session
+owner_openid = ""              # optional: default cron push target; auto-learned from first C2C message otherwise
 
 # [channels.telegram]
 # enabled = false

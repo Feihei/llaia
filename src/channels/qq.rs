@@ -79,30 +79,33 @@ fn parse_openid_from_user_md(workspace: &Path) -> Option<String> {
     None
 }
 
-/// 纯函数：在 USER.md 内容中 upsert `- qq: <openid>` 身份绑定行。
-/// - 已有 `- qq:` 行（无论空值还是其它 openid）→ 原位替换；
-/// - 没有该行 → 追加到文件末尾；
-/// - 已是相同 openid → 返回原内容（调用方可跳过写盘）。
-fn upsert_qq_binding(content: &str, openid: &str) -> String {
-    let mut replaced = false;
-    let mut out = String::with_capacity(content.len() + 32);
-    for line in content.lines() {
-        if !replaced && line.trim_start().strip_prefix("- qq:").is_some() {
-            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-            out.push_str(&format!("{}- qq: {}\n", indent, openid));
-            replaced = true;
-        } else {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    if !replaced {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&format!("- qq: {}\n", openid));
-    }
-    out
+/// channel 运行时状态文件路径（`workspace/channel_state.json`）。
+/// 存放各 channel 自动捕获的"默认推送目标"（如 `{"qq": {"owner_openid": "..."}}`），
+/// 由 channel 自己维护，与 USER.md（用户信息内容）职责分离。
+fn channel_state_path(ws: &Path) -> PathBuf {
+    ws.join("channel_state.json")
+}
+
+/// 从 channel_state.json 读 qq 的 owner openid（自动捕获的持久化值）。
+async fn read_owner_openid_from_state(ws: &Path) -> Option<String> {
+    let content = tokio::fs::read_to_string(channel_state_path(ws)).await.ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    v.get("qq")?
+        .get("owner_openid")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// 把 qq 的 owner openid 写入 channel_state.json（read-modify-write，保留其它 channel 字段）。
+async fn write_owner_openid_to_state(ws: &Path, openid: &str) -> Result<()> {
+    let path = channel_state_path(ws);
+    let mut v: serde_json::Value = match tokio::fs::read_to_string(&path).await {
+        Ok(c) => serde_json::from_str(&c).unwrap_or_else(|_| serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+    v["qq"]["owner_openid"] = serde_json::Value::String(openid.to_string());
+    tokio::fs::write(&path, serde_json::to_string_pretty(&v)?).await?;
+    Ok(())
 }
 
 pub struct QqChannel {
@@ -153,7 +156,7 @@ impl QqChannel {
         }
     }
 
-    /// 注入主 agent workspace（用于 cron 主动推送时读 USER.md 解析 owner openid）。
+    /// 注入主 agent workspace（用于 cron 主动推送时读 channel_state.json / USER.md 解析 owner openid）。
     /// serve_cmd 构造 QqChannel 后调用。
     pub fn with_workspace(mut self, ws: PathBuf) -> Self {
         self.workspace = Some(ws);
@@ -161,7 +164,8 @@ impl QqChannel {
     }
 
     /// 主动推送消息：用于 cron 任务结果推送。
-    /// openid 来源：① 已跟踪的 owner openid（用户发过消息）② USER.md 的 `- qq:` 字段。
+    /// openid 来源：① config `[channels.qq] owner_openid` ② 已跟踪的 owner openid（用户发过消息）
+    /// ③ channel_state.json ④ USER.md 的 `- qq:` 字段（legacy 兜底）。
     /// 都没有则 log + 返回 Ok（不报错，cron 不因此失败）。
     pub async fn send_proactive(&self, message: &str) -> Result<()> {
         let openid = self.resolve_owner_openid().await;
@@ -169,45 +173,47 @@ impl QqChannel {
             Some(id) => self.send_c2c_message(&id, message, None).await,
             None => {
                 tracing::warn!(
-                    "cron push to qq skipped: no owner openid (no incoming message tracked, no USER.md binding)"
+                    "cron push to qq skipped: no owner openid (set [channels.qq] owner_openid, or wait for an inbound C2C message)"
                 );
                 Ok(())
             }
         }
     }
 
-    /// 解析 owner openid：优先用已跟踪的，其次读 USER.md 的 `- qq:` 字段。
+    /// 解析 owner openid。优先级（从高到低）：
+    /// ① config `[channels.qq] owner_openid`（手动指定，最高优先）
+    /// ② 本进程已跟踪的 owner openid（收到过 C2C 消息）
+    /// ③ `workspace/channel_state.json` 的 `qq.owner_openid`（自动捕获的持久化值，跨重启）
+    /// ④ USER.md 的 `- qq:` 行（legacy 兜底，兼容旧版本写入的绑定）
     async fn resolve_owner_openid(&self) -> Option<String> {
+        if !self.config.owner_openid.trim().is_empty() {
+            return Some(self.config.owner_openid.trim().to_string());
+        }
         if let Some(id) = self.owner_openid.lock().await.clone() {
             return Some(id);
+        }
+        if let Some(ws) = self.workspace.as_ref() {
+            if let Some(id) = read_owner_openid_from_state(ws).await {
+                return Some(id);
+            }
         }
         self.workspace
             .as_ref()
             .and_then(|ws| parse_openid_from_user_md(ws))
     }
 
-    /// 把 owner openid 持久化到 USER.md 的 `- qq:` 行（身份绑定清单），
-    /// 使 cron 主动推送在进程重启后依然可解析。USER.md 缺失或写失败时静默降级，
-    /// 不影响消息处理主流程。
+    /// 把 owner openid 持久化到 `workspace/channel_state.json`（自动捕获值，跨重启），
+    /// 与 USER.md（用户信息内容）职责分离。写失败时静默降级，不影响消息处理主流程。
     async fn persist_owner_openid(&self, openid: &str) {
         let ws = match self.workspace.as_ref() {
             Some(ws) => ws,
             None => return,
         };
-        let user_path = ws.join("USER.md");
-        let content = match tokio::fs::read_to_string(&user_path).await {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let updated = upsert_qq_binding(&content, openid);
-        if updated == content {
-            return; // 已是同一绑定，无需写盘
-        }
-        if let Err(e) = tokio::fs::write(&user_path, &updated).await {
+        if let Err(e) = write_owner_openid_to_state(ws, openid).await {
             tracing::warn!(
                 error = %e,
-                path = %user_path.display(),
-                "persist qq openid to USER.md failed"
+                path = %channel_state_path(ws).display(),
+                "persist qq openid to channel_state.json failed"
             );
         }
     }
@@ -1369,7 +1375,7 @@ mod proactive_tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_owner_openid_from_workspace() {
+    async fn test_resolve_owner_openid_from_user_md_legacy() {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("USER.md"),
@@ -1382,43 +1388,63 @@ mod proactive_tests {
     }
 
     #[tokio::test]
-    async fn test_persist_owner_openid_fills_empty_binding() {
+    async fn test_persist_owner_openid_writes_channel_state() {
         let dir = tempdir().unwrap();
-        let user_path = dir.path().join("USER.md");
-        std::fs::write(&user_path, "# 基本信息\n\n- qq:\n- email:\n").unwrap();
         let qq = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
         qq.persist_owner_openid("OPENID_001").await;
-        let content = std::fs::read_to_string(&user_path).unwrap();
-        assert!(content.contains("- qq: OPENID_001"), "openid should be filled");
-        // 再次持久化同一 openid 不应改写文件
+        let state_path = channel_state_path(dir.path());
+        let content = std::fs::read_to_string(&state_path).unwrap();
+        assert!(content.contains("OPENID_001"), "state file should store openid");
+        // USER.md 不应被写入（职责分离：状态归状态文件，USER.md 归用户信息）
+        assert!(
+            !dir.path().join("USER.md").exists(),
+            "persist must not write USER.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persist_owner_openid_idempotent() {
+        let dir = tempdir().unwrap();
+        let qq = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
         qq.persist_owner_openid("OPENID_001").await;
-        let again = std::fs::read_to_string(&user_path).unwrap();
+        let state_path = channel_state_path(dir.path());
+        let content = std::fs::read_to_string(&state_path).unwrap();
+        qq.persist_owner_openid("OPENID_001").await;
+        let again = std::fs::read_to_string(&state_path).unwrap();
         assert_eq!(content, again, "idempotent persist should not rewrite");
     }
 
     #[tokio::test]
-    async fn test_persist_owner_openid_appends_when_no_qq_line() {
+    async fn test_persist_owner_openid_replaces_state_value() {
         let dir = tempdir().unwrap();
-        let user_path = dir.path().join("USER.md");
-        std::fs::write(&user_path, "# 基本信息\n\n- 姓名：Boss\n").unwrap();
         let qq = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
-        qq.persist_owner_openid("OPENID_002").await;
-        let content = std::fs::read_to_string(&user_path).unwrap();
-        assert!(content.contains("- qq: OPENID_002"), "should append binding");
-        // 持久化后 resolve 兜底能读回
+        qq.persist_owner_openid("OLD_OPENID").await;
+        qq.persist_owner_openid("NEW_OPENID").await;
         let resolved = qq.resolve_owner_openid().await;
-        assert_eq!(resolved.as_deref(), Some("OPENID_002"));
+        assert_eq!(resolved.as_deref(), Some("NEW_OPENID"));
+        // 重新构造（模拟重启，内存态清空）后 state 兜底仍能读到最新值
+        let qq2 = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
+        let resolved2 = qq2.resolve_owner_openid().await;
+        assert_eq!(
+            resolved2.as_deref(),
+            Some("NEW_OPENID"),
+            "state value survives restart"
+        );
     }
 
     #[tokio::test]
-    async fn test_persist_owner_openid_replaces_existing() {
+    async fn test_resolve_owner_openid_config_takes_priority() {
         let dir = tempdir().unwrap();
-        let user_path = dir.path().join("USER.md");
-        std::fs::write(&user_path, "# 基本信息\n\n- qq: OLD_OPENID\n").unwrap();
-        let qq = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
-        qq.persist_owner_openid("NEW_OPENID").await;
-        let content = std::fs::read_to_string(&user_path).unwrap();
-        assert!(content.contains("- qq: NEW_OPENID"), "old binding replaced");
-        assert!(!content.contains("OLD_OPENID"), "old openid removed");
+        let mut cfg = QqConfig::default();
+        cfg.owner_openid = "CFG_OPENID".into();
+        std::fs::write(dir.path().join("USER.md"), "# 基本信息\n\n- qq: MD_OPENID\n").unwrap();
+        let qq = QqChannel::new(cfg).with_workspace(dir.path().to_path_buf());
+        qq.persist_owner_openid("STATE_OPENID").await; // state 也有值
+        let openid = qq.resolve_owner_openid().await;
+        assert_eq!(
+            openid.as_deref(),
+            Some("CFG_OPENID"),
+            "config owner_openid wins over state and USER.md"
+        );
     }
 }
