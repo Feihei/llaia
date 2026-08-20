@@ -10,6 +10,7 @@ use rand::Rng;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
@@ -1141,7 +1142,15 @@ pub async fn put_cron_raw(
 
 // ───────────────────────── MCP API ─────────────────────────
 
-/// GET /api/mcp → MCP server 状态列表（含每个 server 的工具清单）
+/// GET /api/mcp → MCP server 列表（含每个 server 的工具清单与连接状态）
+///
+/// 与旧实现（只返回 registry 中已连接的 server）不同：这里以 `mcp.toml` 的
+/// 配置为准，列出 **全部** server —— 包括被 `enabled = false` 关掉的。否则被关掉的
+/// server 在 `connect_all` 阶段就被跳过，UI 上看不到、也无法重新打开。
+/// 连接状态（`status`/`error`/`tools`）叠加自内存 registry：
+/// - 未启用 → `status = "disabled"`
+/// - 启用且已连上 / 失败 → registry 的 `connected` / `dead`
+/// - 启用但 registry 中尚无记录（如刚开、尚未重连）→ `unknown`
 pub async fn list_mcp(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1150,13 +1159,197 @@ pub async fn list_mcp(
     if !authorize(&state, &headers, &q) {
         return unauthorized();
     }
-    let Some(registry) = state.mcp_registry.lock().unwrap().clone() else {
-        return json_err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "MCP registry not available",
-        );
+    let cfg = crate::mcp::McpConfig::load(&state.mcp_path).unwrap_or_default();
+    let registry = state.mcp_registry.lock().unwrap().clone();
+    // registry 状态按 id 建索引（仅含已启用且 connect 过的；失败进 failed）
+    let mut live_by_id: HashMap<String, serde_json::Value> = HashMap::new();
+    if let Some(reg) = &registry {
+        for s in reg.status().await {
+            if let Some(id) = s.get("id").and_then(|v| v.as_str()) {
+                live_by_id.insert(id.to_string(), s.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for srv in &cfg.server {
+        let live = live_by_id.get(&srv.id);
+        let (status, error, tools) = if !srv.enabled {
+            (
+                "disabled".to_string(),
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            )
+        } else if let Some(l) = live {
+            (
+                l.get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                l.get("error").cloned().unwrap_or(serde_json::Value::Null),
+                l.get("tools").cloned().unwrap_or(serde_json::Value::Null),
+            )
+        } else {
+            (
+                "unknown".to_string(),
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            )
+        };
+        out.push(serde_json::json!({
+            "id": srv.id,
+            "enabled": srv.enabled,
+            "transport": srv.transport,
+            "command": srv.command,
+            "url": srv.url,
+            "args": srv.args,
+            "status": status,
+            "error": error,
+            "tools": tools,
+        }));
+    }
+    axum::Json(serde_json::json!({ "servers": out })).into_response()
+}
+
+/// PUT /api/mcp → 保存 server 的 `enabled` 开关到 mcp.toml（结构化，不丢注释 / `${VAR}`）
+///
+/// 用 toml_edit 定点改写每个 `[[server]]` 的 `enabled` 字段，保留原文件其余内容
+/// （注释、环境变量 `${VAR}` 插值、格式）。改完校验 + 写盘 + 热重连。
+#[derive(Deserialize)]
+pub struct McpServerPatch {
+    pub id: String,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct McpSaveBody {
+    pub servers: Vec<McpServerPatch>,
+}
+
+pub async fn save_mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::Json(body): axum::Json<McpSaveBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    if !state.mcp_path.exists() {
+        return json_err(StatusCode::BAD_REQUEST, "no mcp.toml yet; add a server first");
+    }
+    let raw = match std::fs::read_to_string(&state.mcp_path) {
+        Ok(r) => r,
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("read mcp.toml: {e}")),
     };
-    axum::Json(serde_json::json!({ "servers": registry.status().await })).into_response()
+    let patches: Vec<(String, bool)> = body
+        .servers
+        .iter()
+        .map(|s| (s.id.clone(), s.enabled))
+        .collect();
+    let new_raw = match patch_mcp_enabled(&raw, &patches) {
+        Ok(r) => r,
+        Err(e) => return json_err(StatusCode::BAD_REQUEST, &e),
+    };
+    if let Err(e) = crate::mcp::McpConfig::from_str_validate(&new_raw) {
+        return json_err(StatusCode::BAD_REQUEST, &format!("invalid after patch: {e}"));
+    }
+    if let Err(e) = std::fs::write(&state.mcp_path, &new_raw) {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write mcp.toml: {e}"));
+    }
+    let (note, _tools) = reconnect_mcp(&state).await;
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "note": format!("mcp.toml saved; {}", note)
+    }))
+    .into_response()
+}
+
+/// 用 toml_edit 定点改写 mcp.toml 里每个 `[[server]]` 的 `enabled`，返回改完的文本。
+/// 保留原文件其余内容：注释、`${VAR}` 环境变量插值、格式都原样保留。
+fn patch_mcp_enabled(raw: &str, patches: &[(String, bool)]) -> Result<String, String> {
+    let mut doc = DocumentMut::from_str(raw).map_err(|e| format!("parse mcp.toml: {e}"))?;
+    let patch: HashMap<&str, bool> = patches.iter().map(|(id, en)| (id.as_str(), *en)).collect();
+    let mut matched = 0usize;
+    if let Some(servers) = doc.get_mut("server").and_then(|v| v.as_array_of_tables_mut()) {
+        for tbl in servers.iter_mut() {
+            if let Some(idv) = tbl.get("id").and_then(|v| v.as_str()) {
+                if let Some(&en) = patch.get(idv) {
+                    // 原地改写 bool，保留原值的 decor（含同行尾注）。
+                    // 仅在原本不是 bool 时（极少见）才整值替换，会丢该行尾注。
+                    let mut done = false;
+                    if let Some(v) = tbl.get_mut("enabled").and_then(|i| i.as_value_mut()) {
+                        if let toml_edit::Value::Boolean(b) = v {
+                            let decor = b.decor().clone();
+                            let mut nb = toml_edit::Value::from(en);
+                            let dm = nb.decor_mut();
+                            dm.set_prefix(
+                                decor.prefix().and_then(|r| r.as_str()).unwrap_or("").to_string(),
+                            );
+                            dm.set_suffix(
+                                decor.suffix().and_then(|r| r.as_str()).unwrap_or("").to_string(),
+                            );
+                            *v = nb;
+                            done = true;
+                        }
+                    }
+                    if !done {
+                        tbl.insert("enabled", toml_edit::value(en));
+                    }
+                    matched += 1;
+                }
+            }
+        }
+    }
+    if matched == 0 {
+        return Err("no matching server id found in mcp.toml".to_string());
+    }
+    Ok(doc.to_string())
+}
+
+#[cfg(test)]
+mod mcp_patch_tests {
+    use super::patch_mcp_enabled;
+
+    #[test]
+    fn toggles_enabled_and_keeps_comments_and_env_var() {
+        let raw = r#"# top comment preserved
+[[server]]
+id = "a"
+enabled = true          # keep me
+transport = "stdio"
+command = "run"
+env = { TOKEN = "${MY_TOKEN}" }   # interpolation must survive
+
+[[server]]
+id = "b"
+enabled = true
+transport = "http"
+url = "https://x"
+"#;
+        // 关掉 a、打开 b（b 已是 true，幂等）
+        let out = patch_mcp_enabled(raw, &[("a".into(), false), ("b".into(), true)])
+            .expect("patch ok");
+        // 注释保留
+        assert!(out.contains("# top comment preserved"), "comment lost:\n{}", out);
+        assert!(out.contains("# keep me"), "inline comment lost:\n{}", out);
+        // ${VAR} 插值原样保留（不能因为序列化被展开）
+        assert!(out.contains("${MY_TOKEN}"), "env var interpolation lost:\n{}", out);
+        // enabled 已改
+        let a = out.split("id = \"a\"").nth(1).unwrap();
+        let a_block = a.split("[[server]]").next().unwrap();
+        assert!(a_block.contains("enabled = false"), "a not disabled:\n{}", out);
+        let b = out.split("id = \"b\"").nth(1).unwrap();
+        assert!(b.contains("enabled = true"), "b not kept on:\n{}", out);
+        // 改动后仍可被 mcp 解析
+        crate::mcp::McpConfig::from_str_validate(&out).expect("patched toml must validate");
+    }
+
+    #[test]
+    fn errors_when_id_missing() {
+        let raw = "[[server]]\nid = \"a\"\nenabled = true\n";
+        let err = patch_mcp_enabled(raw, &[("ghost".into(), false)]).unwrap_err();
+        assert!(err.contains("no matching server"), "got: {}", err);
+    }
 }
 
 /// GET /api/mcp/raw → 读 mcp.toml 文本
@@ -1739,7 +1932,7 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/cron/history", axum::routing::get(cron_history))
         .route("/api/cron/:id/trigger", axum::routing::post(trigger_cron))
         // MCP API
-        .route("/api/mcp", axum::routing::get(list_mcp))
+        .route("/api/mcp", axum::routing::get(list_mcp).put(save_mcp))
         .route(
             "/api/mcp/raw",
             axum::routing::get(get_mcp_raw).put(put_mcp_raw),
@@ -2058,6 +2251,10 @@ model = "local.m"
         assert!(
             idx.contains("channel-grid") && idx.contains("webui-card"),
             "index.html missing channel-card markup (stale embed?)"
+        );
+        assert!(
+            idx.contains("mcp-card") && idx.contains("saveMcp"),
+            "index.html missing mcp collapsible-card markup (stale embed?)"
         );
 
         let js = StaticAsset::get("app.js").expect("app.js embedded").data.to_vec();
