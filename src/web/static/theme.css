@@ -598,6 +598,8 @@ option { background: var(--bg-input); color: var(--text); }
   color: var(--text-dim); font-size: 12px;
 }
 #sessions-pane .toolcall-outcome { color: var(--green); }
+#sessions-pane .tool-result { margin: 6px 0 0 4px; padding-left: 6px; border-left: 1px dashed var(--border); }
+#sessions-pane .tool-result > summary { color: var(--green); }
 #sessions-pane details summary { cursor: pointer; color: var(--cyan); font-size: 12px; }
 #sessions-pane .hint { color: var(--text-faint); font-size: 12px; margin-top: 6px; }
 #sessions-pane .err { color: var(--red); font-size: 12px; margin-top: 6px; }

@@ -173,7 +173,12 @@
                         <div class="toolcall">
                           <b x-text="tc.tool_name"></b> <span class="hint" x-text="tc.tool_call_id"></span>
                           <pre x-text="tc.payload"></pre>
-                          <template x-if="tc.outcome !== null && tc.outcome !== undefined"><pre class="toolcall-outcome" x-text="tc.outcome"></pre></template>
+                          <template x-if="tc.outcome !== null && tc.outcome !== undefined">
+                            <details class="tool-result">
+                              <summary x-text="'result' + (tc.outcome ? ' (' + tc.outcome.length + ' chars)' : '')"></summary>
+                              <pre class="toolcall-outcome" x-text="tc.outcome"></pre>
+                            </details>
+                          </template>
                         </div>
                       </template>
                     </details>

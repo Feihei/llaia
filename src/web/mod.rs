@@ -2293,6 +2293,10 @@ model = "local.m"
             idx.contains("mcp-card") && idx.contains("saveMcp"),
             "index.html missing mcp collapsible-card markup (stale embed?)"
         );
+        assert!(
+            idx.contains("tool-result"),
+            "index.html missing tool-result collapsible markup (stale embed?)"
+        );
 
         let js = StaticAsset::get("app.js")
             .expect("app.js embedded")
