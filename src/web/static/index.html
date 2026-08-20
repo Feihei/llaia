@@ -306,8 +306,11 @@
                   <button class="btn-delete" @click="deleteAgent(alias)" x-show="alias !== 'main'" title="main agent 不可删除">Delete</button>
                 </div>
                 <div class="form-row"><label>model</label>
-                  <select x-model="a.model">
-                    <option value="" disabled>— select a model —</option>
+                  <select x-model="a.model" x-init="$nextTick(() => { $el.value = a.model || ''; })">
+                    <option value="" :disabled="!!a.model">— select a model —</option>
+                    <template x-if="a.model && !modelRefs().includes(a.model)">
+                      <option :value="a.model" x-text="a.model + ' (current)'"></option>
+                    </template>
                     <template x-for="ref in modelRefs()" :key="ref">
                       <option :value="ref" x-text="ref"></option>
                     </template>
