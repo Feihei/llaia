@@ -2045,4 +2045,36 @@ model = "local.m"
             out
         );
     }
+
+    /// 静态资源嵌入回归测试：防止 build.rs 未触发重编译导致 index.html/app.js/theme.css
+    /// 的改动被 rust-embed 静默吞掉（沿用增量缓存里的旧副本）。
+    #[test]
+    fn test_static_assets_embedded_up_to_date() {
+        let idx = StaticAsset::get("index.html")
+            .expect("index.html embedded")
+            .data
+            .to_vec();
+        let idx = String::from_utf8(idx).expect("index.html utf8");
+        assert!(
+            idx.contains("channel-grid") && idx.contains("webui-card"),
+            "index.html missing channel-card markup (stale embed?)"
+        );
+
+        let js = StaticAsset::get("app.js").expect("app.js embedded").data.to_vec();
+        let js = String::from_utf8(js).expect("app.js utf8");
+        assert!(
+            js.contains("channelCards"),
+            "app.js missing channelCards metadata (stale embed?)"
+        );
+
+        let css = StaticAsset::get("theme.css")
+            .expect("theme.css embedded")
+            .data
+            .to_vec();
+        let css = String::from_utf8(css).expect("theme.css utf8");
+        assert!(
+            css.contains(".channel-card"),
+            "theme.css missing .channel-card styles (stale embed?)"
+        );
+    }
 }
