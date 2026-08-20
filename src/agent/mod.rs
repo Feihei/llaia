@@ -1111,7 +1111,7 @@ mod tests {
         let mut agent = make_agent_with_rounds_seen(true, rounds, seen.clone()).await;
         let sid = agent
             .session_store
-            .create_session("iso-uuid", "cron:dream:dream-stage1")
+            .create_session("iso-uuid", "cron:dream:dream")
             .unwrap();
 
         let reply = agent

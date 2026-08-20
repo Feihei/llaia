@@ -2,7 +2,6 @@ use crate::agent::approval::{format_move_prompt, validate_move_target};
 use crate::agent::Agent;
 use crate::agent::AgentRegistry;
 use crate::config::Config;
-use crate::cron::{CronMode, CronTask};
 use crate::goal::{read_goal, set_goal, update_status, GoalStatus};
 use crate::memory::markdown::compress_memory;
 use anyhow::Result;
@@ -294,18 +293,7 @@ tools: {:?}
         }
         "/dream" => {
             // 手动触发一次做梦：两阶段记忆整理（跳过空闲门控）。
-            let task = CronTask {
-                id: "dream".into(),
-                schedule: "0 4 * * *".into(),
-                mode: CronMode::Agent,
-                channel: "cli".into(),
-                enabled: true,
-                prompt: None,
-                steps: None,
-                kind: Some("dream".into()),
-                idle_minutes: Some(30),
-            };
-            match crate::cron::dream::run_dream(agent, &task, true).await {
+            match crate::cron::dream::run_dream(agent, "dream", 30, true).await {
                 Ok(summary) => Ok(SlashOutcome::Handled(summary)),
                 Err(e) => Ok(SlashOutcome::Handled(format!("[dream failed: {}]", e))),
             }
