@@ -174,10 +174,13 @@
                           <b x-text="tc.tool_name"></b> <span class="hint" x-text="tc.tool_call_id"></span>
                           <pre x-text="tc.payload"></pre>
                           <template x-if="tc.outcome !== null && tc.outcome !== undefined">
-                            <details class="tool-result">
-                              <summary x-text="'result' + (tc.outcome ? ' (' + tc.outcome.length + ' chars)' : '')"></summary>
-                              <pre class="toolcall-outcome" x-text="tc.outcome"></pre>
-                            </details>
+                            <div class="tool-result" x-data="{open: false}">
+                              <div class="tool-result-head" @click="open = !open">
+                                <span class="tool-result-caret" x-text="open ? '▾' : '▸'"></span>
+                                <span x-text="'result (' + (tc.outcome ? tc.outcome.length : 0) + ' chars)'"></span>
+                              </div>
+                              <pre class="toolcall-outcome" x-show="open" x-text="tc.outcome"></pre>
+                            </div>
                           </template>
                         </div>
                       </template>
