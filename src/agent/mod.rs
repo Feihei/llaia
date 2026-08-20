@@ -591,6 +591,31 @@ impl Agent {
         }
     }
 
+    /// 上下文超阈值则自动压缩（优先 compact_provider，未配置回退主 provider）。
+    /// 抽成方法，供「回合开头」与「工具循环内每次迭代」复用同一套逻辑，
+    /// 避免单回合内工具链把上下文撑爆却只在回合边界才检查的问题。
+    async fn maybe_auto_compact(&mut self) {
+        if !self
+            .context
+            .needs_compaction(self.context_size, self.context_threshold)
+        {
+            return;
+        }
+        let compact_provider = self.provider_for_compact().await;
+        match compact_provider.as_ref() {
+            Some(p) => {
+                if let Err(e) = self
+                    .context
+                    .compact(p.as_ref(), 6, self.context_size)
+                    .await
+                {
+                    tracing::warn!(error = %e, "auto-compact failed");
+                }
+            }
+            None => tracing::warn!("skip auto-compact: no provider available"),
+        }
+    }
+
     /// 多模态流式版本：接收任意 ChatMessage（支持文本+图片）。
     /// 文本消息存入 sqlite，多模态消息只存文本部分（图片 base64 不持久化）。
     pub async fn handle_message_streaming(
@@ -643,21 +668,8 @@ impl Agent {
             }
         };
 
-        if self
-            .context
-            .needs_compaction(self.context_size, self.context_threshold)
-        {
-            // 优先用 compact_provider，未配置时回退到主 provider
-            let compact_provider = self.provider_for_compact().await;
-            match compact_provider.as_ref() {
-                Some(p) => {
-                    if let Err(e) = self.context.compact(p.as_ref(), 6, self.context_size).await {
-                        tracing::warn!(error = %e, "auto-compact failed");
-                    }
-                }
-                None => tracing::warn!("skip auto-compact: no provider available"),
-            }
-        }
+        // 回合开头：先按阈值做一次自动压缩
+        self.maybe_auto_compact().await;
 
         let max_iters = self.max_iterations;
         // 时区快照：整轮用同一个值。turn 中途 WebUI 改配置不会让同一轮里的
@@ -682,6 +694,10 @@ impl Agent {
                     "已达工具调用次数上限，请停止调用工具，基于已获取的信息总结任务并直接回复用户。",
                 ));
             }
+            // 单回合内工具链也可能把上下文撑爆：每次迭代组装请求前复查，
+            // 超阈值立即压缩，避免把几十万 token 的请求直接发给 provider 导致 400 溢出。
+            self.maybe_auto_compact().await;
+
             let messages = self.context.to_messages(&tz);
             let tools = if force_summary || self.disable_tools {
                 None
@@ -929,6 +945,7 @@ mod tests {
     use async_trait::async_trait;
     use futures_util::stream::BoxStream;
     use serde_json::json;
+    use crate::tools::Tool;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::mpsc;
 
@@ -1011,6 +1028,152 @@ mod tests {
             None,
         )
         .await
+    }
+
+    /// 回归：单回合内长工具链（如 Blender MCP 返回巨大）把上下文撑过阈值时，
+    /// 必须在工具循环内自动压缩，否则会把无限膨胀的请求直接发给 provider 导致 400 溢出。
+    /// 模拟 provider 连续 8 轮返回同一工具调用，工具返回 30k 字符；断言：
+    /// 1) 每轮发给 provider 的请求规模有界（压缩把旧工具消息截断到 500 字符）；
+    /// 2) history 中所有工具消息都已截断（未被无限堆积）。
+    struct BigTool {
+        payload: String,
+    }
+    #[async_trait]
+    impl Tool for BigTool {
+        fn name(&self) -> &str {
+            "bigtool"
+        }
+        fn description(&self) -> &str {
+            "returns a large payload"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({})
+        }
+        async fn execute(&self, _args: &serde_json::Value, _channel: &str) -> Result<String> {
+            Ok(self.payload.clone())
+        }
+    }
+
+    /// 记录每次 chat_stream 收到的请求总字符数，用于断言单回合内请求规模有界。
+    struct IntraTurnMockProvider {
+        native: bool,
+        rounds: Arc<StdMutex<std::collections::VecDeque<Vec<StreamEvent>>>>,
+        request_sizes: Arc<StdMutex<Vec<usize>>>,
+    }
+    #[async_trait]
+    impl Provider for IntraTurnMockProvider {
+        async fn chat(&self, _req: &ChatRequest<'_>) -> Result<ChatResponse> {
+            unreachable!()
+        }
+        async fn chat_stream(&self, req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
+            let size: usize = req
+                .messages
+                .iter()
+                .map(|m| m.content.as_text().chars().count())
+                .sum();
+            self.request_sizes.lock().unwrap().push(size);
+            let events = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
+            let s = try_stream! {
+                for ev in events {
+                    yield ev;
+                }
+            };
+            Box::pin(s)
+        }
+        fn native_tool_calling(&self) -> bool {
+            self.native
+        }
+    }
+
+    #[tokio::test]
+    async fn test_intra_turn_auto_compaction_bounds_request() {
+        // 小窗口 + 低阈值：模拟 llama.cpp n_ctx 有限、长工具链易溢出。
+        let context_size: usize = 4000;
+        let threshold: f64 = 0.3; // 触发点 ~1200 tokens ≈ 4800 chars
+
+        let request_sizes = Arc::new(StdMutex::new(Vec::new()));
+
+        // 前 8 轮返回工具调用（让循环继续），之后返回纯文本结束回合。
+        let tool_rounds = 8u32;
+        let mut rounds: Vec<Vec<StreamEvent>> = Vec::new();
+        for i in 0..tool_rounds {
+            rounds.push(vec![
+                StreamEvent::TextDelta(format!("step {}", i)),
+                StreamEvent::ToolCall(ToolCall {
+                    id: format!("call_{}", i),
+                    name: "bigtool".into(),
+                    arguments: json!({}),
+                }),
+                StreamEvent::Done,
+            ]);
+        }
+        rounds.push(vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done]);
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(BigTool {
+            payload: "x".repeat(30_000),
+        }));
+
+        let provider: Arc<dyn Provider> = Arc::new(IntraTurnMockProvider {
+            native: true,
+            rounds: Arc::new(StdMutex::new(rounds.into())),
+            request_sizes: request_sizes.clone(),
+        });
+
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("test", "test").unwrap();
+        let mut config = Config::default_for_workspace("/tmp/llaia-test");
+        config.runtime.context_threshold = threshold;
+        config.runtime.max_iterations = 30;
+        let mut agent = Agent::new(
+            &config,
+            Some(provider),
+            None,
+            None,
+            tools,
+            Arc::new(store),
+            sid,
+            "test system".into(),
+            context_size,
+            std::path::PathBuf::from("/tmp/llaia-test/workspace"),
+            Arc::new(RwLock::new(std::path::PathBuf::from(
+                "/tmp/llaia-test/workspace",
+            ))),
+            std::path::PathBuf::from("/tmp/llaia-test"),
+            true,
+            "main".into(),
+            None,
+        )
+        .await;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "done");
+
+        // 1) 每轮发给 provider 的请求规模应有界：不压缩时 8 轮 × 30k ≈ 240k chars，
+        //    压缩把旧工具消息截断到 500 字符后，单轮请求应远小于此。
+        let sizes = request_sizes.lock().unwrap();
+        let max_size = sizes.iter().copied().max().unwrap_or(0);
+        assert!(
+            max_size < 15_000,
+            "outgoing request not bounded by intra-turn compaction: max={} sizes={:?}",
+            max_size,
+            sizes
+        );
+        drop(sizes);
+
+        // 2) history 中所有工具消息都应已被截断（cheap_normalize 砍到 TOOL_TRIM_CAP），
+        //    证明单回合内确实发生了压缩，而非把 30k 工具返回一路堆积。
+        let all_tool_truncated = agent.context.history.iter().all(|m| {
+            m.role != crate::provider::Role::Tool || m.content.as_text().chars().count() <= 500 + 60
+        });
+        assert!(
+            all_tool_truncated,
+            "a tool message escaped truncation (history grew uncompacted)"
+        );
     }
 
     #[tokio::test]
