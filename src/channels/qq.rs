@@ -79,6 +79,32 @@ fn parse_openid_from_user_md(workspace: &Path) -> Option<String> {
     None
 }
 
+/// 纯函数：在 USER.md 内容中 upsert `- qq: <openid>` 身份绑定行。
+/// - 已有 `- qq:` 行（无论空值还是其它 openid）→ 原位替换；
+/// - 没有该行 → 追加到文件末尾；
+/// - 已是相同 openid → 返回原内容（调用方可跳过写盘）。
+fn upsert_qq_binding(content: &str, openid: &str) -> String {
+    let mut replaced = false;
+    let mut out = String::with_capacity(content.len() + 32);
+    for line in content.lines() {
+        if !replaced && line.trim_start().strip_prefix("- qq:").is_some() {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            out.push_str(&format!("{}- qq: {}\n", indent, openid));
+            replaced = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !replaced {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("- qq: {}\n", openid));
+    }
+    out
+}
+
 pub struct QqChannel {
     config: QqConfig,
     http: Client,
@@ -158,6 +184,32 @@ impl QqChannel {
         self.workspace
             .as_ref()
             .and_then(|ws| parse_openid_from_user_md(ws))
+    }
+
+    /// 把 owner openid 持久化到 USER.md 的 `- qq:` 行（身份绑定清单），
+    /// 使 cron 主动推送在进程重启后依然可解析。USER.md 缺失或写失败时静默降级，
+    /// 不影响消息处理主流程。
+    async fn persist_owner_openid(&self, openid: &str) {
+        let ws = match self.workspace.as_ref() {
+            Some(ws) => ws,
+            None => return,
+        };
+        let user_path = ws.join("USER.md");
+        let content = match tokio::fs::read_to_string(&user_path).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let updated = upsert_qq_binding(&content, openid);
+        if updated == content {
+            return; // 已是同一绑定，无需写盘
+        }
+        if let Err(e) = tokio::fs::write(&user_path, &updated).await {
+            tracing::warn!(
+                error = %e,
+                path = %user_path.display(),
+                "persist qq openid to USER.md failed"
+            );
+        }
     }
 
     /// 取下一个递增的 msg_seq（用于被动回复去重）
@@ -1002,6 +1054,8 @@ impl QqChannel {
                                     let user_openid = incoming.user_id.clone();
                                     // 跟踪 owner openid（用于 cron 主动推送）
                                     *self.owner_openid.lock().await = Some(user_openid.clone());
+                                    // 持久化到 USER.md，重启后 cron 主动推送仍可解析
+                                    self.persist_owner_openid(&user_openid).await;
                                     let this = self.clone();
                                     let agent = agent.clone();
                                     let registry = registry.clone();
@@ -1325,5 +1379,46 @@ mod proactive_tests {
         let qq = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
         let openid = qq.resolve_owner_openid().await;
         assert_eq!(openid.as_deref(), Some("WS_OPENID"));
+    }
+
+    #[tokio::test]
+    async fn test_persist_owner_openid_fills_empty_binding() {
+        let dir = tempdir().unwrap();
+        let user_path = dir.path().join("USER.md");
+        std::fs::write(&user_path, "# 基本信息\n\n- qq:\n- email:\n").unwrap();
+        let qq = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
+        qq.persist_owner_openid("OPENID_001").await;
+        let content = std::fs::read_to_string(&user_path).unwrap();
+        assert!(content.contains("- qq: OPENID_001"), "openid should be filled");
+        // 再次持久化同一 openid 不应改写文件
+        qq.persist_owner_openid("OPENID_001").await;
+        let again = std::fs::read_to_string(&user_path).unwrap();
+        assert_eq!(content, again, "idempotent persist should not rewrite");
+    }
+
+    #[tokio::test]
+    async fn test_persist_owner_openid_appends_when_no_qq_line() {
+        let dir = tempdir().unwrap();
+        let user_path = dir.path().join("USER.md");
+        std::fs::write(&user_path, "# 基本信息\n\n- 姓名：Boss\n").unwrap();
+        let qq = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
+        qq.persist_owner_openid("OPENID_002").await;
+        let content = std::fs::read_to_string(&user_path).unwrap();
+        assert!(content.contains("- qq: OPENID_002"), "should append binding");
+        // 持久化后 resolve 兜底能读回
+        let resolved = qq.resolve_owner_openid().await;
+        assert_eq!(resolved.as_deref(), Some("OPENID_002"));
+    }
+
+    #[tokio::test]
+    async fn test_persist_owner_openid_replaces_existing() {
+        let dir = tempdir().unwrap();
+        let user_path = dir.path().join("USER.md");
+        std::fs::write(&user_path, "# 基本信息\n\n- qq: OLD_OPENID\n").unwrap();
+        let qq = QqChannel::new(QqConfig::default()).with_workspace(dir.path().to_path_buf());
+        qq.persist_owner_openid("NEW_OPENID").await;
+        let content = std::fs::read_to_string(&user_path).unwrap();
+        assert!(content.contains("- qq: NEW_OPENID"), "old binding replaced");
+        assert!(!content.contains("OLD_OPENID"), "old openid removed");
     }
 }
