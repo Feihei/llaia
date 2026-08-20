@@ -117,6 +117,7 @@ function llaiaApp() {
     // mcp
     mcpSection: 'servers',
     mcpServers: [],
+    mcpOpen: {},
     mcpRaw: '',
     mcpMsg: '',
     mcpRawMsg: '',
@@ -708,8 +709,23 @@ function llaiaApp() {
       const r = await this.apiFetch('/api/mcp');
       if (!this.authed) return;
       if (r.ok) { const j = await r.json(); this.mcpServers = j.servers || []; }
-      else if (r.status === 503) { this.mcpServers = []; this.mcpMsg = 'MCP registry not available'; }
       else { this.mcpMsg = 'Load failed: ' + r.status; }
+    },
+    async saveMcp() {
+      const patches = this.mcpServers.map(s => ({ id: s.id, enabled: !!s.enabled }));
+      const r = await this.apiFetch('/api/mcp', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ servers: patches }),
+      });
+      if (!this.authed) return;
+      let j; try { j = await r.json(); } catch { j = {}; }
+      if (r.ok && j.ok) {
+        this.mcpMsg = '✓ ' + (j.note || 'Saved (hot-reloaded).');
+        await this.loadMcp();
+      } else {
+        this.mcpMsg = '✗ ' + (j.error || j.note || r.status);
+      }
     },
     async loadMcpRaw() {
       const r = await this.apiFetch('/api/mcp/raw');

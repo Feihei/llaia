@@ -215,6 +215,44 @@ option { background: var(--bg-input); color: var(--text); }
 }
 #config-pane .placeholder { color: var(--text-faint); font-style: italic; }
 
+/* MCP server 卡片（可折叠 + enabled 开关） */
+#config-pane .mcp-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--green);
+  margin: 12px 0;
+}
+#config-pane .mcp-card.off { border-left-color: var(--border); opacity: .8; }
+#config-pane .mcp-card-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; cursor: pointer; user-select: none;
+}
+#config-pane .mcp-card-head:hover { background: rgba(255,255,255,.03); }
+#config-pane .mcp-card .caret { color: var(--text-faint); width: 12px; text-align: center; }
+#config-pane .mcp-card .mcp-title { font-weight: 600; color: var(--green-bright); flex: 0 0 auto; }
+#config-pane .mcp-card.off .mcp-title { color: var(--text-dim); }
+#config-pane .mcp-card .badge {
+  font-size: 11px; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px;
+}
+#config-pane .mcp-card .dot {
+  width: 9px; height: 9px; border-radius: 50%; margin-left: 2px;
+  background: var(--text-faint);
+}
+#config-pane .mcp-card .dot.connected { background: var(--green); }
+#config-pane .mcp-card .dot.dead { background: #e5534b; }
+#config-pane .mcp-card .dot.disabled { background: #777; }
+#config-pane .mcp-card .dot.unknown { background: #d29922; }
+#config-pane .mcp-card .enable-toggle { margin-left: auto; }
+#config-pane .mcp-card-body { padding: 4px 16px 14px; border-top: 1px solid var(--border); }
+#config-pane .mcp-card .kv { margin: 8px 0; }
+#config-pane .mcp-card .kv code {
+  display: block; word-break: break-all;
+  background: rgba(0,0,0,.25); padding: 6px 8px; border-radius: 4px;
+  color: var(--text-dim); font-size: 12px;
+}
+#config-pane .mcp-card-actions { margin-top: 10px; }
+
 /* channel 卡片网格 */
 #config-pane .channel-grid {
   display: grid;

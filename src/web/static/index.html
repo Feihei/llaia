@@ -571,41 +571,51 @@
                   <div class="placeholder">No MCP servers configured. Edit mcp.toml in the Raw TOML section or run <code>llaia init</code>.</div>
                 </template>
                 <template x-for="s in mcpServers" :key="s.id">
-                  <div class="provider-card">
-                    <div class="card-header">
-                      <h3>
-                        <span x-text="s.id"></span>
-                        <span x-show="s.transport" x-text="' [' + s.transport + ']'"></span>
-                        <span x-text="s.status === 'connected' ? ' ✓' : ' ✗'"></span>
-                      </h3>
-                      <button @click="testMcp(s.id)" :disabled="mcpTesting === s.id"
-                              x-text="mcpTesting === s.id ? 'Testing...' : 'Test'"></button>
+                  <div class="mcp-card" :class="{ off: !s.enabled }">
+                    <div class="mcp-card-head" @click="mcpOpen[s.id] = !mcpOpen[s.id]">
+                      <span class="caret" x-text="mcpOpen[s.id] ? '▾' : '▸'"></span>
+                      <span class="mcp-title" x-text="s.id"></span>
+                      <span class="badge" x-show="s.transport" x-text="s.transport"></span>
+                      <span class="dot" :class="s.status" :title="s.status"></span>
+                      <label class="enable-toggle" @click.stop>
+                        <input type="checkbox" x-model="s.enabled"> enabled
+                      </label>
                     </div>
-                    <div x-show="s.status !== 'connected'" class="err" x-text="s.error"></div>
-                    <template x-if="s.tools && s.tools.length > 0">
-                      <table class="cron-table">
-                        <thead>
-                          <tr><th>tool</th><th>description</th><th>confirm</th></tr>
-                        </thead>
-                        <tbody>
-                          <template x-for="t in s.tools" :key="t.name">
-                            <tr>
-                              <td x-text="t.name"></td>
-                              <td x-text="t.description"></td>
-                              <td x-text="t.requires_confirm ? 'required' : 'safe'"></td>
-                            </tr>
-                          </template>
-                        </tbody>
-                      </table>
-                    </template>
-                    <div x-show="s.status === 'connected' && (!s.tools || s.tools.length === 0)" class="hint">Server connected but exposes no tools.</div>
+                    <div class="mcp-card-body" x-show="mcpOpen[s.id]">
+                      <div x-show="s.status === 'disabled'" class="hint">Disabled — toggle on + Save to reconnect.</div>
+                      <div x-show="s.status === 'dead'" class="err" x-text="s.error"></div>
+                      <div x-show="s.command" class="kv"><code x-text="s.command + (s.args &amp;&amp; s.args.length ? ' ' + s.args.join(' ') : '')"></code></div>
+                      <div x-show="s.url" class="kv"><code x-text="s.url"></code></div>
+                      <template x-if="s.tools &amp;&amp; s.tools.length > 0">
+                        <table class="cron-table">
+                          <thead>
+                            <tr><th>tool</th><th>description</th><th>confirm</th></tr>
+                          </thead>
+                          <tbody>
+                            <template x-for="t in s.tools" :key="t.name">
+                              <tr>
+                                <td x-text="t.name"></td>
+                                <td x-text="t.description"></td>
+                                <td x-text="t.requires_confirm ? 'required' : 'safe'"></td>
+                              </tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </template>
+                      <div x-show="s.status === 'connected' &amp;&amp; (!s.tools || s.tools.length === 0)" class="hint">Connected but exposes no tools.</div>
+                      <div class="mcp-card-actions">
+                        <button @click="testMcp(s.id)" :disabled="mcpTesting === s.id"
+                                x-text="mcpTesting === s.id ? 'Testing...' : 'Test'"></button>
+                      </div>
+                    </div>
                   </div>
                 </template>
                 <div class="cron-toolbar">
+                  <button @click="saveMcp()">Save</button>
                   <button @click="loadMcp()">Refresh</button>
                   <span class="cron-msg" x-text="mcpMsg"></span>
                 </div>
-                <div class="hint">Tools are named <code>&lt;server&gt;__&lt;tool&gt;</code>. Editing mcp.toml hot-reloads the connection; no restart needed.</div>
+                <div class="hint">Toggle <b>enabled</b> per server then <b>Save</b> to write mcp.toml and hot-reload (no restart). Tools are named <code>&lt;server&gt;__&lt;tool&gt;</code>.</div>
               </div>
             </template>
 
