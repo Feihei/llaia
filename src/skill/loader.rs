@@ -4,7 +4,7 @@
 use crate::skill::{is_valid_skill_name, SkillManifest};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// skills.json 相对 skills_dir 的位置：`<config_dir>/skills.json`
@@ -184,33 +184,74 @@ fn parse_skill_md(path: &Path, dir_name: &str) -> SkillManifest {
 }
 
 /// 扫描 skills 目录（不种子示例）：目录不存在返回空列表。
-/// 目录名非法（不满足 name 校验）的 skill 跳过，防 prompt injection。
+/// 递归遍历子目录，找到所有含 `SKILL.md` 的目录作为 skill。
+/// - 目录名非法（不满足 name 校验）的 skill 跳过，防 prompt injection；
+/// - 已含 `SKILL.md` 的目录不再向下递归，避免 skill 内部的支撑文件被当成独立 skill；
+/// - 同名（叶子目录名，skills.json 的 key）或同名（frontmatter name）冲突时保留先扫到的、warn 并跳过其余。
 pub fn scan_skills(skills_dir: &Path) -> Vec<SkillManifest> {
-    let entries = match std::fs::read_dir(skills_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
     let active_map = load_skills_json(&skills_json_path(skills_dir)).skills;
     let mut out = Vec::new();
-    for entry in entries.flatten() {
+    let mut seen_dirs = HashSet::new();
+    let mut seen_names = HashSet::new();
+    scan_dir_recursive(
+        skills_dir,
+        &active_map,
+        &mut seen_dirs,
+        &mut seen_names,
+        &mut out,
+    );
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// scan_skills 的递归实现：深度优先遍历 `dir`，把含 SKILL.md 的目录解析为 skill。
+/// `seen_dirs` / `seen_names` 跨层级共享，保证全局同名检测（先扫到的优先）。
+fn scan_dir_recursive(
+    dir: &Path,
+    active_map: &HashMap<String, SkillEntry>,
+    seen_dirs: &mut HashSet<String>,
+    seen_names: &mut HashSet<String>,
+    out: &mut Vec<SkillManifest>,
+) {
+    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(e) => e.flatten().collect(),
+        Err(_) => return,
+    };
+    // 先排序再遍历，保证同名冲突时"先扫到的"是确定性的（字典序最小路径胜出）
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         let dir_name = entry.file_name().to_string_lossy().to_string();
-        if !is_valid_skill_name(&dir_name) {
-            tracing::warn!(dir = %dir_name, "skip skill dir with invalid name");
+        // 隐藏目录（如 .git / .hidden 分类）跳过，防误扫与意外注入
+        if dir_name.starts_with('.') {
             continue;
         }
         let skill_md = entry.path().join("SKILL.md");
         if !skill_md.is_file() {
+            // 无 SKILL.md：可能是分类子目录，继续向下递归
+            scan_dir_recursive(&entry.path(), active_map, seen_dirs, seen_names, out);
+            continue;
+        }
+        if !is_valid_skill_name(&dir_name) {
+            tracing::warn!(dir = %dir_name, "skip skill dir with invalid name");
+            continue;
+        }
+        // 同名（叶子目录名 = skills.json 的 key）：保留先扫到的
+        if !seen_dirs.insert(dir_name.clone()) {
+            tracing::warn!(dir = %dir_name, "skip skill with duplicate dir name");
             continue;
         }
         let mut manifest = parse_skill_md(&skill_md, &dir_name);
+        // 同名（frontmatter name，注入 prompt / WebUI 寻址）：保留先扫到的
+        if !seen_names.insert(manifest.name.clone()) {
+            tracing::warn!(name = %manifest.name, "skip skill with duplicate name");
+            continue;
+        }
         manifest.active = active_map.get(&dir_name).map(|e| e.active).unwrap_or(true);
         out.push(manifest);
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
 }
 
 /// 扫描 + 种子：skills 目录不存在时创建并写入内置示例 skill（on-demand，init 不生成）。
@@ -536,6 +577,122 @@ mod tests {
         let skills = scan_skills(&dir);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "fallback");
+    }
+
+    #[test]
+    fn test_scan_skills_recursive_finds_nested_skills() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("skills");
+        // 分类子目录（无 SKILL.md）下的嵌套 skill
+        write_skill(
+            &dir.join("tools"),
+            "git",
+            "---\nname: git\ndescription: 版本控制\nduration: turn\n---\nbody",
+        );
+        // 更深层级：a/b/c/SKILL.md
+        write_skill(
+            &dir.join("a").join("b"),
+            "deep",
+            "---\nname: deep\ndescription: d\n---\nbody",
+        );
+        // 顶层 skill 依旧发现
+        write_skill(&dir, "top", "---\nname: top\ndescription: t\n---\nbody");
+
+        let skills = scan_skills(&dir);
+        assert_eq!(skills.len(), 3);
+        let git = skills.iter().find(|s| s.name == "git").unwrap();
+        assert_eq!(git.description, "版本控制");
+        assert!(git.path.ends_with("tools/git/SKILL.md"));
+        let deep = skills.iter().find(|s| s.name == "deep").unwrap();
+        assert!(deep.path.ends_with("a/b/deep/SKILL.md"));
+        assert!(skills.iter().any(|s| s.name == "top"));
+    }
+
+    #[test]
+    fn test_scan_skills_duplicate_dir_name_keeps_first() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("skills");
+        // 两个子目录下同名叶子目录 → 保留先扫到的（排序后字典序最小路径胜出）
+        write_skill(
+            &dir.join("tools"),
+            "git",
+            "---\nname: git\ndescription: g1\n---\n",
+        );
+        write_skill(
+            &dir.join("work"),
+            "git",
+            "---\nname: git\ndescription: g2\n---\n",
+        );
+
+        let skills = scan_skills(&dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].description, "g1");
+        assert!(skills[0].path.ends_with("tools/git/SKILL.md"));
+    }
+
+    #[test]
+    fn test_scan_skills_duplicate_frontmatter_name_keeps_first() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("skills");
+        // 叶子目录名不同但 frontmatter name 相同 → 同样判为冲突
+        write_skill(
+            &dir.join("x"),
+            "skill-a",
+            "---\nname: shared\ndescription: a\n---\n",
+        );
+        write_skill(
+            &dir.join("y"),
+            "skill-b",
+            "---\nname: shared\ndescription: b\n---\n",
+        );
+
+        let skills = scan_skills(&dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "shared");
+        assert_eq!(skills[0].description, "a");
+    }
+
+    #[test]
+    fn test_scan_skills_skips_skill_inner_dirs() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("skills");
+        // 已含 SKILL.md 的目录不再向下递归：内层 assets/ 里的 SKILL.md 不算独立 skill
+        write_skill(
+            &dir,
+            "code-review",
+            "---\nname: code-review\ndescription: cr\n---\n",
+        );
+        write_skill(
+            &dir.join("code-review"),
+            "assets",
+            "---\nname: inner\ndescription: i\n---\n",
+        );
+
+        let skills = scan_skills(&dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "code-review");
+    }
+
+    #[test]
+    fn test_scan_skills_skips_hidden_dirs() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("skills");
+        // 隐藏目录（.git / .hidden 分类）跳过
+        write_skill(
+            &dir.join(".git"),
+            "secret",
+            "---\nname: secret\ndescription: s\n---\n",
+        );
+        write_skill(
+            &dir.join(".hidden").join("nested"),
+            "hidden-skill",
+            "---\nname: hidden-skill\ndescription: h\n---\n",
+        );
+        write_skill(&dir, "visible", "---\nname: visible\ndescription: v\n---\n");
+
+        let skills = scan_skills(&dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "visible");
     }
 
     #[test]
