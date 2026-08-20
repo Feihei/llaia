@@ -88,7 +88,9 @@ fn channel_state_path(ws: &Path) -> PathBuf {
 
 /// 从 channel_state.json 读 qq 的 owner openid（自动捕获的持久化值）。
 async fn read_owner_openid_from_state(ws: &Path) -> Option<String> {
-    let content = tokio::fs::read_to_string(channel_state_path(ws)).await.ok()?;
+    let content = tokio::fs::read_to_string(channel_state_path(ws))
+        .await
+        .ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     v.get("qq")?
         .get("owner_openid")?
@@ -1394,7 +1396,10 @@ mod proactive_tests {
         qq.persist_owner_openid("OPENID_001").await;
         let state_path = channel_state_path(dir.path());
         let content = std::fs::read_to_string(&state_path).unwrap();
-        assert!(content.contains("OPENID_001"), "state file should store openid");
+        assert!(
+            content.contains("OPENID_001"),
+            "state file should store openid"
+        );
         // USER.md 不应被写入（职责分离：状态归状态文件，USER.md 归用户信息）
         assert!(
             !dir.path().join("USER.md").exists(),
@@ -1435,9 +1440,15 @@ mod proactive_tests {
     #[tokio::test]
     async fn test_resolve_owner_openid_config_takes_priority() {
         let dir = tempdir().unwrap();
-        let mut cfg = QqConfig::default();
-        cfg.owner_openid = "CFG_OPENID".into();
-        std::fs::write(dir.path().join("USER.md"), "# 基本信息\n\n- qq: MD_OPENID\n").unwrap();
+        let cfg = QqConfig {
+            owner_openid: "CFG_OPENID".into(),
+            ..Default::default()
+        };
+        std::fs::write(
+            dir.path().join("USER.md"),
+            "# 基本信息\n\n- qq: MD_OPENID\n",
+        )
+        .unwrap();
         let qq = QqChannel::new(cfg).with_workspace(dir.path().to_path_buf());
         qq.persist_owner_openid("STATE_OPENID").await; // state 也有值
         let openid = qq.resolve_owner_openid().await;

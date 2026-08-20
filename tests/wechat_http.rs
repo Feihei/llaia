@@ -9,6 +9,7 @@ fn test_config(api_base: &str) -> WechatConfig {
     WechatConfig {
         enabled: true,
         allow_user_id: String::new(),
+        owner_user_id: String::new(),
         base_url: api_base.into(),
         cdn_base_url: format!("{}/cdn", api_base),
     }
@@ -39,6 +40,7 @@ fn logged_in_state() -> WechatState {
         account_id: "bot_1".into(),
         sync_buf: String::new(),
         context_tokens: HashMap::new(),
+        owner_user_id: String::new(),
     }
 }
 

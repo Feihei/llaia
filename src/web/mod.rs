@@ -9,8 +9,8 @@ use axum::response::{IntoResponse, Response};
 use rand::Rng;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
-use std::path::{Component, Path, PathBuf};
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
@@ -1235,11 +1235,19 @@ pub async fn save_mcp(
         return unauthorized();
     }
     if !state.mcp_path.exists() {
-        return json_err(StatusCode::BAD_REQUEST, "no mcp.toml yet; add a server first");
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "no mcp.toml yet; add a server first",
+        );
     }
     let raw = match std::fs::read_to_string(&state.mcp_path) {
         Ok(r) => r,
-        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("read mcp.toml: {e}")),
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("read mcp.toml: {e}"),
+            )
+        }
     };
     let patches: Vec<(String, bool)> = body
         .servers
@@ -1251,10 +1259,16 @@ pub async fn save_mcp(
         Err(e) => return json_err(StatusCode::BAD_REQUEST, &e),
     };
     if let Err(e) = crate::mcp::McpConfig::from_str_validate(&new_raw) {
-        return json_err(StatusCode::BAD_REQUEST, &format!("invalid after patch: {e}"));
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid after patch: {e}"),
+        );
     }
     if let Err(e) = std::fs::write(&state.mcp_path, &new_raw) {
-        return json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write mcp.toml: {e}"));
+        return json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("write mcp.toml: {e}"),
+        );
     }
     let (note, _tools) = reconnect_mcp(&state).await;
     axum::Json(serde_json::json!({
@@ -1270,7 +1284,10 @@ fn patch_mcp_enabled(raw: &str, patches: &[(String, bool)]) -> Result<String, St
     let mut doc = DocumentMut::from_str(raw).map_err(|e| format!("parse mcp.toml: {e}"))?;
     let patch: HashMap<&str, bool> = patches.iter().map(|(id, en)| (id.as_str(), *en)).collect();
     let mut matched = 0usize;
-    if let Some(servers) = doc.get_mut("server").and_then(|v| v.as_array_of_tables_mut()) {
+    if let Some(servers) = doc
+        .get_mut("server")
+        .and_then(|v| v.as_array_of_tables_mut())
+    {
         for tbl in servers.iter_mut() {
             if let Some(idv) = tbl.get("id").and_then(|v| v.as_str()) {
                 if let Some(&en) = patch.get(idv) {
@@ -1283,10 +1300,18 @@ fn patch_mcp_enabled(raw: &str, patches: &[(String, bool)]) -> Result<String, St
                             let mut nb = toml_edit::Value::from(en);
                             let dm = nb.decor_mut();
                             dm.set_prefix(
-                                decor.prefix().and_then(|r| r.as_str()).unwrap_or("").to_string(),
+                                decor
+                                    .prefix()
+                                    .and_then(|r| r.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                             );
                             dm.set_suffix(
-                                decor.suffix().and_then(|r| r.as_str()).unwrap_or("").to_string(),
+                                decor
+                                    .suffix()
+                                    .and_then(|r| r.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                             );
                             *v = nb;
                             done = true;
@@ -1327,17 +1352,29 @@ transport = "http"
 url = "https://x"
 "#;
         // 关掉 a、打开 b（b 已是 true，幂等）
-        let out = patch_mcp_enabled(raw, &[("a".into(), false), ("b".into(), true)])
-            .expect("patch ok");
+        let out =
+            patch_mcp_enabled(raw, &[("a".into(), false), ("b".into(), true)]).expect("patch ok");
         // 注释保留
-        assert!(out.contains("# top comment preserved"), "comment lost:\n{}", out);
+        assert!(
+            out.contains("# top comment preserved"),
+            "comment lost:\n{}",
+            out
+        );
         assert!(out.contains("# keep me"), "inline comment lost:\n{}", out);
         // ${VAR} 插值原样保留（不能因为序列化被展开）
-        assert!(out.contains("${MY_TOKEN}"), "env var interpolation lost:\n{}", out);
+        assert!(
+            out.contains("${MY_TOKEN}"),
+            "env var interpolation lost:\n{}",
+            out
+        );
         // enabled 已改
         let a = out.split("id = \"a\"").nth(1).unwrap();
         let a_block = a.split("[[server]]").next().unwrap();
-        assert!(a_block.contains("enabled = false"), "a not disabled:\n{}", out);
+        assert!(
+            a_block.contains("enabled = false"),
+            "a not disabled:\n{}",
+            out
+        );
         let b = out.split("id = \"b\"").nth(1).unwrap();
         assert!(b.contains("enabled = true"), "b not kept on:\n{}", out);
         // 改动后仍可被 mcp 解析
@@ -2257,7 +2294,10 @@ model = "local.m"
             "index.html missing mcp collapsible-card markup (stale embed?)"
         );
 
-        let js = StaticAsset::get("app.js").expect("app.js embedded").data.to_vec();
+        let js = StaticAsset::get("app.js")
+            .expect("app.js embedded")
+            .data
+            .to_vec();
         let js = String::from_utf8(js).expect("app.js utf8");
         assert!(
             js.contains("channelCards"),

@@ -424,8 +424,8 @@ impl WechatChannel {
                         .insert(from_user_id.clone(), ct.to_string());
                 }
                 // 自动捕获 owner user_id（cron 主动推送目标）；config 手动指定时不覆盖
-                let owner_changed = self.config.owner_user_id.is_empty()
-                    && state.owner_user_id != from_user_id;
+                let owner_changed =
+                    self.config.owner_user_id.is_empty() && state.owner_user_id != from_user_id;
                 if owner_changed {
                     state.owner_user_id = from_user_id.clone();
                 }
@@ -927,8 +927,10 @@ mod tests {
 
     #[test]
     fn test_proactive_user_id_config_priority() {
-        let mut cfg = WechatConfig::default();
-        cfg.owner_user_id = "cfg_user".into();
+        let cfg = WechatConfig {
+            owner_user_id: "cfg_user".into(),
+            ..Default::default()
+        };
         let state = WechatState {
             owner_user_id: "auto_user".into(),
             ..Default::default()

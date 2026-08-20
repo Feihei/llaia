@@ -367,33 +367,6 @@ impl crate::cron::ProactivePusher for TelegramChannel {
     }
 }
 
-#[cfg(test)]
-mod proactive_tests {
-    use super::*;
-    use crate::config::TelegramConfig;
-
-    #[test]
-    fn test_proactive_chat_id_owner_priority() {
-        let mut cfg = TelegramConfig::default();
-        cfg.owner_chat_id = 111;
-        cfg.allow_chat_id = 222;
-        assert_eq!(proactive_chat_id(&cfg), Some(111), "owner wins over allow");
-    }
-
-    #[test]
-    fn test_proactive_chat_id_fallback_to_allow() {
-        let mut cfg = TelegramConfig::default();
-        cfg.allow_chat_id = 222;
-        assert_eq!(proactive_chat_id(&cfg), Some(222), "fallback to allow_chat_id");
-    }
-
-    #[test]
-    fn test_proactive_chat_id_none_when_unset() {
-        let cfg = TelegramConfig::default();
-        assert_eq!(proactive_chat_id(&cfg), None, "no target -> skip");
-    }
-}
-
 /// 输出汇聚：缓冲全部文本后整条发送（Telegram 无编辑成本考虑，避免流式刷屏）
 struct TelegramSink {
     tg: Arc<TelegramChannel>,
@@ -455,5 +428,40 @@ impl OutputSink for TelegramSink {
         }
         text.push_str("[已中断]");
         let _ = self.tg.send_text(self.chat_id, &text).await;
+    }
+}
+
+#[cfg(test)]
+mod proactive_tests {
+    use super::*;
+    use crate::config::TelegramConfig;
+
+    #[test]
+    fn test_proactive_chat_id_owner_priority() {
+        let cfg = TelegramConfig {
+            owner_chat_id: 111,
+            allow_chat_id: 222,
+            ..Default::default()
+        };
+        assert_eq!(proactive_chat_id(&cfg), Some(111), "owner wins over allow");
+    }
+
+    #[test]
+    fn test_proactive_chat_id_fallback_to_allow() {
+        let cfg = TelegramConfig {
+            allow_chat_id: 222,
+            ..Default::default()
+        };
+        assert_eq!(
+            proactive_chat_id(&cfg),
+            Some(222),
+            "fallback to allow_chat_id"
+        );
+    }
+
+    #[test]
+    fn test_proactive_chat_id_none_when_unset() {
+        let cfg = TelegramConfig::default();
+        assert_eq!(proactive_chat_id(&cfg), None, "no target -> skip");
     }
 }

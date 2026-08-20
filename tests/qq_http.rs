@@ -8,6 +8,7 @@ fn test_config() -> QqConfig {
         app_id: "test_app".into(),
         app_secret: "test_secret".into(),
         confirm_mode: "always".into(),
+        owner_openid: String::new(),
     }
 }
 

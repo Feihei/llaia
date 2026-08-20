@@ -9,6 +9,7 @@ fn test_config(api_base: &str) -> TelegramConfig {
         enabled: true,
         bot_token: "123456:TEST_TOKEN".into(),
         allow_chat_id: 0,
+        owner_chat_id: 0,
         api_base: api_base.into(),
     }
 }
@@ -103,6 +104,7 @@ async fn test_new_rejects_empty_token_in_run() {
         enabled: true,
         bot_token: String::new(),
         allow_chat_id: 0,
+        owner_chat_id: 0,
         api_base: "http://127.0.0.1:1".into(),
     };
     assert!(TelegramChannel::new(cfg).is_ok());
