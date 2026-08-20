@@ -2014,4 +2014,35 @@ workspace = ""
             out
         );
     }
+
+    #[test]
+    fn test_agent_fallback_persists_via_json_put_path() {
+        // 模拟前端结构化保存回传的 JSON：provider 已 flat 回顶层、agent 含 fallback 列表
+        let json = r#"{
+            "runtime": { "context_threshold": 0.7 },
+            "provider": {
+                "local": { "type": "openai_compatible", "base_url": "http://localhost:11434/v1", "m": { "model": "qwen3", "native_tool_calling": true } }
+            },
+            "agent": {
+                "main": { "model": "local.m", "fallback": ["local.m", "cloud.big"], "denied_tools": [], "delegate_timeout": 120, "memory_token_budget": 4000 }
+            }
+        }"#;
+        let new_config: Config = serde_json::from_str(json).expect("frontend json should parse");
+        assert_eq!(
+            new_config.agent.get("main").unwrap().fallback,
+            vec!["local.m".to_string(), "cloud.big".to_string()],
+            "fallback lost during JSON deserialize"
+        );
+        let merged = merge_masked(&new_config, &new_config);
+        let disk = r#"
+[agent.main]
+model = "local.m"
+"#;
+        let out = merge_config_preserving_comments(disk, &merged).expect("merge ok");
+        assert!(
+            out.contains("fallback") && out.contains("cloud.big"),
+            "fallback not written to disk:\n{}",
+            out
+        );
+    }
 }
