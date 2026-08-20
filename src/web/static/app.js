@@ -19,9 +19,85 @@ function llaiaApp() {
     _todoTimer: null,
     ws: null,
     // config
-    cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{},tts:{}} },
+    cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},telegram:{},dingtalk:{},wechat:{},mail:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{},tts:{}} },
     compatOpen: {},
     configSection: 'runtime',
+    // 支持的 channel 卡片元数据（参数表单由这些字段驱动渲染）。
+    // 顺序即展示顺序；WebUI 另有独立卡片、永远排在最前。
+    channelCards: [
+      {
+        key: 'qq', icon: '💬', title: 'QQ',
+        desc: 'QQ 开放平台机器人（扫码/手动登录），长轮询免公网回调。',
+        fields: [
+          { name: 'app_id', label: 'app_id' },
+          { name: 'app_secret', label: 'app_secret', password: true },
+          { name: 'confirm_mode', label: 'confirm_mode', placeholder: 'none' },
+          { name: 'owner_openid', label: 'owner_openid', placeholder: 'optional cron push target' },
+        ],
+      },
+      {
+        key: 'telegram', icon: '✈️', title: 'Telegram',
+        desc: 'BotFather 机器人 + long polling，免公网回调。',
+        fields: [
+          { name: 'bot_token', label: 'bot_token', password: true },
+          { name: 'allow_chat_id', label: 'allow_chat_id', type: 'number', placeholder: '0 = 不限制' },
+          { name: 'owner_chat_id', label: 'owner_chat_id', type: 'number', placeholder: '0 = 回退 allow_chat_id' },
+          { name: 'api_base', label: 'api_base', placeholder: 'https://api.telegram.org' },
+        ],
+      },
+      {
+        key: 'dingtalk', icon: '📌', title: 'DingTalk',
+        desc: '钉钉开放平台机器人 + Stream Mode WebSocket，免公网回调。',
+        fields: [
+          { name: 'client_id', label: 'client_id' },
+          { name: 'client_secret', label: 'client_secret' },
+          { name: 'allow_staff_id', label: 'allow_staff_id', placeholder: '空 = 不限制' },
+          { name: 'api_base', label: 'api_base', placeholder: 'https://api.dingtalk.com' },
+        ],
+      },
+      {
+        key: 'wechat', icon: '🟢', title: 'WeChat',
+        desc: '微信 ClawBot（ilink bot），扫码登录 + 长轮询免公网回调。',
+        fields: [
+          { name: 'allow_user_id', label: 'allow_user_id', placeholder: '空 = 不限制' },
+          { name: 'owner_user_id', label: 'owner_user_id', placeholder: 'optional cron push target' },
+          { name: 'base_url', label: 'base_url', placeholder: 'https://ilinkai.weixin.qq.com' },
+          { name: 'cdn_base_url', label: 'cdn_base_url', placeholder: 'https://novac2c.cdn.weixin.qq.com/c2c' },
+        ],
+      },
+      {
+        key: 'feishu', icon: '🚀', title: 'Feishu / Lark',
+        desc: '飞书开放平台事件订阅「长连接」模式（WebSocket 免公网回调）。',
+        fields: [
+          { name: 'app_id', label: 'app_id' },
+          { name: 'app_secret', label: 'app_secret', password: true },
+          { name: 'allow_open_id', label: 'allow_open_id', placeholder: '空 = 不限制' },
+          { name: 'mention_only', label: 'mention_only（群内仅 @ 时回复）', type: 'checkbox' },
+          { name: 'api_base', label: 'api_base', placeholder: 'https://open.feishu.cn/open-apis' },
+          { name: 'ws_base', label: 'ws_base', placeholder: 'https://open.feishu.cn' },
+        ],
+      },
+      {
+        key: 'mail', icon: '✉️', title: 'Mail',
+        desc: 'IMAP 收件 + SMTP 发信（个人助理入口，单用户安全锁）。',
+        fields: [
+          { name: 'imap_server', label: 'imap_server', placeholder: 'imap.gmail.com' },
+          { name: 'imap_port', label: 'imap_port', type: 'number', placeholder: '993' },
+          { name: 'imap_user', label: 'imap_user' },
+          { name: 'imap_pass', label: 'imap_pass', password: true },
+          { name: 'smtp_server', label: 'smtp_server', placeholder: 'smtp.gmail.com' },
+          { name: 'smtp_port', label: 'smtp_port', type: 'number', placeholder: '465' },
+          { name: 'smtp_user', label: 'smtp_user', placeholder: '留空复用 imap_user' },
+          { name: 'smtp_pass', label: 'smtp_pass', password: true, placeholder: '留空复用 imap_pass' },
+          { name: 'poll_interval_secs', label: 'poll_interval_secs', type: 'number', placeholder: '30' },
+          { name: 'mailbox', label: 'mailbox', placeholder: 'INBOX' },
+          { name: 'owner_email', label: 'owner_email', placeholder: '只响应此地址（谨慎留空）' },
+          { name: 'from_name', label: 'from_name', placeholder: 'LLAIA' },
+          { name: 'mark_seen', label: 'mark_seen（处理后标记已读）', type: 'checkbox' },
+          { name: 'max_attachment_mb', label: 'max_attachment_mb', type: 'number', placeholder: '10' },
+        ],
+      },
+    ],
     rawToml: '',
     rawMsg: '',
     // about

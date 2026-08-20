@@ -215,6 +215,38 @@ option { background: var(--bg-input); color: var(--text); }
 }
 #config-pane .placeholder { color: var(--text-faint); font-style: italic; }
 
+/* channel 卡片网格 */
+#config-pane .channel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+#config-pane .channel-card {
+  background: var(--bg-elev);
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  margin: 0;
+}
+#config-pane .channel-card.channel-on { border-left-color: var(--green); }
+#config-pane .channel-card.channel-off { opacity: .82; }
+#config-pane .channel-card.webui-card { border-left-color: #4aa3ff; }
+#config-pane .channel-card .channel-desc {
+  color: var(--text-faint); font-size: 12px; margin: 0 0 10px;
+}
+#config-pane .channel-card .form-row label { width: 150px; }
+#config-pane .channel-card .form-row input { flex: 1; min-width: 0; }
+#config-pane .enable-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-dim); font-size: 12px; cursor: pointer;
+  user-select: none;
+}
+#config-pane .badge-on {
+  font-size: 11px; color: var(--green-bright);
+  border: 1px solid var(--green-deep); border-radius: 10px; padding: 1px 8px;
+}
+
 #config-pane .card-header {
   display: flex; align-items: center; gap: 8px;
   margin-bottom: 10px; padding-bottom: 8px;

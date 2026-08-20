@@ -349,16 +349,48 @@
         </template>
         <template x-if="configSection==='channels'">
           <div>
-            <h3>QQ</h3>
-            <div class="form-row"><label><input type="checkbox" x-model="cfg.channels.qq.enabled"> enabled</label></div>
-            <div class="form-row"><label>app_id</label><input x-model="cfg.channels.qq.app_id"></div>
-            <div class="form-row"><label>app_secret</label><input type="password" x-model="cfg.channels.qq.app_secret"></div>
-            <div class="form-row"><label>confirm_mode</label><input x-model="cfg.channels.qq.confirm_mode"></div>
-            <div class="form-row"><label>owner_openid</label><input x-model="cfg.channels.qq.owner_openid" placeholder="optional cron push target"></div>
-            <h3>WebUI <span class="hint">(always enabled in serve mode)</span></h3>
-            <div class="form-row"><label>host</label><input x-model="cfg.webui.host"></div>
-            <div class="form-row"><label>port</label><input type="number" x-model.number="cfg.webui.port"></div>
-            <div class="form-row"><label>token</label><input type="password" x-model="cfg.webui.token"></div>
+            <div class="channel-grid">
+
+              <!-- WebUI 卡片：永远排在最前（serve 模式始终启用，主交互界面） -->
+              <div class="channel-card webui-card">
+                <div class="card-header">
+                  <h3>🌐 WebUI</h3>
+                  <span class="badge-on">always on</span>
+                </div>
+                <div class="channel-desc">serve 模式下 WebUI 始终启用，这是主交互界面。</div>
+                <div class="form-row"><label>host</label><input x-model="cfg.webui.host"></div>
+                <div class="form-row"><label>port</label><input type="number" x-model.number="cfg.webui.port"></div>
+                <div class="form-row"><label>token</label><input type="password" x-model="cfg.webui.token" placeholder="留空则启动时随机生成"></div>
+              </div>
+
+              <!-- 各 channel 卡片：由 channelCards 元数据驱动渲染 -->
+              <template x-for="card in channelCards" :key="card.key">
+                <div class="channel-card" :class="cfg.channels[card.key].enabled ? 'channel-on' : 'channel-off'">
+                  <div class="card-header">
+                    <h3><span x-text="card.icon"></span> <span x-text="card.title"></span></h3>
+                    <label class="enable-toggle">
+                      <input type="checkbox" x-model="cfg.channels[card.key].enabled">
+                      <span x-text="cfg.channels[card.key].enabled ? 'enabled' : 'disabled'"></span>
+                    </label>
+                  </div>
+                  <div class="channel-desc" x-text="card.desc"></div>
+                  <template x-for="f in card.fields" :key="f.name">
+                    <div>
+                      <template x-if="f.type === 'checkbox'">
+                        <div class="form-row"><label><input type="checkbox" x-model="cfg.channels[card.key][f.name]"> <span x-text="f.label"></span></label></div>
+                      </template>
+                      <template x-if="f.type === 'number'">
+                        <div class="form-row"><label x-text="f.label"></label><input type="number" x-model.number="cfg.channels[card.key][f.name]" :placeholder="f.placeholder || ''"></div>
+                      </template>
+                      <template x-if="f.type !== 'checkbox' && f.type !== 'number'">
+                        <div class="form-row"><label x-text="f.label"></label><input :type="f.password ? 'password' : 'text'" x-model="cfg.channels[card.key][f.name]" :placeholder="f.placeholder || ''"></div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+            </div>
             <button @click="saveConfig()">Save</button>
           </div>
         </template>
