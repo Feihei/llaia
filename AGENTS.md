@@ -133,6 +133,10 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 
 > **环境探测（P5 E1，非工具）**：`src/envprobe.rs` 启动时对 main agent 探测一次本机工具链（shell/python/node/npm/rustc/cargo/go/git/docker，2s/命令 timeout），以 Runtime Context 尾部注入（与 todo/goal 同区，KV 缓存友好）；`/env` 命令手动刷新。
 
+> **工具结果防护（超大返回 / base64 图片）**：`execute_tool_calls` 返回的文本结果 push 进 history 前在 `src/agent/mod.rs` 做两道处理——
+> 1. **图片识别**（`src/image_utils.rs::extract_data_url_images`）：`data:image/<fmt>;base64,` 从文本剥离为 `[图片]` 占位。配了 `runtime.vision_model` → 用 vision provider 描述图片，描述文本进上下文；未配（主模型多模态）→ 桥接一条 user 多模态消息让主模型直接读图（结构：assistant(tool_calls) → tool(占位) → user(图片) → assistant）。图片经 `prepare_base64_for_vision` 缩放重编码（最长边 1024 / JPEG85）后**落盘 `workspace_root/tmp/` 并发 `TurnEvent::MediaOutput` 回显给用户**。
+> 2. **非图片超长截断**：超过 `runtime.tool_result_cap`（默认 32768 字符）保留头部 + 占位说明（完整内容已在 sqlite 留底）。`context.rs::cheap_normalize`（compact 时的 TOOL_TRIM_CAP=500）不受影响。
+
 终端命令安全：由 `[tools.terminal]` 控制——
 - `confirm`（`none` / `whitelist` 默认 / `always`）：是否需要交互式确认
 - `command_policy`（`blacklist` 默认 / `whitelist` / `none`）：命令黑白名单

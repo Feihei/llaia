@@ -68,6 +68,9 @@ pub struct Agent {
     pub context_size: usize,
     pub context_threshold: f64,
     pub max_iterations: u32,
+    /// 单个工具结果文本的最大字符数（非图片内容），超限截断兜底。
+    /// 图片（data:image base64）识别后走多模态通道，不占此额度。
+    pub tool_result_cap: usize,
     /// 全局 confirm_mode（none / always / session），不再 per-channel
     /// [deprecated] P4-d 起由 permission profile 取代，保留字段仅为向后兼容
     pub confirm_mode: String,
@@ -160,6 +163,7 @@ impl Agent {
             context_size,
             context_threshold: config.runtime.context_threshold,
             max_iterations: config.runtime.max_iterations,
+            tool_result_cap: config.runtime.tool_result_cap,
             confirm_mode: config.channels.qq.confirm_mode.clone(),
             approval_gate: crate::agent::approval::ApprovalGate::new(),
             permission_profile: Arc::new(RwLock::new(permission)),
@@ -436,6 +440,7 @@ impl Agent {
             context_size: self.context_size,
             context_threshold: self.context_threshold,
             max_iterations: self.max_iterations,
+            tool_result_cap: self.tool_result_cap,
             confirm_mode: self.confirm_mode.clone(),
             approval_gate: self.approval_gate.clone(),
             permission_profile: self.permission_profile.clone(),
@@ -614,6 +619,42 @@ impl Agent {
             }
             None => tracing::warn!("skip auto-compact: no provider available"),
         }
+    }
+
+    /// 把工具返回的图片 data URL 落盘到 `workspace/tmp/`，返回绝对路径。
+    /// 供回显（`TurnEvent::MediaOutput`）使用；失败返回 None，不阻塞工具结果处理。
+    async fn persist_tool_image(
+        &self,
+        data_url: &str,
+        tool_name: &str,
+        idx: usize,
+    ) -> Option<String> {
+        let bytes = crate::image_utils::decode_data_url(data_url).ok()?;
+        if bytes.is_empty() {
+            return None;
+        }
+        let ext = match data_url.split(';').next().unwrap_or("") {
+            "data:image/png" => "png",
+            "data:image/gif" => "gif",
+            "data:image/webp" => "webp",
+            _ => "jpg",
+        };
+        let ws = self.workspace_root.read().await;
+        let tmp = ws.join("tmp");
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = tmp.join(format!("tool_{}_{}_{}.{}", tool_name, ts, idx, ext));
+        if let Err(e) = tokio::fs::create_dir_all(&tmp).await {
+            tracing::warn!(error = %e, "create workspace tmp dir failed");
+            return None;
+        }
+        if let Err(e) = tokio::fs::write(&path, &bytes).await {
+            tracing::warn!(error = %e, path = %path.display(), "persist tool image failed");
+            return None;
+        }
+        Some(path.to_string_lossy().to_string())
     }
 
     /// 多模态流式版本：接收任意 ChatMessage（支持文本+图片）。
@@ -852,17 +893,91 @@ impl Agent {
             };
             let (tool_msgs, deferred) =
                 execute_tool_calls(&self.tools, &calls, channel, &ctx, Some(&event_tx)).await?;
+            // tool_call_id → 工具名映射：图片桥接提示语标注来源工具
+            let name_by_id: std::collections::HashMap<&str, &str> = calls
+                .iter()
+                .map(|c| (c.id.as_str(), c.name.as_str()))
+                .collect();
+            // 图片读图分流：配了 vision_provider（主模型无多模态）→ 描述进文本；
+            // 未配（主模型能看图）→ 桥接多模态 user 消息直接发图。与入口图片处理语义一致。
+            let vision_provider = self.vision_provider_snapshot().await;
             for msg in tool_msgs.iter() {
+                let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
+                let tool_name = name_by_id
+                    .get(tool_call_id.as_str())
+                    .copied()
+                    .unwrap_or("tool");
                 let text = msg.content.as_text();
+
+                // 1) 提取工具返回的图片 data URL，文本中剥离为 [图片] 占位
+                let (placeholder, images) = crate::image_utils::extract_data_url_images(&text);
+
+                // 2) 非图片内容超长截断兜底（完整内容由下方 append_message 写入 sqlite 留底）
+                let mut tool_text = truncate_tool_result(&placeholder, self.tool_result_cap);
+
+                // 3) 图片处理：缩放 → 回显给用户（MediaOutput）→ 模型读图
+                let mut bridge_images: Vec<String> = Vec::new();
+                for (idx, url) in images.iter().enumerate() {
+                    // 缩放省 token（解码失败则退回原始 data URL）
+                    let prepared = crate::image_utils::prepare_base64_for_vision(url)
+                        .unwrap_or_else(|_| url.clone());
+                    // 回显：落盘到 workspace/tmp/ 并发 MediaOutput 事件由 channel 发送
+                    if let Some(path) = self.persist_tool_image(&prepared, &tool_name, idx).await {
+                        let _ = event_tx
+                            .send(TurnEvent::MediaOutput {
+                                path,
+                                kind: MediaKind::Image,
+                            })
+                            .await;
+                    }
+                    // 模型读图：有 vision_provider → 描述文本进上下文；否则桥接图片
+                    match vision_provider.as_ref() {
+                        Some(p) => {
+                            let desc = self.describe_single_image(p.as_ref(), &prepared).await;
+                            let label = if images.len() > 1 {
+                                format!("[工具 {} 返回的图片{}描述] ", tool_name, idx + 1)
+                            } else {
+                                format!("[工具 {} 返回的图片描述] ", tool_name)
+                            };
+                            tool_text.push_str(&format!("\n{}{}", label, desc));
+                        }
+                        None => bridge_images.push(prepared),
+                    }
+                }
+
                 let _ = event_tx
                     .send(TurnEvent::ToolResult {
-                        id: msg.tool_call_id.clone().unwrap_or_default(),
-                        output: text.clone(),
+                        id: tool_call_id.clone(),
+                        output: tool_text.clone(),
                     })
                     .await;
                 self.session_store
-                    .append_message(self.session_id, &Role::Tool, &text)?;
-                self.context.push(msg.clone());
+                    .append_message(self.session_id, &Role::Tool, &tool_text)?;
+                self.context.push(ChatMessage::tool(tool_text, &tool_call_id));
+
+                // 4) 无 vision_provider：桥接 user 多模态消息，让（多模态）主模型真正看到图。
+                //    结构合法：assistant(tool_calls) → tool(占位) → user(图片) → assistant。
+                if !bridge_images.is_empty() {
+                    let mut parts = vec![ContentPart::Text {
+                        text: format!(
+                            "[这是工具 {} 返回的图片（如截图），请仔细查看并理解其中的内容。]",
+                            tool_name
+                        ),
+                    }];
+                    for url in &bridge_images {
+                        parts.push(ContentPart::ImageUrl {
+                            image_url: ImageUrlContent { url: url.clone() },
+                        });
+                    }
+                    let bridge = ChatMessage::user_multimodal(parts);
+                    // 多模态消息 sqlite 只存文本部分（图片 base64 不持久化，与输入侧一致）
+                    self.session_store.append_message(
+                        self.session_id,
+                        &Role::User,
+                        &bridge.content.as_text(),
+                    )?;
+                    self.context.push(bridge);
+                }
             }
 
             tracing::info!(iter = i, "tool iteration done");
@@ -894,6 +1009,17 @@ impl Agent {
         let _ = event_tx.send(TurnEvent::Done).await;
         Ok(fallback.into())
     }
+}
+
+/// 非图片工具结果超长截断：超过 `cap` 保留头部并附占位说明。
+/// 完整内容已由调用方写入 sqlite 会话记录，可随时回查。
+fn truncate_tool_result(text: &str, cap: usize) -> String {
+    let n = text.chars().count();
+    if n <= cap {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(cap).collect();
+    format!("{}…[已截断：原 {} 字符，完整结果见会话记录]", head, n)
 }
 
 /// ask_user 结构化单选：把用户原始回答映射到选项文本。
@@ -948,6 +1074,8 @@ mod tests {
     use crate::tools::Tool;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::mpsc;
+    use base64::Engine as _;
+    use image::ImageEncoder as _;
 
     /// Mock provider：每次 chat_stream 调用返回下一组预设事件
     struct MockProvider {
@@ -1174,6 +1302,139 @@ mod tests {
             all_tool_truncated,
             "a tool message escaped truncation (history grew uncompacted)"
         );
+    }
+
+    /// 回归：工具返回 base64 图片（如 blender-mcp get_viewport_screenshot）时——
+    /// 1) 图片从工具文本剥离为 [图片] 占位，base64 不进文本上下文；
+    /// 2) 无 vision_provider → 桥接 user 多模态消息，让（多模态）主模型真正看到图；
+    /// 3) 图片落盘 workspace/tmp/ 并发 MediaOutput 事件回显给用户；
+    /// 4) 非图片超长文本按 tool_result_cap 截断兜底。
+    #[tokio::test]
+    async fn test_tool_image_bridged_and_echoed() {
+        // 8x8 红色 PNG 的 base64 data URL（模拟 MCP 截图返回）
+        let img: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> =
+            image::ImageBuffer::from_pixel(8, 8, image::Rgb([255, 0, 0]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::codecs::png::PngEncoder::new(&mut buf)
+            .write_image(img.as_raw(), 8, 8, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+        let data_url = format!("data:image/png;base64,{}", b64);
+
+        // 工具返回：一张截图 + 超长文本（超过 tool_result_cap 触发截断兜底）
+        let payload = format!("viewport:\n{}\nnotes: {}", data_url, "y".repeat(2000));
+
+        let rounds = vec![
+            vec![
+                StreamEvent::TextDelta("step 1".into()),
+                StreamEvent::ToolCall(ToolCall {
+                    id: "call_img".into(),
+                    name: "bigtool".into(),
+                    arguments: json!({}),
+                }),
+                StreamEvent::Done,
+            ],
+            vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done],
+        ];
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(BigTool { payload }));
+
+        let provider: Arc<dyn Provider> = Arc::new(IntraTurnMockProvider {
+            native: true,
+            rounds: Arc::new(StdMutex::new(rounds.into())),
+            request_sizes: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("test", "test").unwrap();
+        let mut config = Config::default_for_workspace("/tmp/llaia-test");
+        config.runtime.max_iterations = 20;
+        config.runtime.tool_result_cap = 500; // 小 cap 触发截断
+        let ws = std::path::PathBuf::from("/tmp/llaia-test/workspace");
+        let mut agent = Agent::new(
+            &config,
+            Some(provider),
+            None,
+            None, // 无 vision_provider → 桥接多模态让主模型读图
+            tools,
+            Arc::new(store),
+            sid,
+            "test system".into(),
+            100_000, // 大窗口，避免 auto-compact 干扰断言
+            ws.clone(),
+            Arc::new(RwLock::new(ws.clone())),
+            std::path::PathBuf::from("/tmp/llaia-test"),
+            true,
+            "main".into(),
+            None,
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "done");
+
+        // 1) 工具消息：图片剥离为 [图片] 占位，base64 不进文本上下文
+        let tool_msgs: Vec<_> = agent
+            .context
+            .history
+            .iter()
+            .filter(|m| m.role == crate::provider::Role::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 1);
+        let tool_text = tool_msgs[0].content.as_text();
+        assert!(
+            tool_text.contains("[图片]"),
+            "image not stripped into placeholder: {}",
+            tool_text
+        );
+        assert!(
+            !tool_text.contains("data:image/png;base64,"),
+            "base64 leaked into tool text context"
+        );
+        // 2) 非图片超长文本截断兜底
+        assert!(
+            tool_text.contains("已截断"),
+            "oversized non-image text not truncated"
+        );
+
+        // 3) 无 vision_provider → 桥接 user 多模态消息让主模型读图
+        let bridge = agent
+            .context
+            .history
+            .iter()
+            .find(|m| m.role == crate::provider::Role::User && m.content.has_image());
+        assert!(bridge.is_some(), "no bridged multimodal user message");
+        let bridge_text = bridge.unwrap().content.as_text();
+        assert!(
+            bridge_text.contains("bigtool"),
+            "bridge text should name source tool: {}",
+            bridge_text
+        );
+
+        // 4) 回显：MediaOutput 事件 + 落盘文件存在（workspace/tmp/ 下）
+        let mut echoed = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let TurnEvent::MediaOutput { path, kind } = ev {
+                echoed = true;
+                assert!(matches!(kind, MediaKind::Image));
+                assert!(
+                    std::path::Path::new(&path).exists(),
+                    "echoed file missing: {}",
+                    path
+                );
+                assert!(
+                    path.contains("tmp"),
+                    "echoed file should live under workspace/tmp: {}",
+                    path
+                );
+            }
+        }
+        assert!(echoed, "no MediaOutput event echoed to channel");
     }
 
     #[tokio::test]

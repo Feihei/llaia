@@ -61,6 +61,12 @@ pub struct RuntimeConfig {
     /// 自动按"用户未回答，已按最合理假设继续"续跑。默认 300（对齐 zeroclaw）。
     #[serde(default = "default_ask_user_timeout")]
     pub ask_user_timeout_secs: usize,
+    /// 单个工具结果文本的最大字符数（非图片内容）。
+    /// 超过则截断并附占位说明（完整内容已写入会话记录 sqlite 留底，可随时回查）。
+    /// 工具返回的图片（data:image base64）不占此额度：识别后走多模态读图
+    /// （主模型 / vision provider）或截断，避免 280k 字符的 base64 撑爆上下文。
+    #[serde(default = "default_tool_result_cap")]
+    pub tool_result_cap: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -73,6 +79,7 @@ impl Default for RuntimeConfig {
             vision_model: None,
             permission: None,
             ask_user_timeout_secs: default_ask_user_timeout(),
+            tool_result_cap: default_tool_result_cap(),
         }
     }
 }
@@ -87,6 +94,10 @@ fn default_max_iterations() -> u32 {
 
 fn default_ask_user_timeout() -> usize {
     300
+}
+
+fn default_tool_result_cap() -> usize {
+    32_768
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
