@@ -844,7 +844,8 @@ pub fn pkcs7_unpad(data: &[u8], block_size: usize) -> Vec<u8> {
 pub fn aes_ecb_encrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let cipher = Aes128::new(GenericArray::from_slice(key));
     let mut buf = pkcs7_pad(data, 16);
-    for chunk in buf.chunks_exact_mut(16) {
+    // pkcs7_pad 保证长度是 16 的倍数，无余数块
+    for chunk in buf.as_chunks_mut::<16>().0 {
         cipher.encrypt_block(GenericArray::from_mut_slice(chunk));
     }
     buf
