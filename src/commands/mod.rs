@@ -169,7 +169,12 @@ const CRON_TEMPLATE: &str = r#"# LLAIA cron schedule configuration
 # prompt = """
 # It's 8:00 AM. Check today's AI/tech headlines and
 # summarize them into 3-5 short briefs for me.
+# Fetch at most 3 sources, never fetch the same URL twice,
+# then summarize immediately.
 # """
+# 提示：agent 模式任务抓网页时，建议把 config.toml 中 [tools.web_fetch] 的
+# max_chars 调小（如 4000~5000），避免大段网页文本撑爆上下文导致 agent
+# 陷入"重复抓取同一 URL"死循环直至超时。
 
 # Example: run a tool chain every 30 minutes (no LLM token cost)
 # [[task]]
