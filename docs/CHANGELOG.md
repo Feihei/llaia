@@ -6,7 +6,30 @@
 
 ---
 
-## P5 — 已完成（v0.2.2 候选）
+## v0.3.0 (2026-08-21)
+
+**Milestone**: P5 全部交付（P5-1~P5-7 + 剩余项 E1/W1/W2/S1/T1/M1），叠加 v0.2.1 后的稳定性修复。workspace 版本号由 0.2.2 直升 0.3.0（P5 为里程碑级发布，跳过一个 patch）。
+
+**P5 交付总览**（逐条详情见下方 P5 分节）
+- Provider Compat 层（ADR-0026）、system prompt MEMORY 预算（ADR-0025）、统一 search（ADR-0023）、规划后执行 todo（ADR-0024）、ask_user 阻塞澄清（ADR-0022）、Skill 自管（ADR-0027）、长期目标 /goal（ADR-0021）
+- 剩余项：envprobe 环境探测、WebUI 会话历史 + 模型探测、敏感信息 .env 自动化、TTS、MCP 现状收尾
+
+**Bug fixes / 稳定性**
+- **terminal (Windows)**：改走 Git Bash `bash -s` stdin 执行（白名单路径 + PATH 探测、排除 WSL 假 bash、`$MSYSTEM` 校验），绕开 MSVCRT argv 转义层——修复双引号被破坏成 `\"` 字面量、bash 风格 `;` 链 / `$VAR` 不展开、中文 GBK 乱码；无 Git Bash 时回退 `cmd` + `raw_arg`（`304469d`）
+- **agent**：工具返回 base64 图片（如 blender-mcp 截图）剥离为 `[图片]` 占位 + 缩放重编码（1024/JPEG85）落盘回显 + 多模态桥接 / vision 描述，超大非图片结果按 `tool_result_cap` 截断（`b3a791e`）
+- **agent**：工具循环内紧凑上下文，避免单回合工具链把上下文撑爆（`c6da3fd`）
+- **cron**：会话复用 / 全局锁冻结 / 时区漂移修复（`4bbdaa6`）；禁深度思考 + 隔离 turn 修复超时（`e3102d3`）；dream 合并会话、纯化分发（`6aa0a09`）
+- **cron 模板**：morning_news 示例 prompt 加"≤3 来源 / 不重复抓同一 URL / 抓完立即总结"约束，并提示调小 web_fetch max_chars（`2488225`）
+- **web**：tool-result 折叠、MCP/channel 卡片化、config 保存保注释、模型下拉实时反映（`bdda4fa` `630b4df` `8a251f3` `2f1eb8d` 等）
+- **skill**：递归扫描子目录（`833117f`）；**ci**：修复存量 fmt/clippy（`0b7b1a9` `91028cf`）
+
+**注意（破坏性）**
+- cron 任务引用旧工具名 `tavily_search` 需改为 `search`（P5-3）
+- 废弃字段 `agent.workspace` 等从 schema 移除（`6a19a1e`）
+
+---
+
+## P5 — 已完成
 
 > P5 各条目按 `plan.md` 推荐顺序逐条交付，每完成一条在此累加勾选清单。P5-1 ~ P5-7 + 剩余项（E1/W1/W2/S1/T1/M1）全部交付。
 
