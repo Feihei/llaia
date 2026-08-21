@@ -609,11 +609,7 @@ impl Agent {
         let compact_provider = self.provider_for_compact().await;
         match compact_provider.as_ref() {
             Some(p) => {
-                if let Err(e) = self
-                    .context
-                    .compact(p.as_ref(), 6, self.context_size)
-                    .await
-                {
+                if let Err(e) = self.context.compact(p.as_ref(), 6, self.context_size).await {
                     tracing::warn!(error = %e, "auto-compact failed");
                 }
             }
@@ -922,7 +918,7 @@ impl Agent {
                     let prepared = crate::image_utils::prepare_base64_for_vision(url)
                         .unwrap_or_else(|_| url.clone());
                     // 回显：落盘到 workspace/tmp/ 并发 MediaOutput 事件由 channel 发送
-                    if let Some(path) = self.persist_tool_image(&prepared, &tool_name, idx).await {
+                    if let Some(path) = self.persist_tool_image(&prepared, tool_name, idx).await {
                         let _ = event_tx
                             .send(TurnEvent::MediaOutput {
                                 path,
@@ -953,7 +949,8 @@ impl Agent {
                     .await;
                 self.session_store
                     .append_message(self.session_id, &Role::Tool, &tool_text)?;
-                self.context.push(ChatMessage::tool(tool_text, &tool_call_id));
+                self.context
+                    .push(ChatMessage::tool(tool_text, &tool_call_id));
 
                 // 4) 无 vision_provider：桥接 user 多模态消息，让（多模态）主模型真正看到图。
                 //    结构合法：assistant(tool_calls) → tool(占位) → user(图片) → assistant。
@@ -1067,15 +1064,15 @@ mod tests {
     use crate::provider::{
         ChatRequest, ChatResponse, ContentPart, ImageUrlContent, Provider, StreamEvent, ToolCall,
     };
+    use crate::tools::Tool;
     use async_stream::try_stream;
     use async_trait::async_trait;
+    use base64::Engine as _;
     use futures_util::stream::BoxStream;
+    use image::ImageEncoder as _;
     use serde_json::json;
-    use crate::tools::Tool;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::mpsc;
-    use base64::Engine as _;
-    use image::ImageEncoder as _;
 
     /// Mock provider：每次 chat_stream 调用返回下一组预设事件
     struct MockProvider {
@@ -1235,7 +1232,10 @@ mod tests {
                 StreamEvent::Done,
             ]);
         }
-        rounds.push(vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done]);
+        rounds.push(vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::Done,
+        ]);
 
         let tools = Arc::new(ToolRegistry::new());
         tools.register(Arc::new(BigTool {

@@ -131,8 +131,8 @@ pub fn is_image_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgb};
     use image::ImageEncoder as _;
+    use image::{ImageBuffer, Rgb};
 
     /// 创建带 .png 后缀的临时文件，让 image crate 能根据扩展名推断格式
     fn png_tempfile() -> tempfile::NamedTempFile {
@@ -223,8 +223,7 @@ mod tests {
     #[test]
     fn test_extract_data_url_images_empty_b64_falls_back() {
         // ";base64," 后无数据 → 不作为图片提取，原样保留
-        let (placeholder, images) =
-            extract_data_url_images("data:image/png;base64,");
+        let (placeholder, images) = extract_data_url_images("data:image/png;base64,");
         assert!(images.is_empty());
         assert_eq!(placeholder, "data:image/png;base64,");
     }
