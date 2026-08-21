@@ -6,24 +6,26 @@
 
 > 📖 [readme EN](readme.md)
 
-市面上的 AI Agent 越来越多，也越做越重——大多数都在随着社区壮大去覆盖更多场景、服务更多用户。但每个人用 Agent 的方式都不一样。我受够了把自己的工作流硬塞进别人的轮子，于是干脆自己造了一个。
+市面上的 AI Agent 越来越多，也越做越重——大多数都在随着社区壮大去覆盖更多场景、服务更多用户。但每个人用 Agent 的方式都不一样。我疲于把自己的工作流塞进现有的轮子，于是自己造了一个。
 
-### ✔️ 适合做什么
+### ✔️ 适合
 
 - 本地优先：数据留在你自己的机器上，不依赖云端
 - 个人使用，单用户
 - 一个主 Agent 配几个内部子 Agent 负责委派
+- 开箱即用，无其它依赖
 
-### ❌ 不适合做什么
+### ❌ 不适合
 
 - 云端 / SaaS 托管
 - 多用户或团队协作
 - 多智能体编排集群
 - 对外公开的机器人（客服、群聊机器人等）
+- 模块化，扩展生态系统
 
 ### 风险须知
 
-LLAIA 是一个具备文件与终端访问能力的 AI 助手——大语言模型可以在你的机器上读写文件、运行 shell 命令。这份能力伴随风险。大模型**并不**总能按你预期产生结果。**行动由你负责。** 在批准删除、覆盖、`git` 推送等破坏性操作前，务必再三确认。
+LLAIA 是一个具备文件与终端访问能力的 AI 助手——大语言模型可以在你的机器上读写文件、运行 shell 命令。这份能力伴随风险。大模型**并不**总能按你预期产生结果。**行动由你负责** 。在批准删除、覆盖、`git` 推送等破坏性操作前，务必再三确认。
 
 LLAIA 默认只在你的工作区目录内运行。**务必**在让它操作重要数据之前先做好备份，或用 **git** 保留历史。
 
@@ -86,4 +88,7 @@ LLAIA 是模块化的。每个能力都有专门的用户指南——从你需�
 - [astrbot](https://github.com/AstrBotDevs/AstrBot) - 带直观 WebUI 的本地 Agent
 - [zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) - Rust 编写的轻量 agent
 - [goose](https://github.com/aaif-goose/goose) - Rust 编写的编码 agent
-- [深入理解 AI Agent：设计原理与工程实践](https://github.com/bojieli/ai-agent-book) - 一本书
+- [nanobot](https://github.com/HKUDS/nanobot) - 轻量个人agent框架
+- [pi](https://github.com/earendil-works/pi)- 极简agent工具
+- [deepseek harness](https://github.com/deepseek-ai/deepseek-harness/)
+- [深入理解 AI Agent：设计原理与工程实践](https://github.com/bojieli/ai-agent-book)

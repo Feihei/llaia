@@ -13,6 +13,7 @@ There are loads of AI agents out there and they keep getting heavier — most ar
 - Local-first: your data stays on your own machine, no cloud required
 - Personal use, single user
 - One main agent with a few internal subagents for delegation
+- Work **out-of-box** as a bundle, no dependency
 
 ### ❌ NOT for
 
@@ -20,6 +21,7 @@ There are loads of AI agents out there and they keep getting heavier — most ar
 - Multi-user or team collaboration
 - Multi-agent orchestration swarms
 - Public-facing bots (customer-service, group-chat bot, etc.)
+- Everything modular, large eco-system
 
 ### Risk Notes
 
@@ -88,5 +90,5 @@ LLAIA is modular. Each capability has a dedicated user guide — start from the 
 - [goose](https://github.com/aaif-goose/goose) - coding agent in rust
 - [nanobot](https://github.com/HKUDS/nanobot) - Lightweight personal agent framework
 - [pi](https://github.com/earendil-works/pi)- minimal agent toolkit
-- [deepseek harness](https://github.com/deepseek-ai/deepseek-harness/) - DeepSeek Harness
-- [深入理解 AI Agent：设计原理与工程实践](https://github.com/bojieli/ai-agent-book) - A Book
+- [deepseek harness](https://github.com/deepseek-ai/deepseek-harness/)
+- [深入理解 AI Agent：设计原理与工程实践](https://github.com/bojieli/ai-agent-book)
