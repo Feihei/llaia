@@ -77,19 +77,20 @@ impl Context {
         msgs
     }
 
+    /// 估算上下文 token 用量（chars/4 启发式，与 `memory/trim.rs` 口径一致）。
+    ///
+    /// 覆盖 `to_messages` 实际发送给 provider 的全部文本：system + summary +
+    /// history + 尾部状态栏 + todo/goal/env Runtime Context，另加每条消息的
+    /// JSON 结构开销（role/header 等，近似 8 token/条）。tool definitions 是
+    /// 常量不随对话增长，由调用方按需追加（`/stats` 用 `tools.specs()` 序列化
+    /// 估算；压缩判定不依赖它——相对变化不受影响）。
     pub fn estimate_tokens(&self) -> usize {
-        let system_tokens = self.system.chars().count() / 4;
-        let summary_tokens = self
-            .summary
-            .as_ref()
-            .map(|s| s.chars().count() / 4)
-            .unwrap_or(0);
-        let history_tokens: usize = self
-            .history
+        let msgs = self.to_messages(&None);
+        let text_tokens: usize = msgs
             .iter()
             .map(|m| m.content.as_text().chars().count() / 4)
             .sum();
-        system_tokens + summary_tokens + history_tokens
+        text_tokens + msgs.len() * 8
     }
 
     pub fn clear(&mut self) {
@@ -332,15 +333,32 @@ mod tests {
     fn test_token_estimate() {
         let mut ctx = Context::new("a".repeat(40));
         ctx.push(ChatMessage::user("b".repeat(40)));
-        assert_eq!(ctx.estimate_tokens(), 20);
+        // system(10) + history(10) + 尾部状态栏 + 每条消息结构开销(8/条)
+        let est = ctx.estimate_tokens();
+        assert!(est >= 20, "至少包含 system+history 文本 token");
+        assert!(est > 20, "状态栏与消息结构开销应计入估算");
+    }
+
+    #[test]
+    fn test_token_estimate_includes_runtime_context() {
+        // 回归：todo/goal/env 等 Runtime Context 必须计入估算（曾漏掉导致 /stats 低估）
+        let mut ctx = Context::new("a".repeat(40));
+        ctx.push(ChatMessage::user("b".repeat(40)));
+        let base = ctx.estimate_tokens();
+        ctx.todo_state = Some("c".repeat(400));
+        let with_todo = ctx.estimate_tokens();
+        // 400 chars/4 = 100 tokens + 1 条消息结构开销 8
+        assert!(with_todo > base + 90, "todo 清单应计入 token 估算");
     }
 
     #[test]
     fn test_needs_compaction() {
         let mut ctx = Context::new("a".repeat(80));
         ctx.push(ChatMessage::user("b".repeat(80)));
-        assert!(ctx.needs_compaction(100, 0.3));
-        assert!(!ctx.needs_compaction(100, 0.5));
+        // 估算含尾部状态栏 + 结构开销，用相对值断言避免依赖具体文本长度
+        let est = ctx.estimate_tokens();
+        assert!(ctx.needs_compaction(est * 2, 0.3));
+        assert!(!ctx.needs_compaction(est * 2, 0.9));
     }
 }
 

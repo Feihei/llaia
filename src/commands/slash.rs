@@ -217,10 +217,15 @@ pub async fn try_handle(
             }
         }
         "/stats" => {
+            // 文本部分（system/summary/history/状态栏/todo/goal/env）+ tool definitions
+            // （实际发送给 provider 的 tools JSON schema）合并估算，避免低估真实发送量。
             let tokens = agent.context.estimate_tokens();
+            let tools_json = serde_json::to_string(&agent.tools.specs()).unwrap_or_default();
+            let tools_tokens = tools_json.chars().count() / 4;
+            let total = tokens + tools_tokens;
             let threshold_tokens = (agent.context_size as f64 * agent.context_threshold) as usize;
             let usage = if agent.context_size > 0 {
-                (tokens as f64 / agent.context_size as f64 * 100.0) as u32
+                (total as f64 / agent.context_size as f64 * 100.0) as u32
             } else {
                 0
             };
@@ -231,7 +236,7 @@ pub async fn try_handle(
             };
             let info = format!(
                 "context_size: {}\ncontext_threshold: {} ({} tokens)\n\
-                 current tokens (est.): {} ({}% used)\n\
+                 current tokens (est.): {} ({}% used, text {} + tools {})\n\
                  history msgs: {}
 session_id: {}
 summary: {}
@@ -241,8 +246,10 @@ tools: {:?}
                 agent.context_size,
                 agent.context_threshold,
                 threshold_tokens,
-                tokens,
+                total,
                 usage,
+                tokens,
+                tools_tokens,
                 agent.context.history.len(),
                 agent.session_id,
                 summary_status,
@@ -590,7 +597,16 @@ async fn switch_provider(agent: &mut Agent, arg: &str) -> Result<String> {
     } else {
         arg.to_string()
     };
-    let provider = crate::provider::provider_from_ref(&agent.config, &model_ref)?;
+    // 走 build_provider_chain 而非 provider_from_ref：保留 [agent.<alias>].fallback 降级链，
+    // 否则切换后 FallbackProvider 被裸替换丢失（回归见 test_provider_switch_preserves_fallback_chain）。
+    let fallback = agent
+        .config
+        .agent
+        .get(&agent.alias)
+        .map(|a| a.fallback.clone())
+        .unwrap_or_default();
+    let provider = crate::provider::build_provider_chain(&model_ref, &fallback, &agent.config)?
+        .ok_or_else(|| anyhow::anyhow!("provider unavailable"))?;
     agent.reload_provider(Some(provider)).await;
     tracing::info!(model = model_ref.as_str(), "provider switched at runtime");
     Ok(format!("[switched to {}]", model_ref))
@@ -750,5 +766,29 @@ mod tests {
         // 切换失败不动现有 provider
         let p = agent.provider_snapshot().await.unwrap();
         assert_eq!(p.label(), "big-model");
+    }
+
+    #[tokio::test]
+    async fn test_provider_switch_preserves_fallback_chain() {
+        // 回归：bug 版本 switch_provider 用 provider_from_ref 裸替换，
+        // [agent.main].fallback 降级链被丢弃（kind 变回 "provider"）。
+        let mut config = test_config();
+        config.agent.get_mut("main").unwrap().fallback = vec!["b.small".into()];
+        let mut agent = test_agent(config).await;
+        let msg = switch_provider(&mut agent, "a.big").await.unwrap();
+        assert_eq!(msg, "[switched to a.big]");
+        let p = agent.provider_snapshot().await.unwrap();
+        assert_eq!(p.label(), "big-model");
+        // 链必须保留：FallbackProvider kind == "fallback"
+        assert_eq!(p.kind(), "fallback");
+    }
+
+    #[tokio::test]
+    async fn test_provider_switch_without_fallback_is_bare() {
+        // 未配置 fallback 时不包链（保持裸 provider，行为与旧版一致）
+        let mut agent = test_agent(test_config()).await;
+        switch_provider(&mut agent, "a.big").await.unwrap();
+        let p = agent.provider_snapshot().await.unwrap();
+        assert_eq!(p.kind(), "provider");
     }
 }

@@ -5,6 +5,7 @@ use crate::config::QqConfig;
 use crate::provider::{ChatMessage, ContentPart, ImageUrlContent};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -455,21 +456,19 @@ impl QqChannel {
             // QQ 对空文件返回 "file data empty" (code 10000)，这里提前给出明确错误
             return Err(anyhow!("media file is empty (0 bytes): {:?}", path));
         }
-        let file_name = std::path::Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file")
-            .to_string();
 
-        // 构造 multipart 表单的闭包（token 过期刷新后需重建）
-        let build_form = || {
-            let part = reqwest::multipart::Part::bytes(file_bytes.clone())
-                .file_name(file_name.clone())
-                .mime_str("application/octet-stream")
-                .expect("mime_str");
-            reqwest::multipart::Form::new()
-                .text("file_type", file_type.to_string())
-                .part("file", part)
+        // 构造上传 JSON body 的闭包（token 过期刷新后需重建）。
+        // v2 接口规范：JSON body 传 `file_type` + `file_data`(base64) 或 `url` + `srv_send_msg`，
+        // 不再支持 multipart 文件上传（旧实现发 multipart `file` 字段被拒，40093006/40093007）。
+        // 见 https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/rich-media.html
+        let build_body = || {
+            let file_data = base64::engine::general_purpose::STANDARD.encode(&file_bytes);
+            serde_json::json!({
+                "file_type": file_type,
+                "file_data": file_data,
+                // false：只上传拿 file_info，随后走 msg_type=7 消息接口（与 send 路径一致）
+                "srv_send_msg": false,
+            })
         };
 
         // 1. 上传媒体到 QQ 文件服务
@@ -480,7 +479,7 @@ impl QqChannel {
                 .http
                 .post(&upload_url)
                 .header("Authorization", format!("QQBot {}", token))
-                .multipart(build_form())
+                .json(&build_body())
                 .send()
                 .await?;
             Ok::<_, anyhow::Error>(resp)

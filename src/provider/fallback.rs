@@ -93,6 +93,10 @@ impl Provider for FallbackProvider {
     fn label(&self) -> String {
         self.main().label()
     }
+
+    fn kind(&self) -> &'static str {
+        "fallback"
+    }
 }
 
 #[cfg(test)]

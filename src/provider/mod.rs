@@ -207,6 +207,11 @@ pub trait Provider: Send + Sync {
     fn label(&self) -> String {
         "unknown".into()
     }
+    /// 提供器类型标识（诊断/测试用）：默认 `"provider"`，`FallbackProvider` 覆盖为 `"fallback"`。
+    /// 供 `/provider` 切换等场景断言降级链是否保留。
+    fn kind(&self) -> &'static str {
+        "provider"
+    }
 }
 
 /// 从 model ref（"provider_id.model_alias"）构建单个 provider 实例。
