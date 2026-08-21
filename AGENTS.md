@@ -141,6 +141,8 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 - `confirm`（`none` / `whitelist` 默认 / `always`）：是否需要交互式确认
 - `command_policy`（`blacklist` 默认 / `whitelist` / `none`）：命令黑白名单
 
+> **Windows 执行器**：优先探测 Git Bash（白名单安装路径 + PATH，排除 WSL `System32`/`WindowsApps` 假 bash，`$MSYSTEM` 非空校验），以 `bash -s` 经 **stdin** 喂命令——绕开 MSVCRT argv 转义层，双引号 / `;` 链 / `$VAR` / 中文（UTF-8）按 bash 语义正确执行；无 Git Bash 时回退 `cmd /C` + `raw_arg` 原样传参（引号不再二次转义，但 `;`/`$VAR`/中文受 cmd 限制）。非 Windows 走 `sh -c`。
+
 ### 工具副作用标记
 
 `Tool` trait 提供 `requires_confirm()`（默认 `false`）。有副作用的工具（`file_write` / `file_edit` / `terminal` / `memory_write` 等）override 为 `true`，触发审批流。
