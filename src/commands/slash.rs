@@ -608,7 +608,9 @@ pub fn flatten_model_refs(config: &Config) -> Vec<String> {
 
 /// `/provider`：列出所有可用模型，当前模型标 `*`
 async fn list_providers(agent: &Agent) -> String {
-    let refs = flatten_model_refs(&agent.config);
+    let live_arc = agent.live_config();
+    let live = live_arc.read().await;
+    let refs = flatten_model_refs(&live);
     if refs.is_empty() {
         return "no providers configured".into();
     }
@@ -620,7 +622,7 @@ async fn list_providers(agent: &Agent) -> String {
     for (i, r) in refs.iter().enumerate() {
         // refs 由 flatten 生成，格式保证合法
         let (prov_id, alias) = Config::parse_model_ref(r).unwrap_or(("", ""));
-        let model_name = agent.config.provider[prov_id].model[alias].model.clone();
+        let model_name = live.provider[prov_id].model[alias].model.clone();
         let mark = if model_name == current_label {
             " *"
         } else {
@@ -634,7 +636,9 @@ async fn list_providers(agent: &Agent) -> String {
 
 /// `/provider <n>` 或 `/provider <id.alias>`：运行时切换，不写 config.toml
 async fn switch_provider(agent: &mut Agent, arg: &str) -> Result<String> {
-    let refs = flatten_model_refs(&agent.config);
+    let live_arc = agent.live_config();
+    let live = live_arc.read().await;
+    let refs = flatten_model_refs(&live);
     let model_ref = if let Ok(n) = arg.parse::<usize>() {
         refs.get(
             n.checked_sub(1)
@@ -647,13 +651,12 @@ async fn switch_provider(agent: &mut Agent, arg: &str) -> Result<String> {
     };
     // 走 build_provider_chain 而非 provider_from_ref：保留 [agent.<alias>].fallback 降级链，
     // 否则切换后 FallbackProvider 被裸替换丢失（回归见 test_provider_switch_preserves_fallback_chain）。
-    let fallback = agent
-        .config
+    let fallback = live
         .agent
         .get(&agent.alias)
         .map(|a| a.fallback.clone())
         .unwrap_or_default();
-    let provider = crate::provider::build_provider_chain(&model_ref, &fallback, &agent.config)?
+    let provider = crate::provider::build_provider_chain(&model_ref, &fallback, &live)?
         .ok_or_else(|| anyhow::anyhow!("provider unavailable"))?;
     agent.reload_provider(Some(provider)).await;
     tracing::info!(model = model_ref.as_str(), "provider switched at runtime");

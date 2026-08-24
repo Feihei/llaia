@@ -563,14 +563,14 @@ function llaiaApp() {
         });
         const j = await r.json();
         if (j.ok) {
-          this.probeModels[pid] = j.models || [];
-          this.probeChecked[pid] = {};
-          this.probeMsg[pid] = this.probeModels[pid].length
+          this.probeModels = { ...this.probeModels, [pid]: j.models || [] };
+          this.probeChecked = { ...this.probeChecked, [pid]: {} };
+          this.probeMsg = { ...this.probeMsg, [pid]: this.probeModels[pid].length
             ? this.probeModels[pid].length + ' model(s) found'
-            : 'Endpoint reachable but no models returned.';
+            : 'Endpoint reachable but no models returned.' };
         } else {
-          this.probeModels[pid] = [];
-          this.probeMsg[pid] = 'Probe failed: ' + (j.error || r.status);
+          this.probeModels = { ...this.probeModels, [pid]: [] };
+          this.probeMsg = { ...this.probeMsg, [pid]: 'Probe failed: ' + (j.error || r.status) };
         }
       } catch (e) {
         this.probeModels[pid] = [];

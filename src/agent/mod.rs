@@ -217,6 +217,11 @@ impl Agent {
         self.provider.read().await.clone()
     }
 
+    /// 实时配置（WebUI 热加载写入的 Arc），用于读取最新的 provider/model 列表。
+    pub fn live_config(&self) -> Arc<RwLock<Config>> {
+        self.live_config.clone()
+    }
+
     /// 拿 compact provider 的 snapshot：未配置时返回 None，调用方应回退到主 provider。
     pub async fn compact_provider_snapshot(&self) -> Option<Arc<dyn Provider>> {
         self.compact_provider.read().await.clone()
