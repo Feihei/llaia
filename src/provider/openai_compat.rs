@@ -472,9 +472,17 @@ impl Provider for OpenAiCompatibleProvider {
 }
 
 impl OpenAiCompatibleProvider {
+    /// 探测端点根地址。OpenAI 兼容 `base_url` 通常以 `/v1` 结尾，而
+    /// llama.cpp `/props`、Ollama `/api/*` 等管理端点挂在服务根路径，
+    /// 需剥掉 `/v1` 后缀再拼（否则请求 `/v1/props` → 404，探测永远失败）。
+    fn probe_base(&self) -> &str {
+        let trimmed = self.base_url.trim_end_matches('/');
+        trimmed.strip_suffix("/v1").unwrap_or(trimmed)
+    }
+
     /// 尝试 llama.cpp 的 /props 端点
     async fn try_llamacpp_props(&self) -> Option<usize> {
-        let url = format!("{}/props", self.base_url);
+        let url = format!("{}/props", self.probe_base());
         let resp = self.client.get(&url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
@@ -488,14 +496,15 @@ impl OpenAiCompatibleProvider {
 
     /// 尝试 Ollama 的 /api/show 端点
     async fn try_ollama_show(&self) -> Option<usize> {
+        let base = self.probe_base();
         // 先用 /api/tags 确认是 Ollama 后端
-        let tags_url = format!("{}/api/tags", self.base_url);
+        let tags_url = format!("{}/api/tags", base);
         let tags_resp = self.client.get(&tags_url).send().await.ok()?;
         if !tags_resp.status().is_success() {
             return None;
         }
         // POST /api/show {"model": "<model>"}
-        let show_url = format!("{}/api/show", self.base_url);
+        let show_url = format!("{}/api/show", base);
         let resp = self
             .client
             .post(&show_url)
@@ -745,5 +754,73 @@ mod tests {
             disable_thinking: false,
         };
         assert_eq!(build_openai_messages(&req2, &Compat::ollama()).len(), 1);
+    }
+
+    #[test]
+    fn probe_base_strips_v1_suffix() {
+        let mk = |base: &str| {
+            OpenAiCompatibleProvider::new(base, "", "m", true, None, Compat::default()).unwrap()
+        };
+        assert_eq!(mk("http://h:8080/v1").probe_base(), "http://h:8080");
+        // 带尾斜杠同样剥掉
+        assert_eq!(mk("http://h:8080/v1/").probe_base(), "http://h:8080");
+        // 不以 /v1 结尾保持原样
+        assert_eq!(mk("http://h:8080").probe_base(), "http://h:8080");
+        // 路径里只有别处的 v1 不受影响
+        assert_eq!(
+            mk("http://h:8080/api/v1/openai").probe_base(),
+            "http://h:8080/api/v1/openai"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_context_size_hits_props_at_root_despite_v1_base_url() {
+        // 回归：llama.cpp base_url 带 /v1 时，/props 必须打到服务根路径，
+        // 旧实现拼成 /v1/props → 404 → 探测失败落到默认 8192。
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("GET", "/props")
+            .with_status(200)
+            .with_body(json!({"default_generation_settings": {"n_ctx": 131072}}).to_string())
+            .create();
+        let p = OpenAiCompatibleProvider::new(
+            format!("{}/v1", server.url()),
+            "",
+            "qwen3",
+            true,
+            None,
+            Compat::llamacpp(),
+        )
+        .unwrap();
+        assert_eq!(p.detect_context_size().await, Some(131072));
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn detect_context_size_ollama_show_with_v1_base_url() {
+        // Ollama 同理：/api/show 挂根路径，base_url 带 /v1 也能探测
+        let mut server = mockito::Server::new_async().await;
+        let tags = server
+            .mock("GET", "/api/tags")
+            .with_status(200)
+            .with_body(json!({"models": []}).to_string())
+            .create();
+        let show = server
+            .mock("POST", "/api/show")
+            .with_status(200)
+            .with_body(json!({"model_info": {"qwen3.context_length": 131072u64}}).to_string())
+            .create();
+        let p = OpenAiCompatibleProvider::new(
+            format!("{}/v1", server.url()),
+            "",
+            "qwen3",
+            true,
+            None,
+            Compat::ollama(),
+        )
+        .unwrap();
+        assert_eq!(p.detect_context_size().await, Some(131072));
+        tags.assert();
+        show.assert();
     }
 }
