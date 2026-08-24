@@ -41,7 +41,7 @@ pub async fn try_handle(
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /reasoning [on|off] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -389,6 +389,29 @@ tools: {}
                 Ok(()) => Ok(SlashOutcome::Handled("[goal cancelled]".into())),
                 Err(e) => Ok(SlashOutcome::Handled(format!("[goal-cancel failed: {}]", e))),
             }
+        }
+        "/skill" => {
+            // 技能管理：/skill list [--all] 查看已加载技能及 active 状态
+            let args = args.trim();
+            if args == "list" || args == "list --all" {
+                let skills_dir = agent.config_dir.join("skills");
+                let skills = crate::skill::loader::load_skills(&skills_dir);
+                let show_all = args.contains("--all");
+                if skills.is_empty() {
+                    return Ok(SlashOutcome::Handled("[no skills found] run `llaia init` to seed examples".into()));
+                }
+                let mut out = String::from("skills:\n");
+                for s in &skills {
+                    if !show_all && !s.active { continue; }
+                    let mark = if s.active { "✓" } else { "✗" };
+                    out.push_str(&format!("{} {} — {} (path: {})\n", mark, s.name, s.description, s.path.display()));
+                }
+                if !show_all {
+                    out.push_str("\nuse `/skill list --all` to show inactive skills");
+                }
+                return Ok(SlashOutcome::Handled(out));
+            }
+            Ok(SlashOutcome::Handled("usage: /skill list [--all]".into()))
         }
         "/env" => {
             // 手动刷新环境探测（P5 E1）：重探本机工具链并更新注入文本。
