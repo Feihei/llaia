@@ -1,8 +1,8 @@
 # 记忆与上下文
 
-LLAIA 用三份 Markdown 文件 + 一个 SQLite 数据库来持久化"它是谁、你是谁、记得什么、聊过什么"。
+LLAIA 用三份核心 Markdown 文件 + 一个 SQLite 数据库来持久化"它是谁、你是谁、记得什么、聊过什么"，外加一份自动维护的 `reminder.md`。
 
-## 三份 Markdown
+## 三份核心 Markdown + reminder
 
 都位于 `workspace/`（默认 `~/.llaia/workspace/`）：
 
@@ -11,8 +11,19 @@ LLAIA 用三份 Markdown 文件 + 一个 SQLite 数据库来持久化"它是谁�
 | `SOUL.md` | agent 人格设定 | 你（初始化模板生成，可自由改） |
 | `USER.md` | 你的信息、偏好、身份绑定 | 你 / agent（`/remember` 也能追加） |
 | `MEMORY.md` | 长期事实记忆（分条） | agent 通过 `memory_write` 工具 / `llaia remember` / `/remember` |
+| `reminder.md` | 自动生成的抗漂移要点（勿手改） | agent 自动维护 |
 
 `SOUL.md` 与 `USER.md` 永驻上下文（压缩时不会丢）；`MEMORY.md` 是事实记忆，会被「做梦」定期整理。
+
+## Tail Reminder（抗长会话漂移）
+
+会话变长后回复风格可能逐渐偏离 `SOUL.md` 的设定（比如变得冗长、爱用列表）。这不是系统提示词丢了——SOUL/USER 每轮都完整在场——而是模型在长历史里开始模仿自己最近的回复。
+
+LLAIA 的对策：由 LLM 从 SOUL+USER 自动提炼一份 ≤120 token 的关键行为指令清单（语气、称呼、硬偏好），存到 `workspace/reminder.md`，并作为每轮请求的**最后一条**消息注入（离生成点最近、注意力最强）。
+
+- 全自动：SOUL 或 USER 修改后下一轮自动重新提炼，无需任何配置。
+- 首次生成前（或生成失败时）没有 reminder，属正常降级。
+- 文件头有「勿手改」注释；想影响其内容，改 SOUL/USER 对应段落即可。
 
 ## 会话与压缩
 

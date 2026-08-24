@@ -11,11 +11,12 @@
 | `/stop` | 停止当前生成（同退出语义视频道实现）。 |
 | `/compact` | 手动压缩上下文（需要已配 provider）。 |
 | `/clear` | 清空上下文（等同 `/new` 的清空效果）。 |
-| `/stats` | 显示上下文统计：context_size、阈值、当前 token 占比、历史条数、session id、摘要状态、工具列表、压缩用 provider。 |
+| `/stats` | 显示上下文统计：context_size、阈值、当前 token 占比（正文 + 工具 schema 分项）、历史条数、session id、摘要状态、工具分组计数、压缩用 provider。 |
 | `/remember <text>` | 往 `MEMORY.md` 追加一条记忆（等价 CLI `llaia remember`）。 |
 | `/provider` | 列出所有可用模型，当前模型标 `*`。 |
-| `/provider <num>` · `/provider <id.alias>` | 运行时切换模型（不写 config）。 |
+| `/provider <num>` · `/provider <id.alias>` | 运行时切换模型（不写 config；保留 fallback 降级链）。 |
 | `/permission [read-only\|default\|yolo]` | 查看或切换权限档位（不写 config）。 |
+| `/reasoning [on\|off]` | 会话级开关推理模型的深度思考。`off` 提速日常问答（对 llama.cpp / Ollama / vLLM 等支持 `chat_template_kwargs` 的端点生效，其它忽略）；仅当前会话有效，不写 config。 |
 | `/ok <id>` | 批准一个待确认的操作（交互式审批）。 |
 | `/deny <id>` | 拒绝一个待确认的操作。 |
 | `/move [<path>\|home]` · `/cd` | 切换工作目录；无参数 / `home` / `~` / `-` 恢复到原始 workspace；其它路径需 `/ok` 确认。 |

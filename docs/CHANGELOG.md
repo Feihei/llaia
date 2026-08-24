@@ -6,6 +6,26 @@
 
 ---
 
+## v0.3.1 (2026-08-24)
+
+**Milestone**: P6 稳定性修复 + 快赢项。源自 `docs/issues/issues.md` 的 9 个问题评估（详见 [plan.md](plan.md) P6 节）。
+
+**Bug fixes / 稳定性**
+- **provider**：`/provider N` 切换后 fallback 降级链被裸替换丢弃——改走 `build_provider_chain` 重建链，新增 `Provider::kind()` 标识 + 3 个回归测试
+- **agent**：`estimate_tokens` 漏算 Runtime Context（todo/goal/env）与每条消息结构开销，`/stats` 显示显著低于真实发送量——改为基于 `to_messages` 全量文本 + tool defs 序列化估算
+- **qq**：发图失败 `40093006/40093007`——腾讯 v2 富媒体接口已改为 JSON body（`file_type`+`file_data`(base64)+`srv_send_msg`），不再支持 multipart 上传；已用真实凭据实测验证
+- **provider**：context_size 探测恒失败落默认 8192（128k 模型显示 127% used）——llama.cpp `/props`、Ollama `/api/*` 挂在服务根路径而 `base_url` 以 `/v1` 结尾，探测 URL 打到 `/v1/props` 404；`probe_base()` 剥掉 `/v1` 后缀，mockito 回归测试覆盖
+
+**Features**
+- **agent**：自动 Tail Reminder（抗长会话风格漂移）：回合起点对 SOUL+USER 求 md5，与 `workspace/reminder.md` 失配时后台隔离 turn 让 LLM 提炼 ≤120 token 行为指令，下一轮作为请求最后一条消息注入（离生成点最近）；MEMORY/skills 不参与 hash；失败静默降级
+- **slash**：`/reasoning on|off` 会话级深度思考开关（对支持 `chat_template_kwargs` 的端点生效）
+- **slash**：`/stats` 工具列表改为分组计数（`N builtin + M mcp (server: n, ...)`）
+- **web**：聊天页 ENV 只读面板（`GET /api/env` / `POST /api/env/refresh`）
+- **web**：Config 页 Doctor section（`GET /api/doctor` → `commands::doctor_checks`：provider 连通性 / 主模型链 / context_size 探测 / `.env` 权限 / sessions.db / cron/mcp / skills，ok/warn/error 分色）
+- **qq**：工具通知收敛为每回合一条「🔧 正在调用工具...」，结束后把去重工具名拼进回复开头（原每个 ToolStart 刷一条消息）
+
+---
+
 ## v0.3.0 (2026-08-21)
 
 **Milestone**: P5 全部交付（P5-1~P5-7 + 剩余项 E1/W1/W2/S1/T1/M1），叠加 v0.2.1 后的稳定性修复。workspace 版本号由 0.2.2 直升 0.3.0（P5 为里程碑级发布，跳过一个 patch）。

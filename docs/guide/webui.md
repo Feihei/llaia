@@ -23,6 +23,13 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 
 对话通过 WebSocket（`/ws`）进行，支持流式输出（见 [ADR-0010](../adr/0010-streaming-output.md)）。
 
+聊天页底部有若干**只读面板**实时展示运行时状态：
+
+- **TODO**：当前会话的任务清单（agent 用 `todo` 工具维护）。
+- **QUESTIONS**：agent 通过 `ask_user` 抛出的待回答问题。
+- **GOAL**：当前长期目标（`/goal` 设定）。
+- **ENV**：本机环境探测结果（工具链快照），点 Refresh 重新探测。
+
 ## 文件
 
 - 上传：`POST /upload` → 落到 `workspace/uploads/`，可在对话里引用。
@@ -33,6 +40,7 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 - **定时任务**：查看 / 新增 / 修改 / 触发 / 看执行历史（见 [定时任务](cron.md)）。
 - **MCP**：查看 / 增删 server（见 [MCP](mcp.md)）。
 - **技能**：查看 / 删除（见 [技能](skills.md)）。
+- **Doctor**（Config 页）：一键运行诊断检查——provider 连通性、主模型链、context_size 探测、`.env` 存在性与权限、sessions.db、cron/mcp 解析、skills 计数，结果按 ok / warn / error 分色展示。
 
 ## REST API 一览
 
@@ -52,6 +60,10 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 | `POST /api/cron/:id/trigger` | 手动触发某个任务 |
 | `GET /api/mcp` · `POST /api/mcp` · `DELETE /api/mcp` | 列出 / 增 / 删 MCP server |
 | `GET|POST|PUT|DELETE /api/skills/:name` | 技能管理 |
+| `GET /api/todos` · `GET /api/questions` · `GET /api/goal` | 只读面板数据源 |
+| `GET /api/env` · `POST /api/env/refresh` | 环境探测缓存 / 重探 |
+| `GET /api/doctor` | 运行诊断检查 |
+| `GET /api/sessions` | 会话历史列表 / 详情 / 删除 / 导出 |
 
 > 这些接口需要 Web UI 的 token 鉴权（与 `webui.token` 一致）。
 
