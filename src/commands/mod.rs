@@ -816,6 +816,188 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 单项诊断结果（WebUI /api/doctor 用）：status ∈ ok | warn | error。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheck {
+    pub name: String,
+    pub status: String,
+    pub detail: String,
+}
+
+impl DoctorCheck {
+    fn ok(name: &str, detail: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: "ok".into(),
+            detail: detail.into(),
+        }
+    }
+    fn warn(name: &str, detail: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: "warn".into(),
+            detail: detail.into(),
+        }
+    }
+    fn error(name: &str, detail: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: "error".into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+/// 结构化诊断（与 CLI `doctor_cmd` 同源的检查集，供 WebUI 展示）：
+/// provider 连通性、主模型链、context_size 探测、.env、sessions.db、cron/mcp/skills。
+/// 网络探测带 5s 超时；任何单项失败不阻断其余检查。
+pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
+    let cfg = load_config_or_init(config_dir)?;
+    let mut checks = Vec::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+
+    // provider 连通性：仅探测 openai_compatible（anthropic/gemini 的 /models 语义不同）
+    if cfg.provider.is_empty() {
+        checks.push(DoctorCheck::warn(
+            "providers",
+            "no provider configured; serve starts in degraded mode",
+        ));
+    }
+    for (pid, p) in &cfg.provider {
+        if p.provider_type != "openai_compatible" {
+            checks.push(DoctorCheck::ok(
+                &format!("provider.{pid}"),
+                format!("type={} (connectivity not probed)", p.provider_type),
+            ));
+            continue;
+        }
+        let url = format!("{}/models", p.base_url.trim_end_matches('/'));
+        match client.get(&url).send().await {
+            Ok(resp) => checks.push(DoctorCheck::ok(
+                &format!("provider.{pid}"),
+                format!("{} → {} {}", p.base_url, resp.status(), url),
+            )),
+            Err(e) => checks.push(DoctorCheck::error(
+                &format!("provider.{pid}"),
+                format!("{} unreachable: {} ({})", p.base_url, e, url),
+            )),
+        }
+    }
+
+    // 主模型链 + context_size 探测
+    match cfg.agent.get("main") {
+        None => checks.push(DoctorCheck::warn("agent.main", "not configured")),
+        Some(a) => {
+            match crate::provider::provider_from_ref(&cfg, &a.model) {
+                Ok(p) => {
+                    checks.push(DoctorCheck::ok("agent.main.model", p.label()));
+                    match p.detect_context_size().await {
+                        Some(n) => {
+                            checks.push(DoctorCheck::ok("context_size", format!("detected {n}")))
+                        }
+                        None => checks.push(DoctorCheck::warn(
+                            "context_size",
+                            "probe failed; falls back to configured value or default 8192 \
+                             (set [provider.<id>].model.<alias>].context_size to override)",
+                        )),
+                    }
+                }
+                Err(e) => checks.push(DoctorCheck::error("agent.main.model", e.to_string())),
+            }
+            // sessions.db
+            let db_path = a.derive_workspace(config_dir, "main").join("sessions.db");
+            if db_path.exists() {
+                let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+                checks.push(DoctorCheck::ok(
+                    "sessions.db",
+                    format!("{} ({} bytes)", db_path.display(), size),
+                ));
+            } else {
+                checks.push(DoctorCheck::warn(
+                    "sessions.db",
+                    format!(
+                        "{} not found (created automatically on first start)",
+                        db_path.display()
+                    ),
+                ));
+            }
+        }
+    }
+
+    // .env 存在性（敏感信息自动化 P5 S1）；Unix 额外查权限位
+    let env_path = config_dir.join(".env");
+    if env_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&env_path)
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0);
+            if mode & 0o077 != 0 {
+                checks.push(DoctorCheck::warn(
+                    ".env",
+                    format!("permissions too open: {:o} (expected 0600)", mode & 0o777),
+                ));
+            } else {
+                checks.push(DoctorCheck::ok(
+                    ".env",
+                    format!("{} (0600)", env_path.display()),
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        checks.push(DoctorCheck::ok(".env", env_path.display().to_string()));
+    } else {
+        checks.push(DoctorCheck::warn(
+            ".env",
+            "not found (plaintext secrets stay in config.toml; save via WebUI or run /migrate-secrets)",
+        ));
+    }
+
+    // cron.toml / mcp.toml 可解析性
+    if config_dir.join("cron.toml").exists() {
+        let path = config_dir.join("cron.toml");
+        match crate::cron::CronConfig::load(&path) {
+            Ok(c) => checks.push(DoctorCheck::ok(
+                "cron.toml",
+                format!("{} ({} tasks)", path.display(), c.task.len()),
+            )),
+            Err(e) => checks.push(DoctorCheck::error(
+                "cron.toml",
+                format!("{}: {}", path.display(), e),
+            )),
+        }
+    }
+    if config_dir.join("mcp.toml").exists() {
+        let path = config_dir.join("mcp.toml");
+        match crate::mcp::McpConfig::load(&path) {
+            Ok(c) => checks.push(DoctorCheck::ok(
+                "mcp.toml",
+                format!("{} ({} servers)", path.display(), c.server.len()),
+            )),
+            Err(e) => checks.push(DoctorCheck::error(
+                "mcp.toml",
+                format!("{}: {}", path.display(), e),
+            )),
+        }
+    }
+
+    // skills 数量
+    let skills_dir = config_dir.join("skills");
+    if skills_dir.exists() {
+        let skills = crate::skill::loader::scan_skills(&skills_dir);
+        let active = skills.iter().filter(|s| s.active).count();
+        checks.push(DoctorCheck::ok(
+            "skills",
+            format!("{} skills, {} active", skills.len(), active),
+        ));
+    }
+
+    Ok(checks)
+}
+
 pub async fn remember_cmd(text: &str, config_dir: &Path) -> Result<()> {
     let cfg = load_config_or_init(config_dir)?;
     let agent_cfg = cfg
@@ -870,5 +1052,70 @@ struct PidGuard(crate::pid::PidFile);
 impl Drop for PidGuard {
     fn drop(&mut self) {
         self.0.release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(dir: &std::path::Path, base_url: &str) {
+        let toml = format!(
+            "[provider.local]\n\
+             type = \"openai_compatible\"\n\
+             base_url = \"{base_url}\"\n\
+             \n\
+             [provider.local.default]\n\
+             model = \"test-model\"\n\
+             native_tool_calling = true\n\
+             \n\
+             [agent.main]\n\
+             model = \"local.default\"\n"
+        );
+        std::fs::write(dir.join("config.toml"), toml).unwrap();
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_ok_when_provider_reachable() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("GET", "/models")
+            .with_status(200)
+            .with_body(r#"{"data":[]}"#)
+            .create();
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), &server.url());
+        let checks = doctor_checks(dir.path()).await.unwrap();
+        let prov = checks.iter().find(|c| c.name == "provider.local").unwrap();
+        assert_eq!(prov.status, "ok");
+        // context_size 探测失败（无 /props）→ warn 而非 error
+        let ctx = checks.iter().find(|c| c.name == "context_size").unwrap();
+        assert_eq!(ctx.status, "warn");
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_error_when_provider_unreachable() {
+        // 保留端口的 server socket 已关闭 → 连接必失败
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "http://127.0.0.1:9");
+        let checks = doctor_checks(dir.path()).await.unwrap();
+        let prov = checks.iter().find(|c| c.name == "provider.local").unwrap();
+        assert_eq!(prov.status, "error");
+    }
+
+    #[tokio::test]
+    async fn doctor_warns_on_missing_env_and_sessions_db() {
+        let mut server = mockito::Server::new_async().await;
+        server.mock("GET", "/models").with_status(200).create();
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), &server.url());
+        let checks = doctor_checks(dir.path()).await.unwrap();
+        assert!(checks
+            .iter()
+            .any(|c| c.name == ".env" && c.status == "warn"));
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "sessions.db" && c.status == "warn"));
     }
 }

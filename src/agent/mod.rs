@@ -119,6 +119,9 @@ pub struct Agent {
     /// `disable_thinking`，由 provider 注入 chat_template_kwargs 关掉思考。
     /// 仅 `run_isolated_turn_with` 在持有 `&mut self` 期间临时置位，turn 结束即恢复。
     disable_thinking: bool,
+    /// 用户经 `/reasoning off` 设置的会话级思考开关：true = 关闭深度思考。
+    /// 与上面的临时位独立（OR 关系），隔离 turn 的保存/恢复不影响它。
+    pub thinking_off: bool,
 }
 
 /// 单次工具调用记录（用于 delegate 提取产出文件）
@@ -180,6 +183,7 @@ impl Agent {
             system_has_tool_instructions: false,
             disable_tools: false,
             disable_thinking: false,
+            thinking_off: false,
         }
     }
 
@@ -454,6 +458,7 @@ impl Agent {
             config: self.config.clone(),
             disable_tools: self.disable_tools,
             disable_thinking,
+            thinking_off: false,
             live_config: self.live_config.clone(),
             system_prompt_base: self.system_prompt_base.clone(),
             system_has_tool_instructions: self.system_has_tool_instructions,
@@ -750,7 +755,7 @@ impl Agent {
             let req = ChatRequest {
                 messages: &messages,
                 tools: tools_ref,
-                disable_thinking: self.disable_thinking,
+                disable_thinking: self.disable_thinking || self.thinking_off,
             };
 
             let mut stream = provider.chat_stream(&req).await;

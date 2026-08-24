@@ -16,6 +16,10 @@ function llaiaApp() {
     questions: [],
     // 长期目标（ADR-0021，只读展示）
     goal: null,
+    // 环境探测（P6，只读展示）
+    env: '',
+    doctorChecks: [],
+    doctorRunning: false,
     _todoTimer: null,
     ws: null,
     // config
@@ -169,8 +173,28 @@ function llaiaApp() {
           // 长期目标（ADR-0021）：只读轮询 goal.md 状态
           this.loadGoal();
           this._goalTimer = setInterval(() => this.loadGoal(), 5000);
+          // 环境探测（P6）：变化低频，登录时加载一次 + 手动刷新
+          this.loadEnv();
         }
       }
+    },
+    async loadEnv() {
+      try {
+        const r = await this.apiFetch('/api/env');
+        if (r.ok) {
+          const j = await r.json();
+          this.env = j.env || '';
+        }
+      } catch (e) { /* 非致命：UI 静默跳过 */ }
+    },
+    async refreshEnv() {
+      try {
+        const r = await this.apiFetch('/api/env/refresh', { method: 'POST' });
+        if (r.ok) {
+          const j = await r.json();
+          this.env = j.env || '';
+        }
+      } catch (e) { /* 非致命：UI 静默跳过 */ }
     },
     async loadTodos() {
       try {
@@ -822,6 +846,27 @@ function llaiaApp() {
       if (!this.authed) return;
       if (r.ok) { this.skillMsg = '✓ Deleted ' + name; await this.loadSkills(); }
       else { let j; try { j = await r.json(); } catch { j = {}; } this.skillMsg = '✗ ' + (j.error || r.status); }
+    },
+
+    // ---- doctor（P6） ----
+    async switchDoctor() {
+      this.tab = 'config';
+      this.configSection = 'doctor';
+    },
+    async runDoctor() {
+      this.doctorRunning = true;
+      try {
+        const r = await this.apiFetch('/api/doctor');
+        if (r.ok) {
+          const j = await r.json();
+          this.doctorChecks = j.checks || [];
+        } else {
+          this.doctorChecks = [{ name: 'doctor', status: 'error', detail: 'HTTP ' + r.status }];
+        }
+      } catch (e) {
+        this.doctorChecks = [{ name: 'doctor', status: 'error', detail: e.message }];
+      }
+      this.doctorRunning = false;
     },
 
     // ---- about ----

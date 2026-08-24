@@ -705,6 +705,8 @@ impl QqChannel {
                         user_openid: user_openid.to_string(),
                         msg_id: msg_id.to_string(),
                         buffer: String::new(),
+                        tool_names: Vec::new(),
+                        notified_tools: false,
                     });
                     registry.set_delivery(
                         self.clone()
@@ -807,6 +809,8 @@ impl QqChannel {
             user_openid: user_openid.to_string(),
             msg_id: msg_id.to_string(),
             buffer: String::new(),
+            tool_names: Vec::new(),
+            notified_tools: false,
         });
 
         registry.set_delivery(
@@ -827,12 +831,18 @@ impl QqChannel {
     }
 }
 
-/// QQ 输出 sink：累积 chunk 后分片发送，工具调用即时通知
+/// QQ 输出 sink：累积 chunk 后分片发送。
+/// 工具通知收敛为单条：首个 ToolStart 发「🔧 正在调用工具…」，后续静默；
+/// 全部工具名累积到回复开头一并返回（QQ 消息不可编辑，多条/更新只会刷屏）。
 struct QqSink {
     qq: Arc<QqChannel>,
     user_openid: String,
     msg_id: String,
     buffer: String,
+    /// 本回合已调用的工具名（按序去重）
+    tool_names: Vec<String>,
+    /// 是否已发过工具通知（每回合最多一条）
+    notified_tools: bool,
 }
 
 #[async_trait]
@@ -841,11 +851,16 @@ impl OutputSink for QqSink {
         self.buffer.push_str(delta);
     }
     async fn on_tool_start(&mut self, name: &str) {
-        let notice = format!("🔧 {}...", name);
-        let _ = self
-            .qq
-            .send_c2c_message(&self.user_openid, &notice, Some(&self.msg_id))
-            .await;
+        if !self.tool_names.iter().any(|n| n == name) {
+            self.tool_names.push(name.to_string());
+        }
+        if !self.notified_tools {
+            self.notified_tools = true;
+            let _ = self
+                .qq
+                .send_c2c_message(&self.user_openid, "🔧 正在调用工具...", Some(&self.msg_id))
+                .await;
+        }
     }
     async fn on_media(&mut self, path: &str, kind: MediaKind) {
         if let Err(e) = self
@@ -867,19 +882,25 @@ impl OutputSink for QqSink {
     async fn on_done(&mut self) {
         // agent 可能只调工具无文本输出，buffer 为空时给占位回复
         // 否则 QQ 会因 content="" 返回 304061 invalid content
-        let reply = if self.buffer.trim().is_empty() {
+        let body = if self.buffer.trim().is_empty() {
             tracing::warn!(
                 total_len = self.buffer.len(),
                 "agent reply empty, sending placeholder"
             );
-            "[已完成（无文本输出）]"
+            "[已完成（无文本输出）]".to_string()
         } else {
             // 模型回复常以 \n\n 开头（思考结束留白/markdown 习惯），
             // CLI 下被终端吞掉不显眼，QQ 原样发送会显示成两个空行。
             // 这里 trim 前导换行符（保留首行前导空格，避免影响 markdown 缩进）。
-            self.buffer.trim_start_matches(['\n', '\r'])
+            self.buffer.trim_start_matches(['\n', '\r']).to_string()
         };
-        let chunks = split_reply(reply, 1800);
+        // 调用过工具时把清单拼在回复开头，同一条消息反馈（不额外发消息）
+        let reply = if self.tool_names.is_empty() {
+            body
+        } else {
+            format!("🔧 已调用: {}\n\n{}", self.tool_names.join("、"), body)
+        };
+        let chunks = split_reply(&reply, 1800);
         tracing::info!(
             chunks = chunks.len(),
             total_len = reply.len(),

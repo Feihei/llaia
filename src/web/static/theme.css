@@ -374,6 +374,11 @@ option { background: var(--bg-input); color: var(--text); }
 #config-pane code { color: var(--green-bright); }
 #config-pane .err { color: var(--red); font-size: 12px; }
 
+/* ---------- Doctor（Config 内嵌 section） ---------- */
+.doctor-ok { color: var(--green); }
+.doctor-warn { color: #d29922; }
+.doctor-err { color: var(--red); }
+
 /* ---------- About（Config 内嵌 section） ---------- */
 .about-list dt { font-weight: bold; color: var(--green); margin-top: 10px; }
 .about-list dd { margin-left: 16px; color: var(--text); }

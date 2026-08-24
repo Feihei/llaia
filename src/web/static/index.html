@@ -138,6 +138,11 @@
           </div>
         </template>
       </div>
+      <!-- 环境探测（P6）：本机工具链只读展示 -->
+      <div class="todo-panel" x-show="env" style="border-left-color:#7ec27e;">
+        <div class="todo-head" style="color:#7ec27e;">&#x276F; ENV <button class="inline-add" @click="refreshEnv()">Refresh</button></div>
+        <div class="todo-item"><span class="todo-task todo-progress" style="white-space:pre-wrap;" x-text="env"></span></div>
+      </div>
     </div>
 
     <!-- 会话历史（P5 W1）：sessions.db 只读浏览 + 删除 + 导出 -->
@@ -217,6 +222,7 @@
         <div :class="{active: configSection==='mcp'}" @click="switchMcp()">MCP</div>
         <div :class="{active: configSection==='skills'}" @click="switchSkills()">Skills</div>
         <div :class="{active: configSection==='raw'}" @click="switchRaw()">Raw TOML</div>
+        <div :class="{active: configSection==='doctor'}" @click="switchDoctor()">Doctor</div>
         <div :class="{active: configSection==='about'}" @click="switchAbout()">About</div>
       </div>
       <div class="content">
@@ -644,6 +650,27 @@
                   <span class="cron-msg" x-text="mcpRawMsg"></span>
                 </div>
                 <div class="hint">Saving mcp.toml hot-reloads the MCP connection immediately; no restart needed.</div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Doctor（P6）：运行诊断检查 -->
+        <template x-if="configSection==='doctor'">
+          <div>
+            <div class="hint">Runtime diagnostics: provider connectivity, main model chain, context_size probe, .env, sessions.db, cron/mcp/skills.</div>
+            <div style="margin:10px 0;">
+              <button @click="runDoctor()" x-bind:disabled="doctorRunning">
+                <span x-show="!doctorRunning">Run checks</span>
+                <span x-show="doctorRunning">Running…</span>
+              </button>
+            </div>
+            <template x-for="(c, i) in doctorChecks" :key="i">
+              <div class="form-row" style="align-items:flex-start;">
+                <label x-text="c.name"></label>
+                <span :class="c.status==='ok' ? 'doctor-ok' : (c.status==='warn' ? 'doctor-warn' : 'doctor-err')"
+                      x-text="'[' + c.status.toUpperCase() + '] ' + c.detail"
+                      style="white-space:pre-wrap;"></span>
               </div>
             </template>
           </div>

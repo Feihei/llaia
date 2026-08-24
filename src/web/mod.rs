@@ -1729,8 +1729,78 @@ pub async fn get_questions(
         .into_response()
 }
 
-/// GET /api/goal → 当前长期目标（只读展示，ADR-0021）。
-/// 文件不存在或无法解析时返回 `{ "goal": null }`。
+/// GET /api/env → 环境探测结果（只读展示，P6）。返回启动时（或 `/env` / 刷新按钮）
+/// 探测到的本机工具链缓存文本；未探测到时 `env` 为空串。
+pub async fn get_env(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    let env = agent.context.env_state.clone().unwrap_or_default();
+    let json = serde_json::json!({ "env": env });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
+/// POST /api/env/refresh → 重新探测本机环境（同 `/env` 命令）。
+pub async fn refresh_env(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let mut agent = state.registry.main.lock().await;
+    let env_text = crate::envprobe::probe().await;
+    agent.context.env_state = (!env_text.is_empty()).then_some(env_text.clone());
+    let json = serde_json::json!({ "env": env_text });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
+/// GET /api/doctor → 运行诊断检查（provider 连通性 / context_size 探测 / .env /
+/// sessions.db / cron / mcp / skills）。结果为结构化 check 列表，前端 Config 页展示。
+pub async fn get_doctor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let config_dir = state.registry.main.lock().await.config_dir.clone();
+    match crate::commands::doctor_checks(&config_dir).await {
+        Ok(checks) => {
+            let json = serde_json::json!({ "checks": checks });
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+                json.to_string(),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("doctor failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/goal → 当前长期目标（只读展示，ADR-0021）。/// 文件不存在或无法解析时返回 `{ "goal": null }`。
 pub async fn get_goal(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1986,6 +2056,9 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/questions", axum::routing::get(get_questions))
         // 长期目标（ADR-0021）：只读展示 goal.md 状态
         .route("/api/goal", axum::routing::get(get_goal))
+        .route("/api/env", axum::routing::get(get_env))
+        .route("/api/env/refresh", axum::routing::post(refresh_env))
+        .route("/api/doctor", axum::routing::get(get_doctor))
         // 会话历史（P5 W1）：列表 / 详情 / 删除 / 导出
         .route("/api/sessions", axum::routing::get(list_sessions_api))
         .route(

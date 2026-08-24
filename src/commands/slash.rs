@@ -6,6 +6,7 @@ use crate::goal::{read_goal, set_goal, update_status, GoalStatus};
 use crate::memory::markdown::compress_memory;
 use anyhow::Result;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -40,7 +41,7 @@ pub async fn try_handle(
     match cmd {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /reasoning [on|off] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -234,13 +235,36 @@ pub async fn try_handle(
             } else {
                 "no"
             };
+            // 工具分组计数：MCP 工具名为 `<server_id>__<tool_name>`，据此归类
+            let tools_summary = {
+                let mut builtin = 0usize;
+                let mut mcp: HashMap<String, usize> = HashMap::new();
+                for name in agent.tools.names() {
+                    if let Some((server, _)) = name.split_once("__") {
+                        *mcp.entry(server.to_string()).or_default() += 1;
+                    } else {
+                        builtin += 1;
+                    }
+                }
+                let mcp_part = if mcp.is_empty() {
+                    String::new()
+                } else {
+                    let mut servers: Vec<String> = mcp
+                        .iter()
+                        .map(|(s, n)| format!("{}: {}", s, n))
+                        .collect();
+                    servers.sort();
+                    format!(" + {} mcp ({})", mcp.values().sum::<usize>(), servers.join(", "))
+                };
+                format!("{} builtin{}", builtin, mcp_part)
+            };
             let info = format!(
                 "context_size: {}\ncontext_threshold: {} ({} tokens)\n\
                  current tokens (est.): {} ({}% used, text {} + tools {})\n\
                  history msgs: {}
 session_id: {}
 summary: {}
-tools: {:?}
+tools: {}
 \
                  compact_provider: {}",
                 agent.context_size,
@@ -253,7 +277,7 @@ tools: {:?}
                 agent.context.history.len(),
                 agent.session_id,
                 summary_status,
-                agent.tools.names(),
+                tools_summary,
                 if agent.compact_provider_snapshot().await.is_some() {
                     "configured"
                 } else {
@@ -379,6 +403,30 @@ tools: {:?}
                 "[env refreshed] {}",
                 cur
             )))
+        }
+        "/reasoning" => {
+            // 会话级思考开关：/reasoning off 关深度思考（推理模型日常问答提速），
+            // /reasoning on 恢复。仅对支持 chat_template_kwargs 的 provider 生效
+            // （llama.cpp / Ollama / vLLM 等，其它端点忽略，无害）。
+            let state = |a: &Agent| if a.thinking_off { "off" } else { "on" };
+            match args.trim() {
+                "off" => {
+                    agent.thinking_off = true;
+                    Ok(SlashOutcome::Handled("[reasoning: off]".into()))
+                }
+                "on" => {
+                    agent.thinking_off = false;
+                    Ok(SlashOutcome::Handled("[reasoning: on]".into()))
+                }
+                "" => Ok(SlashOutcome::Handled(format!(
+                    "[reasoning: {}] usage: /reasoning on|off",
+                    state(agent)
+                ))),
+                other => Ok(SlashOutcome::Handled(format!(
+                    "[unknown arg '{}'] usage: /reasoning on|off",
+                    other
+                ))),
+            }
         }
         "/migrate-secrets" => {
             // 敏感信息 .env 自动化（P5 S1）：把 config.toml 里的明文敏感字段
