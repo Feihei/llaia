@@ -75,18 +75,39 @@
 
 ### 🧩 待 grill 明确后立项（需求/设计类）
 
-- [ ] 会话主题自动总结（必要性：**中** / 难度：★★☆）
-  - 现状：无代码基础；落点可选 `sessions` 表加 title 字段。
-  - 待明确：触发时机（压缩时顺带？固定 N 条？）、存储位置、展示处（WebUI 会话列表？CLI `/stats`？）、用 compact provider or 主 provider、失败降级。
-- [ ] deepseek / glm / kimi 等 provider 针对性优化，探讨必要性（必要性：待定 / 难度：★☆☆~★★☆）
-  - 现状：`compat.rs::detect` 仅覆盖 ollama/llamacpp 预设（`reasoning_to_content` / `streaming_usage` 等），deepseek / glm / kimi 走 bare 行为。
-  - 待明确：是遇到具体报错（哪个 provider 什么现象）还是预防性优化？目标清单（deepseek `reasoning_content` 处理、glm `thinking` 字段等）？
-- [ ] `memory_research` 工具：跨 session 搜索历史记忆（必要性：**中** / 难度：★★☆）
-  - 现状：`sessions/messages/tool_calls` 已在 sqlite（`memory/sqlite.rs`），FTS5 技术路线可行（rusqlite 加 `fts5` feature）。
-  - 待明确：搜索范围（仅 messages？含 tool_calls 结果？含 MEMORY.md？）、返回形态（N 条 + 所属 session？）、暴露为模型可调工具 or slash 命令、结果上限与隐私边界。
-- [ ] 检查清理基本架构 / agent loop（必要性：待定 / 难度：★★☆~★★★）
-  - 现状：无动机描述，范围完全模糊。
-  - 待明确：触发点（loop 卡死？上下文爆炸？性能？）、清理范围（`agent/mod.rs` 主循环？`runner`？）、期望产出（重构 or 文档梳理）。
+- [x] 会话主题自动总结（必要性：**中** / 难度：★★☆）— 已定案 → 立项
+  - 现状：无代码基础；`sessions` 表加 `title` 字段。
+  - 定案（grill 2026-08-24）：**压缩时顺带**用 compact provider 生成标题，落 `sessions.title`，WebUI 会话列表展示；失败降级为默认标题。存储即随会话。
+  - 待实现：压缩流程内加一步标题生成 + 更新行 + WebUI 读列。
+- [ ] deepseek / glm / kimi 等 provider 针对性优化（必要性：**高** / 难度：★★☆）— 已定案，有 .ref 现成实现
+  - 现状：`compat.rs::detect` 仅覆盖 ollama/llamacpp 预设，线上 provider（deepseek/glm/kimi/moonshot…）走 bare；用户实测**非本地 provider 的 probe/探测常失败**，疑似线上 API 规则不同。
+  - .ref 现成实现（已探明，可照抄）：
+    - **nanobot** `openai_compat_provider.py`：`_MODEL_THINKING_STYLES` 按模型 slug 映射 thinking 线上参数（`thinking_type`/`enable_thinking`/`reasoning_split`）；`reasoning_content` 加入放行字段并保证 deepseek-R1 走 `reasoning_content` 而非 `reasoning`；`_requires_max_completion_tokens` 对 o 系/kimi-k3 用 `max_completion_tokens`。
+    - **goose** `crates/goose-providers/src/openai.rs`：`PROVIDERS_NEEDING_MAX_TOKENS_REMAP`（cerebras/custom_deepseek/groq/kimi/mistral/moonshot…→ 传统 `max_tokens`）、`PROVIDERS_NEEDING_REASONING_EFFORT_MAPPING`、Meta effort 折叠。
+  - 定案方向（grill 2026-08-24）：`Compat::detect` 扩展——detect 不只看 base_url host，还要能按其 provider 预设（deepseek/glm/kimi/moonshot）设定 `max_tokens_field` / `reasoning_to_content` / thinking 参数，模式对齐 nanobot/goose 的 per-model 表；把 `native_tool_calling` 并入同套探测（见 #10）。
+  - 待明确：`probe 失败`的具体根因（context_size 探测走非 OpenAI 管理端点？`/models` 响应结构差异？）需一次实测抓包/trace 定位后再定实现。
+- [ ] `memory_research` 工具：跨 session 搜索历史记忆（必要性：**中** / 难度：★★☆）— 已定案 → 立项
+  - 现状：`sessions/messages/tool_calls` 已在 sqlite（`memory/sqlite.rs`）。
+  - 定案（grill 2026-08-24）：**仅搜索 messages 文本**，FTS5（`rusqlite` 加 `fts5` feature），返回 N 条 + 所属 session + 时间，**暴露为模型可调工具**。结果上限与隐私边界实现时定（先给硬上限 N=20）。
+  - 待实现：建 FTS 虚拟表 + 增量同步 + 工具封装 + 注册。
+- [x] 检查清理基本架构 / agent loop（必要性：待定 / 难度：★★☆~★★★）— 已定案 **不立项**
+  - 无具体动机描述、产出不明；grill 2026-08-24 结论：不立项删除，精力给有明确价值项。若后续遇 loop 卡死/上下文爆炸再单独提。
+- [x] provider native 模式默认简化（必要性：**中** / 难度：★★☆）— 已定案 → 并入 #4 的 Compat 探测
+  - 现状：`native_tool_calling` 是每个 model 的布尔字段（`config.rs` `ModelConfig`，缺省默认 `true`），两种模式协议本质不同——native 发 `tools` 参数并期待结构化 `tool_calls`；标签降级不发 tools、靠注入 `<tool_call>` 协议指令 + prompt 约束。P4-b 已让 `ToolCallStreamParser` 始终清洗文本流（native 也剥标签），但请求载荷差异仍在，无法完全二合一。
+  - 定案（grill 2026-08-24）：**并入 Compat 自动探测**——`compat.rs::detect` 按 provider 预设（ollama/llamacpp/以及 #4 新增的 deepseek/glm/kimi）推断 `native_tool_calling`，字段允许 `None=auto`（缺省跟随探测），用户不再手设；**不做**单次请求内动态降级（复杂度不值）。无实际踩坑，属预防性简化。
+  - 待实现：给 `Compat` 增加推断 `native_tool_calling` 的能力 + `ModelConfig` 支持 `None` + detect 扩展。与 #4 同一套探测框架合并做，避免两套逻辑。
+- [x] 启动速度优化（必要性：**中** / 难度：★★☆）— 已定案，**实测定点后方向转向**
+  - 现状：`build_agent`（`channels/cli.rs:625`）启动主路径串行执行：① `McpRegistry::connect_all`（`mcp/client.rs:249` 串行 for，每 server `transport.connect` + `handshake`(30s 超时) + `tools/list`）→ ② `load_skills` → ③ 逐个 build 子 Agent + main Agent。
+  - 实测（2026-08-24 用户 trace）：启动首日志→registry built ≈ **840ms**，其中 MCP 握手+注册 ~1ms（单 server）、skills 扫描(37) ~7ms 均非瓶颈；**大头是 `detect_context_size` 的 llama.cpp `/props` 探测**——coder 一次 ~206ms、main 探两次 ~225ms，合计 400–600ms 独占近 2/3。
+  - 原定案（grill）：MCP `join_all` 并行连接。**实测表明对当前单 server 配置几乎无收益，方向转向**：
+    1. **`/props` 探测收敛/去重**：`final=0` 却覆盖 `configured=128000`（疑似 bug，探测盖掉显式配置）；子 Agent 与 main 重复探测、main 探两次。先查根因（为何 `/props` 返 0、为何多次探、为何覆盖配置），再谈缓存/并行。
+    2. MCP `join_all` 并行仍值得做，但对多 server 才有效，且不是当前用户瓶颈——降至次要。
+    3. 给 build_agent 加阶段耗时打点（`elapsed_ms`），后续 trace 不用再靠猜。
+  - 待办：① 定位 `context_size final=0 且覆盖 configured` 的根因与重复探测；② 视情况加阶段耗时打点；③ MCP 并行连接保留为次要优化。
+  - **根因定位（2026-08-24 用户 trace 深挖）**：
+    - **A（bug：`final=0` 覆盖显式配置）**：后端为 llama.cpp，`/props` 返回 `n_ctx: 0`（服务器以 auto/0 启动，0 表示用模型默认，非真实窗口）；`try_llamacpp_props`（`openai_compat.rs:483-495`）对 `n==0` 仍返 `Some(0)`；`cli.rs:564-574` 走 `configured.min(detected)` → `128000.min(0)=0`。显式配置被无意义 0 覆盖。→ 修：`n==0` 视为 `None`（Ollama `.context_length==0` 同理），探测失败时 `final` 保持 `configured`。
+    - **B（性能：#11 大头）**：`FallbackProvider::detect_context_size`（`fallback.rs:82-91`）逐探测 fallback 链上每个 provider；main 带 2 模型链 → main 探 2 次 + coder 1 次 = 3 次 GET /props@~200ms ≈ 600ms，占启动 2/3。同一后端多模型探测必同值，冗余。→ 修：同后端去重 / 只探 `main()`。
+    - **C（次要）**：main与子 agent 同后端各自探测同值 → 可缓存。
 
 ---
 

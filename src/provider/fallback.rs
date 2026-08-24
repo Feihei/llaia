@@ -80,14 +80,10 @@ impl Provider for FallbackProvider {
     }
 
     async fn detect_context_size(&self) -> Option<usize> {
-        // 保守起见取链中最小的上下文窗口
-        let mut min: Option<usize> = None;
-        for p in &self.chain {
-            if let Some(n) = p.detect_context_size().await {
-                min = Some(min.map_or(n, |m: usize| m.min(n)));
-            }
-        }
-        min
+        // 只探测链的主 provider。fallback 链通常是同一后端的不同模型，上下文窗口相同，
+        // 逐个探测是每次 ~200ms 的重复 HTTP（多模型链拖慢启动）；若真有更小窗口的 fallback
+        // 模型，实际生效的也是主模型（链上代答才切 fallback），预算以主模型为准即可。
+        self.main().detect_context_size().await
     }
 
     fn label(&self) -> String {
@@ -230,8 +226,9 @@ mod tests {
         let fb = FallbackProvider::new(chain);
         assert_eq!(fb.label(), "main");
         assert!(fb.native_tool_calling());
-        // detect_context_size 取链中最小值
-        assert_eq!(fb.detect_context_size().await, Some(2048));
+        // detect_context_size 只探链表头（主模型）——避免同一后端多模型重复探测拖慢启动；
+        // 不再取链上最小窗口。backup 的 2048 访问次数应保持 0（未被探测）。
+        assert_eq!(fb.detect_context_size().await, Some(4096));
     }
 
     #[tokio::test]

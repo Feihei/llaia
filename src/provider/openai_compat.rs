@@ -488,10 +488,14 @@ impl OpenAiCompatibleProvider {
             return None;
         }
         let v: serde_json::Value = resp.json().await.ok()?;
-        v.get("default_generation_settings")?
+        let n_ctx = v
+            .get("default_generation_settings")?
             .get("n_ctx")?
             .as_u64()
-            .map(|n| n as usize)
+            .map(|n| n as usize);
+        // n_ctx=0 表示服务器以 auto/模型默认启动，并非真实窗口；当作无信息返回 None，
+        // 否则 min(configured, 0)=0 会把用户显式配置的 context_size 覆盖成 0。
+        n_ctx.filter(|&n| n > 0)
     }
 
     /// 尝试 Ollama 的 /api/show 端点
@@ -521,7 +525,10 @@ impl OpenAiCompatibleProvider {
             for (k, val) in info {
                 if k.ends_with(".context_length") {
                     if let Some(n) = val.as_u64() {
-                        return Some(n as usize);
+                        // 0 视为无信息（同 llamacpp n_ctx=0 语义），跳过避免污染 min
+                        if n > 0 {
+                            return Some(n as usize);
+                        }
                     }
                 }
             }
@@ -531,7 +538,9 @@ impl OpenAiCompatibleProvider {
             for line in params.lines() {
                 if let Some(rest) = line.trim().strip_prefix("num_ctx ") {
                     if let Ok(n) = rest.trim().parse::<usize>() {
-                        return Some(n);
+                        if n > 0 {
+                            return Some(n);
+                        }
                     }
                 }
             }
@@ -771,6 +780,56 @@ mod tests {
             mk("http://h:8080/api/v1/openai").probe_base(),
             "http://h:8080/api/v1/openai"
         );
+    }
+
+    #[tokio::test]
+    async fn detect_context_size_llamacpp_zero_nctx_returns_none() {
+        // 回归：/props 返回 n_ctx=0（服务器 auto/模型默认，非真实窗口）必须视为无信息，
+        // 否则 cli.rs 走 configured.min(0)=0 会把显式 context_size 覆盖成 0。
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("GET", "/props")
+            .with_status(200)
+            .with_body(json!({"default_generation_settings": {"n_ctx": 0}}).to_string())
+            .create();
+        let p = OpenAiCompatibleProvider::new(
+            format!("{}/v1", server.url()),
+            "",
+            "m",
+            true,
+            None,
+            Compat::llamacpp(),
+        )
+        .unwrap();
+        assert_eq!(p.detect_context_size().await, None);
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn detect_context_size_ollama_zero_context_length_returns_none() {
+        let mut server = mockito::Server::new_async().await;
+        let tags = server
+            .mock("GET", "/api/tags")
+            .with_status(200)
+            .with_body(json!({"models": []}).to_string())
+            .create();
+        let show = server
+            .mock("POST", "/api/show")
+            .with_status(200)
+            .with_body(json!({"model_info": {"qwen3.context_length": 0u64}}).to_string())
+            .create();
+        let p = OpenAiCompatibleProvider::new(
+            format!("{}/v1", server.url()),
+            "",
+            "qwen3",
+            true,
+            None,
+            Compat::ollama(),
+        )
+        .unwrap();
+        assert_eq!(p.detect_context_size().await, None);
+        tags.assert();
+        show.assert();
     }
 
     #[tokio::test]
