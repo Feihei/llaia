@@ -551,7 +551,9 @@ function llaiaApp() {
     },
 
     // ---- 模型探测（P5 W2） ----
-    async probeModels(pid) {
+    // 注意：方法名不能与 data 属性 probeModels（探测结果 map）同名——
+    // 方法体内 this.probeModels = {...} 会把方法自身覆盖成普通对象，首次探测后按钮全部失灵。
+    async runProbe(pid) {
       const p = this.cfg.provider[pid];
       this.probing = pid;
       this.probeMsg = { ...this.probeMsg, [pid]: '' };

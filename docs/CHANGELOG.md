@@ -15,6 +15,7 @@
 - **agent**：`estimate_tokens` 漏算 Runtime Context（todo/goal/env）与每条消息结构开销，`/stats` 显示显著低于真实发送量——改为基于 `to_messages` 全量文本 + tool defs 序列化估算
 - **qq**：发图失败 `40093006/40093007`——腾讯 v2 富媒体接口已改为 JSON body（`file_type`+`file_data`(base64)+`srv_send_msg`），不再支持 multipart 上传；已用真实凭据实测验证
 - **provider**：context_size 探测恒失败落默认 8192（128k 模型显示 127% used）——llama.cpp `/props`、Ollama `/api/*` 挂在服务根路径而 `base_url` 以 `/v1` 结尾，探测 URL 打到 `/v1/props` 404；`probe_base()` 剥掉 `/v1` 后缀，mockito 回归测试覆盖
+- **web**：WebUI Config 页模型探测按钮首次探测后全部失灵（需刷新页面）——`probeModels` 同时是 data 属性（探测结果 map）与方法名，方法体内 `this.probeModels = {...}` 把方法覆盖成普通对象，后续点击抛 `probeModels is not a function`；探测方法改名 `runProbe` 消除同名冲突，新增 app.js 顶层键去重回归测试兜住此类问题
 
 **Features**
 - **agent**：自动 Tail Reminder（抗长会话风格漂移）：回合起点对 SOUL+USER 求 md5，与 `workspace/reminder.md` 失配时后台隔离 turn 让 LLM 提炼 ≤120 token 行为指令，下一轮作为请求最后一条消息注入（离生成点最近）；MEMORY/skills 不参与 hash；失败静默降级

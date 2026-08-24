@@ -258,7 +258,7 @@
                 <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
                 <!-- 模型探测（P5 W2）：向 OpenAI 兼容端点 GET /models 拉取列表，勾选后加入 Models -->
                 <div class="probe-section">
-                  <button type="button" class="inline-add" @click="probeModels(pid)" :disabled="probing===pid">
+                  <button type="button" class="inline-add" @click="runProbe(pid)" :disabled="probing===pid">
                     <span x-text="probing===pid ? 'Probing…' : 'Probe models'"></span>
                   </button>
                   <span class="hint" x-show="probeMsg[pid]" x-text="probeMsg[pid]"></span>

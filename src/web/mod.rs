@@ -2395,4 +2395,40 @@ model = "local.m"
             "theme.css missing .channel-card styles (stale embed?)"
         );
     }
+
+    /// app.js 顶层键同名冲突回归测试：llaiaApp() 返回单个对象字面量，data 属性与方法
+    /// 同名时后者覆盖前者。曾因 `probeModels` 既是结果 map（data）又是方法，方法体内
+    /// `this.probeModels = {...}` 把方法覆盖成普通对象，导致首次探测后所有 Probe 按钮
+    /// 点击抛 `probeModels is not a function`、需刷新页面才恢复（已改名 runProbe 修复）。
+    /// 此检查兜住整个 bug 类别：任何顶层同名键（data/data、data/方法、方法/方法）都会失败。
+    #[test]
+    fn test_app_js_no_duplicate_top_level_keys() {
+        let js = StaticAsset::get("app.js")
+            .expect("app.js embedded")
+            .data
+            .to_vec();
+        let js = String::from_utf8(js).expect("app.js utf8");
+        // 顶层键：恰好 4 空格缩进的 `name:`（data）或 `async name(` / `name(`（方法）
+        let re = regex::Regex::new(r"(?m)^    (?:async\s+)?([A-Za-z_$][A-Za-z0-9_$]*)(?:\s*:|\()")
+            .expect("valid regex");
+        let mut seen = std::collections::HashMap::<String, usize>::new();
+        for cap in re.captures_iter(&js) {
+            let key = cap[1].to_string();
+            let line = 1 + js[..cap.get(0).unwrap().start()]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count();
+            if let Some(&prev) = seen.get(&key) {
+                panic!(
+                    "app.js duplicate top-level key `{key}` (first at line {prev}, again at line {line}); \
+                     data 属性与方法同名会相互覆盖，改名其一（参见 probeModels/runProbe 修复）"
+                );
+            }
+            seen.insert(key, line);
+        }
+        assert!(
+            seen.contains_key("runProbe"),
+            "app.js missing runProbe method (probeModels 修复被回退?)"
+        );
+    }
 }
