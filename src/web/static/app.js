@@ -554,7 +554,7 @@ function llaiaApp() {
     async probeModels(pid) {
       const p = this.cfg.provider[pid];
       this.probing = pid;
-      this.probeMsg[pid] = '';
+      this.probeMsg = { ...this.probeMsg, [pid]: '' };
       try {
         const r = await this.apiFetch('/api/providers/' + encodeURIComponent(pid) + '/models', {
           method: 'POST',
@@ -573,10 +573,11 @@ function llaiaApp() {
           this.probeMsg = { ...this.probeMsg, [pid]: 'Probe failed: ' + (j.error || r.status) };
         }
       } catch (e) {
-        this.probeModels[pid] = [];
-        this.probeMsg[pid] = 'Probe failed: ' + e.message;
+        this.probeModels = { ...this.probeModels, [pid]: [] };
+        this.probeMsg = { ...this.probeMsg, [pid]: 'Probe failed: ' + e.message };
+      } finally {
+        this.probing = null;
       }
-      this.probing = null;
     },
     toggleProbeModel(pid, id) {
       if (!this.probeChecked[pid]) this.probeChecked[pid] = {};
