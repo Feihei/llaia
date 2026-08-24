@@ -91,6 +91,7 @@ jobs:
             llaia-${{ env.VERSION }}-${{ matrix.target }}*
           # Overwrite same-named assets when re-pushing a tag
           fail_on_unmatched_files: true
-          # Auto-generate release notes from commits/PRs (English, Conventional Commits).
-          # Prevents empty notes when a tag is pushed without a manual body.
-          generate_release_notes: true
+          # NOTE: no generate_release_notes here. This step runs once per matrix job
+          # (5 platforms); previously generate_release_notes:true made each job append
+          # the same auto-generated full changelog, producing 5 duplicate notes in the
+          # release body. Write the curated note manually (docs/release-notes/<tag>.md).
