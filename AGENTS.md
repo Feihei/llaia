@@ -265,35 +265,23 @@ CI 在 `push` / PR 时对 `main` 跑三道门：`cargo fmt --check` → `cargo c
 
 ### 发版
 
-- 走 `cargo-release` 自动化流程（配置见仓库根 `release.toml`）。工具本地一次性安装：`cargo install cargo-release`（或 `cargo binstall cargo-release`）。
-- **cargo-release 1.x 与 0.x 的两处关键差异（已踩坑，必须注意）**：
-  1. `release.toml` 必须是**平铺格式**（顶层不要 `[release]` 表包裹），否则报 `Failed to parse release.toml` 且 `cargo release` 完全无法运行。
-  2. `cargo set-version` 子命令在 1.x 已移除；提版本号改用 `cargo release version <VERSION>`，或直接编辑 `Cargo.toml` 的 `version` 再 `cargo build` 同步 `Cargo.lock`（后者更确定可靠）。
-- 工作区版本号始终保持为**下一个开发版本**（如 v0.1.0 发完后，`Cargo.toml` 为 `0.1.1`）。
-- 提版本号（开发阶段，纯版本号改动，跳过测试）：
+简单直接：**不用 `cargo-release`**，发版 = 打 `git tag`，版本 bump = 手改文件。
+
+- 版本 bump（开发阶段，纯版本号改动，跳过测试）：工作区版本号始终保持为**下一个开发版本**。`cargo build` 同步 `Cargo.lock` 后再提交：
   ```bash
-  # 方式一：cargo-release 1.x 子命令
-  cargo release version 0.1.2
-  # 方式二（确定可靠）：手动改 Cargo.toml version 后同步 lock
-  #   编辑 Cargo.toml: version = "0.1.2"
-  #   cargo build   # 同步 Cargo.lock
+  # 编辑 Cargo.toml: version = "0.3.2"   # 发完上一版后即为下一开发版
+  cargo build          # 同步 Cargo.lock
   git add Cargo.toml Cargo.lock
-  git commit -m "chore: bump version to 0.1.2"
+  git commit -m "chore: bump version to 0.3.2"
   ```
-- 发布某个开发版本（生成 `chore: release X.Y.Z` 提交 + `vX.Y.Z` tag，不自动 push）：
+- 发布某个开发版本（版本号已就位，核心产物就是 tag）：
   ```bash
-  cargo release 0.1.1 --execute --no-publish --no-push --no-confirm
-  git push --follow-tags
+  git tag -a v0.3.2 -m "chore: release 0.3.2"
+  git push origin main
+  git push origin v0.3.2
   ```
-  - `--no-confirm` 必加：1.x 在非 CI 环境会交互询问 `Release? [y/N]` 并卡住；CI 环境设 `CI=true` 也可跳过。
-- **网络注意**：即便 `publish = false`，`cargo release` 仍会访问 crates.io index 做"未发布"检查。本机沙箱/离线环境会因 `error sending request for url (https://index.crates.io/...)` 失败。此时手动兜底等价完成本地部分：
-  ```bash
-  git tag -a v0.1.1 -m "chore: release 0.1.1"   # tag 打在 HEAD
-  ```
-  （version 已是目标版本时 cargo-release 不会再生成额外 release 提交，核心产物就是 tag。）
-- `git push --follow-tags` 推送 tag 后触发 `release.yml`，自动构建多平台二进制并上传到 GitHub Releases。
-- **tag 必须带 `v` 前缀**（`release.toml` 已用 `tag-name = "v{{version}}"` 保证），否则 release 工作流不触发。
-- 不发布到 crates.io（`release.toml` 中 `publish = false`）；`push = false` 由 Feihei 手动推送。
+- **tag 必须带 `v` 前缀**，否则 `release.yml` 不触发；push tag 后自动构建多平台二进制并上传 GitHub Releases。
+- 不发布到 crates.io；push 由 Feihei 手动完成。
 
 ## 文档结构
 
