@@ -20,6 +20,10 @@ pub struct Context {
     /// 环境探测（P5 E1）的注入文本：进程启动时对 main agent 探测一次、
     /// `/env` 命令手动刷新。与 todo/goal 同区，不进 system 前缀（KV 缓存友好）。
     pub env_state: Option<String>,
+    /// 自动生成的 Tail Reminder（P6）：LLM 从 SOUL+USER 提炼的抗漂移要点，
+    /// 存 `workspace/reminder.md`，hash 失配时后台重生成。排在所有尾部消息
+    /// 之后（离生成点最近，注意力最强）。
+    pub reminder: Option<String>,
 }
 
 impl Context {
@@ -31,6 +35,7 @@ impl Context {
             todo_state: None,
             goal_state: None,
             env_state: None,
+            reminder: None,
         }
     }
 
@@ -72,6 +77,12 @@ impl Context {
         if let Some(env) = &self.env_state {
             if !env.is_empty() {
                 msgs.push(ChatMessage::user(env.clone()));
+            }
+        }
+        // Tail Reminder（P6）：抗风格/身份漂移的要点重申，放最后（离生成点最近）。
+        if let Some(rem) = &self.reminder {
+            if !rem.is_empty() {
+                msgs.push(ChatMessage::user(rem.clone()));
             }
         }
         msgs
@@ -288,6 +299,32 @@ mod tests {
         assert!(!msgs
             .iter()
             .any(|m| m.content.as_text().contains("Goal (active)")));
+    }
+
+    #[test]
+    fn test_reminder_injected_last() {
+        // 回归：Tail Reminder（P6）必须是最后一条消息（离生成点最近，注意力最强）
+        let mut ctx = Context::new("SOUL".into());
+        ctx.push(ChatMessage::user("hi"));
+        ctx.todo_state = Some("[todo]".into());
+        ctx.env_state = Some("[env]".into());
+        ctx.reminder = Some("简洁口语化".into());
+        let msgs = ctx.to_messages(&None);
+        assert_eq!(
+            msgs.last().unwrap().content.as_text(),
+            "简洁口语化",
+            "reminder 应排在状态栏/todo/env 之后"
+        );
+    }
+
+    #[test]
+    fn test_reminder_skipped_when_none_or_empty() {
+        let mut ctx = Context::new("SOUL".into());
+        ctx.push(ChatMessage::user("hi"));
+        ctx.reminder = None;
+        assert_eq!(ctx.to_messages(&None).last().unwrap().role, Role::User);
+        ctx.reminder = Some(String::new());
+        assert_eq!(ctx.to_messages(&None).last().unwrap().role, Role::User);
     }
 
     #[test]

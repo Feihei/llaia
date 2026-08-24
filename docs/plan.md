@@ -69,6 +69,9 @@
   - 原 `tools: {:?}` 全量名单冗长；改为 `N builtin + M mcp (server: n, ...)`（按 MCP `<server_id>__<tool>` 前缀归类）。
 - [x] QQ 工具通知收敛单条 + 回复开头拼工具清单（必要性：**中** / 难度：★☆☆）— ✅ 已交付
   - 原每个 ToolStart 即发一条「🔧 xxx...」，连续工具调用刷屏。改为：首工具发一条「🔧 正在调用工具...」后续静默（QQ 消息不可编辑，更新=新消息）；`on_done` 把去重后的工具名拼进回复开头（「🔧 已调用: a、b、c」），零额外消息。
+- [x] 自动 Tail Reminder：LLM 提炼抗长会话漂移要点（必要性：**中** / 难度：★★☆）— ✅ 已交付
+  - **背景**：SOUL/USER 每轮在 system 头部完整重发（与 AstrBot 同构，压缩不动 system），10K 上下文即出现风格漂移的根因是 LLM 自我模仿 + 中段注意力稀释，非 prompt 丢失。
+  - **机制**：回合起点对 SOUL+USER 求 md5，与 `workspace/reminder.md` 记录失配（或缺失）时后台隔离 turn 让 LLM 从 SOUL+USER 提炼 ≤120 token 的行为指令清单（走 compact_provider 回退主模型），写盘后下一轮作为最后一条消息注入（离生成点最近）。MEMORY/skills 不参与 hash（避免 memory_write 频繁触发）；文件头注释声明勿手改；生成失败静默降级。
 
 ### 🧩 待 grill 明确后立项（需求/设计类）
 

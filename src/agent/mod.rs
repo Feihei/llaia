@@ -1,6 +1,7 @@
 pub mod approval;
 pub mod context;
 pub mod registry;
+pub mod reminder;
 pub mod runner;
 pub mod sink;
 
@@ -712,6 +713,27 @@ impl Agent {
 
         // 回合开头：先按阈值做一次自动压缩
         self.maybe_auto_compact().await;
+
+        // Tail Reminder（P6）：SOUL+USER hash 校验，缺失/失配时后台重生成
+        // （写盘后下一轮生效）。生成走 compact_provider（省主模型），回退主模型。
+        {
+            let soul = std::fs::read_to_string(self.workspace.join("SOUL.md")).unwrap_or_default();
+            let user = std::fs::read_to_string(self.workspace.join("USER.md")).unwrap_or_default();
+            if !soul.is_empty() || !user.is_empty() {
+                let gen_provider = match self.compact_provider_snapshot().await {
+                    Some(p) => p,
+                    None => provider.clone(),
+                };
+                self.context.reminder = crate::agent::reminder::refresh_reminder(
+                    &self.workspace,
+                    &soul,
+                    &user,
+                    gen_provider,
+                );
+            } else {
+                self.context.reminder = None;
+            }
+        }
 
         let max_iters = self.max_iterations;
         // 时区快照：整轮用同一个值。turn 中途 WebUI 改配置不会让同一轮里的
