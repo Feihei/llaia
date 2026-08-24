@@ -91,7 +91,36 @@ jobs:
             llaia-${{ env.VERSION }}-${{ matrix.target }}*
           # Overwrite same-named assets when re-pushing a tag
           fail_on_unmatched_files: true
-          # NOTE: no generate_release_notes here. This step runs once per matrix job
-          # (5 platforms); previously generate_release_notes:true made each job append
-          # the same auto-generated full changelog, producing 5 duplicate notes in the
-          # release body. Write the curated note manually (docs/release-notes/<tag>.md).
+          # NOTE: this step only uploads assets. It deliberately does NOT set a body
+          # or generate_release_notes: it runs once per matrix job, and a per-job body
+          # caused 5 duplicate changelogs. The curated note is written exactly once by
+          # the dedicated `release-notes` job below.
+
+  # Write the curated release note once, after all platforms have uploaded assets.
+  # Reads docs/release-notes/<tag>.md (created before pushing the tag) and sets it
+  # as the release body. Runs a single time, so the body is never duplicated.
+  release-notes:
+    name: Write release notes
+    runs-on: ubuntu-latest
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compose release body from markdown
+        id: notes
+        run: |
+          FILE="docs/release-notes/${{ github.ref_name }}.md"
+          if [ -f "$FILE" ]; then
+            {
+              echo "body<<EOF"
+              cat "$FILE"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "body=No curated note found (docs/release-notes/${{ github.ref_name }}.md)" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Update release body
+        uses: softprops/action-gh-release@v3
+        with:
+          body: ${{ steps.notes.outputs.body }}
+          update_release_body: true
