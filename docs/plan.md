@@ -90,8 +90,10 @@
   - 现状：`sessions/messages/tool_calls` 已在 sqlite（`memory/sqlite.rs`）。
   - 定案（grill 2026-08-24）：**仅搜索 messages 文本**，FTS5（`rusqlite` 加 `fts5` feature），返回 N 条 + 所属 session + 时间，**暴露为模型可调工具**。结果上限与隐私边界实现时定（先给硬上限 N=20）。
   - 待实现：建 FTS 虚拟表 + 增量同步 + 工具封装 + 注册。
-- [x] 检查清理基本架构 / agent loop（必要性：待定 / 难度：★★☆~★★★）— 已定案 **不立项**
-  - 无具体动机描述、产出不明；grill 2026-08-24 结论：不立项删除，精力给有明确价值项。若后续遇 loop 卡死/上下文爆炸再单独提。
+- [x] 检查清理基本架构 / agent loop（必要性：**中** / 难度：★★☆~★★★）— 已定案 → **立项为定期例行检查**
+  - 本意（用户澄清 2026-08-25）：**定期体检主干代码**——架构合理性、逻辑反模式、死代码/未接线路径、与 ADR/编码约定（AGENTS.md：无 `#[allow(dead_code)]`、无占位 config、生产路径无 unwrap）的偏差。**非问题驱动**，不是等 loop 卡死/上下文爆炸才查，而是周期性主动检查。
+  - 定案（修正 grill 2026-08-24 的"不立项"结论）：开放发散型例行项，产出为检查记录（发现项 → 直接修 / 单独立项 / 搁置留档），不要求一次清完；主干模块（agent loop / provider / memory / web）逐次过一遍。
+  - 节奏：**不固定，需要时手动触发**（用户定，2026-08-25）；任何时刻想体检直接提即可。
 - [x] provider native 模式默认简化（必要性：**中** / 难度：★★☆）— 已定案 → 并入 #4 的 Compat 探测
   - 现状：`native_tool_calling` 是每个 model 的布尔字段（`config.rs` `ModelConfig`，缺省默认 `true`），两种模式协议本质不同——native 发 `tools` 参数并期待结构化 `tool_calls`；标签降级不发 tools、靠注入 `<tool_call>` 协议指令 + prompt 约束。P4-b 已让 `ToolCallStreamParser` 始终清洗文本流（native 也剥标签），但请求载荷差异仍在，无法完全二合一。
   - 定案（grill 2026-08-24）：**并入 Compat 自动探测**——`compat.rs::detect` 按 provider 预设（ollama/llamacpp/以及 #4 新增的 deepseek/glm/kimi）推断 `native_tool_calling`，字段允许 `None=auto`（缺省跟随探测），用户不再手设；**不做**单次请求内动态降级（复杂度不值）。无实际踩坑，属预防性简化。
