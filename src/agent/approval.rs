@@ -257,7 +257,7 @@ pub fn approval_decision(
     } else {
         ApprovalAction::Denied {
             reason: format!(
-                "操作 `{}` 需要审批，但频道 `{}` 非交互式，无法等待确认，已跳过",
+                "operation `{}` requires approval, but channel `{}` is non-interactive and cannot wait for confirmation; skipped",
                 tool.name(),
                 channel
             ),
@@ -376,4 +376,66 @@ pub fn validate_move_target(path: &str) -> anyhow::Result<PathBuf> {
     // 结果（无前缀）永远 starts_with 不匹配 → moved 目录内的绝对路径操作全部误判为
     // workspace 外、每次都要审批。统一剥掉前缀，保持普通路径形态。
     Ok(crate::path_guard::strip_verbatim_prefix(&canon))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // 平台专属：/move 到某目录后，目录内绝对路径命令必须判定为 workspace 内
+    // （default 档免审批）；且 validate_move_target 不得携带 Windows verbatim
+    // `\\?\` 前缀，否则与命令路径形态不一致，moved 目录内操作每次都要审批。
+    #[cfg(windows)]
+    #[test]
+    fn test_move_trusts_moved_dir_within_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let moved = validate_move_target(dir.path().to_str().unwrap()).expect("move");
+        assert!(
+            !moved.to_string_lossy().contains(r"\\?\"),
+            "moved workspace 不应带 verbatim 前缀，实际: {}",
+            moved.display()
+        );
+
+        // 目录内绝对路径的终端命令应视为 workspace 内 → default 档免审批
+        let cmd = format!("cat {}", dir.path().join("notes.txt").display());
+        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), &moved);
+        assert!(within, "moved 目录内绝对路径命令应判定为 workspace 内");
+    }
+
+    // 用 db 里真实 /move 后的命令在真实 moved 目录上验证：命令都以 `cd "E:/<moved>" &&`
+    // 开头，cd 目标就是 moved 目录本身，应判定 workspace 内（免审批）。
+    // 若此断言成立，运行时那些审批必然来自「越出 moved 目录」的其它路径（如 find E:/s、
+    // 读 home workspace），而非 cd 段。
+    #[cfg(windows)]
+    #[test]
+    fn test_real_moved_dir_cd_cmds_within_scope() {
+        let ws = std::path::PathBuf::from(r"E:\AIAD_Group\20260807-Agent科普");
+        if !ws.exists() {
+            return; // 目录不存在则跳过（非本机时）
+        }
+        for real in [
+            "cd \"E:/AIAD_Group/20260807-Agent科普\" && officecli create \"AI Agent科普_v2.pptx\" 2>&1",
+            "cd \"E:/AIAD_Group/20260807-Agent科普\" && officecli get \"AI Agent科普.pptx\" / --json 2>&1 | head -30",
+            "cd \"E:/AIAD_Group/20260807-Agent科普\" && ls -la",
+        ] {
+            let within =
+                tool_within_workspace("terminal", &json!({ "command": real }), &ws);
+            assert!(within, "moved 目录内的真实命令应免审批:\n{real}");
+        }
+    }
+
+    // 回归：带引号 + 正斜杠的 `cd "ws" && ...`，cd 目标即 workspace 本身，应免审批。
+    #[cfg(windows)]
+    #[test]
+    fn test_repro_quoted_cd_cmd_within_moved_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path();
+        // 等价于 `cd "E:/AIAD_Group/20260807-Agent科普" && ls -la`
+        let quoted = ws.to_string_lossy().replace('\\', "/");
+        let cmd = format!("cd \"{}\" && ls -la", quoted);
+        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), ws);
+        assert!(within, "moved 目录内带引号的 cd 命令应判定为 workspace 内:\n{cmd}");
+    }
 }

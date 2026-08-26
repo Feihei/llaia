@@ -213,6 +213,13 @@ pub fn check_shell_wrappers(command: &str) -> Result<()> {
 /// 提取命令行所有路径 token，校验每个都落在 workspace 内
 pub fn validate_command_paths(command: &str, workspace: &Path) -> Result<()> {
     for token in extract_path_tokens(command) {
+        // 裸 `/` 通常是命令的路径元字符而非文件系统路径（如 officecli 用 `/` 表示
+        // pptx 根节点、`/slide[N]` 等），PathBuf 在 Windows 上会把其解析为盘符根
+        // `X:\`，永远落在移入目录之外 → 反而让本来 workspace 内的命令误判越界、
+        // 每次都弹审批。跳过不作为文件路径校验。
+        if token == "/" {
+            continue;
+        }
         validate_path(workspace, &token, None)?;
     }
     Ok(())
