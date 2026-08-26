@@ -320,6 +320,14 @@ pub fn format_approval_prompt(
     } else {
         "在 workspace 外"
     };
+    // 长命令/长路径截断到一行，避免 QQ/Telegram 等频道把审批提示拆成多条消息。
+    const SUMMARY_CAP: usize = 220;
+    let summary = if summary.chars().count() > SUMMARY_CAP {
+        let cut: String = summary.chars().take(SUMMARY_CAP).collect();
+        format!("{}…（已截断）", cut)
+    } else {
+        summary
+    };
     let target = match tool_name {
         "terminal" => format!("命令：{}", summary),
         _ => format!("目标：{}", summary),
@@ -363,5 +371,9 @@ pub fn validate_move_target(path: &str) -> anyhow::Result<PathBuf> {
     if crate::path_guard::hits_blacklist(&canon.to_string_lossy()) {
         anyhow::bail!("目标目录命中危险路径黑名单，拒绝切换：{}", canon.display());
     }
-    Ok(canon)
+    // Windows canonicalize 返回带 `\\?\` verbatim 前缀；若直接存进 workspace_root，
+    // 后续 validate_path 里 norm_ws（保留前缀）与命令路径 canonicalize 后 strip 的
+    // 结果（无前缀）永远 starts_with 不匹配 → moved 目录内的绝对路径操作全部误判为
+    // workspace 外、每次都要审批。统一剥掉前缀，保持普通路径形态。
+    Ok(crate::path_guard::strip_verbatim_prefix(&canon))
 }

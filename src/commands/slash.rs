@@ -1,4 +1,4 @@
-use crate::agent::approval::{format_move_prompt, validate_move_target};
+use crate::agent::approval::{format_move_prompt, validate_move_target, PendingKind};
 use crate::agent::Agent;
 use crate::agent::AgentRegistry;
 use crate::config::Config;
@@ -62,14 +62,39 @@ pub async fn try_handle(
             Ok(SlashOutcome::Handled(format!("[permission profile set to {}]", p)))
         }
         "/ok" | "/deny" => {
-            if args.is_empty() {
-                return Ok(SlashOutcome::Handled(format!(
-                    "usage: {} <approval-id>",
-                    cmd
-                )));
+            let mut id_arg = args.trim().to_string();
+            if id_arg.is_empty() {
+                // 无 id（裸 /ok 或 /deny）：绝大多数时候交互式频道一次只有一条待审批，
+                // 自动选唯一的 Approval；多条或没有时给明确提示，不猜测。
+                let pendings: Vec<_> = agent
+                    .approval_gate
+                    .list()
+                    .await
+                    .into_iter()
+                    .filter(|p| p.kind == PendingKind::Approval)
+                    .collect();
+                match pendings.len() {
+                    0 => {
+                        return Ok(SlashOutcome::Handled(
+                            "[没有待审批的操作]（有多个时请用 /ok <id> 或 /deny <id> 指定）".into(),
+                        ))
+                    }
+                    1 => id_arg = pendings[0].id.clone(),
+                    n => {
+                        return Ok(SlashOutcome::Handled(format!(
+                            "有 {} 条待审批，请用 /ok <id> 或 /deny <id> 指定：{}",
+                            n,
+                            pendings
+                                .iter()
+                                .map(|p| p.id.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )))
+                    }
+                }
             }
             let approve = cmd == "/ok";
-            match resolve_approval(agent, args, approve).await {
+            match resolve_approval(agent, &id_arg, approve).await {
                 Ok(Some(ApprovalOutcome::Resume { notice, message })) => {
                     Ok(SlashOutcome::Resume { notice, message })
                 }
@@ -593,7 +618,12 @@ async fn resolve_approval(
             Err(e) => format!("[error: {}]", e),
         }
     } else {
-        format!("user denied execution: {}", pending.tool_name)
+        // 拒绝：明确要求模型停止当前任务，而不是仅中性告知"被拒绝"。
+        // 幂等提示词，防止模型换工具/换方案继续同一任务（见 /deny 反馈 bug）。
+        format!(
+            "用户拒绝了 `{}` 的执行。这是明确的停止信号：请立即停止当前任务，不要再执行该操作、替代方案或任何后续步骤。结束本轮并等待用户给出新的指示。",
+            pending.tool_name
+        )
     };
 
     let notice = format!(
