@@ -66,7 +66,7 @@ fn hard_truncate_tail(text: &str, budget: usize) -> String {
     }
     let skip = total - max_chars;
     let tail: String = text.chars().skip(skip).collect();
-    format!("…（已截断早期内容）\n{}", tail)
+    format!("… (earlier content truncated)\n{}", tail)
 }
 
 /// 实际裁剪逻辑（不含缓存）。
@@ -115,7 +115,7 @@ async fn compute_trim(
             }
             // 压缩前缀 + 近期原文（不重复 # MEMORY 标题，外层已有包裹）
             format!(
-                "> 早期记忆已压缩摘要：{}\n>\n{}",
+                "> early memory compressed: {}\n>\n{}",
                 summary.trim(),
                 recent_text
             )
@@ -250,7 +250,7 @@ mod tests {
         assert!(!out.contains("old entry number 1"));
         assert!(out.contains("RECENT IMPORTANT FACT"));
         // 不引入压缩前缀标记（无 provider）
-        assert!(!out.contains("早期记忆已压缩摘要"));
+        assert!(!out.contains("early memory compressed"));
     }
 
     #[tokio::test]
@@ -267,7 +267,7 @@ mod tests {
         let provider: DynProvider = Arc::new(MockSummarizeProvider);
         let out = trim_memory_to_budget(&mem, 50, Some(&provider)).await;
         // 有 provider → 旧段被摘要，压缩前缀存在
-        assert!(out.contains("早期记忆已压缩摘要"));
+        assert!(out.contains("early memory compressed"));
         assert!(out.contains("SUMMARY["));
         // 近期条目原文保留
         assert!(out.contains("RECENT IMPORTANT FACT"));
@@ -280,7 +280,7 @@ mod tests {
         let mem = format!("# MEMORY\n\n{}", "x".repeat(10000));
         let out = trim_memory_to_budget(&mem, 100, None).await;
         // 单条巨长 → 硬截断保留末尾
-        assert!(out.contains("已截断早期内容"));
+        assert!(out.contains("earlier content truncated"));
         assert!(out.len() < mem.len());
         // 末尾字符保留
         assert!(out.ends_with('x'));

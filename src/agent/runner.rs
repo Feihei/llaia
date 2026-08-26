@@ -223,7 +223,7 @@ pub async fn execute_tool_calls(
                         .await;
                 }
                 results.push(ChatMessage::tool(
-                    format!("[等待确认 id={}] 该操作需要你确认后才能执行。", id),
+                    format!("[awaiting confirmation id={}] this operation needs your confirmation.", id),
                     &call.id,
                 ));
                 continue;
@@ -411,7 +411,7 @@ mod tests {
         .unwrap();
         assert!(deferred);
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.as_text().contains("等待确认"));
+        assert!(msgs[0].content.as_text().contains("awaiting confirmation"));
 
         // qq + yolo：直接执行
         let (msgs, deferred) = execute_tool_calls(

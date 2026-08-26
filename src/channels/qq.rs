@@ -647,7 +647,7 @@ impl QqChannel {
         // 斜杠命令：在锁内处理，把输出发回用户（忽略附件）
         if text.trim().starts_with('/') {
             // /stop：中断当前正在执行的 turn（不需要 lock agent，避免被长任务阻塞）
-            if text.trim() == "/stop" {
+            if text.trim().eq_ignore_ascii_case("/stop") {
                 let notify = {
                     let mut stops = self.running_stops.lock().await;
                     stops.remove(user_openid)

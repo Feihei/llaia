@@ -149,7 +149,7 @@ impl Channel for CliChannel {
             };
 
             // /stop 在空闲态无意义
-            if line == "/stop" {
+            if line.trim().eq_ignore_ascii_case("/stop") {
                 println!("[no active generation to stop]");
                 continue;
             }
@@ -527,7 +527,7 @@ pub async fn build_single_agent(
     }
 
     let system_prompt_base = format!(
-        "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}\n\n# WORKSPACE\n{}\n\n工作目录说明：所有工具的相对路径都相对于 WORKSPACE 解析；terminal 命令在 WORKSPACE 下执行。需要写到其它位置时请使用绝对路径。",
+        "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}\n\n# WORKSPACE\n{}\n\nWorkspace note: all relative paths in tools resolve against WORKSPACE; terminal commands run under WORKSPACE. Use absolute paths when you need to write elsewhere.",
         soul, user, memory, workspace.display()
     );
     // Skills（P3-e）：Progressive Disclosure，只注入 active skill 的 name + description + 路径

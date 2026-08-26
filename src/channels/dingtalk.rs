@@ -162,7 +162,7 @@ impl DingtalkChannel {
 
         // 斜杠命令
         if text.starts_with('/') {
-            if text == "/stop" {
+            if text.trim().eq_ignore_ascii_case("/stop") {
                 stop.notify_waiters();
                 let _ = self.send_markdown(&webhook, "[stop signal sent]").await;
                 return Ok(());

@@ -760,7 +760,7 @@ impl Agent {
                     "approaching max_iterations, forcing summary"
                 );
                 self.context.push(ChatMessage::user(
-                    "已达工具调用次数上限，请停止调用工具，基于已获取的信息总结任务并直接回复用户。",
+                    "Tool call limit reached. Stop calling tools, summarize the task based on the information already gathered, and reply to the user directly.",
                 ));
             }
             // 单回合内工具链也可能把上下文撑爆：每次迭代组装请求前复查，
@@ -1085,18 +1085,18 @@ fn map_ask_user_choice(raw: &str, choices: &[String]) -> String {
 fn build_repeated_tool_warning(tool_name: &str, streak: u32) -> String {
     if streak >= 5 {
         format!(
-            "\n\n[系统提示] 重要：你已经连续 {} 次用相同参数调用工具 `{}`。除非每次调用都明确产生了新信息，否则请立即停止重复，更换策略、调整参数，或向用户说明限制。",
-            streak, tool_name
+            "\n\n[SYSTEM NOTE] Important: you have called tool `{}` with identical arguments {} consecutive times. Unless each call clearly produced new information, stop repeating immediately and change strategy, adjust your parameters, or explain the limitation to the user.",
+            tool_name, streak
         )
     } else if streak >= 4 {
         format!(
-            "\n\n[系统提示] 重要：你已经连续 {} 次用相同参数调用工具 `{}`。除非重复明显必要，否则请停止重复同一操作，改用其他工具、调整参数，或总结还缺什么。",
-            streak, tool_name
+            "\n\n[SYSTEM NOTE] Important: you have called tool `{}` with identical arguments {} consecutive times. Unless repetition is clearly necessary, stop repeating the same operation and instead use a different tool, adjust your parameters, or summarize what is still missing.",
+            tool_name, streak
         )
     } else {
         format!(
-            "\n\n[系统提示] 提醒：你已经连续 {} 次用相同参数调用工具 `{}`。请检查是否有其他工具、不同参数或直接总结能更好地推进任务。",
-            streak, tool_name
+            "\n\n[SYSTEM NOTE] Reminder: you have called tool `{}` with identical arguments {} consecutive times. Check whether another tool, different arguments, or summarizing directly would better advance the task.",
+            tool_name, streak
         )
     }
 }

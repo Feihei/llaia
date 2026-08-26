@@ -38,7 +38,9 @@ pub async fn try_handle(
         Some((c, a)) => (c, a.trim()),
         None => (trimmed, ""),
     };
-    match cmd {
+    // 命令单词大小写不敏感（/OK、/Move、/stop 均等效）；参数保持原样。
+    let cmd_lc = cmd.to_ascii_lowercase();
+    match cmd_lc.as_str() {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
             "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
@@ -73,27 +75,18 @@ pub async fn try_handle(
                     .into_iter()
                     .filter(|p| p.kind == PendingKind::Approval)
                     .collect();
-                match pendings.len() {
-                    0 => {
+                match pendings.split_first() {
+                    // 取最旧一条即可（裸 /ok 或 /deny 自动批最旧的，不必带 id）
+                    Some((first, _)) => id_arg = first.id.clone(),
+                    // 无待审批
+                    None => {
                         return Ok(SlashOutcome::Handled(
-                            "[没有待审批的操作]（有多个时请用 /ok <id> 或 /deny <id> 指定）".into(),
+                            "[no pending approval to confirm]".into(),
                         ))
-                    }
-                    1 => id_arg = pendings[0].id.clone(),
-                    n => {
-                        return Ok(SlashOutcome::Handled(format!(
-                            "有 {} 条待审批，请用 /ok <id> 或 /deny <id> 指定：{}",
-                            n,
-                            pendings
-                                .iter()
-                                .map(|p| p.id.clone())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )))
                     }
                 }
             }
-            let approve = cmd == "/ok";
+            let approve = cmd_lc == "/ok";
             match resolve_approval(agent, &id_arg, approve).await {
                 Ok(Some(ApprovalOutcome::Resume { notice, message })) => {
                     Ok(SlashOutcome::Resume { notice, message })
@@ -621,7 +614,7 @@ async fn resolve_approval(
         // 拒绝：明确要求模型停止当前任务，而不是仅中性告知"被拒绝"。
         // 幂等提示词，防止模型换工具/换方案继续同一任务（见 /deny 反馈 bug）。
         format!(
-            "用户拒绝了 `{}` 的执行。这是明确的停止信号：请立即停止当前任务，不要再执行该操作、替代方案或任何后续步骤。结束本轮并等待用户给出新的指示。",
+            "The user denied execution of `{}`. This is an explicit stop signal: immediately stop the current task and do NOT retry this operation, attempt an alternative approach, or take any further steps. End this turn and wait for the user's new instructions.",
             pending.tool_name
         )
     };

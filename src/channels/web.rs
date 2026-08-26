@@ -221,7 +221,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 
                                     // 斜杠命令拦截（P4-d）：与其它频道一致地走审批/续跑流。
                                     // web 用 type:"stop" 中断（见上面 "stop" 分支），不认 /stop，故排除之。
-                                    let slash_outcome = if text.starts_with('/') && text.trim() != "/stop" {
+                                    let slash_outcome = if text.starts_with('/') && !text.trim().eq_ignore_ascii_case("/stop") {
                                         let mut a = agent.lock().await;
                                         Some(try_handle(&text, &mut a, Some(state.registry.clone())).await)
                                     } else {
