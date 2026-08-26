@@ -156,13 +156,18 @@ pub fn validate_path(
 }
 
 /// 判断 token 是否"看起来像路径"（用于 terminal 命令行路径提取）
+///
+/// Windows 上不能把「含单个反斜杠」当作路径判据——字面量 `\n`、`\t` 等转义片段
+/// 会因此被误判为路径并触发越界拒绝（#C：officecli 多行文本 `\n` 失败即此因）。
+/// 真实路径至少满足：带盘符 `X:`、前导 `\`(UNC)、前导 `/`/`~`/`./`/`../`、或含 `/`。
 fn looks_like_path(token: &str) -> bool {
     token.starts_with('/')
         || token.starts_with('~')
         || token.starts_with("./")
         || token.starts_with("../")
+        || token.starts_with('\\')
         || (token.len() >= 2 && token.as_bytes()[1] == b':') // Windows 盘符 C:
-        || token.contains(std::path::MAIN_SEPARATOR)
+        || token.contains('/')
 }
 
 /// 从命令行字符串提取所有路径 token
@@ -330,6 +335,26 @@ mod tests {
         assert!(tokens.contains(&"/home/me/file.txt".to_string()));
         // hello.txt 不含分隔符，不算路径 token
         assert!(!tokens.contains(&"hello.txt".to_string()));
+    }
+
+    /// 回归 #C：字面量 `\n`（含单反斜杠的转义片段）不得被判为路径，
+    /// 否则 terminal 里多行文本/JSON heredoc 会被误拒（officecli 失败根因）。
+    #[test]
+    fn test_literal_backslash_n_not_a_path() {
+        // 注意：这里写真实的反斜杠+n（字面量转义），非换行符
+        let tokens = extract_path_tokens("officecli add --text \"第一行\\n第二行\"");
+        assert!(
+            !tokens.iter().any(|t| t.contains("\\n")),
+            "字面量 \\n 不应被当作路径: {tokens:?}"
+        );
+    }
+
+    /// Windows 盘符与 UNC 仍然识别为路径
+    #[test]
+    fn test_windows_drive_and_unc_paths_still_detected() {
+        let tokens = extract_path_tokens(r"copy C:\Users\me\file.txt \\srv\share\x");
+        assert!(tokens.contains(&r"C:\Users\me\file.txt".to_string()));
+        assert!(tokens.contains(&r"\\srv\share\x".to_string()));
     }
 
     #[test]
