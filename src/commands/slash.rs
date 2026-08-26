@@ -70,9 +70,10 @@ pub async fn try_handle(
             }
             let approve = cmd == "/ok";
             match resolve_approval(agent, args, approve).await {
-                Ok(Some((notice, message))) => {
+                Ok(Some(ApprovalOutcome::Resume { notice, message })) => {
                     Ok(SlashOutcome::Resume { notice, message })
                 }
+                Ok(Some(ApprovalOutcome::Done { notice })) => Ok(SlashOutcome::Handled(notice)),
                 Ok(None) => Ok(SlashOutcome::Handled(format!(
                     "[{}] no pending approval {}",
                     cmd, args
@@ -527,18 +528,28 @@ tools: {}
     }
 }
 
+/// 审批解析结果：区分「需要 continuation turn」与「仅展示即可」。
+enum ApprovalOutcome {
+    /// 展示 notice，并把 message 作为用户消息喂给模型续跑（如普通工具执行结果）。
+    Resume { notice: String, message: String },
+    /// 仅展示 notice，不触发 continuation（如 /move 切换目录——纯环境操作，
+    /// 模型无需参与，避免其基于旧上下文在新目录里自行开始干活）。
+    Done { notice: String },
+}
+
 /// 解析一条待确认审批：从门控取出 pending，按批准/拒绝决定执行与否。
 ///
 /// - 普通工具：批准则 `execute_with_events` 真正执行，拒绝则返回拒绝提示。
 /// - `__move_workspace`：批准则把 agent 工作目录切到目标，拒绝则不动。
 ///
-/// 返回 `Some((notice, message))` 时，调用方应启动一次 continuation turn，
+/// 返回 `Some(Resume)` 时，调用方应启动一次 continuation turn，
 /// 把 `message` 作为用户消息喂给模型，让其基于工具结果继续。
+/// `__move_workspace` 返回 `Done`（仅展示切换结果，不续跑）。
 async fn resolve_approval(
     agent: &mut Agent,
     id: &str,
     approve: bool,
-) -> Result<Option<(String, String)>> {
+) -> Result<Option<ApprovalOutcome>> {
     let pending = agent.approval_gate.take(id).await;
     let pending = match pending {
         Some(p) => p,
@@ -546,7 +557,7 @@ async fn resolve_approval(
     };
 
     if pending.tool_name == "__move_workspace" {
-        if approve {
+        let notice = if approve {
             let target = validate_move_target(
                 pending
                     .args
@@ -555,21 +566,21 @@ async fn resolve_approval(
                     .unwrap_or(""),
             )?;
             agent.set_workspace(target.clone()).await;
-            let notice = format!("[switched working directory to {}]", target.display());
-            return Ok(Some((notice.clone(), notice)));
+            format!("[switched working directory to {}]", target.display())
         } else {
-            let notice = "[denied] working directory unchanged".to_string();
-            return Ok(Some((notice.clone(), notice)));
-        }
+            "[denied] working directory unchanged".to_string()
+        };
+        // 只回显切换结果，不把消息喂给模型：/move 是用户主动的环境操作，
+        // 模型无需基于它续跑（否则会带着旧上下文在新目录里自行开始干活）。
+        return Ok(Some(ApprovalOutcome::Done { notice }));
     }
 
     let tool = match agent.tools.get(&pending.tool_name) {
         Some(t) => t.clone(),
         None => {
-            return Ok(Some((
-                format!("[tool not found: {}]", pending.tool_name),
-                String::new(),
-            )))
+            return Ok(Some(ApprovalOutcome::Done {
+                notice: format!("[tool not found: {}]", pending.tool_name),
+            }))
         }
     };
 
@@ -590,7 +601,7 @@ async fn resolve_approval(
         if approve { "approved" } else { "denied" },
         pending.tool_name
     );
-    Ok(Some((notice, result)))
+    Ok(Some(ApprovalOutcome::Resume { notice, message: result }))
 }
 
 /// 解析一条待回答问题：取出 pending question，把 text 作为用户回答，
