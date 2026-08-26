@@ -200,8 +200,10 @@ impl Context {
         let mut out: Vec<ChatMessage> = Vec::with_capacity(self.history.len());
         for mut m in self.history.drain(..) {
             let text = m.content.as_text();
-            // 丢弃空消息（工具消息除外，保留与 assistant 的 tool_call 配对）
-            if text.trim().is_empty() && m.role != Role::Tool {
+            // 丢弃空消息。两个例外：tool 结果（需与 tool_call_id 配对）与带
+            // tool_calls 的 assistant 消息——原生工具调用常见「零文本 + tool_calls」
+            // 形态，丢掉会产生孤儿 tool 消息，违反 OpenAI 消息结构（严格端点 400）。
+            if text.trim().is_empty() && m.role != Role::Tool && m.tool_calls.is_none() {
                 continue;
             }
             // 多模态图片降级为文本占位（省 token，图片信息已由 vision 模型描述进入上下文）
@@ -402,8 +404,9 @@ mod tests {
 #[cfg(test)]
 mod compact_tests {
     use super::*;
-    use crate::provider::{ChatRequest, ChatResponse, Provider, StreamEvent};
+    use crate::provider::{ChatRequest, ChatResponse, Provider, StreamEvent, ToolCall};
     use async_trait::async_trait;
+    use serde_json::json;
 
     struct MockProvider;
     #[async_trait]
@@ -496,6 +499,31 @@ mod compact_tests {
             .expect("tool message kept");
         assert!(tool_msg.content.as_text().chars().count() <= TOOL_TRIM_CAP + 60);
         assert!(tool_msg.content.as_text().contains("已截断"));
+    }
+
+    /// 回归：原生工具调用常见「零文本 + tool_calls」的 assistant 消息，
+    /// cheap_normalize 不得丢弃——否则 tool 消息成孤儿，违反 OpenAI 消息结构。
+    #[tokio::test]
+    async fn test_compact_keeps_empty_assistant_with_tool_calls() {
+        let mut ctx = Context::new("SOUL".into());
+        ctx.push(ChatMessage::user("do something"));
+        ctx.push(ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "file_read".into(),
+                arguments: json!({"path": "/tmp"}),
+            }],
+        ));
+        ctx.push(ChatMessage::tool("result", "c1"));
+        // budget 充裕 → 不进 LLM，但 cheap_normalize 仍跑
+        ctx.compact(&MockProvider, 3, 10_000).await.unwrap();
+        let assistant = ctx
+            .history
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .expect("empty assistant(tool_calls) must survive cheap_normalize");
+        assert!(assistant.tool_calls.is_some());
     }
 
     /// 廉价去重：连续重复用户消息只留一条。

@@ -90,8 +90,6 @@ struct LarkEvent {
 #[derive(Debug, Deserialize)]
 struct LarkEventHeader {
     event_type: String,
-    #[allow(dead_code)]
-    event_id: String,
 }
 
 #[derive(Debug, Deserialize)]

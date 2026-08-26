@@ -826,6 +826,17 @@ impl Agent {
                     StreamEvent::FinishReason(_) => {}
                     StreamEvent::Done => break,
                     StreamEvent::Error(msg) => {
+                        // 保存错误前已生成的部分输出（与 tx-closed 中止路径同构）：
+                        // 用户已在频道看到这些文本，不落 context/sqlite 会让下一轮
+                        // 模型不知道自己说过什么。
+                        if !iter_text.is_empty() {
+                            self.session_store.append_message(
+                                self.session_id,
+                                &Role::Assistant,
+                                &iter_text,
+                            )?;
+                            self.context.push(ChatMessage::assistant(&iter_text));
+                        }
                         let _ = event_tx
                             .send(TurnEvent::Error {
                                 message: msg.clone(),

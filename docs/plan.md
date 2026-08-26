@@ -111,6 +111,30 @@
     - **B（性能：#11 大头）**：`FallbackProvider::detect_context_size`（`fallback.rs:82-91`）逐探测 fallback 链上每个 provider；main 带 2 模型链 → main 探 2 次 + coder 1 次 = 3 次 GET /props@~200ms ≈ 600ms，占启动 2/3。同一后端多模型探测必同值，冗余。→ 修：同后端去重 / 只探 `main()`。
     - **C（次要）**：main与子 agent 同后端各自探测同值 → 可缓存。
 
+### 🧩 主干代码体检记录（2026-08-26，例行第 1 轮）
+
+范围：agent loop（mod/sink/context/runner）+ provider 层（openai_compat/fallback/compat）+ memory 层（sqlite/trim）+ 约定扫描。整体评价：主干质量高（锁设计、KV cache 友好注入、compat 零回归约束均有注释与回归测试）。
+
+**直接修（本轮已交付）**：
+
+- [x] `cheap_normalize` 丢弃空文本 assistant(tool_calls) 消息 → 孤儿 tool 消息违反 OpenAI 协议（`context.rs`；原生工具调用「零文本 + tool_calls」是常态形态，压缩后严格端点直接 400。修：丢弃条件加 `m.tool_calls.is_none()` + 回归测试）
+- [x] `StreamEvent::Error` 路径丢失错误前已生成的部分输出（`agent/mod.rs`；用户看到半截回复但模型下一轮不知道自己说过什么。修：镜像 tx-closed 中止路径保存 `iter_text`）
+- [x] 4 处 `#[allow(dead_code)]` 清理：`sqlite.rs::all_messages`（零调用者）、`feishu.rs::event_id`、`tavily.rs` 两个 DTO 字段
+
+**待修（下轮候选）**：
+
+- [ ] SSE 解析只认 `\n\n` 事件分隔符（`openai_compat.rs`）：CRLF（`\r\n\r\n`）服务端/反代事件永不分割 → 整回复静默丢失。触碰流解析核心，单独修 + mockito 双分隔符测试；anthropic/gemini 流解析一并检查
+- [ ] `workspace/tmp/` 工具图片落盘后无任何清理 → 磁盘无界增长（`agent/mod.rs::persist_tool_image`）。需小设计：启动时清理 N 天前文件
+
+**搁置留档（影响小，暂不动）**：
+
+- 生产路径 `lock().unwrap()`：`slash.rs:476/504`（background_tasks）与 `sqlite.rs` 全文件（conn，约 20 处）。锁内均同步调用、无 await，正确性无问题，仅 poisoning-panic 与编码约定冲突。机械替换 `unwrap_or_else(|e| e.into_inner())` 可解，diff 大
+- `TRIM_CACHE` 无上限增长（`memory/trim.rs`）：单用户 MEMORY 变更频率低，实际影响极小
+- 图片逐张串行 vision 描述（`agent/mod.rs::maybe_describe_images`）：可 `join_all`，但通常单图
+- tools schema 每次请求重建序列化（`openai_compat.rs`）：~20 工具 × 每迭代，微小
+- 常量正则 `unwrap()`（`secrets.rs:52` / `config.rs:957` / `approval.rs:163`）：逻辑上不可 panic，按约定补注释即可
+- 云 provider 启动也打 `/props`、`/api/tags` 探测：已由上方 #4（provider 针对性优化）覆盖，不重复立项
+
 ---
 
 ## 工程约定

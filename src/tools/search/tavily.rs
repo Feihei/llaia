@@ -79,15 +79,10 @@ struct TavilyResult {
 #[derive(Deserialize)]
 struct TavilyExtractResponse {
     results: Vec<TavilyExtractResult>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    failed_results: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct TavilyExtractResult {
-    #[allow(dead_code)]
-    url: String,
     raw_content: String,
 }
 

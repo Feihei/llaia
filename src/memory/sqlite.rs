@@ -264,11 +264,6 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn all_messages(&self, session_id: i64) -> Result<Vec<MessageRow>> {
-        self.recent_messages(session_id, i64::MAX)
-    }
-
     // ---- kv 存储（做梦游标等小元数据） ----
 
     /// 读取 kv 值；key 不存在返回 None。
