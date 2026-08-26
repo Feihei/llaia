@@ -135,6 +135,26 @@
 - 常量正则 `unwrap()`（`secrets.rs:52` / `config.rs:957` / `approval.rs:163`）：逻辑上不可 panic，按约定补注释即可
 - 云 provider 启动也打 `/props`、`/api/tags` 探测：已由上方 #4（provider 针对性优化）覆盖，不重复立项
 
+### ⭐ 新增发现（2026-08-26·2）
+
+**#A 新增 provider 填 api key 后报「environment variable referenced but not set」（已修复）**
+
+- 现象：WebUI 添加新 provider（如 modelscope）填 key 保存，日志立刻 WARN `var="LLAIA_PROVIDER_MODELSCOPE_API_KEY" ... replacing with empty string`，且该 provider 内存态 key 被压成空串、热加载失效（重启才恢复）。
+- 根因：**不是 .env 没写**（.env / config.toml 均已正确落盘并引用）。真因在 `web/mod.rs::put_config` 时序：`apply_refs` 把 `merged` 里新 secret 替换成 `${VAR}` **之后**才 `merged.clone()` 出 `runtime_config`，随后 `expand_config_secrets` 对刚写入磁盘、**尚未进入当前进程 env** 的变量做 `std::env::var` → 命中「未设置」降级（运行态从不重载 .env，仅 main.rs 启动加载一次）。
+- 修复：`runtime_config` **先于 `apply_refs` 克隆**（保留明文），磁盘仍写 `${VAR}` 引用；`expand_config_secrets` 对非引用明文透传、不查询 env → 无警告、key 立即生效。
+- 说明：这是布局级最小改动（移动一行克隆 + 注释），符合「成功才应用引用 / 失败保留明文」既有降级语义。
+
+**#B /move 后的目录信任模型（分析·待决策，未实现）**
+
+- 现状：`approval_decision` 的 `workspace` 参数取自 `workspace_root`（`mod.rs:927`），/move 后**目录内**的 file/terminal 操作在 default 档本就自动放行（`within→Approved`）。因此「每次都批准」仅出现在**逃出被移动目录**的操作：绝对路径指向别处、`..` 上退、terminal 触碰 moved 目录之外（含 agent 自家 home workspace 的 goal.md/MEMORY 等记账文件）→ 每次 /ok。
+- 用户诉求：一次 /move 批准后应信任该目录，且 move 审批信息里提醒信任范围。
+- 已落最小改动：`format_move_prompt` 提示补充「切换后该目录内的文件读写/终端命令默认放行，仅目录外的路径仍需审批」（`approval.rs`）。
+- 待决设计（需选型，暂不实现）：
+  - **选 1（推荐）**：会话级持久「受信目录」——把 /move 目标 canonical 目录加入受信集合（随 workspace_root 持久化），`tool_within_workspace` 以「落在任一受信目录内」判定，令 moved 目录内操作自动放行；逃出集合仍审批。负担低、语义清晰。
+  - **选 2**：恢复 home workspace 也应视为受信（等价于选 1 默认含 home）。
+  - **选 3（谨慎）**：仅保留现有「workspace_root 内放行」+ 提示澄清，不引入受信集合（省改动，但 home 记账文件反复审批的摩擦仍在）。
+  - 安全权衡：/move 到过宽的目录（如 `C:\`）会把几乎全部文件操作划为「内」，需与黑名单校验配合评估；受信目录需 canonicalize + 黑名单复核。
+
 ---
 
 ## 工程约定

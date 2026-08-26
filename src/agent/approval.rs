@@ -338,7 +338,7 @@ pub fn format_approval_prompt(
 /// 格式化 /move 审批提示
 pub fn format_move_prompt(new_workspace: &Path, id: &str) -> String {
     format!(
-        "\n🔀 需要确认切换工作目录（workspace）到：\n   {}\n   ⚠️ 切换后文件/终端工具将只在该目录内操作，workspace 外的原有文件将不可见。\n   回复 `/ok {}` 确认切换，或 `/deny {}` 取消。\n",
+        "\n🔀 需要确认切换工作目录（workspace）到：\n   {}\n   ⚠️ 切换后文件/终端工具将只在该目录内操作，目录内的文件读写/终端命令默认放行、无需逐次确认；仅触及该目录之外的路径仍需审批。\n   回复 `/ok {}` 确认切换，或 `/deny {}` 取消。\n",
         new_workspace.display(),
         id,
         id

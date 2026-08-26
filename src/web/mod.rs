@@ -408,6 +408,11 @@ pub async fn put_config(
     };
     let old = state.config.read().await.clone();
     let mut merged = merge_masked(&old, &new_config);
+    // 内存态副本先于 apply_refs 克隆：新落盘 secret 以明文留在内存（磁盘仍写 ${VAR}
+    // 引用）。若等 apply_refs 后才克隆，expand_config_secrets 会对刚写入磁盘、尚未进
+    // 入当前进程 env 的变量做 std::env::var 查询 → 命中「未设置」降级：报该警告并把
+    // 新 provider 的 key 压成空串，热加载失效直到重启。此副本明文透传，不触发查询。
+    let mut runtime_config = merged.clone();
 
     // P5 S1 敏感信息 .env 自动化：明文敏感字段先写入 .env（成功才替换为 ${VAR} 引用，
     // 失败保留明文 + warn 降级，保证配置保存不因安全改造而失败）。
@@ -462,8 +467,8 @@ pub async fn put_config(
 
     // 先尝试构建新 provider：失败则不写盘、不更新内存（回滚到旧 config）。
     // 注意：写盘保留 ${VAR} 引用，但内存态须展开为明文（build_provider 不认 ${VAR}；
-    // 下次启动 Config::load → expand_paths 再展开，行为一致）。
-    let mut runtime_config = merged.clone();
+    // 下次启动 Config::load → expand_paths 再展开，行为一致）。runtime_config 已在
+    // apply_refs 之前克隆，新落盘 secret 保持明文，这里只展开旧的 ${VAR} 引用。
     crate::config::secrets::expand_config_secrets(&mut runtime_config);
     if let Err(e) = build_provider_from_config(&runtime_config) {
         return json_err(
