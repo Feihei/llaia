@@ -321,7 +321,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// SKILL.md 特殊放行：workspace 外的 skills 目录内 SKILL.md 可读，其他文件仍拒绝
+    /// 特殊放行：workspace 外的 skills 目录内任意文件可读（SKILL.md、脚本、资产），
+    /// 但路径穿越到 skills 目录外仍拒绝。
     #[tokio::test]
     async fn test_file_read_skill_md_special_allow() {
         let root = tempdir().unwrap();
@@ -351,14 +352,22 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("skill body"));
-        // 同目录非 SKILL.md 文件仍拒绝
+        // 同目录非 SKILL.md 配套文件（脚本/配置/资产）也可读
         let result = tool
             .execute(
                 &json!({"path": skill_dir.join("secret.txt").to_str().unwrap()}),
                 "cli",
             )
             .await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("secret"));
+        // 路径穿越到 skills 目录外仍拒绝
+        let escape = "demo/../../secret.txt";
+        let result = tool.execute(&json!({"path": escape}), "cli").await;
+        assert!(
+            result.is_err(),
+            "path escape out of skills dir must be rejected"
+        );
         // 未配 skills_dir 时 SKILL.md 也拒绝
         let tool_no_skills = FileRead::new(
             Arc::new(RwLock::new(root.path().join("workspace"))),

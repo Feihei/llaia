@@ -210,8 +210,17 @@ pub fn check_shell_wrappers(command: &str) -> Result<()> {
 
 /// 校验 terminal 命令的路径安全性（第二层 + 第三层）
 ///
-/// 提取命令行所有路径 token，校验每个都落在 workspace 内
-pub fn validate_command_paths(command: &str, workspace: &Path) -> Result<()> {
+/// 提取命令行所有路径 token，校验每个都落在 workspace 或 `extra_readable` 内。
+///
+/// `extra_readable`：额外允许引用（读）的目录（如 skills 目录，见 ADR-0028）。
+/// 注：terminal 命令无法从 token 可靠区分读写（`cd skills && > file` 技巧），
+/// 因此该放行对读与写一视同仁。写防线由 file_write / file_edit 保持对 skills
+/// 目录拒绝来兜底；terminal 内写技能在无内核沙箱下无法彻底封死（已知边界）。
+pub fn validate_command_paths(
+    command: &str,
+    workspace: &Path,
+    extra_readable: Option<&Path>,
+) -> Result<()> {
     for token in extract_path_tokens(command) {
         // 裸 `/` 通常是命令的路径元字符而非文件系统路径（如 officecli 用 `/` 表示
         // pptx 根节点、`/slide[N]` 等），PathBuf 在 Windows 上会把其解析为盘符根
@@ -220,7 +229,7 @@ pub fn validate_command_paths(command: &str, workspace: &Path) -> Result<()> {
         if token == "/" {
             continue;
         }
-        validate_path(workspace, &token, None)?;
+        validate_path(workspace, &token, extra_readable)?;
     }
     Ok(())
 }
@@ -380,13 +389,13 @@ mod tests {
         // 命令引用 workspace 内文件
         let abs = ws.path().join("file.txt");
         let cmd = format!("cat {}", abs.display());
-        assert!(validate_command_paths(&cmd, ws.path()).is_ok());
+        assert!(validate_command_paths(&cmd, ws.path(), None).is_ok());
     }
 
     #[test]
     fn test_validate_command_paths_blocked() {
         let ws = tempdir().unwrap();
         // 命令引用黑名单路径
-        assert!(validate_command_paths("cat /etc/passwd", ws.path()).is_err());
+        assert!(validate_command_paths("cat /etc/passwd", ws.path(), None).is_err());
     }
 }

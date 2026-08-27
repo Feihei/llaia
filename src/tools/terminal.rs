@@ -14,6 +14,9 @@ pub struct Terminal {
     pub command_policy: String,
     pub command_whitelist: Vec<String>,
     pub workspace: Arc<RwLock<PathBuf>>,
+    /// skills 目录（<config_dir>/skills）：terminal 读/执行 skill 目录内脚本、资产时放行。
+    /// None 时不对 skills 目录做额外放行（与旧行为一致）。
+    skills_dir: Option<PathBuf>,
     /// Windows 上探测到的 Git Bash 路径；None 表示未找到，执行回退到 `cmd /C`。
     #[cfg(windows)]
     bash_path: Option<PathBuf>,
@@ -24,11 +27,13 @@ impl Terminal {
         command_policy: String,
         command_whitelist: Vec<String>,
         workspace: Arc<RwLock<PathBuf>>,
+        skills_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             command_policy,
             command_whitelist,
             workspace,
+            skills_dir,
             #[cfg(windows)]
             bash_path: detect_bash(),
         }
@@ -60,8 +65,8 @@ impl Terminal {
         // 第一层：shell 包装拒绝
         path_guard::check_shell_wrappers(command)?;
 
-        // 第二层 + 第三层：路径白名单 + 黑名单兜底
-        path_guard::validate_command_paths(command, workspace)?;
+        // 第二层 + 第三层：路径白名单 + 黑名单兜底（skills 目录作只读放行）
+        path_guard::validate_command_paths(command, workspace, self.skills_dir.as_deref())?;
 
         Ok(())
     }
@@ -230,7 +235,7 @@ mod tests {
     }
 
     fn term(policy: &str, ws: PathBuf) -> Terminal {
-        Terminal::new(policy.into(), vec![], Arc::new(RwLock::new(ws)))
+        Terminal::new(policy.into(), vec![], Arc::new(RwLock::new(ws)), None)
     }
 
     #[test]
@@ -249,6 +254,7 @@ mod tests {
             "whitelist".into(),
             vec!["ls".into(), "cat".into()],
             Arc::new(RwLock::new(ws)),
+            None,
         );
         assert!(t.check_command_policy("ls -la").is_ok());
         assert!(t.check_command_policy("rm foo").is_err());
@@ -269,6 +275,36 @@ mod tests {
         let t = term("none", ws.clone());
         // /etc/passwd 命中黑名单
         assert!(t.check_path_safety("cat /etc/passwd", &ws).is_err());
+    }
+
+    #[test]
+    fn test_skills_dir_allowed_when_configured() {
+        let (_g, ws) = make_workspace();
+        // 用真实存在的临时目录作 skills_dir（Windows 上 /fake 会被解析成盘符根，
+        // 无法走 canonicalize 分支；真实目录才体现"目录内引用放行"）
+        let skills_root = TempDir::new().unwrap();
+        std::fs::create_dir_all(skills_root.path().join("comfy_img_gen")).unwrap();
+        let skill_script = skills_root
+            .path()
+            .join("comfy_img_gen")
+            .join("generate_image.py")
+            .to_string_lossy()
+            .into_owned();
+        // 配了 skills_dir 时，skill 目录内脚本/资产引用放行
+        let t = Terminal::new(
+            "none".into(),
+            vec![],
+            Arc::new(RwLock::new(ws.clone())),
+            Some(skills_root.path().to_path_buf()),
+        );
+        assert!(t
+            .check_path_safety(&format!("python {}", skill_script), &ws)
+            .is_ok());
+        // 未配 skills_dir 时同一引用仍越界拒绝（保持旧行为）
+        let t_no_skills = term("none", ws.clone());
+        assert!(t_no_skills
+            .check_path_safety(&format!("python {}", skill_script), &ws)
+            .is_err());
     }
 
     #[tokio::test]

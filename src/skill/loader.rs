@@ -294,11 +294,17 @@ pub fn load_skills(skills_dir: &Path) -> Vec<SkillManifest> {
 
 // ───────────────────────── file_read 特殊放行 ─────────────────────────
 
-/// 尝试把用户传入的路径解析为 skills 目录内的 SKILL.md（file_read 特殊放行规则）。
+/// 尝试把用户传入的路径解析为 skills 目录内的可读文件（file_read 特殊放行规则）。
 /// 命中返回可读路径；未命中返回 None（调用方继续走 workspace 校验）。
 ///
-/// 规则（ADR-0015）：`~` 展开 + 相对路径按 workspace 解析 + 词法规范化后，
-/// canonicalize 落在 skills_dir 内且文件名恰为 `SKILL.md` → 放行。
+/// 规则：`~` 展开 + 相对路径按 workspace 解析 + 词法规范化后，
+/// canonicalize 落在 skills_dir 内 → 放行。
+///
+/// 不限于 `SKILL.md`：工具型 skill 常带配套脚本（`.py`）、配置（`.json`）与
+/// 资产（如 PPT 模板），agent 需能直接读取它们（配合 `terminal` 运行 / `send_media`
+/// 发送）。安全性由 canonicalize + `starts_with(skills_dir)` 保证：仅放行
+/// `skills/<name>/` 下的真实文件，skills 的兄弟文件（`skills.json` 等）与目录外路径
+/// 仍落回 `path_guard::validate_path` 走正常 workspace 校验。
 pub fn resolve_skill_path(skills_dir: &Path, workspace: &Path, raw: &str) -> Option<PathBuf> {
     let expanded = shellexpand::tilde(raw).into_owned();
     let p = PathBuf::from(&expanded);
@@ -308,7 +314,7 @@ pub fn resolve_skill_path(skills_dir: &Path, workspace: &Path, raw: &str) -> Opt
         workspace.join(&expanded)
     };
     let normalized = crate::path_guard::normalize_lexical(&joined);
-    // 必须真实存在才能读；canonicalize 同时消解符号链接
+    // 必须真实存在才能读；canonicalize 同时消解符号链接与目录穿越
     let canon = match std::fs::canonicalize(&normalized) {
         Ok(c) => crate::path_guard::strip_verbatim_prefix(&c),
         Err(_) => return None,
@@ -318,9 +324,6 @@ pub fn resolve_skill_path(skills_dir: &Path, workspace: &Path, raw: &str) -> Opt
         Err(_) => return None,
     };
     if !canon.starts_with(&canon_skills) {
-        return None;
-    }
-    if canon.file_name().map(|n| n.to_string_lossy()) != Some("SKILL.md".into()) {
         return None;
     }
     Some(normalized)
@@ -764,10 +767,10 @@ mod tests {
         let abs = skills_dir.join("demo").join("SKILL.md");
         assert!(resolve_skill_path(&skills_dir, &workspace, abs.to_str().unwrap()).is_some());
 
-        // 非 SKILL.md 文件拒绝
+        // skill 目录内任意配套文件（脚本/配置/资产）放行
         let other = skills_dir.join("demo").join("notes.txt");
         std::fs::write(&other, "x").unwrap();
-        assert!(resolve_skill_path(&skills_dir, &workspace, other.to_str().unwrap()).is_none());
+        assert!(resolve_skill_path(&skills_dir, &workspace, other.to_str().unwrap()).is_some());
 
         // skills 目录外的文件拒绝
         let outside = tmp.path().join("config.toml");

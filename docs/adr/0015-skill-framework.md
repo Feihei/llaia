@@ -195,13 +195,14 @@ P3-e 随附 3 个示例 skill，放在 `~/.llaia/skills/` 下：
 
 ### 路径校验特殊规则
 
-SKILL.md 路径在 `~/.llaia/skills/<name>/SKILL.md`，属于 `~/.llaia/` 根目录（agent workspace 之外）。file_read 工具需特殊放行：
-- file_read 的 path 参数 canonicalize 后 `starts_with(~/.llaia/skills/)` 且文件名以 `SKILL.md` 结尾 → 放行
+skill 目录 `~/.llaia/skills/<name>/` 相对 agent workspace 在 `~/.llaia/` 根目录（agent workspace 之外）。file_read 工具需特殊放行：
+- file_read 的 path 参数 canonicalize 后 `starts_with(~/.llaia/skills/)` → 放行，**不限于 `SKILL.md`**：工具型 skill 常带配套脚本（`.py`）、配置（`.json`）与资产（如 PPT 模板），agent 需能直接读取后经 terminal 运行（见 ADR-0028）
 - 其他 `~/.llaia/` 根目录路径 → 拒绝（保护 config.toml / mcp.toml / cron.toml / skills.json）
+- file_write / file_edit 不放行 skill 目录：skill 增改走专用 `skill_create` / `skill_edit` 工具（frontmatter 校验 + 路径安全校验，见 ADR-0027）；skill 目录内的任意文件均通过 canonicalize 落在 `skills/` 内校验，穿越出目录的路径仍拒绝
 
 ## 与 P3-a 的依赖
 
-- SKILL.md 的 file_read 走特殊放行规则（见上"路径校验特殊规则"）
+- skill 目录的 file_read 走特殊放行规则（见上"路径校验特殊规则"）
 - skill 的 `tools` 字段推荐的工具调用受 agent workspace 边界约束
 - skill 不引入额外 confirm_mode 规则
 

@@ -203,7 +203,9 @@ pub fn tool_within_workspace(tool_name: &str, args: &Value, workspace: &Path) ->
         }
         "terminal" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            crate::path_guard::validate_command_paths(cmd, workspace).is_ok()
+            // 不把 skills_dir 作为 extra_readable 传进来：terminal 引用 skill 目录
+            // 脚本仍判为 workspace 外 → 走审批（执行 skill 代码需人肉确认，符合 ADR-0028）。
+            crate::path_guard::validate_command_paths(cmd, workspace, None).is_ok()
         }
         // MCP 工具一律视为 workspace 外（ADR-0020：安全默认，需审批）
         name if name.starts_with("mcp_") => false,
