@@ -37,12 +37,57 @@ fn ensure_within_skills_dir(skills_dir: &Path, name: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// patch 的两种形态：追加 / 单次查找替换。
+enum Patch {
+    Append(String),
+    Replace { find: String, replace: String },
+}
+
+fn patch_from_object(map: &serde_json::Map<String, Value>) -> Result<Patch> {
+    let find = map
+        .get("find")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("skill_edit: patch.find required (non-empty string)"))?;
+    let replace = map.get("replace").and_then(|v| v.as_str()).unwrap_or("");
+    Ok(Patch::Replace {
+        find: find.to_string(),
+        replace: replace.to_string(),
+    })
+}
+
 /// 应用 patch：
 /// - 字符串 → 追加到 body（保留 frontmatter）。
 /// - 对象 `{ find, replace }` → 在全文做单次精确替换（找不到则报错）。
+///
+/// 兼容层：经 OpenAI 兼容端点的本地模型（ornith 等）会把对象参数二次序列化
+/// 成字符串发出。字符串若整体恰好解析为含非空 `find` 的 JSON 对象，按对象
+/// patch 执行替换，而不是把 JSON 文本原文追加进文件。
 fn apply_patch(existing: &str, patch: &Value) -> Result<String> {
-    match patch {
-        Value::String(s) if !s.trim().is_empty() => {
+    let decoded = match patch {
+        Value::Object(map) => patch_from_object(map)?,
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                anyhow::bail!(
+                    "skill_edit: `patch` must be a non-empty string (append to body) or an object {{\"find\", \"replace\"}}"
+                );
+            }
+            // 字符串若整体是二次序列化的 {find,replace} 对象，按对象 patch 处理；
+            // 对象不合法（如缺 find）或根本不是 JSON，则维持追加语义原文入文。
+            match serde_json::from_str::<Value>(t) {
+                Ok(Value::Object(map)) => {
+                    patch_from_object(&map).unwrap_or(Patch::Append(t.to_string()))
+                }
+                _ => Patch::Append(t.to_string()),
+            }
+        }
+        _ => anyhow::bail!(
+            "skill_edit: `patch` must be a string (append to body) or an object {{\"find\", \"replace\"}}"
+        ),
+    };
+    match decoded {
+        Patch::Append(s) => {
             let (yaml, body) = split_frontmatter(existing).unwrap_or(("", existing));
             let mut out = String::new();
             if !yaml.is_empty() {
@@ -61,21 +106,12 @@ fn apply_patch(existing: &str, patch: &Value) -> Result<String> {
             out.push('\n');
             Ok(out)
         }
-        Value::Object(map) => {
-            let find = map
-                .get("find")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("skill_edit: patch.find required (non-empty string)"))?;
-            let replace = map.get("replace").and_then(|v| v.as_str()).unwrap_or("");
-            if !existing.contains(find) {
+        Patch::Replace { find, replace } => {
+            if !existing.contains(&find) {
                 anyhow::bail!("skill_edit: patch.find not found in SKILL.md");
             }
-            Ok(existing.replacen(find, replace, 1))
+            Ok(existing.replacen(&find, &replace, 1))
         }
-        _ => anyhow::bail!(
-            "skill_edit: `patch` must be a string (append to body) or an object {{\"find\", \"replace\"}}"
-        ),
     }
 }
 
@@ -102,7 +138,9 @@ impl crate::tools::Tool for SkillEditTool {
     fn description(&self) -> &str {
         "Edit an existing skill's SKILL.md (use this, NOT file_edit, since skill dirs are outside the workspace). \
         Provide `name` and either `content` (full replacement SKILL.md text) or `patch`. \
-        `patch` is a string appended to the body, OR an object {\"find\": \"...\", \"replace\": \"...\"} for a single targeted edit. \
+        `patch` appends a string to the body, OR performs a single targeted edit via an object {\"find\": \"...\", \"replace\": \"...\"} \
+        — pass the object directly as a JSON object, never as a JSON-encoded string \
+        (a string whose whole content parses to such an object is decoded and applied as the replacement). \
         Optional `scope`: \"user\" (default) or \"project\". \
         After writing, frontmatter is validated (name + description required, length limits)."
     }
@@ -120,11 +158,11 @@ impl crate::tools::Tool for SkillEditTool {
                     "description": "Full replacement SKILL.md text (overwrites the existing file)."
                 },
                 "patch": {
-                    "description": "Partial edit: a string appended to the body, OR an object {\"find\": \"...\", \"replace\": \"...\"} for a single targeted replacement.",
-                    "oneOf": [
-                        { "type": "string" },
-                        { "type": "object", "properties": { "find": { "type": "string" }, "replace": { "type": "string" } } }
-                    ]
+                    // 故意不写 oneOf 并集：llama.cpp 等端点会把 schema 转语法约束，
+                    // 弱模型在 string|object 并集下容易把对象二次序列化成字符串。
+                    // 契约由本描述 + apply_patch 运行时兜底（字符串内容整体为
+                    // {find,replace} 对象时按替换处理）承载。
+                    "description": "Partial edit. EITHER a plain string appended to the body, OR an object with exactly this shape, passed directly as a JSON object: {\"find\": \"<existing exact text>\", \"replace\": \"<new text>\"}. Never wrap the object in a string."
                 },
                 "scope": {
                     "type": "string",
@@ -277,6 +315,53 @@ mod tests {
             )
             .await;
         assert!(r.is_err());
+    }
+
+    // 回归：模型把 {find,replace} 对象二次序列化成字符串发出（2026-08-27 线上
+    // 事故，ornith 经 llama.cpp 原生 function calling），应解码后执行替换，
+    // 而不是把 JSON 文本追加进文件尾部。
+    #[tokio::test]
+    async fn patch_find_replace_as_double_encoded_string() {
+        let t = tool();
+        make_skill(&t, "demo", "use FOO here");
+        let encoded = serde_json::to_string(&json!({ "find": "FOO", "replace": "BAR" })).unwrap();
+        t.execute(&json!({ "name": "demo", "patch": encoded }), "cli")
+            .await
+            .unwrap();
+        let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
+        assert!(written.contains("use BAR here"));
+        assert!(!written.contains("use FOO"));
+        assert!(!written.contains("\"find\""));
+    }
+
+    // 追加语义不受兼容层影响：字符串虽是 JSON 但不含合法 find 键 → 原文追加。
+    #[tokio::test]
+    async fn patch_plain_json_string_without_find_still_appends() {
+        let t = tool();
+        make_skill(&t, "demo", "body");
+        t.execute(&json!({ "name": "demo", "patch": "{\"other\": 1}" }), "cli")
+            .await
+            .unwrap();
+        let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
+        assert!(written.contains("body"));
+        assert!(written.contains("{\"other\": 1}"));
+    }
+
+    // 对象 patch 的 find 为空串时按错误处理（与对象直传行为一致）
+    #[tokio::test]
+    async fn patch_object_empty_find_errors() {
+        let t = tool();
+        make_skill(&t, "demo", "body");
+        let r = t
+            .execute(
+                &json!({ "name": "demo", "patch": { "find": "", "replace": "x" } }),
+                "cli",
+            )
+            .await;
+        assert!(r.is_err());
+        // 文件未被改动
+        let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
+        assert!(written.contains("body"));
     }
 
     #[tokio::test]

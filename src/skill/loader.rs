@@ -383,7 +383,7 @@ Always use the dedicated tools:
   - Create refuses to overwrite an existing skill — use `skill_edit` to change one.
 - `skill_edit { name, content | patch, scope? }`
   - `content`: full replacement SKILL.md text.
-  - `patch`: a string appended to the body, OR an object `{ "find": "...", "replace": "..." }` for a single targeted edit.
+  - `patch`: a string appended to the body, OR a single targeted edit. For the targeted edit, pass `{"find": "<exact existing text>", "replace": "<new text>"}` **directly as a JSON object** — never as a JSON-encoded string; strings whose entire content parses to that object are decoded and applied as the replacement.
   - The skill must already exist.
 
 After writing, the tool runs `validate_skill_md` (frontmatter parseable, `name`+`description` non-empty, length limits). A validation error means the write was rejected.
