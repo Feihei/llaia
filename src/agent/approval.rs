@@ -316,24 +316,24 @@ pub fn format_approval_prompt(
 ) -> String {
     let summary = summarize_args(tool_name, args);
     let scope = if within_workspace {
-        "在 workspace 内"
+        "within workspace"
     } else {
-        "在 workspace 外"
+        "outside workspace"
     };
     // 长命令/长路径截断到一行，避免 QQ/Telegram 等频道把审批提示拆成多条消息。
     const SUMMARY_CAP: usize = 220;
     let summary = if summary.chars().count() > SUMMARY_CAP {
         let cut: String = summary.chars().take(SUMMARY_CAP).collect();
-        format!("{}…（已截断）", cut)
+        format!("{}… (truncated)", cut)
     } else {
         summary
     };
     let target = match tool_name {
-        "terminal" => format!("命令：{}", summary),
-        _ => format!("目标：{}", summary),
+        "terminal" => format!("command: {}", summary),
+        _ => format!("target: {}", summary),
     };
     format!(
-        "\n🔐 需要确认执行 `{}`（{}）\n   {}\n   workspace：{}\n   回复 `/ok {}` 批准，或 `/deny {}` 拒绝。\n",
+        "\n🔐 Requesting approval to execute `{}` ({})\n   {}\n   workspace: {}\n   Reply `/ok {}` to approve or `/deny {}` to reject. When only one approval is pending, a bare `/ok` or `/deny` works.\n",
         tool_name,
         scope,
         target,
@@ -346,10 +346,8 @@ pub fn format_approval_prompt(
 /// 格式化 /move 审批提示
 pub fn format_move_prompt(new_workspace: &Path, id: &str) -> String {
     format!(
-        "\n🔀 需要确认切换工作目录（workspace）到：\n   {}\n   ⚠️ 切换后文件/终端工具将只在该目录内操作，目录内的文件读写/终端命令默认放行、无需逐次确认；仅触及该目录之外的路径仍需审批。\n   回复 `/ok {}` 确认切换，或 `/deny {}` 取消。\n",
+        "\n🔀 Requesting approval to switch the working directory (workspace) to:\n   {}\n   ⚠️ After switching, file/terminal tools will only operate inside this directory; operations within it are approved by default (no per-step confirmation). Only paths touching outside the directory still require approval.\n   Reply `/ok {id}` to confirm the switch or `/deny {id}` to cancel. When only one approval is pending, a bare `/ok` or `/deny` works.\n",
         new_workspace.display(),
-        id,
-        id
     )
 }
 
@@ -362,14 +360,17 @@ pub fn validate_move_target(path: &str) -> anyhow::Result<PathBuf> {
         std::env::current_dir()?.join(p)
     };
     if !abs.exists() {
-        anyhow::bail!("目录不存在：{}", abs.display());
+        anyhow::bail!("directory does not exist: {}", abs.display());
     }
     if !abs.is_dir() {
-        anyhow::bail!("不是目录：{}", abs.display());
+        anyhow::bail!("not a directory: {}", abs.display());
     }
     let canon = std::fs::canonicalize(&abs)?;
     if crate::path_guard::hits_blacklist(&canon.to_string_lossy()) {
-        anyhow::bail!("目标目录命中危险路径黑名单，拒绝切换：{}", canon.display());
+        anyhow::bail!(
+            "target directory hits the dangerous-path blacklist, refusing to switch: {}",
+            canon.display()
+        );
     }
     // Windows canonicalize 返回带 `\\?\` verbatim 前缀；若直接存进 workspace_root，
     // 后续 validate_path 里 norm_ws（保留前缀）与命令路径 canonicalize 后 strip 的
@@ -436,6 +437,9 @@ mod tests {
         let quoted = ws.to_string_lossy().replace('\\', "/");
         let cmd = format!("cd \"{}\" && ls -la", quoted);
         let within = tool_within_workspace("terminal", &json!({ "command": cmd }), ws);
-        assert!(within, "moved 目录内带引号的 cd 命令应判定为 workspace 内:\n{cmd}");
+        assert!(
+            within,
+            "moved 目录内带引号的 cd 命令应判定为 workspace 内:\n{cmd}"
+        );
     }
 }

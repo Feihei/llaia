@@ -655,13 +655,17 @@ impl QqChannel {
                 if let Some(n) = notify {
                     n.notify_one();
                     let _ = self
-                        .send_c2c_message(user_openid, "[已中断当前任务]", Some(msg_id.as_str()))
+                        .send_c2c_message(
+                            user_openid,
+                            "[current task interrupted]",
+                            Some(msg_id.as_str()),
+                        )
                         .await;
                 } else {
                     let _ = self
                         .send_c2c_message(
                             user_openid,
-                            "[没有正在执行的任务]",
+                            "[no task currently running]",
                             Some(msg_id.as_str()),
                         )
                         .await;
@@ -678,7 +682,7 @@ impl QqChannel {
                     let _ = self
                         .send_c2c_message(
                             user_openid,
-                            "[/exit 在 QQ 下不可用]",
+                            "[/exit not available on QQ channel]",
                             Some(msg_id.as_str()),
                         )
                         .await;
@@ -760,7 +764,7 @@ impl QqChannel {
                                 Err(e) => {
                                     tracing::warn!(error = %e, "prepare image failed");
                                     parts.push(ContentPart::Text {
-                                        text: format!("[图片预处理失败: {}]", e),
+                                        text: format!("[image preprocess failed: {}]", e),
                                     });
                                 }
                             }
@@ -768,7 +772,7 @@ impl QqChannel {
                             // 非图片文件：仅告知 agent 附件名和保存路径
                             parts.push(ContentPart::Text {
                                 text: format!(
-                                    "[附件已保存至 workspace/uploads/{}_{}]",
+                                    "[attachment saved to workspace/uploads/{}_{}]",
                                     msg_id, att.filename
                                 ),
                             });
@@ -777,7 +781,7 @@ impl QqChannel {
                     Err(e) => {
                         tracing::warn!(error = %e, filename = %att.filename, "download attachment failed");
                         parts.push(ContentPart::Text {
-                            text: format!("[附件下载失败: {}]", e),
+                            text: format!("[attachment download failed: {}]", e),
                         });
                     }
                 }
@@ -858,7 +862,7 @@ impl OutputSink for QqSink {
             self.notified_tools = true;
             let _ = self
                 .qq
-                .send_c2c_message(&self.user_openid, "🔧 正在调用工具...", Some(&self.msg_id))
+                .send_c2c_message(&self.user_openid, "🔧 calling tools...", Some(&self.msg_id))
                 .await;
         }
     }
@@ -873,7 +877,7 @@ impl OutputSink for QqSink {
                 .qq
                 .send_c2c_message(
                     &self.user_openid,
-                    &format!("[发送媒体失败: {}]", e),
+                    &format!("[failed to send media: {}]", e),
                     Some(&self.msg_id),
                 )
                 .await;
@@ -887,7 +891,7 @@ impl OutputSink for QqSink {
                 total_len = self.buffer.len(),
                 "agent reply empty, sending placeholder"
             );
-            "[已完成（无文本输出）]".to_string()
+            "[done (no text output)]".to_string()
         } else {
             // 模型回复常以 \n\n 开头（思考结束留白/markdown 习惯），
             // CLI 下被终端吞掉不显眼，QQ 原样发送会显示成两个空行。
@@ -898,7 +902,7 @@ impl OutputSink for QqSink {
         let reply = if self.tool_names.is_empty() {
             body
         } else {
-            format!("🔧 已调用: {}\n\n{}", self.tool_names.join("、"), body)
+            format!("🔧 called: {}\n\n{}", self.tool_names.join(", "), body)
         };
         let chunks = split_reply(&reply, 1800);
         tracing::info!(
@@ -923,7 +927,7 @@ impl OutputSink for QqSink {
     }
     async fn on_error(&mut self, message: &str) {
         let err_msg = if self.buffer.is_empty() {
-            format!("[内部错误: {}]", message)
+            format!("[internal error: {}]", message)
         } else {
             // 保留已生成文本，错误追加（同样 trim 前导换行）
             self.buffer.trim_start_matches(['\n', '\r']).to_string()

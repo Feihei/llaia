@@ -161,7 +161,7 @@ impl Context {
                 } else {
                     t
                 };
-                dump.push_str(&format!("[tool] (结果已归档) {}\n", note));
+                dump.push_str(&format!("[tool] (result archived) {}\n", note));
                 continue;
             }
             let role_str = match m.role {
@@ -213,7 +213,7 @@ impl Context {
                         .iter()
                         .map(|p| match p {
                             ContentPart::Text { text } => text.clone(),
-                            ContentPart::ImageUrl { .. } => "[图片]".to_string(),
+                            ContentPart::ImageUrl { .. } => "[image]".to_string(),
                         })
                         .collect::<Vec<_>>()
                         .join(" ");
@@ -225,8 +225,10 @@ impl Context {
                 let t = m.content.as_text();
                 if t.chars().count() > TOOL_TRIM_CAP {
                     let head: String = t.chars().take(TOOL_TRIM_CAP).collect();
-                    m.content =
-                        MessageContent::Text(format!("{}…[已截断，完整结果见会话记录]", head));
+                    m.content = MessageContent::Text(format!(
+                        "{}…[truncated; full result is in the session history]",
+                        head
+                    ));
                 }
             }
             // 连续重复用户消息去重（只留一条）
@@ -315,7 +317,7 @@ mod tests {
         assert_eq!(
             msgs.last().unwrap().content.as_text(),
             "简洁口语化",
-            "reminder 应排在状态栏/todo/env 之后"
+            "reminder should be placed after status bar/todo/env"
         );
     }
 
@@ -374,8 +376,14 @@ mod tests {
         ctx.push(ChatMessage::user("b".repeat(40)));
         // system(10) + history(10) + 尾部状态栏 + 每条消息结构开销(8/条)
         let est = ctx.estimate_tokens();
-        assert!(est >= 20, "至少包含 system+history 文本 token");
-        assert!(est > 20, "状态栏与消息结构开销应计入估算");
+        assert!(
+            est >= 20,
+            "at least system+history text tokens should be included"
+        );
+        assert!(
+            est > 20,
+            "status bar and per-message overhead should be counted in the estimate"
+        );
     }
 
     #[test]
@@ -387,7 +395,10 @@ mod tests {
         ctx.todo_state = Some("c".repeat(400));
         let with_todo = ctx.estimate_tokens();
         // 400 chars/4 = 100 tokens + 1 条消息结构开销 8
-        assert!(with_todo > base + 90, "todo 清单应计入 token 估算");
+        assert!(
+            with_todo > base + 90,
+            "todo list should be counted in the token estimate"
+        );
     }
 
     #[test]
@@ -498,7 +509,7 @@ mod compact_tests {
             .find(|m| m.role == Role::Tool)
             .expect("tool message kept");
         assert!(tool_msg.content.as_text().chars().count() <= TOOL_TRIM_CAP + 60);
-        assert!(tool_msg.content.as_text().contains("已截断"));
+        assert!(tool_msg.content.as_text().contains("truncated"));
     }
 
     /// 回归：原生工具调用常见「零文本 + tool_calls」的 assistant 消息，

@@ -66,7 +66,7 @@ impl Tool for DelegateTool {
     }
 
     fn description(&self) -> &str {
-        "委派任务给子 Agent 执行。子 Agent 有独立的专业能力和工具集。适用于需要特定专业技能的任务。"
+        "Delegate a task to a sub-agent for execution. A sub-agent has its own specialized capabilities and toolset. Suitable for tasks that require specific expertise."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -79,21 +79,21 @@ impl Tool for DelegateTool {
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "description": "要委派的子 Agent 名称",
+                    "description": "Name of the sub-agent to delegate to",
                     "enum": agents
                 },
                 "task": {
                     "type": "string",
-                    "description": "要委派给子 Agent 执行的任务描述"
+                    "description": "Description of the task to delegate to the sub-agent"
                 },
                 "file_paths": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "要传递给子 Agent 的文件路径列表（主 agent workspace 内的相对路径），系统会复制到子 agent .inbox/"
+                    "description": "List of file paths to pass to the sub-agent (relative paths within the main agent workspace); they will be copied to the sub-agent's .inbox/",
                 },
                 "async": {
                     "type": "boolean",
-                    "description": "是否后台异步执行。true=立即返回并在完成后主动推送结果（用户可继续对话）；false=同步等待子 Agent 完成（默认）",
+                    "description": "Whether to run asynchronously in the background. true = return immediately and push the result when done (user can keep chatting); false = block until the sub-agent finishes (default)",
                     "default": false
                 }
             },
@@ -117,7 +117,7 @@ impl Tool for DelegateTool {
     ) -> Result<String> {
         let registry = match self.get_registry() {
             Some(r) => r.clone(),
-            None => return Ok("[委派失败: registry 未初始化]".into()),
+            None => return Ok("[delegation failed: registry not initialized]".into()),
         };
 
         let agent_name = args["agent_name"]
@@ -138,7 +138,7 @@ impl Tool for DelegateTool {
 
         let sub_agent = match registry.get(agent_name) {
             Ok(a) => a.clone(),
-            Err(e) => return Ok(format!("[委派失败: {}]", e)),
+            Err(e) => return Ok(format!("[delegation failed: {}]", e)),
         };
 
         // 获取主 agent 和子 agent 的 workspace
@@ -181,7 +181,7 @@ impl Tool for DelegateTool {
             task.to_string()
         } else {
             format!(
-                "{}\n\n[输入文件已放在 .inbox/: {}]",
+                "{}\n\n[input files placed in .inbox/: {}]",
                 task,
                 file_paths.join(", ")
             )
@@ -193,7 +193,9 @@ impl Tool for DelegateTool {
             {
                 let tasks = registry.background_tasks.lock().unwrap();
                 if tasks.len() >= 3 {
-                    return Ok("[委派失败: 后台委派已达上限(3)]".into());
+                    return Ok(
+                        "[delegation failed: background delegation limit reached (3)]".into(),
+                    );
                 }
             }
             let id = uuid::Uuid::new_v4().to_string();
@@ -207,7 +209,7 @@ impl Tool for DelegateTool {
             let handle = tokio::spawn(async move {
                 let return_value = run_child(child, task_txt, to, None).await;
                 let msg = format!(
-                    "[子Agent {} 完成]\n{}",
+                    "[sub-agent {} completed]\n{}",
                     sub_name,
                     format_delivery_text(&return_value)
                 );
@@ -229,7 +231,7 @@ impl Tool for DelegateTool {
                 },
             );
             return Ok(format!(
-                "已后台启动子 Agent {name}（任务 {id}），完成会主动通知你。可用 /delegate-list 查看、/delegate-cancel 取消。",
+                "Started sub-agent {name} in the background (task {id}); you will be notified when it completes. Use /delegate-list to view and /delegate-cancel to cancel.",
                 name = agent_name,
                 id = id
             ));
@@ -306,7 +308,7 @@ async fn run_child(
     match result {
         Ok(Ok(_)) => {
             if output.is_empty() && output_files.is_empty() {
-                "[子 Agent 无输出]".to_string()
+                "[sub-agent produced no output]".to_string()
             } else {
                 serde_json::json!({
                     "text": output,
@@ -316,12 +318,12 @@ async fn run_child(
             }
         }
         Ok(Err(e)) => serde_json::json!({
-            "text": format!("[子 Agent 执行错误: {}]", e),
+            "text": format!("[sub-agent execution error: {}]", e),
             "output_files": output_files,
         })
         .to_string(),
         Err(_) => serde_json::json!({
-            "text": format!("[子 Agent 超时({}秒)]", timeout),
+            "text": format!("[sub-agent timed out ({}s)]", timeout),
             "output_files": output_files,
         })
         .to_string(),
@@ -339,7 +341,7 @@ fn format_delivery_text(return_value: &str) -> String {
                     .filter_map(|x| x.as_str().map(String::from))
                     .collect();
                 if !names.is_empty() {
-                    s.push_str(&format!("\n\n产出文件: {}", names.join(", ")));
+                    s.push_str(&format!("\n\nOutput files: {}", names.join(", ")));
                 }
             }
             return s;
@@ -451,7 +453,7 @@ mod tests {
 
         let args = json!({"agent_name": "nonexistent", "task": "test"});
         let result = tool.execute(&args, "cli").await.unwrap();
-        assert!(result.contains("委派失败"), "got: {}", result);
+        assert!(result.contains("delegation failed"), "got: {}", result);
         assert!(result.contains("nonexistent"), "got: {}", result);
     }
 
@@ -470,7 +472,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            result.contains("超时"),
+            result.contains("timed out"),
             "should mention timeout, got: {}",
             result
         );
@@ -496,7 +498,7 @@ mod tests {
         // 不调 set_registry
         let args = json!({"agent_name": "any", "task": "test"});
         let result = tool.execute(&args, "cli").await.unwrap();
-        assert!(result.contains("委派失败"), "got: {}", result);
+        assert!(result.contains("delegation failed"), "got: {}", result);
         assert!(result.contains("registry"), "got: {}", result);
     }
 

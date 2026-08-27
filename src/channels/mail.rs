@@ -179,7 +179,7 @@ impl MailChannel {
 
         let mut text = String::new();
         if !subject.is_empty() {
-            text.push_str(&format!("[邮件主题] {}\n\n", subject));
+            text.push_str(&format!("[email subject] {}\n\n", subject));
         }
         text.push_str(&text_body);
 
@@ -192,7 +192,7 @@ impl MailChannel {
             for (fname, bytes) in &attachments {
                 if bytes.len() > max_bytes {
                     text.push_str(&format!(
-                        "\n[附件 {} 超过 {}MB 限制，已跳过]\n",
+                        "\n[attachment {} exceeds the {}MB limit, skipped]\n",
                         fname, cfg.max_attachment_mb
                     ));
                     continue;
@@ -206,16 +206,16 @@ impl MailChannel {
                         let safe = fname.replace(['/', '\\'], "_");
                         let path = dir.join(&safe);
                         match tokio::fs::write(&path, bytes).await {
-                            Ok(()) => {
-                                text.push_str(&format!("\n[附件已保存: {}]\n", path.display()))
-                            }
-                            Err(e) => {
-                                text.push_str(&format!("\n[附件 {} 保存失败: {}]\n", fname, e))
-                            }
+                            Ok(()) => text
+                                .push_str(&format!("\n[attachment saved: {}]\n", path.display())),
+                            Err(e) => text.push_str(&format!(
+                                "\n[attachment {} save failed: {}]\n",
+                                fname, e
+                            )),
                         }
                     }
                     None => text.push_str(&format!(
-                        "\n[附件 {} ({} 字节，无 workspace 未保存)]\n",
+                        "\n[attachment {} ({} bytes, no workspace, not saved)]\n",
                         fname,
                         bytes.len()
                     )),
@@ -371,11 +371,12 @@ impl OutputSink for MailSink {
         // 邮件是异步的，无法流式回传；工具调用仅记日志
     }
     async fn on_media(&mut self, path: &str, _kind: MediaKind) {
-        self.buffer.push_str(&format!("\n[已生成文件: {}]\n", path));
+        self.buffer
+            .push_str(&format!("\n[generated file: {}]\n", path));
     }
     async fn on_done(&mut self) {
         let reply = if self.buffer.trim().is_empty() {
-            "[已完成处理（无文本输出）]".to_string()
+            "[done processing (no text output)]".to_string()
         } else {
             self.buffer.trim().to_string()
         };
@@ -384,7 +385,7 @@ impl OutputSink for MailSink {
         }
     }
     async fn on_error(&mut self, message: &str) {
-        let msg = format!("[处理出错] {}", message);
+        let msg = format!("[processing error] {}", message);
         if let Err(e) = self.send_reply(&msg).await {
             tracing::error!(error = %e, "send mail error reply failed");
         }
@@ -438,7 +439,7 @@ impl MailSink {
             .map_err(|e| anyhow!("invalid reply-to '{}': {}", self.reply_to, e))?;
         let to_box = Mailbox::new(None, to);
         let subject = if self.subject.is_empty() {
-            "回信".to_string()
+            "Reply".to_string()
         } else {
             format!("Re: {}", self.subject)
         };

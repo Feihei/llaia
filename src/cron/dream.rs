@@ -176,7 +176,7 @@ pub async fn run_dream(
                         "dream skipped: not idle long enough"
                     );
                     return Ok(format!(
-                        "[dream] 距上次对话仅 {} 分钟（需 ≥{} 分钟空闲），跳过",
+                        "[dream] only {} minutes since last conversation (need ≥{} minutes idle), skipped",
                         elapsed_min, idle_minutes
                     ));
                 }
@@ -192,7 +192,7 @@ pub async fn run_dream(
             task = task_id,
             "dream skipped: no new messages since last consolidation"
         );
-        return Ok("[dream] 没有新对话需要整理".into());
+        return Ok("[dream] no new conversations to consolidate".into());
     }
     let history_text = format_messages(&new_rows);
     let max_processed_id = new_rows.iter().map(|m| m.id).max().unwrap_or(cursor);
@@ -245,7 +245,9 @@ pub async fn run_dream(
             task = task_id,
             "dream stage2 produced empty content, skip write"
         );
-        return Ok("[dream] 整理结果为空，已跳过写入（MEMORY 未改动）".into());
+        return Ok(
+            "[dream] consolidation produced empty result, write skipped (MEMORY unchanged)".into(),
+        );
     }
     tokio::fs::write(&memory_path, &new_memory)
         .await

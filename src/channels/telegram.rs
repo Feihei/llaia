@@ -225,7 +225,7 @@ impl TelegramChannel {
             let _ = self
                 .send_text(
                     chat_id,
-                    "你好，我是 LLAIA 私人助理。直接发消息即可对话，/help 查看命令。",
+                    "Hello, I am LLAIA, your personal assistant. Just send a message to chat; /help lists the commands.",
                 )
                 .await;
             return Ok(());
@@ -245,7 +245,7 @@ impl TelegramChannel {
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
                     let _ = self
-                        .send_text(chat_id, "[/exit 在 Telegram 下不可用]")
+                        .send_text(chat_id, "[/exit not available on Telegram channel]")
                         .await;
                 }
                 crate::commands::slash::SlashOutcome::Handled(m) => {
@@ -392,14 +392,14 @@ impl OutputSink for TelegramSink {
             tracing::error!(error = %e, path, "telegram send media failed");
             let _ = self
                 .tg
-                .send_text(self.chat_id, &format!("[发送媒体失败: {}]", e))
+                .send_text(self.chat_id, &format!("[failed to send media: {}]", e))
                 .await;
         }
     }
 
     async fn on_done(&mut self) {
         let reply = if self.buffer.trim().is_empty() {
-            "[已完成（无文本输出）]"
+            "[done (no text output)]"
         } else {
             self.buffer.trim_start_matches(['\n', '\r'])
         };
@@ -417,7 +417,7 @@ impl OutputSink for TelegramSink {
         }
         let _ = self
             .tg
-            .send_text(self.chat_id, &format!("[出错了: {}]", message))
+            .send_text(self.chat_id, &format!("[error: {}]", message))
             .await;
     }
 
@@ -426,7 +426,7 @@ impl OutputSink for TelegramSink {
         if !text.trim().is_empty() {
             text.push_str("\n\n");
         }
-        text.push_str("[已中断]");
+        text.push_str("[interrupted]");
         let _ = self.tg.send_text(self.chat_id, &text).await;
     }
 }

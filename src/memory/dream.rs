@@ -108,23 +108,26 @@ pub fn diff_memory(old_content: &str, new_content: &str) -> String {
     let removed: Vec<&String> = old.iter().filter(|b| !new_set.contains(b)).collect();
 
     if added.is_empty() && removed.is_empty() {
-        return format!("[dream] 记忆无变化（共 {} 条条目，已是最新）", new.len());
+        return format!(
+            "[dream] no memory changes ({} entries, already up to date)",
+            new.len()
+        );
     }
-    let mut s = String::from("[dream] 记忆整理完成：\n");
+    let mut s = String::from("[dream] memory consolidated:\n");
     s.push_str(&format!(
-        "· 当前条目数：{}（整理前 {}）\n",
+        "  Current entries: {} (before: {})\n",
         new.len(),
         old.len()
     ));
     if !added.is_empty() {
-        s.push_str(&format!("· 新增 {} 条：\n", added.len()));
+        s.push_str(&format!("  Added {} entries:\n", added.len()));
         for a in added {
             s.push_str(&format!("  + {}\n", a));
         }
     }
     if !removed.is_empty() {
         s.push_str(&format!(
-            "· 删除 {} 条（过期/重复/矛盾）：\n",
+            "  Removed {} entries (stale/duplicate/contradicted):\n",
             removed.len()
         ));
         for r in removed {
@@ -194,8 +197,8 @@ mod tests {
         let old = "- [2026-08-11] a\n- [2026-08-11] b\n";
         let new = "- [2026-08-11] a\n- [2026-08-12] c\n";
         let d = diff_memory(old, new);
-        assert!(d.contains("删除 1 条"));
-        assert!(d.contains("新增 1 条"));
+        assert!(d.contains("Removed 1 entries"));
+        assert!(d.contains("Added 1 entries"));
         assert!(d.contains("+ c"));
         assert!(d.contains("- b"));
     }
@@ -203,7 +206,7 @@ mod tests {
     #[test]
     fn test_diff_memory_no_change() {
         let c = "- [2026-08-11] a\n";
-        assert!(diff_memory(c, c).contains("无变化"));
+        assert!(diff_memory(c, c).contains("no memory changes"));
     }
 
     #[test]

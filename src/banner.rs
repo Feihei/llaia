@@ -97,7 +97,7 @@ mod tests {
         assert_eq!(
             display_width(&line),
             inner,
-            "居中后显示列宽应等于内容区宽度"
+            "centered display width should equal content area width"
         );
     }
 

@@ -287,7 +287,7 @@ impl WechatChannel {
     async fn present_qrcode(&self, qrcode: &str, img_content: &str) {
         tracing::info!(
             qrcode = %qrcode,
-            "WeChat ClawBot login: 请用手机微信（含 ClawBot 插件）扫描二维码"
+            "WeChat ClawBot login: scan the QR code with WeChat (with the ClawBot plugin)"
         );
         // qrcode_img_content 可能是 data URL 或裸 base64
         let b64 = img_content
@@ -298,11 +298,13 @@ impl WechatChannel {
             Ok(bytes) => {
                 let path = self.state_dir.join("wechat_qr.png");
                 match tokio::fs::write(&path, &bytes).await {
-                    Ok(()) => tracing::info!(path = %path.display(), "二维码图片已保存，请扫码"),
+                    Ok(()) => {
+                        tracing::info!(path = %path.display(), "QR code image saved, please scan")
+                    }
                     Err(e) => tracing::warn!(error = %e, "save qrcode image failed"),
                 }
             }
-            Err(_) => tracing::info!(img = %img_content, "qrcode_img_content 原样输出"),
+            Err(_) => tracing::info!(img = %img_content, "qrcode_img_content output as-is"),
         }
     }
 
@@ -461,7 +463,7 @@ impl WechatChannel {
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
                     let _ = self
-                        .send_text(&from_user_id, "[/exit 在微信下不可用]")
+                        .send_text(&from_user_id, "[/exit not available on WeChat channel]")
                         .await;
                 }
                 crate::commands::slash::SlashOutcome::Handled(m) => {
@@ -524,7 +526,7 @@ impl WechatChannel {
         };
         let Some(context_token) = context_token else {
             anyhow::bail!(
-                "no context_token for user {}, 需要对方先发一条消息建立会话",
+                "no context_token for user {}, the other party must send a message first to establish the session",
                 user_id
             );
         };
@@ -758,14 +760,14 @@ impl OutputSink for WechatSink {
             tracing::error!(error = %e, path, "wechat send media failed");
             let _ = self
                 .wx
-                .send_text(&self.user_id, &format!("[发送媒体失败: {}]", e))
+                .send_text(&self.user_id, &format!("[failed to send media: {}]", e))
                 .await;
         }
     }
 
     async fn on_done(&mut self) {
         let reply = if self.buffer.trim().is_empty() {
-            "[已完成（无文本输出）]"
+            "[done (no text output)]"
         } else {
             self.buffer.trim_start_matches(['\n', '\r'])
         };
@@ -782,7 +784,7 @@ impl OutputSink for WechatSink {
         }
         let _ = self
             .wx
-            .send_text(&self.user_id, &format!("[出错了: {}]", message))
+            .send_text(&self.user_id, &format!("[error: {}]", message))
             .await;
     }
 
@@ -791,7 +793,7 @@ impl OutputSink for WechatSink {
         if !text.trim().is_empty() {
             text.push_str("\n\n");
         }
-        text.push_str("[已中断]");
+        text.push_str("[interrupted]");
         let _ = self.wx.send_text(&self.user_id, &text).await;
     }
 }

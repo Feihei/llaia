@@ -440,7 +440,7 @@ pub async fn put_config(
     if !merged.agent.contains_key("main") {
         return json_err(
             StatusCode::BAD_REQUEST,
-            "[agent.main] 不可删除：main agent 是系统必需配置",
+            "[agent.main] is not deletable: the main agent is a required system configuration",
         );
     }
 
@@ -473,7 +473,7 @@ pub async fn put_config(
     if let Err(e) = build_provider_from_config(&runtime_config) {
         return json_err(
             StatusCode::BAD_REQUEST,
-            &format!("provider 构建失败，配置未保存：{}", e),
+            &format!("failed to build provider, config not saved: {}", e),
         );
     }
 
@@ -925,7 +925,7 @@ pub async fn put_config_raw(
     if !parsed.agent.contains_key("main") {
         return json_err(
             StatusCode::BAD_REQUEST,
-            "[agent.main] 不可删除：main agent 是系统必需配置",
+            "[agent.main] is not deletable: the main agent is a required system configuration",
         );
     }
 
@@ -933,7 +933,7 @@ pub async fn put_config_raw(
     if let Err(e) = build_provider_from_config(&parsed) {
         return json_err(
             StatusCode::BAD_REQUEST,
-            &format!("provider 构建失败，配置未保存：{}", e),
+            &format!("failed to build provider, config not saved: {}", e),
         );
     }
 
@@ -2433,7 +2433,7 @@ model = "local.m"
         }
         assert!(
             seen.contains_key("runProbe"),
-            "app.js missing runProbe method (probeModels 修复被回退?)"
+            "app.js missing runProbe method (probeModels fix was reverted?)"
         );
     }
 }

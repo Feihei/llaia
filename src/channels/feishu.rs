@@ -652,7 +652,10 @@ impl FeishuChannel {
             match outcome {
                 SlashOutcome::Exit => {
                     let _ = self
-                        .reply(&inbound.reply_target, "[/exit 在飞书下不可用]")
+                        .reply(
+                            &inbound.reply_target,
+                            "[/exit not available on Feishu channel]",
+                        )
                         .await;
                 }
                 SlashOutcome::Handled(m) => {
@@ -768,13 +771,13 @@ impl OutputSink for FeishuSink {
     async fn on_media(&mut self, path: &str, _kind: MediaKind) {
         let _ = self
             .fs
-            .reply(&self.chat_id, &format!("[媒体文件: {}]", path))
+            .reply(&self.chat_id, &format!("[media file: {}]", path))
             .await;
     }
 
     async fn on_done(&mut self) {
         let reply = if self.buffer.trim().is_empty() {
-            "[已完成（无文本输出）]".to_string()
+            "[done (no text output)]".to_string()
         } else {
             self.buffer.trim_start_matches(['\n', '\r']).to_string()
         };
@@ -791,7 +794,7 @@ impl OutputSink for FeishuSink {
         }
         let _ = self
             .fs
-            .reply(&self.chat_id, &format!("[出错了: {}]", message))
+            .reply(&self.chat_id, &format!("[error: {}]", message))
             .await;
     }
 
@@ -800,7 +803,7 @@ impl OutputSink for FeishuSink {
         if !text.trim().is_empty() {
             text.push_str("\n\n");
         }
-        text.push_str("[已中断]");
+        text.push_str("[interrupted]");
         let _ = self.fs.reply(&self.chat_id, &text).await;
     }
 }

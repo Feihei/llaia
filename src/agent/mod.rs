@@ -510,7 +510,7 @@ impl Agent {
             // 超时：丢弃 pending，注入说明，交给普通流程（用户的真实消息照常到达）
             self.approval_gate.take_question(&q.id).await;
             let note = format!(
-                "[系统提示] 你之前向用户提出的问题（id={}）在 {} 秒内未收到回答，已按最合理假设继续。",
+                "[system note] your question to the user (id={}) was not answered within {} seconds; proceeding with the most reasonable assumption.",
                 q.id, q.timeout_secs
             );
             self.context.push(ChatMessage::system(&note));
@@ -525,7 +525,7 @@ impl Agent {
             None => raw.to_string(),
         };
         Some(format!(
-            "[用户对你刚才提出的问题给出了回答]\n问题：{}\n回答：{}",
+            "[The user answered the question you asked]\nQuestion: {}\nAnswer: {}",
             q.question, answered
         ))
     }
@@ -562,7 +562,7 @@ impl Agent {
             let desc = self
                 .describe_single_image(vision_provider.as_ref(), url)
                 .await;
-            descriptions.push(format!("[图片{}描述] {}", i + 1, desc));
+            descriptions.push(format!("[image {} description] {}", i + 1, desc));
         }
 
         // 组合改写后的纯文本消息
@@ -584,7 +584,7 @@ impl Agent {
     async fn describe_single_image(&self, provider: &dyn Provider, image_url: &str) -> String {
         let parts = vec![
             ContentPart::Text {
-                text: "请详细描述这张图片的内容，包括文字、物体、场景等关键信息。".into(),
+                text: "Please describe the content of this image in detail, including any text, objects, and scene details.".into(),
             },
             ContentPart::ImageUrl {
                 image_url: ImageUrlContent {
@@ -599,10 +599,12 @@ impl Agent {
             disable_thinking: false,
         };
         match provider.chat(&req).await {
-            Ok(resp) => resp.text.unwrap_or_else(|| "[图片描述为空]".into()),
+            Ok(resp) => resp
+                .text
+                .unwrap_or_else(|| "[image description empty]".into()),
             Err(e) => {
                 tracing::warn!(error = %e, "vision provider describe image failed");
-                "[图片描述失败]".into()
+                "[image description failed]".into()
             }
         }
     }
@@ -706,7 +708,7 @@ impl Agent {
             Some(p) => p,
             None => {
                 // 降级模式：无 provider，直接 sink Error 提示用户配置
-                let msg = "未配置 provider，请先在 WebUI 配置 [provider.default] section 或编辑 config.toml 取消注释".to_string();
+                let msg = "no provider configured; please set up the [provider.default] section in the WebUI or edit config.toml to uncomment it".to_string();
                 let _ = event_tx
                     .send(TurnEvent::Error {
                         message: msg.clone(),
@@ -974,9 +976,13 @@ impl Agent {
                         Some(p) => {
                             let desc = self.describe_single_image(p.as_ref(), &prepared).await;
                             let label = if images.len() > 1 {
-                                format!("[工具 {} 返回的图片{}描述] ", tool_name, idx + 1)
+                                format!(
+                                    "[image {} returned by tool {} — description] ",
+                                    idx + 1,
+                                    tool_name
+                                )
                             } else {
-                                format!("[工具 {} 返回的图片描述] ", tool_name)
+                                format!("[image returned by tool {} — description] ", tool_name)
                             };
                             tool_text.push_str(&format!("\n{}{}", label, desc));
                         }
@@ -1000,7 +1006,7 @@ impl Agent {
                 if !bridge_images.is_empty() {
                     let mut parts = vec![ContentPart::Text {
                         text: format!(
-                            "[这是工具 {} 返回的图片（如截图），请仔细查看并理解其中的内容。]",
+                            "[these are the images returned by tool {} (e.g. screenshots); please look at them carefully and understand their content.]",
                             tool_name
                         ),
                     }];
@@ -1037,7 +1043,7 @@ impl Agent {
         }
 
         // 兜底：循环结束仍未返回（理论上 force_summary 那轮会返回，这里防御性处理）
-        let fallback = "[已达工具调用次数上限，未能生成总结]";
+        let fallback = "[exceeded the tool-call limit without producing a summary]";
         self.session_store
             .append_message(self.session_id, &Role::Assistant, fallback)?;
         self.context.push(ChatMessage::assistant(fallback));
@@ -1059,7 +1065,10 @@ fn truncate_tool_result(text: &str, cap: usize) -> String {
         return text.to_string();
     }
     let head: String = text.chars().take(cap).collect();
-    format!("{}…[已截断：原 {} 字符，完整结果见会话记录]", head, n)
+    format!(
+        "{}…[truncated: original {} chars; full result is in the session history]",
+        head, n
+    )
 }
 
 /// ask_user 结构化单选：把用户原始回答映射到选项文本。
@@ -1431,7 +1440,7 @@ mod tests {
         assert_eq!(tool_msgs.len(), 1);
         let tool_text = tool_msgs[0].content.as_text();
         assert!(
-            tool_text.contains("[图片]"),
+            tool_text.contains("[image]"),
             "image not stripped into placeholder: {}",
             tool_text
         );
@@ -1441,7 +1450,7 @@ mod tests {
         );
         // 2) 非图片超长文本截断兜底
         assert!(
-            tool_text.contains("已截断"),
+            tool_text.contains("truncated"),
             "oversized non-image text not truncated"
         );
 
@@ -1562,7 +1571,7 @@ mod tests {
             agent.handle_input("hi", "cron"),
         )
         .await
-        .expect("handle_input deadlocked: channel 容量超限时必须并发 drain")
+        .expect("handle_input deadlocked: at channel capacity, must drain concurrently")
         .unwrap();
         assert!(reply.starts_with("t0 t1 "));
         assert!(reply.contains("t99 "));
@@ -1763,7 +1772,7 @@ mod tests {
         let user_msg = &agent.context.history[0];
         let text = user_msg.content.as_text();
         assert!(
-            text.contains("[图片1描述]"),
+            text.contains("[image 1 description]"),
             "expected image description tag in: {}",
             text
         );

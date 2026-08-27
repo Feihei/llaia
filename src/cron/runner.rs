@@ -43,7 +43,7 @@ pub async fn run_tools_mode(
     let steps = match &task.steps {
         Some(s) if !s.is_empty() => s,
         _ => {
-            let msg = format!("[cron:{} 失败] tools 模式但 steps 为空", task.id);
+            let msg = format!("[cron:{} failed] tools mode but steps is empty", task.id);
             tracing::error!("{}", msg);
             let _ = pusher.push(&msg).await;
             anyhow::bail!(msg);
@@ -64,7 +64,10 @@ pub async fn run_tools_mode(
         let tool = match tool {
             Some(t) => t,
             None => {
-                let msg = format!("[cron:{} 失败] 工具 {} 未注册", task.id, tool_name);
+                let msg = format!(
+                    "[cron:{} failed] tool {} not registered",
+                    task.id, tool_name
+                );
                 tracing::error!("{}", msg);
                 let _ = pusher.push(&msg).await;
                 anyhow::bail!(msg);
@@ -84,7 +87,10 @@ pub async fn run_tools_mode(
                 prev = output;
             }
             Err(e) => {
-                let msg = format!("[cron:{} 失败] step {} ({}): {}", task.id, i, tool_name, e);
+                let msg = format!(
+                    "[cron:{} failed] step {} ({}): {}",
+                    task.id, i, tool_name, e
+                );
                 tracing::error!("{}", msg);
                 let _ = pusher.push(&msg).await;
                 anyhow::bail!(msg);
@@ -102,7 +108,7 @@ pub async fn run_agent_mode(
 ) -> anyhow::Result<()> {
     let prompt = task.prompt.as_deref().unwrap_or("");
     if prompt.is_empty() {
-        let msg = format!("[cron:{} 失败] agent 模式但 prompt 为空", task.id);
+        let msg = format!("[cron:{} failed] agent mode but prompt is empty", task.id);
         tracing::error!("{}", msg);
         let _ = pusher.push(&msg).await;
         anyhow::bail!(msg);
@@ -178,7 +184,7 @@ pub async fn run_agent_mode(
             Ok(())
         }
         Err(e) => {
-            let msg = format!("[cron:{} 失败] agent turn: {}", task.id, e);
+            let msg = format!("[cron:{} failed] agent turn: {}", task.id, e);
             tracing::error!("{}", msg);
             let _ = pusher.push(&msg).await;
             anyhow::bail!(msg)
@@ -206,7 +212,7 @@ pub async fn run_task(
                 Ok(())
             }
             Err(e) => {
-                let msg = format!("[cron:{} 失败] dream: {}", task.id, e);
+                let msg = format!("[cron:{} failed] dream: {}", task.id, e);
                 tracing::error!("{}", msg);
                 let _ = pusher.push(&msg).await;
                 Err(anyhow::anyhow!(msg))

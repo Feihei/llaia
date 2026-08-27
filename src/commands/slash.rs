@@ -173,8 +173,8 @@ pub async fn try_handle(
                         .await;
                     let prompt = format_move_prompt(&target, &id);
                     Ok(SlashOutcome::Handled(format!(
-                        "[switch requested] reply `/ok {}` to confirm or `/deny {}` to cancel. {}",
-                        id, id, prompt
+                        "[switch requested] {}",
+                        prompt
                     )))
                 }
                 Err(e) => Ok(SlashOutcome::Handled(format!("[move failed: {}]", e))),
@@ -624,7 +624,10 @@ async fn resolve_approval(
         if approve { "approved" } else { "denied" },
         pending.tool_name
     );
-    Ok(Some(ApprovalOutcome::Resume { notice, message: result }))
+    Ok(Some(ApprovalOutcome::Resume {
+        notice,
+        message: result,
+    }))
 }
 
 /// 解析一条待回答问题：取出 pending question，把 text 作为用户回答，
@@ -640,7 +643,7 @@ async fn resolve_question(
     };
     let notice = format!("[answered {}] {}", id, q.question);
     let message = format!(
-        "[用户对你刚才提出的问题给出了回答]\n问题：{}\n回答：{}",
+        "[The user answered the question you asked]\nQuestion: {}\nAnswer: {}",
         q.question, text
     );
     Ok(Some((notice, message)))

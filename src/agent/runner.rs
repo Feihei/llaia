@@ -113,7 +113,7 @@ pub async fn execute_tool_calls(
                             .await;
                         let choice_hint = match &choices {
                             Some(cs) => format!(
-                                "\n   可选答案：{}（回复选项文本或序号即可）",
+                                "\n   Available answers: {} (reply with the option text or its number)",
                                 cs.iter()
                                     .enumerate()
                                     .map(|(i, c)| format!("{}. {}", i + 1, c))
@@ -123,7 +123,7 @@ pub async fn execute_tool_calls(
                             None => String::new(),
                         };
                         let prompt = format!(
-                            "\n❓ 需要你回答一个问题（id={}）：\n   {}\n   {}直接回复你的答案即可（多个待回答时用 `/answer {} 你的答案` 消歧）。\n",
+                            "\n❓ Please answer a question (id={}):\n   {}\n   {}Just reply with your answer (use `/answer {} your-answer` to disambiguate when several are pending).\n",
                             id, question, choice_hint, id
                         );
                         tracing::info!(id = %id, question = %question, "pending question registered");
@@ -136,7 +136,7 @@ pub async fn execute_tool_calls(
                         }
                         results.push(ChatMessage::tool(
                             format!(
-                                "[⏳ 等待用户回答] 已将问题提交给你（id={}），请回复答案后我继续。",
+                                "[⏳ waiting for your answer] the question has been submitted to you (id={}); reply once you have an answer and I will continue.",
                                 id
                             ),
                             &call.id,
@@ -145,7 +145,7 @@ pub async fn execute_tool_calls(
                         continue;
                     } else {
                         results.push(ChatMessage::tool(
-                            "[无法询问用户] 当前频道非交互式，无法等待回答，已按最合理假设继续。",
+                            "[cannot ask the user] this channel is non-interactive and cannot wait for an answer; proceeding with the most reasonable assumption.",
                             &call.id,
                         ));
                         continue;
@@ -223,7 +223,10 @@ pub async fn execute_tool_calls(
                         .await;
                 }
                 results.push(ChatMessage::tool(
-                    format!("[awaiting confirmation id={}] this operation needs your confirmation.", id),
+                    format!(
+                        "[awaiting confirmation id={}] this operation needs your confirmation.",
+                        id
+                    ),
                     &call.id,
                 ));
                 continue;

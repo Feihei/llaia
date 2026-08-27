@@ -173,7 +173,9 @@ impl DingtalkChannel {
             };
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
-                    let _ = self.send_markdown(&webhook, "[/exit 在钉钉下不可用]").await;
+                    let _ = self
+                        .send_markdown(&webhook, "[/exit not available on DingTalk channel]")
+                        .await;
                 }
                 crate::commands::slash::SlashOutcome::Handled(m) => {
                     let _ = self.send_markdown(&webhook, &m).await;
@@ -327,13 +329,13 @@ impl OutputSink for DingtalkSink {
         // v1：sessionWebhook 媒体需 mediaId 上传流程，暂以文本提示代替
         let _ = self
             .dt
-            .send_markdown(&self.webhook, &format!("[媒体文件: {}]", path))
+            .send_markdown(&self.webhook, &format!("[media file: {}]", path))
             .await;
     }
 
     async fn on_done(&mut self) {
         let reply = if self.buffer.trim().is_empty() {
-            "[已完成（无文本输出）]"
+            "[done (no text output)]"
         } else {
             self.buffer.trim_start_matches(['\n', '\r'])
         };
@@ -353,7 +355,7 @@ impl OutputSink for DingtalkSink {
         }
         let _ = self
             .dt
-            .send_markdown(&self.webhook, &format!("[出错了: {}]", message))
+            .send_markdown(&self.webhook, &format!("[error: {}]", message))
             .await;
     }
 
@@ -362,7 +364,7 @@ impl OutputSink for DingtalkSink {
         if !text.trim().is_empty() {
             text.push_str("\n\n");
         }
-        text.push_str("[已中断]");
+        text.push_str("[interrupted]");
         let _ = self.dt.send_markdown(&self.webhook, &text).await;
     }
 }

@@ -110,7 +110,7 @@ pub fn extract_data_url_images(text: &str) -> (String, Vec<String>) {
         }
         let end = data_start + b64_len;
         images.push(rest[pos..end].to_string());
-        out.push_str("[图片]");
+        out.push_str("[image]");
         rest = &rest[end..];
     }
     (out, images)
@@ -201,7 +201,7 @@ mod tests {
         let (placeholder, images) = extract_data_url_images(&text);
         assert_eq!(images.len(), 1);
         assert_eq!(images[0], url);
-        assert_eq!(placeholder, "viewport: [图片]\nscene ok");
+        assert_eq!(placeholder, "viewport: [image]\nscene ok");
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod tests {
         let text = format!("a {} b {}", url, url);
         let (placeholder, images) = extract_data_url_images(&text);
         assert_eq!(images.len(), 2);
-        assert_eq!(placeholder, "a [图片] b [图片]");
+        assert_eq!(placeholder, "a [image] b [image]");
     }
 
     #[test]

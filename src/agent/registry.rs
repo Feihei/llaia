@@ -70,7 +70,7 @@ impl AgentRegistry {
             .unwrap()
             .get(alias)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("未知子 Agent: {}", alias))
+            .ok_or_else(|| anyhow::anyhow!("unknown sub-agent: {}", alias))
     }
 
     pub fn available_sub_agents(&self) -> Vec<String> {

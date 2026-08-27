@@ -51,11 +51,11 @@ impl Tool for CronTool {
     }
 
     fn description(&self) -> &str {
-        "管理定时任务（cron）。支持 create/update/delete/list 四种操作。\
-         到点触发时按 mode 执行：agent 模式唤醒主 agent 跑一轮（消耗 token），\
-         tools 模式直接跑工具链（不消耗 token）。\
-         结果推送到 channel 指定的频道（qq/web/cli，cli 无持久连接会丢弃结果）。\
-         仅在 'llaia serve' 模式下可用，'llaia chat' 调试模式不可用。"
+        "Manage scheduled tasks (cron). Supports four operations: create/update/delete/list. \
+         On trigger, executes by mode: agent mode wakes the main agent to run a turn (consumes tokens), \
+         tools mode runs the tool chain directly (no tokens consumed). \
+         Results are pushed to the channel specified by `channel` (qq/web/cli; cli has no persistent connection, so results are dropped). \
+         Only available in 'llaia serve' mode; the debug 'llaia chat' mode cannot use it."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -65,45 +65,45 @@ impl Tool for CronTool {
                 "action": {
                     "type": "string",
                     "enum": ["create", "update", "delete", "list"],
-                    "description": "操作类型。list 无需其他参数。create 需要完整任务定义。update 需要 id + 待更新字段。delete 只需 id。"
+                    "description": "Operation type. list needs no other parameters. create requires a full task definition. update requires id plus the fields to update. delete only needs id."
                 },
                 "id": {
                     "type": "string",
-                    "description": "任务 ID（唯一标识，不含空白）。create/update/delete 必填。"
+                    "description": "Task ID (unique identifier, must not contain whitespace). Required for create/update/delete."
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "5 字段 cron 表达式（分 时 日 月 周），例如 '0 8 * * *'（每天 8:00）、'*/30 * * * *'（每 30 分钟）、'0 9 * * 1-5'（工作日 9:00）。"
+                    "description": "5-field cron expression (minute hour day month weekday), e.g. '0 8 * * *' (daily at 8:00), '*/30 * * * *' (every 30 minutes), '0 9 * * 1-5' (weekdays at 9:00)."
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["agent", "tools"],
-                    "description": "agent 模式：用 prompt 唤醒主 agent；tools 模式：用 steps 直接跑工具链。"
+                    "description": "agent mode: wakes the main agent using prompt; tools mode: runs the tool chain directly using steps."
                 },
                 "channel": {
                     "type": "string",
                     "enum": ["qq", "web", "cli"],
-                    "description": "结果推送目标。qq/web 需对应频道启用；cli 无持久连接，结果丢弃。"
+                    "description": "Result push target. qq/web require the corresponding channel to be enabled; cli has no persistent connection, so results are dropped."
                 },
                 "enabled": {
                     "type": "boolean",
-                    "description": "是否启用（默认 true）。false 则调度器不注册，但定义保留。"
+                    "description": "Whether the task is enabled (default true). If false, the scheduler will not register it, but the definition is kept."
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "agent 模式的提示词。mode=agent 时必填，会注入主 agent 上下文。"
+                    "description": "Prompt for agent mode. Required when mode=agent; it is injected into the main agent's context."
                 },
                 "steps": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "tool": { "type": "string", "description": "工具名（如 search、memory_write）" },
-                            "args": { "type": "object", "description": "工具参数。支持 {{prev}}（上一步输出）和 {{now}}（当前 RFC3339 时间）占位符。" }
+                            "tool": { "type": "string", "description": "Tool name (e.g. search, memory_write)" },
+                            "args": { "type": "object", "description": "Tool arguments. Supports {{prev}} (previous step output) and {{now}} (current RFC3339 time) placeholders." }
                         },
                         "required": ["tool"]
                     },
-                    "description": "tools 模式的工具链（按顺序执行）。mode=tools 时必填。"
+                    "description": "Tool chain for tools mode (executed in order). Required when mode=tools."
                 }
             },
             "required": ["action"]

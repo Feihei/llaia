@@ -55,8 +55,6 @@
   - **修法**：`probe_base()` 剥掉 `/v1` 后缀再拼管理端点（`openai_compat.rs`）；补 mockito 回归测试（`/v1` base_url 命中根路径 `/props` 返回 131072 等 3 例）。
   - > ✅ 已交付，2026-08-24 实测校验通过
 
-### 🧩 待 grill 明确后立项（需求/设计类）
-
 ### 🧩 快赢交付（2026-08-24，随 v0.3.1 发布）
 
 - [x] WebUI 加入 doctor 功能（必要性：**中** / 难度：★☆☆~★★☆）— ✅ 已交付
@@ -72,6 +70,32 @@
 - [x] 自动 Tail Reminder：LLM 提炼抗长会话漂移要点（必要性：**中** / 难度：★★☆）— ✅ 已交付
   - **背景**：SOUL/USER 每轮在 system 头部完整重发（与 AstrBot 同构，压缩不动 system），10K 上下文即出现风格漂移的根因是 LLM 自我模仿 + 中段注意力稀释，非 prompt 丢失。
   - **机制**：回合起点对 SOUL+USER 求 md5，与 `workspace/reminder.md` 记录失配（或缺失）时后台隔离 turn 让 LLM 从 SOUL+USER 提炼 ≤120 token 的行为指令清单（走 compact_provider 回退主模型），写盘后下一轮作为最后一条消息注入（离生成点最近）。MEMORY/skills 不参与 hash（避免 memory_write 频繁触发）；文件头注释声明勿手改；生成失败静默降级。
+
+### 🌐 WebUI 改进批次（2026-08-27 评估立项）
+
+> 三项来自用户需求评估（2026-08-27）。W1/W2 是快赢可直接做；W3 有数据采集缺口需先补链路，动手前先定表结构与统计边界。
+
+- [ ] **W1** sessions 左侧列表固定不随内容滚走 + 详情区右下角「跳顶部/跳底部」悬浮按钮（必要性：**中** / 难度：★☆☆）
+  - 根因已定位：`index.html` 里 `<template x-if="authed">` 的匿名包裹 `<div>` 无任何样式，打断了 flex 高度链——`main { flex:1; overflow:hidden }` 因父级不是 flex 容器而失效，pane 高度随内容无限增长、变成整页（body）滚动，左栏随之被滚出视口。
+  - 方案：给该包裹 div 加 class 并声明 `display:flex; flex-direction:column; flex:1; min-height:0`，恢复高度约束后 `.session-list`（已有 `overflow-y:auto`）自然固定在视口内；config 页 sidebar 同病顺带修复。纯 CSS 改动。
+  - 悬浮按钮：`.session-detail` 设 `position:relative`，右下角两个 absolute 定位按钮（↑/↓），分别 `scrollTo({top:0})` / `scrollTo({top:scrollHeight})`；纯前端改动，无新 API。
+- [ ] **W2** About 页更新检查按钮（必要性：**低** / 难度：★☆☆）
+  - 后端：新增 `GET /api/update/check` —— reqwest 请求 GitHub Releases latest API（`https://api.github.com/repos/Feihei/llaia/releases/latest`，该 API 必须带 User-Agent 头否则 403），`tag_name` 去 `v` 前缀后与 `CARGO_PKG_VERSION` 三段数值比较；返回 `{current, latest, update_available, url}`；失败（离线/限流）透传原因，结果加分钟级内存缓存防连点。无鉴权请求限 60 次/h，单用户足够。
+  - 前端：About section 加 Check Updates 按钮 + 结果行（已最新 / 新版本号 + Release 页下载链接），复用现有 cron-msg 消息展示模式。
+- [ ] **W3** token 用量 dashboard，参考 AstrBot WebUI（必要性：**中** / 难度：★★☆）
+  - 参考实现已探明（`.ref/AstrBot`）：两张表（小时预聚合消息计数 + 逐请求 provider_stats 含 input/cached/output tokens 与 timing）；API 把单次范围查询在 Python 聚合成预成形 `[ts,value]` series；UI 为时间范围选择（1/3/7 天）+ 汇总卡（总 tokens/调用数/avg TTFT/成功率）+ per-provider 堆叠柱图 + per-session Top10。
+  - LLAIA 数据链路现状（2026-08-27 核实）：
+    - Provider 层已备好：`ChatResponse.usage: Option<Usage>`、流式 `StreamEvent::Usage(Usage)`（openai_compat 仅 `compat.streaming_usage=true` 时发送；ollama/llamacpp 自动探测预设默认开启）
+    - 缺口①：agent loop 对 `StreamEvent::Usage` 直接丢弃（`agent/mod.rs:825`），未累计未落库
+    - 缺口②：sqlite 无逐回合用量表；`sessions.token_count` 列存在但零调用者（死列），可回收利用做会话级累计
+    - 缺口③：anthropic/gemini 流式 usage 未解析（anthropic 收集流事件时丢弃 / gemini 恒 None），云端 provider 要计入统计需先补齐——列为本项前置子任务
+  - 最小边界方案：
+    - 采集：回合内累计 usage（工具循环多次迭代合并一条），turn 结束写 `turn_usage(id, session_id, ts, model_ref, prompt_tokens, completion_tokens, kind)`；compact/vision/reminder 等 sidecar LLM 调用用 `kind` 区分，UI 默认只看主对话
+    - API：`GET /api/stats/tokens?days=N` 单查询 SQL 聚合出天/小时 bucket series + 总计 + per-model/per-session 分组；单用户数据量小，不需要 AstrBot 式预聚合表
+    - UI：顶层 tab「Stats」：范围选择 + 汇总卡（tokens/请求数）+ 每日柱状图 + per-model/per-session 排名表
+    - 明确不做：TTFT/TPM/成功率（AstrBot 有是因为记了 timing 埋点，LLAIA Provider 层无此埋点，单独补不值）、引入图表库（纯 SVG/CSS 手绘条形图起步，契合终端风零依赖；不够用再 vendored Chart.js）
+  - 已知限制须在 UI 标注：LMStudio/bare 端点默认不上报 usage（streaming_usage 未开且端点未必支持）→ 该 provider 无数据是预期行为而非 bug。
+
 
 ### 🧩 待 grill 明确后立项（需求/设计类）
 

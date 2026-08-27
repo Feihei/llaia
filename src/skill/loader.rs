@@ -79,23 +79,24 @@ pub fn parse_frontmatter(yaml: &str) -> Result<Frontmatter> {
 /// 且长度约束（对齐 pi：name ≤ 64、description ≤ 1024）。WebUI 保存 content 前调用，
 /// `skill_create` / `skill_edit` 工具写盘后也调用。
 pub fn validate_skill_md(content: &str) -> Result<()> {
-    let (yaml, _body) = split_frontmatter(content)
-        .ok_or_else(|| anyhow!("SKILL.md 缺少 YAML frontmatter（--- 包裹的头部元数据）"))?;
+    let (yaml, _body) = split_frontmatter(content).ok_or_else(|| {
+        anyhow!("SKILL.md is missing YAML frontmatter (head metadata wrapped in ---)")
+    })?;
     let fm = parse_frontmatter(yaml)?;
     let name = fm.name.as_deref().map(str::trim).unwrap_or_default();
     if name.is_empty() {
-        anyhow::bail!("frontmatter 缺少 name 字段");
+        anyhow::bail!("frontmatter is missing the name field");
     }
     if name.len() > 64 {
-        anyhow::bail!("frontmatter name 过长（{} > 64 字符）", name.len());
+        anyhow::bail!("frontmatter name too long ({} > 64 chars)", name.len());
     }
     let description = fm.description.as_deref().map(str::trim).unwrap_or_default();
     if description.is_empty() {
-        anyhow::bail!("frontmatter 缺少 description 字段");
+        anyhow::bail!("frontmatter is missing the description field");
     }
     if description.len() > 1024 {
         anyhow::bail!(
-            "frontmatter description 过长（{} > 1024 字符）",
+            "frontmatter description too long ({} > 1024 chars)",
             description.len()
         );
     }
