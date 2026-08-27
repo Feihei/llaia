@@ -668,6 +668,8 @@ impl FeishuChannel {
                         fs: self.clone(),
                         chat_id: inbound.reply_target.clone(),
                         buffer: String::new(),
+                        tool_names: Vec::new(),
+                        notified_tools: false,
                     };
                     registry.set_delivery(
                         self.clone()
@@ -692,6 +694,8 @@ impl FeishuChannel {
             fs: self.clone(),
             chat_id: inbound.reply_target.clone(),
             buffer: String::new(),
+            tool_names: Vec::new(),
+            notified_tools: false,
         };
         registry.set_delivery(
             self.clone()
@@ -748,11 +752,16 @@ impl crate::channels::Channel for FeishuChannel {
     }
 }
 
-/// 输出汇聚：缓冲全部文本后整条发送（文本消息）
+/// 输出汇聚：缓冲全部文本后整条发送（文本消息）。
+/// 工具通知收敛为单条：和 QQ 保持一致，紧凑发送避免刷屏。
 struct FeishuSink {
     fs: Arc<FeishuChannel>,
     chat_id: String,
     buffer: String,
+    /// 本回合已调用的工具名（按序去重）
+    tool_names: Vec<String>,
+    /// 是否已发过工具通知（每回合最多一条）
+    notified_tools: bool,
 }
 
 #[async_trait]
@@ -762,10 +771,13 @@ impl OutputSink for FeishuSink {
     }
 
     async fn on_tool_start(&mut self, name: &str) {
-        let _ = self
-            .fs
-            .reply(&self.chat_id, &format!("🔧 {}...", name))
-            .await;
+        if !self.tool_names.iter().any(|n| n == name) {
+            self.tool_names.push(name.to_string());
+        }
+        if !self.notified_tools {
+            self.notified_tools = true;
+            let _ = self.fs.reply(&self.chat_id, "🔧 calling tools...").await;
+        }
     }
 
     async fn on_media(&mut self, path: &str, _kind: MediaKind) {
@@ -776,10 +788,16 @@ impl OutputSink for FeishuSink {
     }
 
     async fn on_done(&mut self) {
-        let reply = if self.buffer.trim().is_empty() {
+        let body = if self.buffer.trim().is_empty() {
             "[done (no text output)]".to_string()
         } else {
             self.buffer.trim_start_matches(['\n', '\r']).to_string()
+        };
+        // 调用过工具时把清单拼在回复开头，同一条消息反馈（不额外发消息）
+        let reply = if self.tool_names.is_empty() {
+            body
+        } else {
+            format!("🔧 called: {}\n\n{}", self.tool_names.join(", "), body)
         };
         for chunk in split_reply(&reply, MAX_TEXT_LEN) {
             if let Err(e) = self.fs.reply(&self.chat_id, &chunk).await {

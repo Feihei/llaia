@@ -258,6 +258,8 @@ impl TelegramChannel {
                         tg: Arc::clone(self),
                         chat_id,
                         buffer: String::new(),
+                        tool_names: Vec::new(),
+                        notified_tools: false,
                     };
                     registry.set_delivery(
                         self.clone()
@@ -282,6 +284,8 @@ impl TelegramChannel {
             tg: Arc::clone(self),
             chat_id,
             buffer: String::new(),
+            tool_names: Vec::new(),
+            notified_tools: false,
         };
         registry.set_delivery(
             self.clone()
@@ -367,11 +371,15 @@ impl crate::cron::ProactivePusher for TelegramChannel {
     }
 }
 
-/// 输出汇聚：缓冲全部文本后整条发送（Telegram 无编辑成本考虑，避免流式刷屏）
+/// 输出汇聚：缓冲全部文本后整条发送（工具通知收敛为单条，与 QQ 紧凑模式一致）
 struct TelegramSink {
     tg: Arc<TelegramChannel>,
     chat_id: i64,
     buffer: String,
+    /// 本回合已调用的工具名（按序去重）
+    tool_names: Vec<String>,
+    /// 是否已发过工具通知（每回合最多一条）
+    notified_tools: bool,
 }
 
 #[async_trait]
@@ -381,10 +389,13 @@ impl OutputSink for TelegramSink {
     }
 
     async fn on_tool_start(&mut self, name: &str) {
-        let _ = self
-            .tg
-            .send_text(self.chat_id, &format!("🔧 {}...", name))
-            .await;
+        if !self.tool_names.iter().any(|n| n == name) {
+            self.tool_names.push(name.to_string());
+        }
+        if !self.notified_tools {
+            self.notified_tools = true;
+            let _ = self.tg.send_text(self.chat_id, "🔧 calling tools...").await;
+        }
     }
 
     async fn on_media(&mut self, path: &str, kind: MediaKind) {
@@ -398,12 +409,17 @@ impl OutputSink for TelegramSink {
     }
 
     async fn on_done(&mut self) {
-        let reply = if self.buffer.trim().is_empty() {
-            "[done (no text output)]"
+        let body = if self.buffer.trim().is_empty() {
+            "[done (no text output)]".to_string()
         } else {
-            self.buffer.trim_start_matches(['\n', '\r'])
+            self.buffer.trim_start_matches(['\n', '\r']).to_string()
         };
-        for chunk in split_reply(reply, MAX_TEXT_LEN) {
+        let reply = if self.tool_names.is_empty() {
+            body
+        } else {
+            format!("🔧 called: {}\n\n{}", self.tool_names.join(", "), body)
+        };
+        for chunk in split_reply(&reply, MAX_TEXT_LEN) {
             if let Err(e) = self.tg.send_text(self.chat_id, &chunk).await {
                 tracing::error!(error = %e, "telegram send reply failed");
             }

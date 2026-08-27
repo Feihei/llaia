@@ -32,8 +32,8 @@ use tokio::sync::{Mutex, Notify};
 const LONG_POLL_SECS: u64 = 35;
 /// errcode -14：登录态失效，需重新扫码
 const SESSION_TIMEOUT_ERRCODE: i64 = -14;
-/// 单条文本回复切分上限
-const MAX_TEXT_LEN: usize = 4000;
+/// 单条文本回复切分上限（与 QQ 一致；微信 sendmessage 对超长会以 ret=-2 "prepare failed" 拒绝）
+const MAX_TEXT_LEN: usize = 1800;
 /// item_list 类型
 const ITEM_TEXT: i64 = 1;
 const ITEM_IMAGE: i64 = 2;
@@ -476,6 +476,8 @@ impl WechatChannel {
                         wx: Arc::clone(self),
                         user_id: from_user_id.clone(),
                         buffer: String::new(),
+                        tool_names: Vec::new(),
+                        notified_tools: false,
                     };
                     registry.set_delivery(
                         self.clone()
@@ -500,6 +502,8 @@ impl WechatChannel {
             wx: Arc::clone(self),
             user_id: from_user_id,
             buffer: String::new(),
+            tool_names: Vec::new(),
+            notified_tools: false,
         };
         registry.set_delivery(
             self.clone()
@@ -735,11 +739,16 @@ impl crate::channels::Channel for WechatChannel {
     }
 }
 
-/// 输出汇聚：缓冲全部文本后整条发送
+/// 输出汇聚：累积文本 + 工具名，done 后一次性分片发送。
+/// 工具通知收敛为单条：和 QQ 保持一致，紧凑发送避免刷屏/拆分。
 struct WechatSink {
     wx: Arc<WechatChannel>,
     user_id: String,
     buffer: String,
+    /// 本回合已调用的工具名（按序去重）
+    tool_names: Vec<String>,
+    /// 是否已发过工具通知（每回合最多一条）
+    notified_tools: bool,
 }
 
 #[async_trait]
@@ -749,10 +758,16 @@ impl OutputSink for WechatSink {
     }
 
     async fn on_tool_start(&mut self, name: &str) {
-        let _ = self
-            .wx
-            .send_text(&self.user_id, &format!("🔧 {}...", name))
-            .await;
+        if !self.tool_names.iter().any(|n| n == name) {
+            self.tool_names.push(name.to_string());
+        }
+        if !self.notified_tools {
+            self.notified_tools = true;
+            let _ = self
+                .wx
+                .send_text(&self.user_id, "🔧 calling tools...")
+                .await;
+        }
     }
 
     async fn on_media(&mut self, path: &str, kind: MediaKind) {
@@ -766,14 +781,24 @@ impl OutputSink for WechatSink {
     }
 
     async fn on_done(&mut self) {
-        let reply = if self.buffer.trim().is_empty() {
-            "[done (no text output)]"
+        let body = if self.buffer.trim().is_empty() {
+            "[done (no text output)]".to_string()
         } else {
-            self.buffer.trim_start_matches(['\n', '\r'])
+            self.buffer.trim_start_matches(['\n', '\r']).to_string()
         };
-        for chunk in split_reply(reply, MAX_TEXT_LEN) {
+        // 调用过工具时把清单拼在回复开头，同一条消息反馈（不额外发消息）
+        let reply = if self.tool_names.is_empty() {
+            body
+        } else {
+            format!("🔧 called: {}\n\n{}", self.tool_names.join(", "), body)
+        };
+        for chunk in split_reply(&reply, MAX_TEXT_LEN) {
             if let Err(e) = self.wx.send_text(&self.user_id, &chunk).await {
-                tracing::error!(error = %e, "wechat send reply failed");
+                // 微信对单条超长消息会以 ret=-2 prepare failed 拒绝；MAX_TEXT_LEN 已足够短，
+                // 这里顺带提示（不再把错误当致命，避免刷屏）
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    tracing::debug!(error = %e, chunk_len = chunk.len(), "wechat send reply failed");
+                }
             }
         }
     }
