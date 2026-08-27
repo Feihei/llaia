@@ -26,6 +26,7 @@
 | P3+ | ✅ | 交互增强与生态扩展（快赢/Anthropic/Telegram/钉钉/微信） | [CHANGELOG.md](CHANGELOG.md)（§P3+） |
 | P4 | ✅ | 基础能力增强（时区/做梦/压缩/权限/shutdown/Gemini/飞书…） | [CHANGELOG.md](CHANGELOG.md)（§P4） |
 | P5 | ✅ | Provider Compat / 记忆预算 / 统一搜索 / todo / ask_user / skill 自管 / goal / 剩余项 | [CHANGELOG.md](CHANGELOG.md)（§P5） |
+| P6 | 🚧 | 首批交付（稳定性修复 + 快赢）已随 v0.3.1 发布；WebUI 改进等后续批次进行中 | [CHANGELOG.md](CHANGELOG.md)（§v0.3.1） |
 
 ---
 
@@ -34,50 +35,15 @@
 **状态**：🚧 进行中（起点 2026-08-21，源自 [docs/issues/issues.md](issues/issues.md) 的 9 个问题与设想评估）
 
 > 候选池来自 `docs/issues/issues.md`。评估结论（2026-08-21）：3 个 bug/修复类（其中 2 个可直接实施、1 个需先验证根因），6 个需求/设计类需 grill 明确边界后立项。条目按状态分组，标注**必要性**（高/中/低，不做会持续踩坑或已影响正确性→高；明显改善体验→中；锦上添花→低）与**难度**（★☆☆ 半天内单点 / ★★☆ 一到数天跨模块 / ★★★ 结构性改造，动手前先出 ADR），便于排期。
-
-### ✅ 稳定性修复（已全部交付）
-
-- [x] `/provider N` 切换后 fallback 规则失效（必要性：**高** / 难度：★☆☆）— ✅ 已交付
-  - **根因**：`switch_provider`（`src/commands/slash.rs:593`）拿到 `provider_from_ref` 后直接 `reload_provider(Some(provider))` 裸替换，`FallbackProvider` 链被丢弃。
-  - **修法**：切换时若 `[agent.<alias>].fallback` 非空，重建 `FallbackProvider{主=选中模型, 备=fallback 链}`；复用 `fallback.rs` 既有 mock 测试基建补回归。
-  - > ✅ 已交付（`switch_provider` 改走 `build_provider_chain` + `Provider::kind()` 标识 + 3 个回归测试）
-- [x] `/stats` 返回的上下文长度数据有误（必要性：**中** / 难度：★☆☆）— ✅ 已交付
-  - **根因**：`estimate_tokens`（`src/agent/context.rs:80`）只统计 `system + summary + history` 的 `chars/4`，漏掉实际发送给 provider 的 tool definitions JSON schema、`env_state` 注入、goal/todo runtime context 与每条消息 role 开销，显示值显著低于真实发送量。
-  - **修法**：把这些注入源纳入估算口径（与 compact 判定共用同一函数，顺带修正自动压缩触发时机）。
-  - > ✅ 已交付（`estimate_tokens` 基于 `to_messages` 全量文本 + 8 token/条结构开销；`/stats` 另加 tool defs 序列化估算）
-- [x] QQ 频道发图失败 `40093006 请求参数错误`（必要性：**高** / 难度：★☆☆）— ✅ 已交付
-  - **现象**：upload 阶段 `POST /v2/users/{openid}/files` 返回 40093006（`qq.rs:476`），日志 `2026-08-21T07:17:19Z`，文件 `cover_aly.png`。
-  - **根因（2026-08-21 实测确认）**：腾讯 v2 富媒体接口已改为 **JSON body**（`file_type` + `file_data`(base64)/`url` + `srv_send_msg`），**不再支持 multipart 文件上传**；旧实现发 multipart `file` 字段被拒（复现时 multipart 一律 40093007 "富媒体文件下载失败"，与日志 40093006 同属接口协议不匹配）。见官方文档 [富媒体消息](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/rich-media.html)。
-  - **修法（已实现）**：`qq.rs` 上传段改为 JSON + base64（`file_data`，`srv_send_msg=false`，随后仍走 msg_type=7 发送）；用真实 `cover_aly.png`（2.7MB）实测 HTTP 200 返回 file_info 验证通过。
-  - > ✅ 已交付并实测验证
-- [x] context_size 探测失败，恒为默认 8192（必要性：**高** / 难度：★☆☆）— ✅ 已交付
-  - **根因**：llama.cpp `/props`、Ollama `/api/*` 管理端点挂在服务根路径，而 OpenAI 兼容 `base_url` 以 `/v1` 结尾，探测请求打到了 `/v1/props` → 404 → `detect_context_size` 恒失败 → 落默认 8192（128k 模型显示 127% used）。
-  - **修法**：`probe_base()` 剥掉 `/v1` 后缀再拼管理端点（`openai_compat.rs`）；补 mockito 回归测试（`/v1` base_url 命中根路径 `/props` 返回 131072 等 3 例）。
-  - > ✅ 已交付，2026-08-24 实测校验通过
-
-### 🧩 快赢交付（2026-08-24，随 v0.3.1 发布）
-
-- [x] WebUI 加入 doctor 功能（必要性：**中** / 难度：★☆☆~★★☆）— ✅ 已交付
-  - 落点：Config 页 Doctor section；`GET /api/doctor` → `commands::doctor_checks`（provider 连通性 5s 超时、主模型链、context_size 探测、.env 存在性+权限、sessions.db、cron/mcp 解析、skills 计数），结构化 check 列表 ok/warn/error 分色展示。
-- [x] 模型 reasoning 设置：对话临时修改参数（必要性：待定 / 难度：★☆☆）— ✅ 已交付
-  - 最小边界：会话级（不持久化）、仅 thinking 开关（`/reasoning on|off`）；`Agent.thinking_off` 与隔离 turn 临时位 OR 关系；对支持 `chat_template_kwargs` 的 provider 生效（llama.cpp/Ollama/vLLM 等），其余忽略无害。
-- [x] 环境发现在 WebUI 中可视（必要性：**低** / 难度：★☆☆）— ✅ 已交付
-  - 落点：聊天页 ENV 只读面板 + Refresh 按钮；`GET /api/env` 返回缓存、`POST /api/env/refresh` 重探（同 `/env`）。
-- [x] `/stats` 工具列表改分组计数（必要性：**低** / 难度：★☆☆）— ✅ 已交付
-  - 原 `tools: {:?}` 全量名单冗长；改为 `N builtin + M mcp (server: n, ...)`（按 MCP `<server_id>__<tool>` 前缀归类）。
-- [x] QQ 工具通知收敛单条 + 回复开头拼工具清单（必要性：**中** / 难度：★☆☆）— ✅ 已交付
-  - 原每个 ToolStart 即发一条「🔧 xxx...」，连续工具调用刷屏。改为：首工具发一条「🔧 正在调用工具...」后续静默（QQ 消息不可编辑，更新=新消息）；`on_done` 把去重后的工具名拼进回复开头（「🔧 已调用: a、b、c」），零额外消息。
-- [x] 自动 Tail Reminder：LLM 提炼抗长会话漂移要点（必要性：**中** / 难度：★★☆）— ✅ 已交付
-  - **背景**：SOUL/USER 每轮在 system 头部完整重发（与 AstrBot 同构，压缩不动 system），10K 上下文即出现风格漂移的根因是 LLM 自我模仿 + 中段注意力稀释，非 prompt 丢失。
-  - **机制**：回合起点对 SOUL+USER 求 md5，与 `workspace/reminder.md` 记录失配（或缺失）时后台隔离 turn 让 LLM 从 SOUL+USER 提炼 ≤120 token 的行为指令清单（走 compact_provider 回退主模型），写盘后下一轮作为最后一条消息注入（离生成点最近）。MEMORY/skills 不参与 hash（避免 memory_write 频繁触发）；文件头注释声明勿手改；生成失败静默降级。
+> 已交付部分（4 项稳定性修复 + 6 项快赢）随 v0.3.1 发布，完整勾选清单已归档至 [CHANGELOG.md](CHANGELOG.md) §v0.3.1，此处不再重复；主干体检直接修项将随下一版本归档。本节只保留剩余计划与进行中条目。
 
 ### 🌐 WebUI 改进批次（2026-08-27 评估立项）
 
 > 三项来自用户需求评估（2026-08-27）。W1/W2 是快赢可直接做；W3 有数据采集缺口需先补链路，动手前先定表结构与统计边界。
 
-- [ ] **W1** sessions 左侧列表固定不随内容滚走 + 详情区右下角「跳顶部/跳底部」悬浮按钮（必要性：**中** / 难度：★☆☆）
-  - 根因已定位：`index.html` 里 `<template x-if="authed">` 的匿名包裹 `<div>` 无任何样式，打断了 flex 高度链——`main { flex:1; overflow:hidden }` 因父级不是 flex 容器而失效，pane 高度随内容无限增长、变成整页（body）滚动，左栏随之被滚出视口。
-  - 方案：给该包裹 div 加 class 并声明 `display:flex; flex-direction:column; flex:1; min-height:0`，恢复高度约束后 `.session-list`（已有 `overflow-y:auto`）自然固定在视口内；config 页 sidebar 同病顺带修复。纯 CSS 改动。
+- [ ] **W1** sessions / config 页左侧栏固定不随内容滚走 + 会话详情区右下角「跳顶部/跳底部」悬浮按钮（必要性：**中** / 难度：★☆☆）
+  - 根因已定位（两个页面同源）：`index.html` 里 `<template x-if="authed">` 的匿名包裹 `<div>` 无任何样式，打断了 flex 高度链——`main { flex:1; overflow:hidden }` 因父级不是 flex 容器而失效，pane 高度随内容无限增长、变成整页（body）滚动；sessions 左侧会话列表与 config 左侧分区导航都因此被滚出视口。
+  - 方案：给该包裹 div 加 class 并声明 `display:flex; flex-direction:column; flex:1; min-height:0`，恢复高度约束后 `.session-list` 与 `#config-pane .sidebar`（均已自带 `overflow-y:auto`）各自固定在视口内、右侧内容独立滚动。纯 CSS 改动，一次修两处。
   - 悬浮按钮：`.session-detail` 设 `position:relative`，右下角两个 absolute 定位按钮（↑/↓），分别 `scrollTo({top:0})` / `scrollTo({top:scrollHeight})`；纯前端改动，无新 API。
 - [ ] **W2** About 页更新检查按钮（必要性：**低** / 难度：★☆☆）
   - 后端：新增 `GET /api/update/check` —— reqwest 请求 GitHub Releases latest API（`https://api.github.com/repos/Feihei/llaia/releases/latest`，该 API 必须带 User-Agent 头否则 403），`tag_name` 去 `v` 前缀后与 `CARGO_PKG_VERSION` 三段数值比较；返回 `{current, latest, update_available, url}`；失败（离线/限流）透传原因，结果加分钟级内存缓存防连点。无鉴权请求限 60 次/h，单用户足够。
@@ -199,6 +165,29 @@
   - 可发现性：需任务列表/入口；评估能否合并现有 goal/todo，避免三套平行「有边界的事」。
   - 任务 session 持久化：独立上下文如何落 sqlite（session 类型字段 + 关联目录？）。
   - 跨频道进出任务：换频道能否回到某任务线。
+
+### ⭐ 新增设计与待实施（2026-08-27），两项一起落地
+
+**#E `/provider` 切换默认持久化 + `--temp` 临时切换（已定案 → 实现中）**
+
+- 现状：`switch_provider`（`slash.rs:697`）只 `reload_provider` 内存替换，**不写 config.toml** → 进程内生效、重启/WebUI 保存配置即回落到 config 值；`context_size` 冻结在 Agent 构建期，切换后压缩阈值不跟随新模型。
+- 定案（用户倾向，2026-08-27）：
+  - `/provider <n|id.alias>` → **默认持久化**：把新模型写进 `[agent.<alias>].model`，同步更新内存 `live_config.agent.<alias>.model`，再 `reload_provider`。
+  - `/provider --temp <n|id.alias>` → 维持纯内存临时切换（试跑不落地）。
+  - 写盘用 `toml_edit` 定点改 `[agent.<alias>].model` 单 key（保住注释，不 `toml::to_string_pretty` 全量覆盖）；`switch` 从 live_config 分离 `persist` 标志。
+- 待实现：`slash.rs::switch_provider` 加 `--temp` 解析 + 持久化分支；服务端/CLI 一致（`config_dir/config.toml` 路径、`Agent.config_dir` 已具备）。
+
+**#F `context_size` 与 Agent 解耦：懒解析 + 缓存 + reload 失效（已定案 → 实现中）**
+
+- 现状：`Agent.context_size: usize` 字段在 `Agent::new`（`cli.rs:562`）同步解析并冻结；`reload_provider`（`mod.rs:244`）与 WebUI `hot_reload_providers` 只换 provider **不重算 context_size** → 进程内切到大/小窗模型后压缩阈值仍是旧值（`needs_compaction` 与 `compact` 的 token 预算都读它，`mod.rs:615/625`）。且构建期同步 `detect_context_size()` 是启动阻塞大头（见 #11 实测 ~200ms/次、main 探多次）。
+- 定案：`context_size` 不再冻结，改为**按活动 provider 懒解析 + 缓存**，窗口随模型跟随：
+  - 新增 `Agent.resolved_context_size: RwLock<Option<usize>>` 作为结果缓存；
+  - 新增方法 `context_size_now()`：缓存命中直接返回；未命中 → 从 live_config 取当前 alias 的 `model_cfg.context_size`（`configured`）+ 活动 provider `detect_context_size()`，`min(configured,detected)`（探测不到用 configured、都没有 8192）→ 缓存；
+  - `reload_provider` / `reload_compact_provider` 命中时清空缓存 → `/provider` 切换、WebUI 热保存后窗口立即跟随新模型；
+  - 使用点全部改 `context_size_now()`：`maybe_auto_compact`（`mod.rs:615`）、`spawn_continuation` 克隆（`mod.rs:450`）、`/config` 展示与 `/compact`（`slash.rs:204/337`）。
+  - 顺带：`cli.rs::build_agent` **不再同步探测**（去掉对 `provider.detect_context_size()` 与 `provider_ref` 的依赖），把探测挪到首个 turn 懒执行 → 启动不再被 /props 阻塞；构建期仅按 `configured.unwrap_or(8192)` 传入基线。
+- 待决（本项不实现）：探测结果磁盘缓存（按 base_url+model，存 sqlite）——与 #11 的「探测收敛/缓存」合并，重启免重复探测；先靠懒解析 + reload 失效解决正确性与启动阻塞。
+- 附带影响：`context_size_now` 是 async，`/config`/`/compact` 路径随之 async（本就 async 上下文，无碍）；`--temp` 切换时 live_config 模型未更新，`configured` 取到旧模型值作为 min 上限，属可接受的临时实验边界。
 
 ---
 

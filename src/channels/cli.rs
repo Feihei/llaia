@@ -559,23 +559,14 @@ pub async fn build_single_agent(
         }
     };
 
-    // context_size: min(配置值, 探测值)，探测不到用配置值，都没有用默认 8192
-    // 降级模式（无 provider）直接用 8192
-    let context_size = match (
-        model_cfg.as_ref().and_then(|m| m.context_size),
-        provider_ref,
-    ) {
-        (Some(cfg), Some(p)) => {
-            let detected = p.detect_context_size().await;
-            match detected {
-                Some(det) => cfg.min(det),
-                None => cfg,
-            }
-        }
-        (Some(cfg), None) => cfg,
-        (None, Some(p)) => p.detect_context_size().await.unwrap_or(8192),
-        (None, None) => 8192,
-    };
+    // context_size 作为 Agent 的**降级基线**：真正的窗口由 `Agent::context_size_now`
+    // 按活动 provider 懒解析（配置上限 + 探测双源，结果缓存、reload_provider 时失效）。
+    // 此处**不再同步探测** `/props` / `/api/show`，把探测挪到首个 turn 懒执行，
+    // 消除构建期探测对启动的阻塞（见 plan.md #F）。仅按配置显式上限给基线，默认 8192。
+    let context_size = model_cfg
+        .as_ref()
+        .and_then(|m| m.context_size)
+        .unwrap_or(8192);
     tracing::info!(
         agent = alias,
         configured = ?model_cfg.as_ref().and_then(|m| m.context_size),

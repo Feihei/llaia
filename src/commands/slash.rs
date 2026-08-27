@@ -43,7 +43,7 @@ pub async fn try_handle(
     match cmd_lc.as_str() {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -201,10 +201,13 @@ pub async fn try_handle(
             Ok(SlashOutcome::Handled("[context cleared]".into()))
         }
         "/compact" => match agent.provider_for_compact().await {
-            Some(p) => match agent.context.compact(p.as_ref(), 6, agent.context_size).await {
-                Ok(_) => Ok(SlashOutcome::Handled("[compacted]".into())),
-                Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
-            },
+            Some(p) => {
+                let context_size = agent.context_size_now().await;
+                match agent.context.compact(p.as_ref(), 6, context_size).await {
+                    Ok(_) => Ok(SlashOutcome::Handled("[compacted]".into())),
+                    Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
+                }
+            }
             None => Ok(SlashOutcome::Handled(
                 "[compact failed: provider not configured]".into(),
             )),
@@ -330,11 +333,12 @@ tools: {}
             }
         }
         "/config" => {
+            let context_size = agent.context_size_now().await;
             let info = format!(
                 "context_threshold: {}\nmax_iterations: {}\ncontext_size: {}\nhistory msgs: {}\nsummary: {}\ntools: {:?}",
                 agent.context_threshold,
                 agent.max_iterations,
-                agent.context_size,
+                context_size,
                 agent.context.history.len(),
                 agent.context.summary.is_some(),
                 agent.tools.names()
@@ -690,37 +694,100 @@ async fn list_providers(agent: &Agent) -> String {
         };
         out.push_str(&format!("{}. {} ({}){}\n", i + 1, r, model_name, mark));
     }
-    out.push_str("usage: /provider <num> | /provider <id.alias>");
+    out.push_str("usage: /provider [--temp] <num> | /provider [--temp] <id.alias>");
+    out.push_str("   (default persists to [agent].model; --temp switches in memory only)");
     out
 }
 
-/// `/provider <n>` 或 `/provider <id.alias>`：运行时切换，不写 config.toml
+/// `/provider <n>` 或 `/provider <id.alias>`：切换到指定模型。
+///
+/// **默认持久化**：把新模型写进 `[agent.<alias>].model`（config.toml）并同步内存
+/// `live_config`，重启/WebUI 保存后仍保持。若要纯临时试跑不落地，用 `--temp`：
+/// `/provider --temp <n|id.alias>`（仅内存切换，重启即回落到 config 值）。
+///
+/// 走 build_provider_chain 而非 provider_from_ref：保留 [agent.<alias>].fallback 降级链，
+/// 否则切换后 FallbackProvider 被裸替换丢失（回归见 test_provider_switch_preserves_fallback_chain）。
 async fn switch_provider(agent: &mut Agent, arg: &str) -> Result<String> {
+    let (persist, sel) = parse_switch_arg(arg);
     let live_arc = agent.live_config();
-    let live = live_arc.read().await;
-    let refs = flatten_model_refs(&live);
-    let model_ref = if let Ok(n) = arg.parse::<usize>() {
-        refs.get(
-            n.checked_sub(1)
-                .ok_or_else(|| anyhow::anyhow!("index starts at 1"))?,
-        )
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("index {} out of range (1-{})", n, refs.len()))?
-    } else {
-        arg.to_string()
+    let (model_ref, provider) = {
+        let live = live_arc.read().await;
+        let refs = flatten_model_refs(&live);
+        let model_ref = if let Ok(n) = sel.parse::<usize>() {
+            refs.get(
+                n.checked_sub(1)
+                    .ok_or_else(|| anyhow::anyhow!("index starts at 1"))?,
+            )
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("index {} out of range (1-{})", n, refs.len()))?
+        } else {
+            sel.to_string()
+        };
+        let fallback = live
+            .agent
+            .get(&agent.alias)
+            .map(|a| a.fallback.clone())
+            .unwrap_or_default();
+        let provider = crate::provider::build_provider_chain(&model_ref, &fallback, &live)?
+            .ok_or_else(|| anyhow::anyhow!("provider unavailable"))?;
+        (model_ref, provider)
     };
-    // 走 build_provider_chain 而非 provider_from_ref：保留 [agent.<alias>].fallback 降级链，
-    // 否则切换后 FallbackProvider 被裸替换丢失（回归见 test_provider_switch_preserves_fallback_chain）。
-    let fallback = live
-        .agent
-        .get(&agent.alias)
-        .map(|a| a.fallback.clone())
-        .unwrap_or_default();
-    let provider = crate::provider::build_provider_chain(&model_ref, &fallback, &live)?
-        .ok_or_else(|| anyhow::anyhow!("provider unavailable"))?;
+    if persist {
+        // 先同步内存 live_config（serve 模式共享，保证后续枚举/索引与磁盘一致）
+        {
+            let mut w = live_arc.write().await;
+            if let Some(a) = w.agent.get_mut(&agent.alias) {
+                a.model = model_ref.clone();
+            }
+        }
+        // 磁盘写 best-effort：失败仅 warn 降级为纯内存切换（不中断切换本身）
+        let config_path = agent.config_dir.join("config.toml");
+        if let Err(e) = persist_agent_model(&config_path, &agent.alias, &model_ref) {
+            tracing::warn!(
+                error = %e,
+                alias = %agent.alias,
+                model = %model_ref,
+                "persist agent.model to config.toml failed; keeping in-memory switch only"
+            );
+        }
+    }
     agent.reload_provider(Some(provider)).await;
-    tracing::info!(model = model_ref.as_str(), "provider switched at runtime");
-    Ok(format!("[switched to {}]", model_ref))
+    tracing::info!(model = %model_ref, persist, "provider switched at runtime");
+    let suffix = if persist { "" } else { " (temporary)" };
+    // 默认持久化保持既有消息格式 `[switched to X]`，临时切换追加 `(temporary)` 标注。
+    Ok(format!("[switched to {}{}]", model_ref, suffix))
+}
+
+/// 解析 `/provider` 参数：`--temp <sel>` 临时切换（不写 config），其余默认持久化。
+/// 返回 `(persist, selector)`；selector 为序号或 `provider.model_alias` ref。
+fn parse_switch_arg(arg: &str) -> (bool, &str) {
+    let arg = arg.trim();
+    match arg.strip_prefix("--temp ") {
+        Some(rest) => (false, rest.trim()),
+        None => (true, arg),
+    }
+}
+
+/// 用 toml_edit 定点改 `[agent.<alias>].model`，保留磁盘上其余段落与注释。
+fn persist_agent_model(config_path: &std::path::Path, alias: &str, model_ref: &str) -> Result<()> {
+    let text = std::fs::read_to_string(config_path)?;
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| anyhow::anyhow!("parse config.toml: {}", e))?;
+    // 确保 `[agent]` 与 `[agent.<alias>]` 表存在，再定点写入 model
+    let agent_tbl = doc
+        .entry("agent")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[agent] in config.toml is not a table"))?;
+    let alias_tbl = agent_tbl
+        .entry(alias)
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[agent.{}] in config.toml is not a table", alias))?;
+    alias_tbl.insert("model", toml_edit::value(model_ref));
+    std::fs::write(config_path, doc.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -811,6 +878,10 @@ mod tests {
     }
 
     async fn test_agent(config: Config) -> Agent {
+        test_agent_at(config, "/tmp/llaia-test").await
+    }
+
+    async fn test_agent_at(config: Config, config_dir: &str) -> Agent {
         let store = SessionStore::open_in_memory().unwrap();
         let sid = store.create_session("test", "test").unwrap();
         Agent::new(
@@ -827,7 +898,7 @@ mod tests {
             std::sync::Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
                 "/tmp/llaia-test/workspace",
             ))),
-            "/tmp/llaia-test".into(),
+            config_dir.into(),
             true,
             "main".into(),
             None,
@@ -901,5 +972,61 @@ mod tests {
         switch_provider(&mut agent, "a.big").await.unwrap();
         let p = agent.provider_snapshot().await.unwrap();
         assert_eq!(p.kind(), "provider");
+    }
+
+    #[tokio::test]
+    async fn test_provider_switch_temp_does_not_persist() {
+        let mut agent = test_agent(test_config()).await;
+        let msg = switch_provider(&mut agent, "--temp 1").await.unwrap();
+        assert_eq!(msg, "[switched to a.big (temporary)]");
+        let p = agent.provider_snapshot().await.unwrap();
+        assert_eq!(p.label(), "big-model");
+        // live_config 保持原 [agent.main].model（"a.big"），未被动过
+        let model = agent
+            .live_config()
+            .read()
+            .await
+            .agent
+            .get("main")
+            .unwrap()
+            .model
+            .clone();
+        assert_eq!(model, "a.big");
+    }
+
+    #[tokio::test]
+    async fn test_provider_switch_persists_to_config_file() {
+        // 默认（非 --temp）应把新模型写进 config.toml 的 [agent.<alias>].model，并同步内存 live_config
+        let cfg = test_config();
+        let dir = std::env::temp_dir().join(format!("llaia-switch-persist-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("config.toml");
+        std::fs::write(&config_path, toml::to_string(&cfg).unwrap()).unwrap();
+
+        let mut agent = test_agent_at(cfg, &dir.to_string_lossy()).await;
+        let msg = switch_provider(&mut agent, "2").await.unwrap();
+        assert_eq!(msg, "[switched to b.small]");
+        let p = agent.provider_snapshot().await.unwrap();
+        assert_eq!(p.label(), "small-model");
+
+        // 内存 live_config 已同步为新模型
+        let model = agent
+            .live_config()
+            .read()
+            .await
+            .agent
+            .get("main")
+            .unwrap()
+            .model
+            .clone();
+        assert_eq!(model, "b.small");
+
+        // 磁盘 config.toml 已定点更新（保留其余字段，仅 [agent.main].model 变化）
+        let disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc: toml_edit::DocumentMut = disk.parse().unwrap();
+        assert_eq!(doc["agent"]["main"]["model"].as_str(), Some("b.small"));
+
+        // 清理临时目录
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

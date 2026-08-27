@@ -66,7 +66,14 @@ pub struct Agent {
     pub session_store: Arc<SessionStore>,
     pub session_id: i64,
     /// 模型上下文窗口大小（tokens），用于判断何时触发自动压缩
+    ///
+    /// 仅作为**降级基线**（构建期由配置值/默认给出），真正的窗口由 `context_size_now`
+    /// 按**活动 provider** 懒解析并缓存进 `resolved_context_size`，两者不再强绑定——
+    /// /provider 切换、WebUI 热保存后压缩阈值即随新模型跟随，而非冻结在启动时刻。
     pub context_size: usize,
+    /// 懒解析的模型上下文窗口缓存，跟随活动 provider（见 `context_size_now`）。
+    /// `reload_provider` 命中时清空，使运行时切换/热保存后窗口随新模型重算。
+    resolved_context_size: Arc<RwLock<Option<usize>>>,
     pub context_threshold: f64,
     pub max_iterations: u32,
     /// 单个工具结果文本的最大字符数（非图片内容），超限截断兜底。
@@ -132,6 +139,25 @@ pub struct TurnToolCall {
     pub args: serde_json::Value,
 }
 
+/// 模型上下文窗口的全局兜底值：配置未设、provider 探测失败时的最小窗口。
+const DEFAULT_CONTEXT_SIZE: usize = 8192;
+
+/// 从实时配置读取 `[agent.<alias>].model` 指向的 model_cfg.context_size（显式上限）。
+/// model 未配置 / 对应 provider.model 缺失 → None（走探测或兜底默认）。
+fn resolve_configured_context_size(config: &Config, alias: &str) -> Option<usize> {
+    let model_ref = config.agent.get(alias)?.model.clone();
+    if model_ref.is_empty() {
+        return None;
+    }
+    let (prov_id, model_alias) = Config::parse_model_ref(&model_ref).ok()?;
+    config
+        .provider
+        .get(prov_id)?
+        .model
+        .get(model_alias)?
+        .context_size
+}
+
 impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
@@ -180,6 +206,7 @@ impl Agent {
             turn_tool_calls: Vec::new(),
             config: Arc::new(config.clone()),
             live_config: Arc::new(RwLock::new(config.clone())),
+            resolved_context_size: Arc::new(RwLock::new(None)),
             system_prompt_base: String::new(),
             system_has_tool_instructions: false,
             disable_tools: false,
@@ -241,9 +268,41 @@ impl Agent {
     /// - `None`：进入降级模式
     ///
     /// 正在进行的 turn 持有旧 snapshot 不受影响，新 turn 用新 provider。
+    /// 同步清空 `resolved_context_size`，使上下文窗口在下次 `context_size_now` 时
+    /// 跟随新模型重算（/provider 切换、WebUI 热保存后压缩阈值不再冻结在启动时刻）。
     pub async fn reload_provider(&self, new_provider: Option<Arc<dyn Provider>>) {
         let mut guard = self.provider.write().await;
         *guard = new_provider;
+        // tokio RwLock 不会 poison，直接解引用 guard 覆盖即可（无需 unwrap）
+        *self.resolved_context_size.write().await = None;
+    }
+
+    /// 解析当前活动 provider 的模型上下文窗口大小（tokens），懒执行并缓存。
+    ///
+    /// 窗口不再冻结在 Agent 构建期：这里按「实时配置的显式上限 + 活动 provider 探测」
+    /// 双源解析，结果缓存进 `resolved_context_size`；`reload_provider` 命中时清空缓存，
+    /// 于是 /provider 切换、WebUI 热保存后压缩阈值立即跟随新模型。
+    /// 探测（`Provider::detect_context_size`）仅在缓存未命中时执行一次。
+    pub async fn context_size_now(&self) -> usize {
+        if let Some(v) = *self.resolved_context_size.read().await {
+            return v;
+        }
+        let configured = {
+            let live = self.live_config.read().await;
+            resolve_configured_context_size(&live, &self.alias)
+        };
+        let detected = match self.provider.read().await.as_ref() {
+            Some(p) => p.detect_context_size().await,
+            None => None,
+        };
+        let size = match (configured, detected) {
+            (Some(c), Some(d)) => c.min(d),
+            (Some(c), None) => c,
+            (None, Some(d)) => d,
+            (None, None) => DEFAULT_CONTEXT_SIZE,
+        };
+        *self.resolved_context_size.write().await = Some(size);
+        size
     }
 
     /// 热替换 compact_provider（仅 compact_model 变更时调用）。
@@ -466,6 +525,7 @@ impl Agent {
             disable_thinking,
             thinking_off: false,
             live_config: self.live_config.clone(),
+            resolved_context_size: self.resolved_context_size.clone(),
             system_prompt_base: self.system_prompt_base.clone(),
             system_has_tool_instructions: self.system_has_tool_instructions,
         }
@@ -613,16 +673,18 @@ impl Agent {
     /// 抽成方法，供「回合开头」与「工具循环内每次迭代」复用同一套逻辑，
     /// 避免单回合内工具链把上下文撑爆却只在回合边界才检查的问题。
     async fn maybe_auto_compact(&mut self) {
+        // 窗口按活动 provider 懒解析：/provider 切换后压缩阈值跟随新模型（而非启动快照）
+        let context_size = self.context_size_now().await;
         if !self
             .context
-            .needs_compaction(self.context_size, self.context_threshold)
+            .needs_compaction(context_size, self.context_threshold)
         {
             return;
         }
         let compact_provider = self.provider_for_compact().await;
         match compact_provider.as_ref() {
             Some(p) => {
-                if let Err(e) = self.context.compact(p.as_ref(), 6, self.context_size).await {
+                if let Err(e) = self.context.compact(p.as_ref(), 6, context_size).await {
                     tracing::warn!(error = %e, "auto-compact failed");
                 }
             }
@@ -1205,6 +1267,84 @@ mod tests {
             None,
         )
         .await
+    }
+
+    /// 回归：context_size 与 Agent 解耦（plan.md #F）。`context_size_now` 按活动
+    /// provider 懒解析并缓存；`reload_provider` 时清缓存，使 /provider 切换、WebUI
+    /// 热保存后窗口随新模型跟随，而非冻结在 Agent 构建期。
+    struct CtxMockProvider {
+        label: &'static str,
+        size: Option<usize>,
+    }
+    #[async_trait]
+    impl Provider for CtxMockProvider {
+        async fn chat(&self, _req: &ChatRequest<'_>) -> Result<ChatResponse> {
+            Ok(ChatResponse::default())
+        }
+        async fn chat_stream(&self, _req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
+            Box::pin(futures_util::stream::empty())
+        }
+        fn native_tool_calling(&self) -> bool {
+            true
+        }
+        fn label(&self) -> String {
+            self.label.into()
+        }
+        async fn detect_context_size(&self) -> Option<usize> {
+            self.size
+        }
+    }
+
+    #[tokio::test]
+    async fn test_context_size_now_follows_provider_switch() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("test", "test").unwrap();
+        let tools = Arc::new(ToolRegistry::new());
+        // 不注入 [agent.main].model，`resolve_configured_context_size` 返回 None →
+        // 窗口全靠 provider 探测（configured=None 分支），正好验证懒探测与缓存失效。
+        let cfg = Config::default_for_workspace("/tmp/llaia-test");
+        let provider_a: Arc<dyn Provider> = Arc::new(CtxMockProvider {
+            label: "provider_a.m1",
+            size: Some(4000),
+        });
+        let agent = Agent::new(
+            &cfg,
+            Some(provider_a),
+            None,
+            None,
+            tools,
+            Arc::new(store),
+            sid,
+            "test system".into(),
+            8192,
+            std::path::PathBuf::from("/tmp/llaia-test/workspace"),
+            Arc::new(RwLock::new(std::path::PathBuf::from(
+                "/tmp/llaia-test/workspace",
+            ))),
+            std::path::PathBuf::from("/tmp/llaia-test"),
+            true,
+            "main".into(),
+            None,
+        )
+        .await;
+        // Av1：探测 4000，配置无显式上限，取探测值；结果缓存。
+        assert_eq!(agent.context_size_now().await, 4000);
+        // 切换前先读取一次，验证缓存命中（不再触发第二次探测，值不变）。
+        assert_eq!(agent.context_size_now().await, 4000);
+        // 类比 /provider 切换：reload_provider 清空缓存 → 下次懒解析取新 model 的探测值。
+        let provider_b: Arc<dyn Provider> = Arc::new(CtxMockProvider {
+            label: "provider_a.m2",
+            size: Some(8000),
+        });
+        agent.reload_provider(Some(provider_b)).await;
+        assert_eq!(agent.context_size_now().await, 8000);
+        // provider 无探测（返回 None）时，退化为构建期基线。
+        let provider_c: Arc<dyn Provider> = Arc::new(CtxMockProvider {
+            label: "provider_no_detect",
+            size: None,
+        });
+        agent.reload_provider(Some(provider_c)).await;
+        assert_eq!(agent.context_size_now().await, agent.context_size);
     }
 
     /// 回归：单回合内长工具链（如 Blender MCP 返回巨大）把上下文撑过阈值时，
