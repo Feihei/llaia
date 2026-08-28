@@ -40,6 +40,17 @@ pub struct ToolCallRow {
     pub created_at: String,
 }
 
+/// 一次模型调用的 token 用量（plan.md W3）：逐请求记录，供 Stats dashboard 聚合。
+#[derive(Debug, Clone)]
+pub struct TurnUsage {
+    pub session_id: i64,
+    pub model_ref: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    /// 'chat'（默认）/ 'compact' / 'vision' / 'reminder' 等 sidecar 调用区分
+    pub kind: String,
+}
+
 /// 会话列表项：SessionRow + 消息数（WebUI 会话历史，P5 W1）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionListItem {
@@ -133,8 +144,21 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT NOT NULL
 );
 
+-- 逐请求 token 用量（plan.md W3 token dashboard）：一行 = 一次模型调用
+CREATE TABLE IF NOT EXISTS turn_usage (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id        INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    ts                TEXT NOT NULL,
+    model_ref         TEXT NOT NULL,
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    kind              TEXT NOT NULL DEFAULT 'chat'
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_ts ON turn_usage(ts);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id);
 "#,
         )?;
         Ok(())
@@ -262,6 +286,25 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
             rusqlite::params![delta, session_id],
         )?;
         Ok(())
+    }
+
+    /// 记录一次模型调用（一次 chat_stream）的 token 用量（plan.md W3）。
+    pub fn add_turn_usage(&self, u: &TurnUsage) -> Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO turn_usage (session_id, ts, model_ref, prompt_tokens, completion_tokens, kind) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                u.session_id,
+                now,
+                u.model_ref,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.kind
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
     }
 
     // ---- kv 存储（做梦游标等小元数据） ----

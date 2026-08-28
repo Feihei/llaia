@@ -304,6 +304,22 @@ impl Provider for GeminiProvider {
         let v: serde_json::Value = resp.json().await.map_err(|e| anyhow!("parse: {}", e))?;
         let mut text = String::new();
         let mut tool_calls = Vec::new();
+        let mut usage = None;
+        if let Some(u) = v.get("usageMetadata") {
+            let prompt = u
+                .get("promptTokenCount")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0) as u32;
+            let completion = u
+                .get("candidatesTokenCount")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0) as u32;
+            usage = Some(crate::provider::Usage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                total_tokens: prompt + completion,
+            });
+        }
         if let Some(cands) = v.get("candidates").and_then(|c| c.as_array()) {
             for cand in cands {
                 if let Some(parts) = cand
@@ -339,7 +355,7 @@ impl Provider for GeminiProvider {
         Ok(ChatResponse {
             text: if text.is_empty() { None } else { Some(text) },
             tool_calls,
-            usage: None,
+            usage,
             finish_reason: None,
         })
     }
@@ -400,6 +416,8 @@ impl Provider for GeminiProvider {
 
         let s = try_stream! {
             let mut buf = String::new();
+            // 流式 token 用量：usageMetadata 在最终 chunk 上（累计值），后到者覆盖
+            let mut usage: Option<crate::provider::Usage> = None;
             // 空闲计时锚点：仅「真实 data 事件」会刷新；keepalive 注释 `: ping` 不会。
             let mut last_data = Instant::now();
             loop {
@@ -498,7 +516,20 @@ impl Provider for GeminiProvider {
                             }
                         }
                     }
+                    // Gemini 流式：usageMetadata 在最终 chunk 带上（整响应累计 token 计数）
+                    if let Some(u) = v.get("usageMetadata") {
+                        let prompt = u.get("promptTokenCount").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+                        let completion = u.get("candidatesTokenCount").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+                        usage = Some(crate::provider::Usage {
+                            prompt_tokens: prompt,
+                            completion_tokens: completion,
+                            total_tokens: prompt + completion,
+                        });
+                    }
                 }
+            }
+            if let Some(u) = usage {
+                yield StreamEvent::Usage(u);
             }
             tracing::info!("provider stream done (stream ended)");
             yield StreamEvent::Done;

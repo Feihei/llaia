@@ -728,6 +728,32 @@ impl Agent {
         Some(path.to_string_lossy().to_string())
     }
 
+    /// 记录一次主对话模型调用的 token 用量（plan.md W3 token dashboard）。
+    /// 空用量直接跳过（LMStudio/bare 端点不上报 usage 是预期行为）。
+    async fn record_turn_usage(&self, usage: &crate::provider::Usage) {
+        if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
+            return;
+        }
+        let model_ref = self
+            .live_config
+            .read()
+            .await
+            .agent
+            .get(&self.alias)
+            .map(|c| c.model.clone())
+            .unwrap_or_else(|| self.alias.clone());
+        let u = crate::memory::sqlite::TurnUsage {
+            session_id: self.session_id,
+            model_ref,
+            prompt_tokens: usage.prompt_tokens as i64,
+            completion_tokens: usage.completion_tokens as i64,
+            kind: "chat".into(),
+        };
+        if let Err(e) = self.session_store.add_turn_usage(&u) {
+            tracing::warn!(error = %e, "record turn_usage failed");
+        }
+    }
+
     /// 多模态流式版本：接收任意 ChatMessage（支持文本+图片）。
     /// 文本消息存入 sqlite，多模态消息只存文本部分（图片 base64 不持久化）。
     pub async fn handle_message_streaming(
@@ -853,6 +879,8 @@ impl Agent {
             let mut iter_text = String::new();
             let mut calls: Vec<crate::provider::ToolCall> = Vec::new();
             let mut parser = crate::tool_call::ToolCallStreamParser::new();
+            // 本次请求（迭代）累计的 token 用量：Usage 事件可能在流中多次出现，合并成一条
+            let mut iter_usage: Option<crate::provider::Usage> = None;
 
             while let Some(ev) = stream.next().await {
                 // 用户中止（Ctrl+C）：event_tx 被关闭，提前结束并保存部分输出
@@ -886,7 +914,14 @@ impl Agent {
                     StreamEvent::ToolCall(tc) => {
                         calls.push(tc);
                     }
-                    StreamEvent::Usage(_) => {}
+                    StreamEvent::Usage(u) => match iter_usage.as_mut() {
+                        Some(acc) => {
+                            acc.prompt_tokens += u.prompt_tokens;
+                            acc.completion_tokens += u.completion_tokens;
+                            acc.total_tokens += u.total_tokens;
+                        }
+                        None => iter_usage = Some(u),
+                    },
                     StreamEvent::FinishReason(_) => {}
                     StreamEvent::Done => break,
                     StreamEvent::Error(msg) => {
@@ -920,6 +955,11 @@ impl Agent {
                     })
                     .await;
                 iter_text.push_str(&rest);
+            }
+
+            // 本流正常走完（未中途 abort/error）：记录本次模型调用的 token 用量
+            if let Some(u) = iter_usage {
+                self.record_turn_usage(&u).await;
             }
 
             if calls.is_empty() {

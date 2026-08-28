@@ -224,11 +224,12 @@ impl Provider for AnthropicProvider {
         let mut stream = self.chat_stream(req).await;
         let mut text = String::new();
         let mut tool_calls = Vec::new();
+        let mut usage = None;
         while let Some(ev) = stream.next().await {
             match ev? {
                 StreamEvent::TextDelta(d) => text.push_str(&d),
                 StreamEvent::ToolCall(tc) => tool_calls.push(tc),
-                StreamEvent::Usage(_) => {}
+                StreamEvent::Usage(u) => usage = Some(u),
                 StreamEvent::FinishReason(_) => {}
                 StreamEvent::Done => break,
                 StreamEvent::Error(msg) => return Err(anyhow!("stream error: {}", msg)),
@@ -237,7 +238,7 @@ impl Provider for AnthropicProvider {
         Ok(ChatResponse {
             text: if text.is_empty() { None } else { Some(text) },
             tool_calls,
-            usage: None,
+            usage,
             finish_reason: None,
         })
     }
@@ -306,6 +307,9 @@ impl Provider for AnthropicProvider {
             let mut tc_name = String::new();
             let mut tc_args = String::new();
             let mut in_tool_block = false;
+            // 流式 token 用量：message_start 给 input，message_delta 给 output（整响应累计）
+            let mut input_tokens: u32 = 0;
+            let mut output_tokens: u32 = 0;
             // 空闲计时锚点：仅「真实 data 事件」会刷新；keepalive 注释 `: ping` 不会。
             let mut last_data = Instant::now();
 
@@ -399,6 +403,29 @@ impl Provider for AnthropicProvider {
                                     id: std::mem::take(&mut tc_id),
                                     name: std::mem::take(&mut tc_name),
                                     arguments: args,
+                                });
+                            }
+                        }
+                        "message_start" => {
+                            // 首帧带截至当时的 usage（input_tokens + 可能的 cache 计数）
+                            if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+                                if let Some(n) = u.get("input_tokens").and_then(|n| n.as_u64()) {
+                                    input_tokens = n as u32;
+                                }
+                            }
+                        }
+                        "message_delta" => {
+                            // 整响应结束帧：usage.output_tokens 为累计输出 token
+                            if let Some(u) = v.get("usage") {
+                                if let Some(n) = u.get("output_tokens").and_then(|n| n.as_u64()) {
+                                    output_tokens = n as u32;
+                                }
+                            }
+                            if input_tokens > 0 || output_tokens > 0 {
+                                yield StreamEvent::Usage(crate::provider::Usage {
+                                    prompt_tokens: input_tokens,
+                                    completion_tokens: output_tokens,
+                                    total_tokens: input_tokens + output_tokens,
                                 });
                             }
                         }
