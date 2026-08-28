@@ -6,6 +6,11 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 
+/// 渲染 `native_tool_calling` 展示：None（auto）= "auto"（跟随 Compat 探测，#10）。
+fn native_label(v: Option<bool>) -> String {
+    v.map(|b| b.to_string()).unwrap_or_else(|| "auto".into())
+}
+
 /// P5 S1：启动时扫描 config.toml 明文敏感字段并 log warn（不自动迁移）。
 /// 读原始 TOML（内存 config 已被 expand_paths 展开为明文，不能用作判断）。
 fn warn_plaintext_secrets(config_dir: &Path) {
@@ -652,7 +657,9 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
             for (alias, m) in &p.model {
                 println!(
                     "  model.{}: {} (native_tool_calling={})",
-                    alias, m.model, m.native_tool_calling
+                    alias,
+                    m.model,
+                    native_label(m.native_tool_calling)
                 );
             }
         }
@@ -790,7 +797,9 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
                 if let Some(m) = p.model.get(model_alias) {
                     println!(
                         "  model.{}: {} (native_tool_calling={})",
-                        model_alias, m.model, m.native_tool_calling
+                        model_alias,
+                        m.model,
+                        native_label(m.native_tool_calling)
                     );
                     match reqwest::Client::new()
                         .get(format!("{}/models", p.base_url.trim_end_matches('/')))

@@ -256,16 +256,20 @@ pub fn provider_from_ref(
         }
         // openai_compatible 及未知 type 都走 OpenAI 兼容协议（存量配置无 type 也能跑）
         _ => {
-            // 兼容层：先按 base_url 探测预设，再用 [provider.<id>.compat.*] 覆盖
-            let mut compat = compat::Compat::detect(&prov_cfg.base_url);
+            // 兼容层：先按 base_url + model slug 探测预设（plan #4/#10），再用 [provider.<id>.compat.*] 覆盖
+            let mut compat = compat::Compat::detect(&prov_cfg.base_url, &model_cfg.model);
             if let Some(c) = &prov_cfg.compat {
                 compat.apply_override(c);
             }
+            // native_tool_calling：显式配置优先，缺省（None=auto）跟随探测结果（#10）
+            let native_tool_calling = model_cfg
+                .native_tool_calling
+                .unwrap_or(compat.native_tool_calling);
             Ok(Arc::new(openai_compat::OpenAiCompatibleProvider::new(
                 &prov_cfg.base_url,
                 &prov_cfg.api_key,
                 &model_cfg.model,
-                model_cfg.native_tool_calling,
+                native_tool_calling,
                 model_cfg.max_tokens,
                 compat,
             )?))

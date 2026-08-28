@@ -832,7 +832,7 @@ mod tests {
                     "small".into(),
                     ModelConfig {
                         model: "small-model".into(),
-                        native_tool_calling: true,
+                        native_tool_calling: Some(true),
                         context_size: None,
                         max_tokens: None,
                     },
@@ -852,7 +852,7 @@ mod tests {
                     "big".into(),
                     ModelConfig {
                         model: "big-model".into(),
-                        native_tool_calling: true,
+                        native_tool_calling: Some(true),
                         context_size: None,
                         max_tokens: None,
                     },

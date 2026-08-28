@@ -147,8 +147,11 @@ pub struct ProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub model: String,
-    #[serde(default = "default_true")]
-    pub native_tool_calling: bool,
+    /// 是否用 OpenAI function calling 协议（发 `tools` + 期待结构化 `tool_calls`）。
+    /// `None`（缺省）= auto：跟随 `Compat` 探测/配置结果（plan #10），不再要求用户手设。
+    /// 存量 `native_tool_calling = true/false` 仍按 Option 语义解析为 Some(…)，零破坏。
+    #[serde(default)]
+    pub native_tool_calling: Option<bool>,
     /// 模型上下文窗口大小（tokens），用于判断何时触发自动压缩。
     /// 未配置时启动时从服务端探测（llama.cpp /props 或 Ollama /api/show），
     /// 探测失败回退默认 8192。取 min(配置值, 探测值)。
@@ -898,7 +901,7 @@ impl Config {
             "qwen".into(),
             ModelConfig {
                 model: "qwen2.5:7b".into(),
-                native_tool_calling: true,
+                native_tool_calling: Some(true),
                 context_size: None,
                 max_tokens: None,
             },
@@ -1024,9 +1027,9 @@ dir = "~/.llaia-test/logs"
         assert_eq!(p.base_url, "http://localhost:11434/v1");
         let m1 = p.model.get("qwen3").unwrap();
         assert_eq!(m1.model, "qwen-3.6-35b-MTP");
-        assert!(!m1.native_tool_calling);
+        assert!(!m1.native_tool_calling.unwrap_or(true));
         let m2 = p.model.get("qwen2").unwrap();
-        assert!(m2.native_tool_calling);
+        assert!(m2.native_tool_calling.unwrap_or(true));
 
         // agent: workspace 字段已移除（存量配置中的该键被忽略），soul/user/memory 缺省为 None
         let a = config.agent.get("main").unwrap();
@@ -1049,7 +1052,7 @@ dir = "~/.llaia-test/logs"
         let p = config.provider.get("default").unwrap();
         assert_eq!(p.provider_type, "openai_compatible");
         let m = p.model.get("qwen").unwrap();
-        assert!(m.native_tool_calling);
+        assert_eq!(m.native_tool_calling, Some(true));
         let a = config.agent.get("main").unwrap();
         assert_eq!(a.model, "default.qwen");
         assert!(a.soul.is_none());
@@ -1075,17 +1078,16 @@ model = "default.qwen"
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
-        // 缺省 native_tool_calling 默认 true
-        assert!(
-            config
-                .provider
-                .get("default")
-                .unwrap()
-                .model
-                .get("qwen")
-                .unwrap()
-                .native_tool_calling
-        );
+        // 缺省 native_tool_calling = None（auto：跟随探测），不显式声明
+        assert!(config
+            .provider
+            .get("default")
+            .unwrap()
+            .model
+            .get("qwen")
+            .unwrap()
+            .native_tool_calling
+            .is_none());
         // 缺省 context_threshold 默认 0.7
         assert_eq!(config.runtime.context_threshold, 0.7);
         // 缺省 confirm 默认 whitelist

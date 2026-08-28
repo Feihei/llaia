@@ -551,7 +551,7 @@ function llaiaApp() {
       const alias = prompt('Enter new model alias (e.g., qwen3, gpt4):');
       if (!alias || !alias.trim()) return;
       if (this.cfg.provider[pid].model[alias]) { alert('Model already exists: ' + alias); return; }
-      this.cfg.provider[pid].model[alias] = { model: '', native_tool_calling: true, context_size: null };
+      this.cfg.provider[pid].model[alias] = { model: '', native_tool_calling: null, context_size: null };
     },
     deleteModel(pid, alias) {
       if (!confirm('Delete model ' + pid + '.' + alias + '?')) return;
@@ -609,7 +609,7 @@ function llaiaApp() {
       const models = this.cfg.provider[pid].model;
       for (const m of picked) {
         const alias = this.genModelAlias(pid, m.id);
-        models[alias] = { model: m.id, native_tool_calling: true, context_size: null };
+        models[alias] = { model: m.id, native_tool_calling: null, context_size: null };
       }
       this.probeModels[pid] = [];
       this.probeChecked[pid] = {};

@@ -314,7 +314,13 @@
                   <div class="model-row">
                     <label x-text="alias"></label>
                     <input x-model="m.model" style="width:200px" placeholder="model id">
-                    <label><input type="checkbox" x-model="m.native_tool_calling"> native</label>
+                    <label> native
+                      <select x-model="m.native_tool_calling">
+                        <option :value="null">auto</option>
+                        <option :value="true">true</option>
+                        <option :value="false">false</option>
+                      </select>
+                    </label>
                     <input type="number" placeholder="ctx" x-model.number="m.context_size" style="width:80px">
                     <button class="btn-delete" @click="deleteModel(pid, alias)">×</button>
                   </div>
