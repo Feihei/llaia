@@ -415,6 +415,37 @@ option { background: var(--bg-input); color: var(--text); }
 }
 .cron-msg { color: var(--text-dim); font-size: 13px; }
 
+/* ---------- Stats tab (plan.md W3) ---------- */
+#stats-pane { padding: 18px 22px; overflow-y: auto; }
+#stats-pane .stats-toolbar {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 16px;
+}
+#stats-pane .stats-label { color: var(--text-dim); font-size: 12px; margin-right: 4px; }
+#stats-pane .stats-toolbar button.active { color: var(--green); border-color: var(--green); }
+#stats-pane .stats-cards { display: flex; gap: 14px; margin-bottom: 22px; }
+#stats-pane .stats-card {
+  flex: 1; background: var(--bg-panel); border: 1px solid var(--border-bright);
+  border-radius: 6px; padding: 14px 16px;
+}
+#stats-pane .stats-card-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+#stats-pane .stats-card-value { font-size: 26px; font-weight: 600; color: var(--green); margin: 6px 0 4px; }
+#stats-pane .stats-card-sub { color: var(--text-faint); font-size: 12px; }
+#stats-pane .stats-section { margin-top: 20px; }
+#stats-pane .stats-section-title { color: var(--green-bright); font-weight: 600; margin-bottom: 8px; }
+#stats-pane .stats-bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 0; }
+#stats-pane .stats-bar-wrap {
+  flex: 1; width: 100%; display: flex; flex-direction: column; justify-content: flex-end;
+  background: rgba(255,255,255,.02); border-bottom: 1px solid var(--border);
+}
+#stats-pane .stats-bar-in { background: rgba(56,224,123,.85); }
+#stats-pane .stats-bar-out { background: rgba(79,214,201,.85); }
+#stats-pane .stats-bars { display: flex; gap: 6px; align-items: stretch; height: 200px; }
+#stats-pane .stats-bar-label { font-size: 10px; color: var(--text-faint); margin-top: 5px; }
+#stats-pane .stats-legend { display: flex; gap: 16px; margin-top: 8px; color: var(--text-dim); font-size: 12px; }
+#stats-pane .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 2px; }
+#stats-pane .swatch-in { background: rgba(56,224,123,.85); }
+#stats-pane .swatch-out { background: rgba(79,214,201,.85); }
+
 /* ---------- 登录遮罩 ---------- */
 #login-overlay {
   position: fixed; inset: 0;

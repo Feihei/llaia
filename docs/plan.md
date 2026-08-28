@@ -48,7 +48,7 @@
 - [x] **W2** About 页更新检查按钮（必要性：**低** / 难度：★☆☆）— 已交付（2026-08-28）
   - 后端：新增 `GET /api/update/check` —— reqwest 请求 GitHub Releases latest API（`https://api.github.com/repos/Feihei/llaia/releases/latest`，该 API 必须带 User-Agent 头否则 403），`tag_name` 去 `v` 前缀后与 `CARGO_PKG_VERSION` 三段数值比较；返回 `{current, latest, update_available, url}`；失败（离线/限流）透传原因，结果加分钟级内存缓存防连点。无鉴权请求限 60 次/h，单用户足够。
   - 前端：About section 加 Check Updates 按钮 + 结果行（已最新 / 新版本号 + Release 页下载链接），复用现有 cron-msg 消息展示模式。
-- [ ] **W3** token 用量 dashboard，参考 AstrBot WebUI（必要性：**中** / 难度：★★☆）
+- [x] **W3** token 用量 dashboard，参考 AstrBot WebUI（必要性：**中** / 难度：★★☆）— 已交付（2026-08-28）
   - 参考实现已探明（`.ref/AstrBot`）：两张表（小时预聚合消息计数 + 逐请求 provider_stats 含 input/cached/output tokens 与 timing）；API 把单次范围查询在 Python 聚合成预成形 `[ts,value]` series；UI 为时间范围选择（1/3/7 天）+ 汇总卡（总 tokens/调用数/avg TTFT/成功率）+ per-provider 堆叠柱图 + per-session Top10。
   - LLAIA 数据链路现状（2026-08-27 核实）：
     - Provider 层已备好：`ChatResponse.usage: Option<Usage>`、流式 `StreamEvent::Usage(Usage)`（openai_compat 仅 `compat.streaming_usage=true` 时发送；ollama/llamacpp 自动探测预设默认开启）

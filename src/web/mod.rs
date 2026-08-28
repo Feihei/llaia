@@ -158,6 +158,13 @@ pub struct SessionListQuery {
     pub offset: Option<i64>,
 }
 
+/// GET /api/stats/tokens 的查询参数（plan.md W3）：token + 时间范围（天）。
+#[derive(Deserialize)]
+pub struct StatsQuery {
+    pub token: Option<String>,
+    pub days: Option<u32>,
+}
+
 #[derive(Deserialize)]
 pub struct FilePathQueryWithToken {
     pub path: String,
@@ -176,6 +183,12 @@ impl TokenProvider for TokenQuery {
 }
 
 impl TokenProvider for SessionListQuery {
+    fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+}
+
+impl TokenProvider for StatsQuery {
     fn token(&self) -> Option<&str> {
         self.token.as_deref()
     }
@@ -2007,7 +2020,39 @@ pub async fn list_sessions_api(
         .into_response()
 }
 
-/// GET /api/sessions/:uuid → 单会话完整消息（含 tool_calls）。
+/// GET /api/stats/tokens?days=N → token 用量聚合（plan.md W3）。
+/// N 缺省 7，线上 clamp 到 1..=30。单用户数据量小，直接单查询聚合即可。
+pub async fn stats_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StatsQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let days = q.days.unwrap_or(7).clamp(1, 30);
+    let agent = state.registry.main.lock().await;
+    let stats = agent.session_store.token_stats(days).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "token_stats query failed");
+        crate::memory::sqlite::TokenStats {
+            days,
+            total_prompt: 0,
+            total_completion: 0,
+            total_tokens: 0,
+            total_requests: 0,
+            series: Vec::new(),
+            by_model: Vec::new(),
+            by_session: Vec::new(),
+        }
+    });
+    let json = serde_json::json!(stats);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
 pub async fn get_session_detail(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2211,6 +2256,7 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/env/refresh", axum::routing::post(refresh_env))
         .route("/api/doctor", axum::routing::get(get_doctor))
         .route("/api/update/check", axum::routing::get(check_update))
+        .route("/api/stats/tokens", axum::routing::get(stats_tokens))
         // 会话历史（P5 W1）：列表 / 详情 / 删除 / 导出
         .route("/api/sessions", axum::routing::get(list_sessions_api))
         .route(

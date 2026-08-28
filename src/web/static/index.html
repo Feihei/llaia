@@ -71,6 +71,7 @@
       <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">Config</div>
       <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
       <div class="tab" :class="{active: tab==='sessions'}" @click="switchSessions()">Sessions</div>
+      <div class="tab" :class="{active: tab==='stats'}" @click="switchStats()">Stats</div>
     </div>
   </header>
   <main>
@@ -728,6 +729,87 @@
           </div>
         </template>
       </div>
+    </div>
+    <div id="stats-pane" class="pane" :class="{active: tab==='stats'}">
+      <div class="stats-toolbar">
+        <span class="stats-label">Range:</span>
+        <button :class="{active: statsDays===1}" @click="setStatsDays(1)">1d</button>
+        <button :class="{active: statsDays===3}" @click="setStatsDays(3)">3d</button>
+        <button :class="{active: statsDays===7}" @click="setStatsDays(7)">7d</button>
+      </div>
+      <div x-show="statsLoading" class="hint">Loading…</div>
+      <div x-show="statsError" class="err" x-text="statsError"></div>
+      <template x-if="stats">
+        <div>
+          <div class="stats-cards">
+            <div class="stats-card">
+              <div class="stats-card-label">Total tokens</div>
+              <div class="stats-card-value" x-text="fmtTokens(stats.total_tokens)"></div>
+              <div class="stats-card-sub">
+                <span x-text="fmtTokens(stats.total_prompt) + ' prompt / ' + fmtTokens(stats.total_completion) + ' completion'"></span>
+              </div>
+            </div>
+            <div class="stats-card">
+              <div class="stats-card-label">Requests</div>
+              <div class="stats-card-value" x-text="stats.total_requests"></div>
+              <div class="stats-card-sub">over <span x-text="stats.days"></span> days</div>
+            </div>
+            <div class="stats-card">
+              <div class="stats-card-label">Avg tokens/req</div>
+              <div class="stats-card-value" x-text="stats.total_requests ? Math.round(stats.total_tokens / stats.total_requests) : 0"></div>
+              <div class="stats-card-sub">across all models</div>
+            </div>
+          </div>
+
+          <div class="stats-section">
+            <div class="stats-section-title">Token usage per day</div>
+            <div x-show="!stats.series.some(d => d.prompt_tokens + d.completion_tokens > 0)" class="hint">
+              No usage data in this range. Note: LMStudio / bare endpoints may not report usage — missing data there is expected, not a bug.
+            </div>
+            <div class="stats-bars">
+              <template x-for="(d, i) in stats.series" :key="i">
+                <div class="stats-bar-col" :title="d.date + ': ' + d.prompt_tokens + ' in / ' + d.completion_tokens + ' out (' + d.requests + ' req)'">
+                  <div class="stats-bar-wrap">
+                    <div class="stats-bar-in" :style="{ height: (d.prompt_tokens / stats._max * 100).toFixed(1) + '%' }"></div>
+                    <div class="stats-bar-out" :style="{ height: (d.completion_tokens / stats._max * 100).toFixed(1) + '%' }"></div>
+                  </div>
+                  <div class="stats-bar-label" x-text="d.date.slice(5)"></div>
+                </div>
+              </template>
+            </div>
+            <div class="stats-legend">
+              <span><i class="swatch swatch-in"></i> prompt</span>
+              <span><i class="swatch swatch-out"></i> completion</span>
+            </div>
+          </div>
+
+          <div class="stats-section">
+            <div class="stats-section-title">By model</div>
+            <table class="cron-table">
+              <thead><tr><th>Model</th><th>Prompt</th><th>Completion</th><th>Requests</th></tr></thead>
+              <tbody>
+                <template x-for="(m, i) in stats.by_model" :key="i">
+                  <tr><td x-text="m.name"></td><td x-text="fmtTokens(m.prompt_tokens)"></td><td x-text="fmtTokens(m.completion_tokens)"></td><td x-text="m.requests"></td></tr>
+                </template>
+                <template x-if="!stats.by_model.length"><tr><td colspan="4" class="hint">No data.</td></tr></template>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="stats-section">
+            <div class="stats-section-title">By session (top 10)</div>
+            <table class="cron-table">
+              <thead><tr><th>Session</th><th>Prompt</th><th>Completion</th><th>Requests</th></tr></thead>
+              <tbody>
+                <template x-for="(s, i) in stats.by_session" :key="i">
+                  <tr><td x-text="s.name"></td><td x-text="fmtTokens(s.prompt_tokens)"></td><td x-text="fmtTokens(s.completion_tokens)"></td><td x-text="s.requests"></td></tr>
+                </template>
+                <template x-if="!stats.by_session.length"><tr><td colspan="4" class="hint">No data.</td></tr></template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
     </div>
   </main>
     </div>

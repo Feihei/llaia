@@ -113,6 +113,11 @@ function llaiaApp() {
     // update check
     updateCheckInfo: null,
     checkingUpdate: false,
+    // stats (plan.md W3)
+    statsDays: 7,
+    stats: null,
+    statsError: '',
+    statsLoading: false,
     // cron
     cronSection: 'tasks',
     cronTasks: [],
@@ -953,5 +958,39 @@ function llaiaApp() {
       }
     },
     formatBytes(n) { if (n < 1024) return n + ' B'; if (n < 1048576) return (n/1024).toFixed(1)+' KB'; return (n/1048576).toFixed(1)+' MB'; },
+    // ---- Stats (plan.md W3) ----
+    switchStats() {
+      this.tab = 'stats';
+      if (!this.stats) this.loadStats();
+    },
+    setStatsDays(d) {
+      this.statsDays = d;
+      this.loadStats();
+    },
+    async loadStats() {
+      this.statsLoading = true;
+      this.statsError = '';
+      try {
+        const r = await this.apiFetch('/api/stats/tokens?days=' + this.statsDays, { method: 'GET' });
+        if (!this.authed) return;
+        if (r.ok) {
+          this.stats = await r.json();
+          // 计算柱状图最大值（含 prompt+completion 堆叠）
+          const max = Math.max(1, ...this.stats.series.map(d => d.prompt_tokens + d.completion_tokens));
+          this.stats._max = max;
+        } else {
+          this.statsError = 'Failed to load stats: HTTP ' + r.status;
+        }
+      } catch (e) {
+        this.statsError = 'Failed to load stats: ' + e.message;
+      } finally {
+        this.statsLoading = false;
+      }
+    },
+    fmtTokens(n) {
+      if (n == null) return '0';
+      if (n < 1000) return String(n);
+      return (n/1000).toFixed(1) + 'k';
+    },
   };
 }

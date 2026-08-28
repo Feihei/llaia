@@ -40,6 +40,8 @@ pub struct ToolCallRow {
     pub created_at: String,
 }
 
+// ---- plan.md W3 token 用量 dashboard ----
+
 /// 一次模型调用的 token 用量（plan.md W3）：逐请求记录，供 Stats dashboard 聚合。
 #[derive(Debug, Clone)]
 pub struct TurnUsage {
@@ -49,6 +51,42 @@ pub struct TurnUsage {
     pub completion_tokens: i64,
     /// 'chat'（默认）/ 'compact' / 'vision' / 'reminder' 等 sidecar 调用区分
     pub kind: String,
+}
+
+/// 单天 token 用量 bucket（plan.md W3-④ Stats dashboard）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TokenDayBucket {
+    pub date: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub requests: i64,
+}
+
+/// 分组统计行（per-model / per-session 排名）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TokenGroupRow {
+    pub name: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub requests: i64,
+}
+
+/// `token_stats()` 返回的完整聚合结果。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TokenStats {
+    pub days: u32,
+    pub total_prompt: i64,
+    pub total_completion: i64,
+    pub total_tokens: i64,
+    pub total_requests: i64,
+    pub series: Vec<TokenDayBucket>,
+    pub by_model: Vec<TokenGroupRow>,
+    pub by_session: Vec<TokenGroupRow>,
+}
+
+/// 取 session_uuid 的前 8 字符做短名。
+pub fn short_uuid(uuid: &str) -> String {
+    uuid.chars().take(8).collect()
 }
 
 /// 会话列表项：SessionRow + 消息数（WebUI 会话历史，P5 W1）。
@@ -305,6 +343,130 @@ CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id);
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// 逐模型 token 用量聚合（plan.md W3-④ Stats dashboard）。
+    /// 仅统计主对话（kind='chat'），供 `GET /api/stats/tokens?days=N` 使用。
+    pub fn token_stats(&self, days: u32) -> Result<TokenStats> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+
+        // 总计
+        let (total_prompt, total_completion, total_requests) = conn.query_row(
+            "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COUNT(*)
+             FROM turn_usage WHERE kind='chat' AND ts >= ?1",
+            rusqlite::params![cutoff],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+
+        // 天级 bucket（ts 为 RFC3339 UTC，取前 10 字符得 YYYY-MM-DD）
+        let mut by_day: std::collections::HashMap<String, (i64, i64, i64)> =
+            std::collections::HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT substr(ts,1,10), SUM(prompt_tokens), SUM(completion_tokens), COUNT(*)
+                 FROM turn_usage WHERE kind='chat' AND ts >= ?1 GROUP BY substr(ts,1,10)",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![cutoff], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (day, p, c, n) = row?;
+                by_day.insert(day, (p, c, n));
+            }
+        }
+        // 补全 last-days 天标签（含无数据的天，前端柱状图对齐 X 轴）
+        let mut series = Vec::with_capacity(days as usize);
+        for i in (0..days).rev() {
+            let day = (chrono::Utc::now() - chrono::Duration::days(i as i64))
+                .format("%Y-%m-%d")
+                .to_string();
+            let (p, c, n) = by_day.get(&day).copied().unwrap_or((0, 0, 0));
+            series.push(TokenDayBucket {
+                date: day,
+                prompt_tokens: p,
+                completion_tokens: c,
+                requests: n,
+            });
+        }
+
+        // per-model 排名
+        let mut by_model = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT model_ref, SUM(prompt_tokens), SUM(completion_tokens), COUNT(*)
+                 FROM turn_usage WHERE kind='chat' AND ts >= ?1
+                 GROUP BY model_ref ORDER BY SUM(prompt_tokens)+SUM(completion_tokens) DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![cutoff], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (m, p, c, n) = row?;
+                by_model.push(TokenGroupRow {
+                    name: m,
+                    prompt_tokens: p,
+                    completion_tokens: c,
+                    requests: n,
+                });
+            }
+        }
+
+        // per-session 排名（Top10，join sessions 取 uuid）
+        let mut by_session = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT s.session_uuid, SUM(u.prompt_tokens), SUM(u.completion_tokens), COUNT(*)
+                 FROM turn_usage u JOIN sessions s ON s.id = u.session_id
+                 WHERE u.kind='chat' AND u.ts >= ?1
+                 GROUP BY u.session_id
+                 ORDER BY SUM(u.prompt_tokens)+SUM(u.completion_tokens) DESC LIMIT 10",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![cutoff], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (u, p, c, n) = row?;
+                by_session.push(TokenGroupRow {
+                    name: short_uuid(&u),
+                    prompt_tokens: p,
+                    completion_tokens: c,
+                    requests: n,
+                });
+            }
+        }
+
+        Ok(TokenStats {
+            days,
+            total_prompt,
+            total_completion,
+            total_tokens: total_prompt + total_completion,
+            total_requests,
+            series,
+            by_model,
+            by_session,
+        })
     }
 
     // ---- kv 存储（做梦游标等小元数据） ----
@@ -818,5 +980,50 @@ mod tests {
         drop(conn);
         // 二次删除返回 false
         assert!(!store.delete_session("uuid-z").unwrap());
+    }
+
+    #[test]
+    fn test_token_stats_aggregation() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("uuid-stats", "cli").unwrap();
+        store
+            .add_turn_usage(&TurnUsage {
+                session_id: sid,
+                model_ref: "model-a".into(),
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                kind: "chat".into(),
+            })
+            .unwrap();
+        // sidecar（kind != chat）计入 kind 字段但默认统计被排除
+        store
+            .add_turn_usage(&TurnUsage {
+                session_id: sid,
+                model_ref: "model-a".into(),
+                prompt_tokens: 999,
+                completion_tokens: 1,
+                kind: "compact".into(),
+            })
+            .unwrap();
+
+        let stats = store.token_stats(7).unwrap();
+        assert_eq!(stats.total_prompt, 100);
+        assert_eq!(stats.total_completion, 50);
+        assert_eq!(stats.total_tokens, 150);
+        assert_eq!(stats.total_requests, 1);
+        assert_eq!(stats.by_model.len(), 1);
+        assert_eq!(stats.by_model[0].name, "model-a");
+        assert_eq!(stats.by_model[0].prompt_tokens, 100);
+        assert_eq!(stats.by_session.len(), 1);
+        assert_eq!(stats.by_session[0].prompt_tokens, 100);
+        // 天级序列补齐为 7 个 bucket，其中一个含数据
+        assert_eq!(stats.series.len(), 7);
+        let total_in_series: i64 = stats
+            .series
+            .iter()
+            .map(|d| d.prompt_tokens + d.completion_tokens)
+            .sum();
+        assert_eq!(total_in_series, 150);
+        assert_eq!(stats.series.iter().map(|d| d.requests).sum::<i64>(), 1);
     }
 }
