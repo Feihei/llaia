@@ -2,6 +2,10 @@
 //!
 //! 与 `skill_create` 同目录（ADR-0027 决策 #2）。`skill_create` 复用本文件的
 //! `resolve_skills_dir` 做 scope → skills 目录解析。
+//!
+//! 参数设计与 `file_edit` 对齐：三种编辑模式互斥单选，全部是扁平命名字符串
+//! 参数、无 union 类型——早期 `patch`（string=追加 / object=替换）的 union
+//! 分派曾诱发弱模型把对象二次序列化成字符串（2026-08-27 事故）。
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -37,85 +41,25 @@ fn ensure_within_skills_dir(skills_dir: &Path, name: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// patch 的两种形态：追加 / 单次查找替换。
-enum Patch {
-    Append(String),
-    Replace { find: String, replace: String },
-}
-
-fn patch_from_object(map: &serde_json::Map<String, Value>) -> Result<Patch> {
-    let find = map
-        .get("find")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("skill_edit: patch.find required (non-empty string)"))?;
-    let replace = map.get("replace").and_then(|v| v.as_str()).unwrap_or("");
-    Ok(Patch::Replace {
-        find: find.to_string(),
-        replace: replace.to_string(),
-    })
-}
-
-/// 应用 patch，返回 (新内容, 操作说明)：
-/// - 字符串 → 追加到 body（保留 frontmatter）。
-/// - 对象 `{ find, replace }` → 在全文做单次精确替换（找不到则报错）。
-///
-/// 兼容层：经 OpenAI 兼容端点的本地模型（ornith 等）会把对象参数二次序列化
-/// 成字符串发出。字符串若整体恰好解析为含非空 `find` 的 JSON 对象，按对象
-/// patch 执行替换，而不是把 JSON 文本原文追加进文件。
-fn apply_patch(existing: &str, patch: &Value) -> Result<(String, &'static str)> {
-    let decoded = match patch {
-        Value::Object(map) => patch_from_object(map)?,
-        Value::String(s) => {
-            let t = s.trim();
-            if t.is_empty() {
-                anyhow::bail!(
-                    "skill_edit: `patch` must be a non-empty string (append to body) or an object {{\"find\", \"replace\"}}"
-                );
-            }
-            // 字符串若整体是二次序列化的 {find,replace} 对象，按对象 patch 处理；
-            // 对象不合法（如缺 find）或根本不是 JSON，则维持追加语义原文入文。
-            match serde_json::from_str::<Value>(t) {
-                Ok(Value::Object(map)) => {
-                    patch_from_object(&map).unwrap_or(Patch::Append(t.to_string()))
-                }
-                _ => Patch::Append(t.to_string()),
-            }
-        }
-        _ => anyhow::bail!(
-            "skill_edit: `patch` must be a string (append to body) or an object {{\"find\", \"replace\"}}"
-        ),
-    };
-    match decoded {
-        Patch::Append(s) => {
-            let (yaml, body) = split_frontmatter(existing).unwrap_or(("", existing));
-            let mut out = String::new();
-            if !yaml.is_empty() {
-                // 保留 frontmatter：开头 --- + yaml + 结尾 ---
-                out.push_str("---\n");
-                out.push_str(yaml);
-                out.push_str("---\n");
-            }
-            let trimmed_body = body.trim_end();
-            out.push_str(trimmed_body);
-            if !trimmed_body.is_empty() {
-                out.push('\n');
-            }
-            out.push('\n');
-            out.push_str(s.trim());
-            out.push('\n');
-            Ok((out, "appended `patch` to the body"))
-        }
-        Patch::Replace { find, replace } => {
-            if !existing.contains(&find) {
-                anyhow::bail!("skill_edit: patch.find not found in SKILL.md");
-            }
-            Ok((
-                existing.replacen(&find, &replace, 1),
-                "replaced the first occurrence of `patch.find` with `patch.replace`",
-            ))
-        }
+/// 追加模式：保留 frontmatter，把 `text` 追加到正文末尾。
+fn append_to_body(existing: &str, text: &str) -> String {
+    let (yaml, body) = split_frontmatter(existing).unwrap_or(("", existing));
+    let mut out = String::new();
+    if !yaml.is_empty() {
+        // 保留 frontmatter：开头 --- + yaml + 结尾 ---
+        out.push_str("---\n");
+        out.push_str(yaml);
+        out.push_str("---\n");
     }
+    let trimmed_body = body.trim_end();
+    out.push_str(trimmed_body);
+    if !trimmed_body.is_empty() {
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(text.trim());
+    out.push('\n');
+    out
 }
 
 pub struct SkillEditTool {
@@ -140,10 +84,10 @@ impl crate::tools::Tool for SkillEditTool {
 
     fn description(&self) -> &str {
         "Edit an existing skill's SKILL.md (use this, NOT file_edit, since skill dirs are outside the workspace). \
-        Provide `name` and either `content` (full replacement SKILL.md text) or `patch`. \
-        `patch` appends a string to the body (it NEVER replaces text), OR performs a single targeted edit via an object {\"find\": \"...\", \"replace\": \"...\"} \
-        — pass the object directly as a JSON object, never as a JSON-encoded string \
-        (a string whose whole content parses to such an object is decoded and applied as the replacement). \
+        Exactly one mode per call: \
+        `content` (full replacement SKILL.md text), OR \
+        `old_string` + `new_string` (single targeted replacement — old_string must match exactly once; same model as file_edit), OR \
+        `append` (text appended to the end of the body). \
         Optional `scope`: \"user\" (default) or \"project\". \
         After writing, frontmatter is validated (name + description required, length limits)."
     }
@@ -158,14 +102,19 @@ impl crate::tools::Tool for SkillEditTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Full replacement SKILL.md text (overwrites the existing file)."
+                    "description": "Mode 1 — full replacement SKILL.md text (overwrites the existing file)."
                 },
-                "patch": {
-                    // 故意不写 oneOf 并集：llama.cpp 等端点会把 schema 转语法约束，
-                    // 弱模型在 string|object 并集下容易把对象二次序列化成字符串。
-                    // 契约由本描述 + apply_patch 运行时兜底（字符串内容整体为
-                    // {find,replace} 对象时按替换处理）承载。
-                    "description": "Partial edit. EITHER a plain string appended to the body, OR an object with exactly this shape, passed directly as a JSON object: {\"find\": \"<existing exact text>\", \"replace\": \"<new text>\"}. Never wrap the object in a string."
+                "old_string": {
+                    "type": "string",
+                    "description": "Mode 2 (with `new_string`) — exact existing text to replace; must occur exactly once in SKILL.md."
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Mode 2 (with `old_string`) — replacement text; may be empty to delete `old_string`."
+                },
+                "append": {
+                    "type": "string",
+                    "description": "Mode 3 — text appended to the end of the body (frontmatter preserved). Never replaces anything."
                 },
                 "scope": {
                     "type": "string",
@@ -210,18 +159,54 @@ impl crate::tools::Tool for SkillEditTool {
 
         let existing = std::fs::read_to_string(&skill_md)
             .map_err(|e| anyhow!("skill_edit: read {}: {}", skill_md.display(), e))?;
-        // (新内容, 操作说明)：content 整篇覆盖 / patch 追加或替换，成功消息里
-        // 明示本次到底做了哪种写操作，避免模型读回文件才能分辨。
-        let (new_content, op_desc) = if let Some(c) = args.get("content").and_then(|v| v.as_str()) {
+
+        // 三种编辑模式互斥单选；成功消息带 op_desc 明示本次写操作类型。
+        let content = args.get("content").and_then(|v| v.as_str());
+        let old = args.get("old_string").and_then(|v| v.as_str());
+        let new = args.get("new_string").and_then(|v| v.as_str());
+        let append = args.get("append").and_then(|v| v.as_str());
+        if old.is_some() != new.is_some() {
+            anyhow::bail!("skill_edit: `old_string` and `new_string` must be provided together");
+        }
+        let given = [content.is_some(), old.is_some(), append.is_some()];
+        if given.iter().filter(|g| **g).count() > 1 {
+            anyhow::bail!(
+                "skill_edit: modes are mutually exclusive; provide exactly one of `content` (full replace), `old_string`+`new_string` (targeted replace), `append`"
+            );
+        }
+
+        let (new_content, op_desc) = if let Some(c) = content {
             if c.trim().is_empty() {
                 anyhow::bail!("skill_edit: `content` must be non-empty");
             }
             (c.to_string(), "replaced the whole file with `content`")
-        } else if let Some(patch) = args.get("patch") {
-            apply_patch(&existing, patch)?
+        } else if let (Some(o), Some(n)) = (old, new) {
+            if o.is_empty() {
+                anyhow::bail!("skill_edit: `old_string` must be non-empty (to rewrite the whole file use `content`)");
+            }
+            // 对齐 file_edit：要求唯一命中，避免静默替换到错误位置。
+            let count = existing.matches(o).count();
+            match count {
+                0 => anyhow::bail!("skill_edit: old_string not found in SKILL.md"),
+                1 => (
+                    existing.replacen(o, n, 1),
+                    "replaced the unique occurrence of `old_string` with `new_string`",
+                ),
+                _ => anyhow::bail!(
+                    "skill_edit: old_string appears {count} times in SKILL.md; include more surrounding text so it matches exactly once (or use `content` to replace the whole file)"
+                ),
+            }
+        } else if let Some(a) = append {
+            if a.trim().is_empty() {
+                anyhow::bail!("skill_edit: `append` must be non-empty");
+            }
+            (
+                append_to_body(&existing, a),
+                "appended `append` to the end of the body",
+            )
         } else {
             anyhow::bail!(
-                "skill_edit: provide `content` (full replace) or `patch` (append / find-replace)"
+                "skill_edit: provide exactly one of `content` (full replace), `old_string`+`new_string` (targeted replace), `append`"
             );
         };
 
@@ -278,96 +263,133 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.contains("Updated skill"));
+        assert!(out.contains("replaced the whole file"));
         let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
         assert!(written.contains("new body"));
         assert!(!written.contains("old body"));
     }
 
     #[tokio::test]
-    async fn patch_append() {
+    async fn append_adds_to_body_and_keeps_frontmatter() {
         let t = tool();
         make_skill(&t, "demo", "step one");
-        t.execute(&json!({ "name": "demo", "patch": "step two" }), "cli")
+        let out = t
+            .execute(&json!({ "name": "demo", "append": "step two" }), "cli")
             .await
             .unwrap();
+        assert!(out.contains("appended `append`"));
         let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
+        assert!(written.starts_with("---\nname: demo\n"));
         assert!(written.contains("step one"));
         assert!(written.contains("step two"));
     }
 
     #[tokio::test]
-    async fn patch_find_replace() {
+    async fn replace_unique_occurrence() {
         let t = tool();
         make_skill(&t, "demo", "use FOO here");
+        let out = t
+            .execute(
+                &json!({ "name": "demo", "old_string": "FOO", "new_string": "BAR" }),
+                "cli",
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("replaced the unique occurrence"));
+        let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
+        assert!(written.contains("use BAR here"));
+    }
+
+    #[tokio::test]
+    async fn replace_can_delete_old_string() {
+        let t = tool();
+        make_skill(&t, "demo", "keep REMOVE me end");
         t.execute(
-            &json!({ "name": "demo", "patch": { "find": "FOO", "replace": "BAR" } }),
+            &json!({ "name": "demo", "old_string": "REMOVE me ", "new_string": "" }),
             "cli",
         )
         .await
         .unwrap();
         let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
-        assert!(written.contains("use BAR here"));
+        assert_eq!(
+            written,
+            "---\nname: demo\ndescription: d\n---\n\nkeep end\n"
+        );
     }
 
     #[tokio::test]
-    async fn patch_find_missing_errors() {
+    async fn replace_missing_old_string_errors() {
         let t = tool();
         make_skill(&t, "demo", "body");
         let r = t
             .execute(
-                &json!({ "name": "demo", "patch": { "find": "NOPE", "replace": "x" } }),
+                &json!({ "name": "demo", "old_string": "NOPE", "new_string": "x" }),
                 "cli",
             )
             .await;
         assert!(r.is_err());
     }
 
-    // 回归：模型把 {find,replace} 对象二次序列化成字符串发出（2026-08-27 线上
-    // 事故，ornith 经 llama.cpp 原生 function calling），应解码后执行替换，
-    // 而不是把 JSON 文本追加进文件尾部。
+    // 对齐 file_edit：old_string 多处命中必须报错，不允许静默替换第一处。
     #[tokio::test]
-    async fn patch_find_replace_as_double_encoded_string() {
+    async fn replace_ambiguous_old_string_errors() {
         let t = tool();
-        make_skill(&t, "demo", "use FOO here");
-        let encoded = serde_json::to_string(&json!({ "find": "FOO", "replace": "BAR" })).unwrap();
-        t.execute(&json!({ "name": "demo", "patch": encoded }), "cli")
-            .await
-            .unwrap();
-        let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
-        assert!(written.contains("use BAR here"));
-        assert!(!written.contains("use FOO"));
-        assert!(!written.contains("\"find\""));
-    }
-
-    // 追加语义不受兼容层影响：字符串虽是 JSON 但不含合法 find 键 → 原文追加。
-    #[tokio::test]
-    async fn patch_plain_json_string_without_find_still_appends() {
-        let t = tool();
-        make_skill(&t, "demo", "body");
-        t.execute(&json!({ "name": "demo", "patch": "{\"other\": 1}" }), "cli")
-            .await
-            .unwrap();
-        let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
-        assert!(written.contains("body"));
-        assert!(written.contains("{\"other\": 1}"));
-    }
-
-    // 对象 patch 的 find 为空串时按错误处理（与对象直传行为一致）
-    #[tokio::test]
-    async fn patch_object_empty_find_errors() {
-        let t = tool();
-        make_skill(&t, "demo", "body");
+        make_skill(&t, "demo", "same same different");
         let r = t
             .execute(
-                &json!({ "name": "demo", "patch": { "find": "", "replace": "x" } }),
+                &json!({ "name": "demo", "old_string": "same", "new_string": "x" }),
                 "cli",
             )
             .await;
         assert!(r.is_err());
-        // 文件未被改动
+        assert!(r.unwrap_err().to_string().contains("2 times"));
+        // 原文件未被改动
         let written = std::fs::read_to_string(t.config_dir.join("skills/demo/SKILL.md")).unwrap();
-        assert!(written.contains("body"));
+        assert!(written.contains("same same"));
+    }
+
+    #[tokio::test]
+    async fn replace_empty_old_string_errors() {
+        let t = tool();
+        make_skill(&t, "demo", "body");
+        let r = t
+            .execute(
+                &json!({ "name": "demo", "old_string": "", "new_string": "x" }),
+                "cli",
+            )
+            .await;
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn half_old_new_pair_errors() {
+        let t = tool();
+        make_skill(&t, "demo", "body");
+        let r = t
+            .execute(&json!({ "name": "demo", "old_string": "body" }), "cli")
+            .await;
+        assert!(r.unwrap_err().to_string().contains("together"));
+    }
+
+    #[tokio::test]
+    async fn multiple_modes_error() {
+        let t = tool();
+        make_skill(&t, "demo", "body");
+        let r = t
+            .execute(
+                &json!({ "name": "demo", "content": "x", "append": "y" }),
+                "cli",
+            )
+            .await;
+        assert!(r.unwrap_err().to_string().contains("mutually exclusive"));
+    }
+
+    #[tokio::test]
+    async fn no_mode_errors() {
+        let t = tool();
+        make_skill(&t, "demo", "body");
+        let r = t.execute(&json!({ "name": "demo" }), "cli").await;
+        assert!(r.unwrap_err().to_string().contains("exactly one"));
     }
 
     #[tokio::test]

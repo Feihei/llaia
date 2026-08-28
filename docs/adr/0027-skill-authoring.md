@@ -15,7 +15,7 @@ llaia 已有扎实的 skill 系统：`src/skill/loader.rs` + `prompt.rs` 已实�
 1. **不做** npx-skills 的搜索 + 自动安装。
 2. 加 `skill_create` / `skill_edit` **工具**：
    - `skill_create { name, description, content, scope? }`：在 `scope`（默认 `"user"`，可选 `"project"`）对应 skills 目录建 `<name>/SKILL.md`；目录名 = name（kebab-case 校验）；`content` 写 SKILL.md。
-   - `skill_edit { name, content | patch, scope? }`：改已存在 skill 的 SKILL.md。
+   - `skill_edit { name, content | old_string + new_string | append, scope? }`：改已存在 skill 的 SKILL.md。三种编辑模式互斥单选（2026-08-28 修订：原 `patch` 的 string|object union 分派诱发弱模型把 `{find,replace}` 对象二次序列化成字符串、JSON 原文被追加进文件，改为与 `file_edit` 对齐的扁平命名参数；替换要求 old_string 唯一命中）。
    - 路径经 `resolve_skill_path` 校验，禁止越权写到 skills 目录外；`scope` 只允许 `user` / `project` 两值。
    - 创建/编辑后自动跑现有 `validate_skill_md`（frontmatter 校验：name 匹配 dirname、description 必填非空、长度上限）。
 3. 加一个**内置元 skill**（如 `skill-authoring`，随 llaia 发布）：引导 agent 如何按 llaia 约定创建/审查/整理 skill（frontmatter 约束、progressive disclosure、路径安全、`validate_skill_md` 规则、何时该建 skill vs 直接做）。agent 想自管 skill 时先加载此元 skill。

@@ -381,9 +381,11 @@ Always use the dedicated tools:
   - `content`: the skill **body** in markdown (workflow, output format, notes). Frontmatter is auto-generated from `name`/`description`. If you pass full content with its own `---` frontmatter, it is used as-is.
   - `scope`: `"user"` (default, all workspaces) or `"project"` (current project only).
   - Create refuses to overwrite an existing skill — use `skill_edit` to change one.
-- `skill_edit { name, content | patch, scope? }`
-  - `content`: full replacement SKILL.md text.
-  - `patch`: a string appended to the body, OR a single targeted edit. For the targeted edit, pass `{"find": "<exact existing text>", "replace": "<new text>"}` **directly as a JSON object** — never as a JSON-encoded string; strings whose entire content parses to that object are decoded and applied as the replacement.
+- `skill_edit { name, content | old_string + new_string | append, scope? }`
+  - Exactly one mode per call (mutually exclusive):
+    - `content`: full replacement SKILL.md text.
+    - `old_string` + `new_string`: replace the unique exact occurrence of `old_string` (same model as file_edit). `new_string` may be empty to delete.
+    - `append`: text appended to the end of the body (frontmatter preserved); never replaces anything.
   - The skill must already exist.
 
 After writing, the tool runs `validate_skill_md` (frontmatter parseable, `name`+`description` non-empty, length limits). A validation error means the write was rejected.
