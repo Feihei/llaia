@@ -701,6 +701,24 @@
               <span class="cron-msg" x-text="restartMsg"></span>
             </div>
             <div style="margin-top:16px;">
+              <button @click="checkUpdate()" x-bind:disabled="checkingUpdate">
+                <span x-show="!checkingUpdate">Check Updates</span>
+                <span x-show="checkingUpdate">Checking…</span>
+              </button>
+              <span class="cron-msg" x-text="updateCheckInfo ? updateCheckInfo.error || '' : ''"></span>
+              <template x-if="updateCheckInfo && !updateCheckInfo.error">
+                <div class="hint" style="margin-top:8px;">
+                  <span x-show="updateCheckInfo.update_available">
+                    New version available: <b x-text="updateCheckInfo.latest"></b> (current: <span x-text="updateCheckInfo.current"></span>) —
+                    <a :href="updateCheckInfo.url" target="_blank" rel="noopener">view release</a>
+                  </span>
+                  <span x-show="!updateCheckInfo.update_available">
+                    You are up to date (current: <span x-text="updateCheckInfo.current"></span>).
+                  </span>
+                </div>
+              </template>
+            </div>
+            <div style="margin-top:16px;">
               <button @click="shutdownService()" x-bind:disabled="shuttingDown">
                 <span x-show="!shuttingDown">Stop Service</span>
                 <span x-show="shuttingDown">Stopping…</span>

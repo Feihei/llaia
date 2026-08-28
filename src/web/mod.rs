@@ -981,6 +981,152 @@ pub struct StatusInfo {
     pub uploads_count: u64,
 }
 
+/// 三段了点号版本号比较：`1.2.3 > 1.2.2`；忽略 pre-release/build 后缀（`1.2.3-beta` → `1.2.3`）。
+/// 任一侧解析不出三段整型返回 `None`（无法比较）。
+fn cmp_version(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    fn segs(v: &str) -> Vec<u64> {
+        v.split(['-', '+'])
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .filter_map(|s| s.parse::<u64>().ok())
+            .collect()
+    }
+    let (va, vb) = (segs(a), segs(b));
+    if va.is_empty() || vb.is_empty() {
+        return None;
+    }
+    for i in 0..va.len().max(vb.len()) {
+        match va
+            .get(i)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&vb.get(i).copied().unwrap_or(0))
+        {
+            std::cmp::Ordering::Equal => continue,
+            o => return Some(o),
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
+}
+
+/// GET /api/update/check 的结果（含失败原因，供前端展示）。
+#[derive(Clone, serde::Serialize)]
+struct UpdateCheck {
+    current: String,
+    latest: Option<String>,
+    update_available: bool,
+    url: Option<String>,
+    error: Option<String>,
+}
+
+/// GitHub Releases latest 的分钟级内存缓存（防连点触无鉴权 60 次/h 限流）。
+#[allow(clippy::type_complexity)]
+static UPDATE_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::time::Instant, Result<UpdateCheck, String>)>>,
+> = std::sync::OnceLock::new();
+
+fn update_cache(
+) -> &'static std::sync::Mutex<Option<(std::time::Instant, Result<UpdateCheck, String>)>> {
+    UPDATE_CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// GET /api/update/check → 通过 GitHub Releases latest API 检查是否有新版。
+///
+/// 该 API 必须带 User-Agent 头否则 403（`https://api.github.com/repos/Feihei/llaia/releases/latest`）；
+/// 返回的 `tag_name` 去 `v` 前缀后与当前版本做三段数值比较。结果做分钟级内存缓存。
+pub async fn check_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let current = env!("CARGO_PKG_VERSION").to_string();
+
+    let cache = update_cache();
+    let now = std::time::Instant::now();
+    let cached = cache.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let result = if let Some((at, cached)) = cached {
+        if now.duration_since(at) < std::time::Duration::from_secs(60) {
+            cached
+        } else {
+            fetch_latest_release().await
+        }
+    } else {
+        fetch_latest_release().await
+    };
+    *cache.lock().unwrap_or_else(|p| p.into_inner()) =
+        Some((std::time::Instant::now(), result.clone()));
+
+    match result {
+        Ok(info) => {
+            let json = serde_json::json!(info);
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+                json.to_string(),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            // 失败透传原因：客户端已是最新或暂时无法获取时，让前端展示可读信息而非报错
+            let json = serde_json::json!({
+                "current": current,
+                "latest": null,
+                "update_available": false,
+                "url": null,
+                "error": e,
+            });
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+                json.to_string(),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn fetch_latest_release() -> Result<UpdateCheck, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("llaia-update-check")
+        .build()
+        .map_err(|e| format!("build http client: {e}"))?;
+    let resp = client
+        .get("https://api.github.com/repos/Feihei/llaia/releases/latest")
+        .send()
+        .await
+        .map_err(|e| format!("query GitHub releases: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!("GitHub API {} (离线或限流，稍后再试)", status));
+    }
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse GitHub response: {e}"))?;
+    let tag = json.get("tag_name").and_then(|v| v.as_str()).unwrap_or("");
+    let url = json
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    let latest = tag.strip_prefix('v').unwrap_or(tag).to_string();
+    let update_available = cmp_version(&latest, &current)
+        .map(|o| o == std::cmp::Ordering::Greater)
+        .unwrap_or(false);
+    Ok(UpdateCheck {
+        current,
+        latest: (!latest.is_empty()).then_some(latest),
+        update_available,
+        url,
+        error: None,
+    })
+}
+
 /// GET /api/status
 pub async fn get_status(
     State(state): State<AppState>,
@@ -2064,6 +2210,7 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/env", axum::routing::get(get_env))
         .route("/api/env/refresh", axum::routing::post(refresh_env))
         .route("/api/doctor", axum::routing::get(get_doctor))
+        .route("/api/update/check", axum::routing::get(check_update))
         // 会话历史（P5 W1）：列表 / 详情 / 删除 / 导出
         .route("/api/sessions", axum::routing::get(list_sessions_api))
         .route(
@@ -2118,6 +2265,23 @@ mod tests {
         let headers = HeaderMap::new();
         let token = extract_token(&headers, "", Some("from-query"));
         assert_eq!(token.as_deref(), Some("from-query"));
+    }
+
+    #[test]
+    fn test_cmp_version() {
+        use std::cmp::Ordering;
+        // 正常三段比较
+        assert_eq!(cmp_version("1.2.3", "1.2.2"), Some(Ordering::Greater));
+        assert_eq!(cmp_version("1.2.3", "1.2.3"), Some(Ordering::Equal));
+        assert_eq!(cmp_version("1.2.2", "1.2.3"), Some(Ordering::Less));
+        // 忽略 pre-release / build 后缀
+        assert_eq!(cmp_version("1.2.3-beta", "1.2.2"), Some(Ordering::Greater));
+        assert_eq!(cmp_version("1.2.3", "1.2.3+build.7"), Some(Ordering::Equal));
+        // 三段 vs 两段：缺位按 0 补
+        assert_eq!(cmp_version("1.2.1", "1.2"), Some(Ordering::Greater));
+        // 不可解析 → None
+        assert_eq!(cmp_version("dev", "1.2.3"), None);
+        assert_eq!(cmp_version("8.8.8.8", "1.2.3"), Some(Ordering::Greater));
     }
 
     #[test]
@@ -2388,6 +2552,12 @@ model = "local.m"
         assert!(
             js.contains("channelCards"),
             "app.js missing channelCards metadata (stale embed?)"
+        );
+        assert!(
+            js.contains("checkingUpdate")
+                && js.contains("checkUpdate")
+                && idx.contains("Check Updates"),
+            "index.html/app.js missing plan.md W2 About update-check button (stale embed?)"
         );
 
         let css = StaticAsset::get("theme.css")

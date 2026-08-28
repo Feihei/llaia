@@ -110,6 +110,9 @@ function llaiaApp() {
     restartMsg: '',
     shuttingDown: false,
     shutdownMsg: '',
+    // update check
+    updateCheckInfo: null,
+    checkingUpdate: false,
     // cron
     cronSection: 'tasks',
     cronTasks: [],
@@ -930,6 +933,23 @@ function llaiaApp() {
       } catch (e) {
         this.shutdownMsg = 'Request failed: ' + e.message;
         this.shuttingDown = false;
+      }
+    },
+    // check for a newer release via GitHub Releases latest API
+    async checkUpdate() {
+      this.checkingUpdate = true;
+      this.updateCheckInfo = null;
+      try {
+        const r = await this.apiFetch('/api/update/check', { method: 'GET' });
+        if (!this.authed) return;
+        if (r.ok) {
+          this.updateCheckInfo = await r.json();
+        } else {
+          this.updateCheckInfo = { error: 'Update check failed: HTTP ' + r.status, current: this.status ? this.status.version : '' };
+      } catch (e) {
+        this.updateCheckInfo = { error: 'Update check failed: ' + e.message };
+      } finally {
+        this.checkingUpdate = false;
       }
     },
     formatBytes(n) { if (n < 1024) return n + ' B'; if (n < 1048576) return (n/1024).toFixed(1)+' KB'; return (n/1048576).toFixed(1)+' MB'; },
