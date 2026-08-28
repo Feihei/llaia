@@ -381,7 +381,9 @@ pub fn validate_move_target(path: &str) -> anyhow::Result<PathBuf> {
     Ok(crate::path_guard::strip_verbatim_prefix(&canon))
 }
 
-#[cfg(test)]
+// 本模块的测试全部依赖 Windows 路径/行为（verbatim `\\?\`、真实 WAS 目录命令），
+// 整模块门控到 windows + test，避免 Linux 上出现未使用的 `super::*`/`json` 导入告警。
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -389,7 +391,6 @@ mod tests {
     // 平台专属：/move 到某目录后，目录内绝对路径命令必须判定为 workspace 内
     // （default 档免审批）；且 validate_move_target 不得携带 Windows verbatim
     // `\\?\` 前缀，否则与命令路径形态不一致，moved 目录内操作每次都要审批。
-    #[cfg(windows)]
     #[test]
     fn test_move_trusts_moved_dir_within_scope() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -411,7 +412,6 @@ mod tests {
     // 开头，cd 目标就是 moved 目录本身，应判定 workspace 内（免审批）。
     // 若此断言成立，运行时那些审批必然来自「越出 moved 目录」的其它路径（如 find E:/s、
     // 读 home workspace），而非 cd 段。
-    #[cfg(windows)]
     #[test]
     fn test_real_moved_dir_cd_cmds_within_scope() {
         let ws = std::path::PathBuf::from(r"E:\AIAD_Group\20260807-Agent科普");
@@ -430,7 +430,6 @@ mod tests {
     }
 
     // 回归：带引号 + 正斜杠的 `cd "ws" && ...`，cd 目标即 workspace 本身，应免审批。
-    #[cfg(windows)]
     #[test]
     fn test_repro_quoted_cd_cmd_within_moved_dir() {
         let dir = tempfile::tempdir().expect("tempdir");
