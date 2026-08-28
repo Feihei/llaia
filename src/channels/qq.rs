@@ -285,8 +285,15 @@ impl QqChannel {
         match self.get_ws_url_inner(false).await {
             Ok(url) => Ok(url),
             Err(first_err) => {
-                // 首次失败若是 token 过期，强制刷新 token 重试一次
-                if first_err.to_string().contains("token not exist or expire") {
+                // 首次失败若是 token 过期，强制刷新 token 重试一次。
+                // QQ 网关的过期响应形态不统一：既有英文 "token not exist or expire"，
+                // 也有 {"code":11244,"message":"AccessToken无效或过期"} 的中文形态，
+                // 后者曾被漏匹配导致重连循环带着失效 token 无限重试
+                let err_text = first_err.to_string();
+                if err_text.contains("token not exist or expire")
+                    || err_text.contains("11244")
+                    || err_text.contains("AccessToken无效或过期")
+                {
                     tracing::warn!("gateway returned token-expired, force refreshing and retrying");
                     self.invalidate_token().await;
                     self.get_ws_url_inner(true).await
