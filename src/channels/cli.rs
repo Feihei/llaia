@@ -602,6 +602,10 @@ pub async fn build_single_agent(
     if is_main {
         let env_text = crate::envprobe::probe().await;
         agent.context.env_state = (!env_text.is_empty()).then_some(env_text);
+        // workspace/tmp 清理（plan.md）：启动时删除 3 天前的临时文件（工具图片等），避免磁盘无界增长
+        agent
+            .cleanup_tmp(std::time::Duration::from_secs(3 * 24 * 60 * 60))
+            .await;
     }
 
     Ok((

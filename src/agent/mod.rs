@@ -728,6 +728,42 @@ impl Agent {
         Some(path.to_string_lossy().to_string())
     }
 
+    /// 清理 `workspace_root/tmp/` 下超过 `retention` 的文件（plan.md：启动时清理，
+    /// 避免工具图片等临时文件无界增长）。幂等：目录不存在/不可读直接返回，不报错。
+    pub async fn cleanup_tmp(&self, retention: std::time::Duration) {
+        let ws = self.workspace_root.read().await.clone();
+        let tmp = ws.join("tmp");
+        let mut dir = match tokio::fs::read_dir(&tmp).await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let now = std::time::SystemTime::now();
+        let mut removed = 0usize;
+        loop {
+            let ent = match dir.next_entry().await {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
+            // 只清文件，不动子目录
+            if !ent.file_type().await.map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let modified = match ent.metadata().await.and_then(|m| m.modified()) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if now.duration_since(modified).unwrap_or_default() > retention
+                && tokio::fs::remove_file(&ent.path()).await.is_ok()
+            {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            tracing::info!(removed, dir = %tmp.display(), "cleaned stale files in workspace/tmp");
+        }
+    }
+
     /// 记录一次主对话模型调用的 token 用量（plan.md W3 token dashboard）。
     /// 空用量直接跳过（LMStudio/bare 端点不上报 usage 是预期行为）。
     async fn record_turn_usage(&self, usage: &crate::provider::Usage) {
@@ -1667,6 +1703,66 @@ mod tests {
             }
         }
         assert!(echoed, "no MediaOutput event echoed to channel");
+    }
+
+    /// cleanup_tmp：删除超过 retention 的旧文件，保留新文件，且不动子目录。
+    #[tokio::test]
+    async fn test_cleanup_tmp_removes_stale() {
+        let config = Config::default_for_workspace("/tmp/llaia-test");
+        let ws = std::path::PathBuf::from("/tmp/llaia-test/workspace");
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("test", "test").unwrap();
+        let agent = Agent::new(
+            &config,
+            None, // 无需真实 provider
+            None,
+            None,
+            Arc::new(crate::agent::ToolRegistry::new()),
+            Arc::new(store),
+            sid,
+            "test system".into(),
+            100_000,
+            ws.clone(),
+            Arc::new(RwLock::new(ws.clone())),
+            std::path::PathBuf::from("/tmp/llaia-test"),
+            true,
+            "main".into(),
+            None,
+        )
+        .await;
+
+        let tmp = ws.join("tmp");
+        tokio::fs::create_dir_all(&tmp).await.unwrap();
+        // 子目录（应保留）
+        tokio::fs::create_dir_all(tmp.join("subdir")).await.unwrap();
+        tokio::fs::write(tmp.join("subdir/keep.txt"), b"x")
+            .await
+            .unwrap();
+        // 新文件（retention 内，应保留）
+        tokio::fs::write(tmp.join("recent.png"), b"new")
+            .await
+            .unwrap();
+        // 旧文件（超过 3 天，应删除）
+        tokio::fs::write(tmp.join("stale.png"), b"old")
+            .await
+            .unwrap();
+        let stale_path = tmp.join("stale.png");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(4 * 24 * 60 * 60);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale_path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        // retention 3 天
+        agent
+            .cleanup_tmp(std::time::Duration::from_secs(3 * 24 * 60 * 60))
+            .await;
+
+        assert!(!stale_path.exists(), "stale file should be removed");
+        assert!(tmp.join("recent.png").exists(), "recent file kept");
+        assert!(tmp.join("subdir/keep.txt").exists(), "subdir untouched");
     }
 
     #[tokio::test]

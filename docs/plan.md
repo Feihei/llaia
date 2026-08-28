@@ -114,7 +114,7 @@
 **待修（下轮候选）**：
 
 - [x] SSE 解析只认 `\n\n` 事件分隔符（`openai_compat.rs`）：CRLF（`\r\n\r\n`）服务端/反代事件永不分割 → 整回复静默丢失。触碰流解析核心，单独修 + mockito 双分隔符测试；anthropic/gemini 流解析一并检查 — 已交付（2026-08-28）
-- [ ] `workspace/tmp/` 工具图片落盘后无任何清理 → 磁盘无界增长（`agent/mod.rs::persist_tool_image`）。需小设计：启动时清理 N 天前文件
+- [x] `workspace/tmp/` 工具图片落盘后无任何清理 → 磁盘无界增长（`agent/mod.rs::persist_tool_image`）。需小设计：启动时清理 N 天前文件 — 已交付（2026-08-28，serve/chat 启动时清理 3 天前文件）
 
 **搁置留档（影响小，暂不动）**：
 
