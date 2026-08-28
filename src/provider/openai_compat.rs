@@ -329,6 +329,9 @@ impl Provider for OpenAiCompatibleProvider {
                     last_data = Instant::now();
                 }
                 buf.push_str(chunk_str);
+                // CRLF 归一化为 LF：SSE 事件以空行分隔，等效分隔符可能是 \n\n 或 \r\n\r\n。
+                // 在累积 buffer 上整体替换，跨 chunk 边界的 \r\n 也能被正确合并。
+                buf = buf.replace("\r\n", "\n");
                 while let Some(pos) = buf.find("\n\n") {
                     let event_str = buf[..pos].to_string();
                     buf = buf[pos + 2..].to_string();

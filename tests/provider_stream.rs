@@ -114,6 +114,56 @@ async fn test_stream_tool_calls_accumulated() {
 }
 
 #[tokio::test]
+async fn test_stream_crlf_event_separator() {
+    // 回归：SSE 事件用 CRLF（\r\n\r\n）分隔时，旧实现只认 \n\n 会整回复静默丢失。
+    bypass_proxy();
+    let mut server = mockito::Server::new_async().await;
+    let sse_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"crlf\"}}]}\r\n\r\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\" works\"}}]}\r\n\r\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\n",
+        "data: [DONE]\r\n\r\n",
+    );
+    let m = server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(sse_body)
+        .create_async()
+        .await;
+
+    let provider = OpenAiCompatibleProvider::new(
+        server.url(),
+        "",
+        "test-model",
+        true,
+        None,
+        Compat::default(),
+    )
+    .unwrap();
+    let msgs = vec![ChatMessage::user("hi")];
+    let req = ChatRequest {
+        messages: &msgs,
+        tools: None,
+        disable_thinking: false,
+    };
+    let mut stream = provider.chat_stream(&req).await;
+
+    let mut deltas = Vec::new();
+    let mut done = false;
+    while let Some(ev) = stream.next().await {
+        match ev.unwrap() {
+            StreamEvent::TextDelta(d) => deltas.push(d),
+            StreamEvent::Done => done = true,
+            _ => {}
+        }
+    }
+    m.assert_async().await;
+    assert_eq!(deltas.concat(), "crlf works");
+    assert!(done);
+}
+
+#[tokio::test]
 async fn test_stream_error_status() {
     bypass_proxy();
     let mut server = mockito::Server::new_async().await;
