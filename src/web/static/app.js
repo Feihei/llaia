@@ -951,6 +951,7 @@ function llaiaApp() {
           this.updateCheckInfo = await r.json();
         } else {
           this.updateCheckInfo = { error: 'Update check failed: HTTP ' + r.status, current: this.status ? this.status.version : '' };
+        }
       } catch (e) {
         this.updateCheckInfo = { error: 'Update check failed: ' + e.message };
       } finally {
