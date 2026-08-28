@@ -128,6 +128,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 | `todo` | `tools/todo` | 规划后执行：每会话一份待办清单（`add`/`list`/`update`/`done`），自动注入 Runtime Context（ADR-0024）|
 | `ask_user` | `tools/ask_user` | 执行中主动向用户抛问题并**阻塞等待**回答再继续；交互频道走软暂停+续跑，非交互频道按最合理假设继续（ADR-0022）|
 | `memory_write` | `tools/memory` | 写 MEMORY.md |
+| `skill_create` / `skill_edit` | `tools/skill_create` / `tools/skill_edit` | agent 自管 skill（ADR-0027）：建 `<name>/SKILL.md` / 改已存在 SKILL.md（`content` 整篇覆盖、`old_string`+`new_string` 唯一命中替换、`append` 追加正文，三模式互斥；仅注册在 main agent） |
 | `delegate` | `tools/delegate` | 后台委派子 Agent 执行长任务（脱离主回合，结果回传） |
 | `cron` | `tools/cron` | 注册/执行定时任务（Agent 模式 / Step 模式） |
 | `mcp` | `tools/mcp` | 接入外部 MCP server 暴露的工具 |

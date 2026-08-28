@@ -15,10 +15,12 @@ agent 在对话中可以调用的工具。模型通过「原生 function calling
 | `todo` | 规划后执行：每会话一份待办清单（`add`/`list`/`update`/`done`），自动注入 Runtime Context（ADR-0024） | 否 |
 | `ask_user` | 执行中主动抛问题并阻塞等待用户回答再继续；交互频道软暂停+续跑，非交互频道按最合理假设继续（ADR-0022） | 否 |
 | `memory_write` | 写 `MEMORY.md` 长期记忆 | 是 |
+| `skill_create` / `skill_edit` | agent 自管 skill：创建 / 修改 `SKILL.md`（详见[技能](skills.md)），仅 main agent 可用 | 是 |
 | `send_media` | 发送图片/媒体 | 否 |
 | `delegate` | 委派子 agent 异步任务 | 视委派内容 |
 | `cron` | 管理定时任务 | 是 |
 | `mcp` | 调用已接入的 MCP server 工具 | 视工具而定 |
+| `tts` | 文本合成语音（`[tools.tts]` 配置） | 否 |
 
 ## 副作用与确认
 
