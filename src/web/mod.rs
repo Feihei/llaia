@@ -2399,6 +2399,14 @@ model = "local.m"
             css.contains(".channel-card"),
             "theme.css missing .channel-card styles (stale embed?)"
         );
+        assert!(
+            css.contains(".app-frame") && idx.contains("app-frame"),
+            "index.html/theme.css missing plan.md W1 flex-height-chain fix (stale embed?)"
+        );
+        assert!(
+            css.contains(".scroll-fab") && idx.contains("scroll-fab"),
+            "index.html/theme.css missing plan.md W1 session scroll-fab buttons (stale embed?)"
+        );
     }
 
     /// app.js 顶层键同名冲突回归测试：llaiaApp() 返回单个对象字面量，data 属性与方法

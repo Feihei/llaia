@@ -64,7 +64,7 @@
   </div>
   <!-- show main UI after auth -->
   <template x-if="authed">
-    <div>
+    <div class="app-frame">
   <header>
     <h1>Llaia (੭aᴗa)੭</h1>
     <div class="tabs">
@@ -161,6 +161,10 @@
           <div class="hint" x-show="sessions.length === 0">No sessions recorded yet.</div>
         </div>
         <div class="session-detail">
+          <!-- 跳顶/跳底（plan.md W1）：按钮挂在滚动容器外部，滚动时保持原位 -->
+          <button class="scroll-fab scroll-fab-top" title="Jump to top" @click="$refs.detailScroll.scrollTo({top: 0, behavior: 'smooth'})">&#8593;</button>
+          <button class="scroll-fab scroll-fab-bottom" title="Jump to bottom" @click="$refs.detailScroll.scrollTo({top: $refs.detailScroll.scrollHeight, behavior: 'smooth'})">&#8595;</button>
+          <div class="session-detail-scroll" x-ref="detailScroll">
           <template x-if="sessionDetail">
             <div>
               <div class="config-head">&#x276F; SESSION <span class="hint" x-text="sessionDetail.session ? sessionDetail.session.session_uuid : ''"></span>
@@ -206,6 +210,7 @@
             </div>
           </template>
           <div class="hint" x-show="!sessionDetail">Select a session on the left to view its history.</div>
+          </div>
         </div>
       </div>
     </div>

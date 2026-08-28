@@ -41,7 +41,7 @@
 
 > 三项来自用户需求评估（2026-08-27）。W1/W2 是快赢可直接做；W3 有数据采集缺口需先补链路，动手前先定表结构与统计边界。
 
-- [ ] **W1** sessions / config 页左侧栏固定不随内容滚走 + 会话详情区右下角「跳顶部/跳底部」悬浮按钮（必要性：**中** / 难度：★☆☆）
+- [x] **W1** sessions / config 页左侧栏固定不随内容滚走 + 会话详情区右下角「跳顶部/跳底部」悬浮按钮（必要性：**中** / 难度：★☆☆）— 已交付（2026-08-28）
   - 根因已定位（两个页面同源）：`index.html` 里 `<template x-if="authed">` 的匿名包裹 `<div>` 无任何样式，打断了 flex 高度链——`main { flex:1; overflow:hidden }` 因父级不是 flex 容器而失效，pane 高度随内容无限增长、变成整页（body）滚动；sessions 左侧会话列表与 config 左侧分区导航都因此被滚出视口。
   - 方案：给该包裹 div 加 class 并声明 `display:flex; flex-direction:column; flex:1; min-height:0`，恢复高度约束后 `.session-list` 与 `#config-pane .sidebar`（均已自带 `overflow-y:auto`）各自固定在视口内、右侧内容独立滚动。纯 CSS 改动，一次修两处。
   - 悬浮按钮：`.session-detail` 设 `position:relative`，右下角两个 absolute 定位按钮（↑/↓），分别 `scrollTo({top:0})` / `scrollTo({top:scrollHeight})`；纯前端改动，无新 API。
