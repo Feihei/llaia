@@ -29,6 +29,17 @@ pub struct MessageRow {
     pub created_at: String,
 }
 
+/// memory_research（plan.md）：FTS5 全文搜索命中，含所属 session 信息。
+#[derive(Debug, Clone)]
+pub struct MessageFtsHit {
+    pub message_id: i64,
+    pub session_uuid: String,
+    pub channel: String,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolCallRow {
     pub id: i64,
@@ -197,7 +208,27 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
 CREATE INDEX IF NOT EXISTS idx_turn_usage_ts ON turn_usage(ts);
 CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id);
+
+-- memory_research（plan.md）：跨会话全文索引。只索引 user/assistant 正文
+-- （system 提示词与 tool 输出是噪音，不参与历史记忆检索）。
+CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(content, tokenize='unicode61');
+CREATE TRIGGER IF NOT EXISTS trg_message_fts_insert AFTER INSERT ON messages
+BEGIN
+    INSERT INTO message_fts(rowid, content)
+        SELECT NEW.id, NEW.content WHERE NEW.role IN ('user','assistant');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_message_fts_delete AFTER DELETE ON messages
+BEGIN
+    DELETE FROM message_fts WHERE rowid = OLD.id;
+END;
 "#,
+        )?;
+        // 存量回填：仅补 user/assistant 里尚未入索引的行（升级既有库时一次性补齐），幂等。
+        conn.execute_batch(
+            "INSERT INTO message_fts(rowid, content)
+             SELECT m.id, m.content FROM messages m
+             WHERE m.role IN ('user','assistant')
+               AND m.id NOT IN (SELECT rowid FROM message_fts);",
         )?;
         Ok(())
     }
@@ -315,6 +346,36 @@ CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id);
         let mut msgs = rows?;
         msgs.reverse();
         Ok(msgs)
+    }
+
+    /// 跨会话全文搜索历史消息（plan.md memory_research，FTS5）。
+    /// `limit` 由调用方 clamp（工具侧硬上限 20）。返回按相关性排序的命中，
+    /// 含所属 session 短 id、channel 与时间；content 由调用方截断展示。
+    pub fn search_messages(&self, query: &str, limit: i64) -> Result<Vec<MessageFtsHit>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT m.id, s.session_uuid, s.channel, m.role, m.content, m.created_at
+             FROM message_fts f
+             JOIN messages m ON m.id = f.rowid
+             JOIN sessions  s ON s.id = m.session_id
+             WHERE f.content MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![query, limit], |r| {
+            Ok(MessageFtsHit {
+                message_id: r.get(0)?,
+                session_uuid: r.get(1)?,
+                channel: r.get(2)?,
+                role: r.get(3)?,
+                content: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        let hits: rusqlite::Result<Vec<MessageFtsHit>> = rows.collect();
+        let mut hits = hits?;
+        hits.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // 同相关度按新优先
+        Ok(hits)
     }
 
     pub fn update_token_count(&self, session_id: i64, delta: i64) -> Result<()> {

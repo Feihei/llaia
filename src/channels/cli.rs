@@ -434,6 +434,9 @@ pub async fn build_single_agent(
     let skills_dir = config_dir.join("skills");
     // 规划后执行（ADR-0024）：每会话一份 todo 清单，agent 与工具共享同一 TodoStore。
     let todo_store = Arc::new(crate::tools::todo::TodoStore::new(workspace.clone()));
+    // sqlite 会话存储：memory_research 工具跨会话搜索历史用（FTS5），需在工具集构建前就位。
+    let db_path = workspace.join("sessions.db");
+    let session_store = Arc::new(SessionStore::open(&db_path)?);
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(FileRead::new(
             workspace_root.clone(),
@@ -465,6 +468,10 @@ pub async fn build_single_agent(
             MemoryWrite::new(memory_path.clone(), user_path.clone(), is_main)
                 .with_timezone(config.runtime.timezone.clone()),
         ),
+        // memory_research（plan.md）：跨会话 FTS5 全文搜索历史消息，只读。
+        Arc::new(crate::tools::memory::MemoryResearch::new(
+            session_store.clone(),
+        )),
         Arc::new(SendImage::new(workspace.clone())),
         Arc::new(SendFile::new(workspace.clone())),
         // todo 工具无条件注册（无需 api_key）：agent 自管当前会话子步骤清单。
@@ -548,9 +555,6 @@ pub async fn build_single_agent(
         system_prompt.push_str(&build_tool_instructions(&registry.specs()));
     }
     let registry = Arc::new(registry);
-
-    let db_path = workspace.join("sessions.db");
-    let session_store = Arc::new(SessionStore::open(&db_path)?);
 
     let session_id = match session_store.latest_session()? {
         Some((id, _)) => id,

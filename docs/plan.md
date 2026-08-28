@@ -76,10 +76,10 @@
     - **goose** `crates/goose-providers/src/openai.rs`：`PROVIDERS_NEEDING_MAX_TOKENS_REMAP`（cerebras/custom_deepseek/groq/kimi/mistral/moonshot…→ 传统 `max_tokens`）、`PROVIDERS_NEEDING_REASONING_EFFORT_MAPPING`、Meta effort 折叠。
   - 定案方向（grill 2026-08-24）：`Compat::detect` 扩展——detect 不只看 base_url host，还要能按其 provider 预设（deepseek/glm/kimi/moonshot）设定 `max_tokens_field` / `reasoning_to_content` / thinking 参数，模式对齐 nanobot/goose 的 per-model 表；把 `native_tool_calling` 并入同套探测（见 #10）。
   - 待明确：`probe 失败`的具体根因（context_size 探测走非 OpenAI 管理端点？`/models` 响应结构差异？）需一次实测抓包/trace 定位后再定实现。
-- [ ] `memory_research` 工具：跨 session 搜索历史记忆（必要性：**中** / 难度：★★☆）— 已定案 → 立项
+- [x] `memory_research` 工具：跨 session 搜索历史记忆（必要性：**中** / 难度：★★☆）— 已定案 → 已实现
   - 现状：`sessions/messages/tool_calls` 已在 sqlite（`memory/sqlite.rs`）。
-  - 定案（grill 2026-08-24）：**仅搜索 messages 文本**，FTS5（`rusqlite` 加 `fts5` feature），返回 N 条 + 所属 session + 时间，**暴露为模型可调工具**。结果上限与隐私边界实现时定（先给硬上限 N=20）。
-  - 待实现：建 FTS 虚拟表 + 增量同步 + 工具封装 + 注册。
+  - 定案（grill 2026-08-24）：**仅搜索 messages 文本**，FTS5，返回 N 条 + 所属 session + 时间，**暴露为模型可调工具**。结果上限与隐私边界实现时定（先给硬上限 N=20）。
+  - 已实现：`message_fts` FTS5 虚拟表 + INSERT/DELETE 触发器 + 存量回填；`SessionStore::search_messages`（`memory/sqlite.rs`）；`MemoryResearch` 工具封装（`tools/memory.rs`，只读无需审批，limit 1..=20，snippet 截断，非法查询降级提示）；CLI 工具集注册。
 - [x] 检查清理基本架构 / agent loop（必要性：**中** / 难度：★★☆~★★★）— 已定案 → **立项为定期例行检查**
   - 本意（用户澄清 2026-08-25）：**定期体检主干代码**——架构合理性、逻辑反模式、死代码/未接线路径、与 ADR/编码约定（AGENTS.md：无 `#[allow(dead_code)]`、无占位 config、生产路径无 unwrap）的偏差。**非问题驱动**，不是等 loop 卡死/上下文爆炸才查，而是周期性主动检查。
   - 定案（修正 grill 2026-08-24 的"不立项"结论）：开放发散型例行项，产出为检查记录（发现项 → 直接修 / 单独立项 / 搁置留档），不要求一次清完；主干模块（agent loop / provider / memory / web）逐次过一遍。
