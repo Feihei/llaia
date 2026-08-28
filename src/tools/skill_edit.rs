@@ -56,14 +56,14 @@ fn patch_from_object(map: &serde_json::Map<String, Value>) -> Result<Patch> {
     })
 }
 
-/// 应用 patch：
+/// 应用 patch，返回 (新内容, 操作说明)：
 /// - 字符串 → 追加到 body（保留 frontmatter）。
 /// - 对象 `{ find, replace }` → 在全文做单次精确替换（找不到则报错）。
 ///
 /// 兼容层：经 OpenAI 兼容端点的本地模型（ornith 等）会把对象参数二次序列化
 /// 成字符串发出。字符串若整体恰好解析为含非空 `find` 的 JSON 对象，按对象
 /// patch 执行替换，而不是把 JSON 文本原文追加进文件。
-fn apply_patch(existing: &str, patch: &Value) -> Result<String> {
+fn apply_patch(existing: &str, patch: &Value) -> Result<(String, &'static str)> {
     let decoded = match patch {
         Value::Object(map) => patch_from_object(map)?,
         Value::String(s) => {
@@ -104,13 +104,16 @@ fn apply_patch(existing: &str, patch: &Value) -> Result<String> {
             out.push('\n');
             out.push_str(s.trim());
             out.push('\n');
-            Ok(out)
+            Ok((out, "appended `patch` to the body"))
         }
         Patch::Replace { find, replace } => {
             if !existing.contains(&find) {
                 anyhow::bail!("skill_edit: patch.find not found in SKILL.md");
             }
-            Ok(existing.replacen(&find, &replace, 1))
+            Ok((
+                existing.replacen(&find, &replace, 1),
+                "replaced the first occurrence of `patch.find` with `patch.replace`",
+            ))
         }
     }
 }
@@ -138,7 +141,7 @@ impl crate::tools::Tool for SkillEditTool {
     fn description(&self) -> &str {
         "Edit an existing skill's SKILL.md (use this, NOT file_edit, since skill dirs are outside the workspace). \
         Provide `name` and either `content` (full replacement SKILL.md text) or `patch`. \
-        `patch` appends a string to the body, OR performs a single targeted edit via an object {\"find\": \"...\", \"replace\": \"...\"} \
+        `patch` appends a string to the body (it NEVER replaces text), OR performs a single targeted edit via an object {\"find\": \"...\", \"replace\": \"...\"} \
         — pass the object directly as a JSON object, never as a JSON-encoded string \
         (a string whose whole content parses to such an object is decoded and applied as the replacement). \
         Optional `scope`: \"user\" (default) or \"project\". \
@@ -207,11 +210,13 @@ impl crate::tools::Tool for SkillEditTool {
 
         let existing = std::fs::read_to_string(&skill_md)
             .map_err(|e| anyhow!("skill_edit: read {}: {}", skill_md.display(), e))?;
-        let new_content = if let Some(c) = args.get("content").and_then(|v| v.as_str()) {
+        // (新内容, 操作说明)：content 整篇覆盖 / patch 追加或替换，成功消息里
+        // 明示本次到底做了哪种写操作，避免模型读回文件才能分辨。
+        let (new_content, op_desc) = if let Some(c) = args.get("content").and_then(|v| v.as_str()) {
             if c.trim().is_empty() {
                 anyhow::bail!("skill_edit: `content` must be non-empty");
             }
-            c.to_string()
+            (c.to_string(), "replaced the whole file with `content`")
         } else if let Some(patch) = args.get("patch") {
             apply_patch(&existing, patch)?
         } else {
@@ -231,9 +236,10 @@ impl crate::tools::Tool for SkillEditTool {
             .map_err(|e| anyhow!("skill_edit: rename {}: {}", skill_md.display(), e))?;
 
         Ok(format!(
-            "Updated skill {:?} (scope={:?}) at {}\n\n{}",
+            "Updated skill {:?} (scope={:?}, {}) at {}\n\n{}",
             name,
             scope,
+            op_desc,
             skill_md.display(),
             new_content
         ))
