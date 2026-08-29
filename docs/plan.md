@@ -13,6 +13,9 @@
 - 🚧 进行中
 - ⏳ 计划中（未开始）
 
+> 条目勾选框语义：**`[x]` = 代码已落地**，`[ ]` = 尚有未完部分（含「已定案未实现」「部分交付」）。
+> 「已定案/已立项」只是决策完成，不算 `[x]`——须在实现后勾上，并在条目标注交付日期与代码位置。
+
 ---
 
 ## 已交付阶段一览
@@ -65,41 +68,46 @@
 
 ### 🧩 待 grill 明确后立项（需求/设计类）
 
-- [x] 会话主题自动总结（必要性：**中** / 难度：★★☆）— 已定案 → 立项
+- [ ] 会话主题自动总结（必要性：**中** / 难度：★★☆）— 已定案，**未实现**
   - 现状：无代码基础；`sessions` 表加 `title` 字段。
   - 定案（grill 2026-08-24）：**压缩时顺带**用 compact provider 生成标题，落 `sessions.title`，WebUI 会话列表展示；失败降级为默认标题。存储即随会话。
   - 待实现：压缩流程内加一步标题生成 + 更新行 + WebUI 读列。
-- [ ] deepseek / glm / kimi 等 provider 针对性优化（必要性：**高** / 难度：★★☆）— 已定案，有 .ref 现成实现
+  - 核实（2026-08-28）：`sessions` 建表语句（`memory/sqlite.rs:162`）仍无 `title` 列，代码中无标题生成路径。
+- [x] deepseek / glm / kimi 等 provider 针对性优化（必要性：**高** / 难度：★★☆）— 已交付（2026-08-28 核实）
   - 现状：`compat.rs::detect` 仅覆盖 ollama/llamacpp 预设，线上 provider（deepseek/glm/kimi/moonshot…）走 bare；用户实测**非本地 provider 的 probe/探测常失败**，疑似线上 API 规则不同。
   - .ref 现成实现（已探明，可照抄）：
     - **nanobot** `openai_compat_provider.py`：`_MODEL_THINKING_STYLES` 按模型 slug 映射 thinking 线上参数（`thinking_type`/`enable_thinking`/`reasoning_split`）；`reasoning_content` 加入放行字段并保证 deepseek-R1 走 `reasoning_content` 而非 `reasoning`；`_requires_max_completion_tokens` 对 o 系/kimi-k3 用 `max_completion_tokens`。
     - **goose** `crates/goose-providers/src/openai.rs`：`PROVIDERS_NEEDING_MAX_TOKENS_REMAP`（cerebras/custom_deepseek/groq/kimi/mistral/moonshot…→ 传统 `max_tokens`）、`PROVIDERS_NEEDING_REASONING_EFFORT_MAPPING`、Meta effort 折叠。
   - 定案方向（grill 2026-08-24）：`Compat::detect` 扩展——detect 不只看 base_url host，还要能按其 provider 预设（deepseek/glm/kimi/moonshot）设定 `max_tokens_field` / `reasoning_to_content` / thinking 参数，模式对齐 nanobot/goose 的 per-model 表；把 `native_tool_calling` 并入同套探测（见 #10）。
-  - 待明确：`probe 失败`的具体根因（context_size 探测走非 OpenAI 管理端点？`/models` 响应结构差异？）需一次实测抓包/trace 定位后再定实现。
+  - 已实现（`provider/compat.rs:104-165`）：`Compat::detect(base_url, model)` 在 ollama/llamacpp 之外新增 deepseek / zhipu·bigmodel·glm / moonshot·kimi host 预设（开 `streaming_usage`）；per-model 规则对齐 nanobot/goose——o 系与 `kimi-k3` 切 `max_completion_tokens`（`max_tokens_field`）、`deepseek-reasoner`/`deepseek-r1`/`kimi-k` 开 `reasoning_to_content`；`native_tool_calling` 并入同套探测（见 #10）。全部带回归测试。
+  - 残余（未做）：`probe 失败`的具体根因未实测定位。已知一端：`detect_context_size`（`openai_compat.rs:458`）对**云 provider 也照打 `/props` + `/api/tags`**，端点不存在必然失败 → 退回 `configured`（非正确性 bug，但白跑两次请求 + 日志噪音）。可顺手按 host 跳过本地专属探测。
 - [x] `memory_research` 工具：跨 session 搜索历史记忆（必要性：**中** / 难度：★★☆）— 已定案 → 已实现
   - 现状：`sessions/messages/tool_calls` 已在 sqlite（`memory/sqlite.rs`）。
   - 定案（grill 2026-08-24）：**仅搜索 messages 文本**，FTS5，返回 N 条 + 所属 session + 时间，**暴露为模型可调工具**。结果上限与隐私边界实现时定（先给硬上限 N=20）。
   - 已实现：`message_fts` FTS5 虚拟表 + INSERT/DELETE 触发器 + 存量回填；`SessionStore::search_messages`（`memory/sqlite.rs`）；`MemoryResearch` 工具封装（`tools/memory.rs`，只读无需审批，limit 1..=20，snippet 截断，非法查询降级提示）；CLI 工具集注册。
 - [x] 检查清理基本架构 / agent loop（必要性：**中** / 难度：★★☆~★★★）— 已定案 → **立项为定期例行检查**
+  - 注：本项是**例行项而非一次性交付**，`[x]` 表示已定案立项；各轮实际产出见下方「主干代码体检记录」小节。
   - 本意（用户澄清 2026-08-25）：**定期体检主干代码**——架构合理性、逻辑反模式、死代码/未接线路径、与 ADR/编码约定（AGENTS.md：无 `#[allow(dead_code)]`、无占位 config、生产路径无 unwrap）的偏差。**非问题驱动**，不是等 loop 卡死/上下文爆炸才查，而是周期性主动检查。
   - 定案（修正 grill 2026-08-24 的"不立项"结论）：开放发散型例行项，产出为检查记录（发现项 → 直接修 / 单独立项 / 搁置留档），不要求一次清完；主干模块（agent loop / provider / memory / web）逐次过一遍。
   - 节奏：**不固定，需要时手动触发**（用户定，2026-08-25）；任何时刻想体检直接提即可。
-- [x] provider native 模式默认简化（必要性：**中** / 难度：★★☆）— 已定案 → 并入 #4 的 Compat 探测
+- [x] provider native 模式默认简化（必要性：**中** / 难度：★★☆）— 已交付（随 #4 同一套探测，2026-08-28 核实）
   - 现状：`native_tool_calling` 是每个 model 的布尔字段（`config.rs` `ModelConfig`，缺省默认 `true`），两种模式协议本质不同——native 发 `tools` 参数并期待结构化 `tool_calls`；标签降级不发 tools、靠注入 `<tool_call>` 协议指令 + prompt 约束。P4-b 已让 `ToolCallStreamParser` 始终清洗文本流（native 也剥标签），但请求载荷差异仍在，无法完全二合一。
   - 定案（grill 2026-08-24）：**并入 Compat 自动探测**——`compat.rs::detect` 按 provider 预设（ollama/llamacpp/以及 #4 新增的 deepseek/glm/kimi）推断 `native_tool_calling`，字段允许 `None=auto`（缺省跟随探测），用户不再手设；**不做**单次请求内动态降级（复杂度不值）。无实际踩坑，属预防性简化。
-  - 待实现：给 `Compat` 增加推断 `native_tool_calling` 的能力 + `ModelConfig` 支持 `None` + detect 扩展。与 #4 同一套探测框架合并做，避免两套逻辑。
-- [x] 启动速度优化（必要性：**中** / 难度：★★☆）— 已定案，**实测定点后方向转向**
+  - 已实现：`Compat` 新增 `native_tool_calling` 字段（bare/ollama/llamacpp 预设均 `true`，`compat.rs:49-52`）；`ModelConfig.native_tool_calling` 改 `Option<bool>`（`None=auto` 跟随探测，`config.rs`）；`[provider.<id>.compat]` 可逐字段覆盖。与 #4 合并为同一套探测框架，无两套逻辑。
+- [ ] 启动速度优化（必要性：**中** / 难度：★★☆）— **部分交付**：bug A/B 已修，②③ 待做
   - 现状：`build_agent`（`channels/cli.rs:625`）启动主路径串行执行：① `McpRegistry::connect_all`（`mcp/client.rs:249` 串行 for，每 server `transport.connect` + `handshake`(30s 超时) + `tools/list`）→ ② `load_skills` → ③ 逐个 build 子 Agent + main Agent。
   - 实测（2026-08-24 用户 trace）：启动首日志→registry built ≈ **840ms**，其中 MCP 握手+注册 ~1ms（单 server）、skills 扫描(37) ~7ms 均非瓶颈；**大头是 `detect_context_size` 的 llama.cpp `/props` 探测**——coder 一次 ~206ms、main 探两次 ~225ms，合计 400–600ms 独占近 2/3。
   - 原定案（grill）：MCP `join_all` 并行连接。**实测表明对当前单 server 配置几乎无收益，方向转向**：
     1. **`/props` 探测收敛/去重**：`final=0` 却覆盖 `configured=128000`（疑似 bug，探测盖掉显式配置）；子 Agent 与 main 重复探测、main 探两次。先查根因（为何 `/props` 返 0、为何多次探、为何覆盖配置），再谈缓存/并行。
     2. MCP `join_all` 并行仍值得做，但对多 server 才有效，且不是当前用户瓶颈——降至次要。
     3. 给 build_agent 加阶段耗时打点（`elapsed_ms`），后续 trace 不用再靠猜。
-  - 待办：① 定位 `context_size final=0 且覆盖 configured` 的根因与重复探测；② 视情况加阶段耗时打点；③ MCP 并行连接保留为次要优化。
+  - 待办：~~① 定位 `context_size final=0 且覆盖 configured` 的根因与重复探测~~（已修，见下）；② 加阶段耗时打点；③ MCP 并行连接保留为次要优化。
   - **根因定位（2026-08-24 用户 trace 深挖）**：
     - **A（bug：`final=0` 覆盖显式配置）**：后端为 llama.cpp，`/props` 返回 `n_ctx: 0`（服务器以 auto/0 启动，0 表示用模型默认，非真实窗口）；`try_llamacpp_props`（`openai_compat.rs:483-495`）对 `n==0` 仍返 `Some(0)`；`cli.rs:564-574` 走 `configured.min(detected)` → `128000.min(0)=0`。显式配置被无意义 0 覆盖。→ 修：`n==0` 视为 `None`（Ollama `.context_length==0` 同理），探测失败时 `final` 保持 `configured`。
+      - ✅ 已修（2026-08-28 核实）：`try_llamacpp_props` 末尾 `n_ctx.filter(|&n| n > 0)`（`openai_compat.rs:499-501`），Ollama `.context_length==0` 同处理；含 mockito 回归测试。
     - **B（性能：#11 大头）**：`FallbackProvider::detect_context_size`（`fallback.rs:82-91`）逐探测 fallback 链上每个 provider；main 带 2 模型链 → main 探 2 次 + coder 1 次 = 3 次 GET /props@~200ms ≈ 600ms，占启动 2/3。同一后端多模型探测必同值，冗余。→ 修：同后端去重 / 只探 `main()`。
-    - **C（次要）**：main与子 agent 同后端各自探测同值 → 可缓存。
+      - ✅ 已修（2026-08-28 核实）：`fallback.rs:86` 只探 `self.main()`，注释声明「避免同一后端多模型重复探测拖慢启动」，含回归测试。
+    - **C（次要）**：main与子 agent 同后端各自探测同值 → 可缓存。已被 #F 的懒解析 + 缓存间接覆盖（`context_size_now` 结果进 `Agent.resolved_context_size`，fork 子 agent 共享该缓存）。
 
 ### 🧩 主干代码体检记录（2026-08-26，例行第 1 轮）
 
@@ -147,7 +155,7 @@
 
 ### ⭐ 新增发现与技术探讨（2026-08-26·3）
 
-**#C terminal 命令安全扫描把字面量 `\n` 当路径（定位完成·修复待确认）**
+**#C terminal 命令安全扫描把字面量 `\n` 当路径（已交付）**
 
 - 现象：用 terminal 跑 officecli 时，命令里的 `\n`（想表达的换行文本）被视为路径 → 越界拒绝 → 多次失败，被迫转 python-pptx（sessions.db sess17 msg 1163-1205 记录完整试错链）。
 - 根因（非 officecli，是安全扫描层）：`path_guard.rs::extract_path_tokens` 用 `split_whitespace()`（把空格/`\t`/**换行**全拆），且 `looks_like_path` 含 `token.contains(std::path::MAIN_SEPARATOR)`——**Windows 上单个反斜杠即命中**。于是字面量 `\n`（反斜杠+n）所在 token 被判为路径，`validate_path` 越界失败。
@@ -168,16 +176,16 @@
 
 ### ⭐ 新增设计与待实施（2026-08-27），两项一起落地
 
-**#E `/provider` 切换默认持久化 + `--temp` 临时切换（已定案 → 实现中）**
+**#E `/provider` 切换默认持久化 + `--temp` 临时切换（已交付，2026-08-28 核实）**
 
 - 现状：`switch_provider`（`slash.rs:697`）只 `reload_provider` 内存替换，**不写 config.toml** → 进程内生效、重启/WebUI 保存配置即回落到 config 值；`context_size` 冻结在 Agent 构建期，切换后压缩阈值不跟随新模型。
 - 定案（用户倾向，2026-08-27）：
   - `/provider <n|id.alias>` → **默认持久化**：把新模型写进 `[agent.<alias>].model`，同步更新内存 `live_config.agent.<alias>.model`，再 `reload_provider`。
   - `/provider --temp <n|id.alias>` → 维持纯内存临时切换（试跑不落地）。
   - 写盘用 `toml_edit` 定点改 `[agent.<alias>].model` 单 key（保住注释，不 `toml::to_string_pretty` 全量覆盖）；`switch` 从 live_config 分离 `persist` 标志。
-- 待实现：`slash.rs::switch_provider` 加 `--temp` 解析 + 持久化分支；服务端/CLI 一致（`config_dir/config.toml` 路径、`Agent.config_dir` 已具备）。
+- 已实现：`slash.rs:697-765` 解析 `--temp` 前缀（`parse_provider_arg`）→ `switch_provider(persist)` 双分支；默认分支用 `toml_edit` 定点写 `[agent.<alias>].model`（保注释）+ 同步内存 `live_config` → `reload_provider`；临时分支仅内存替换，输出追加 `(temporary)`。含两个回归测试（`test_provider_switch_temp_does_not_persist` / 持久化用例写真实 `config.toml`）。
 
-**#F `context_size` 与 Agent 解耦：懒解析 + 缓存 + reload 失效（已定案 → 实现中）**
+**#F `context_size` 与 Agent 解耦：懒解析 + 缓存 + reload 失效（已交付，2026-08-28 核实；残留一处见末条）**
 
 - 现状：`Agent.context_size: usize` 字段在 `Agent::new`（`cli.rs:562`）同步解析并冻结；`reload_provider`（`mod.rs:244`）与 WebUI `hot_reload_providers` 只换 provider **不重算 context_size** → 进程内切到大/小窗模型后压缩阈值仍是旧值（`needs_compaction` 与 `compact` 的 token 预算都读它，`mod.rs:615/625`）。且构建期同步 `detect_context_size()` 是启动阻塞大头（见 #11 实测 ~200ms/次、main 探多次）。
 - 定案：`context_size` 不再冻结，改为**按活动 provider 懒解析 + 缓存**，窗口随模型跟随：
@@ -186,6 +194,8 @@
   - `reload_provider` / `reload_compact_provider` 命中时清空缓存 → `/provider` 切换、WebUI 热保存后窗口立即跟随新模型；
   - 使用点全部改 `context_size_now()`：`maybe_auto_compact`（`mod.rs:615`）、`spawn_continuation` 克隆（`mod.rs:450`）、`/config` 展示与 `/compact`（`slash.rs:204/337`）。
   - 顺带：`cli.rs::build_agent` **不再同步探测**（去掉对 `provider.detect_context_size()` 与 `provider_ref` 的依赖），把探测挪到首个 turn 懒执行 → 启动不再被 /props 阻塞；构建期仅按 `configured.unwrap_or(8192)` 传入基线。
+- 已实现（2026-08-28 核实）：`Agent.resolved_context_size` 缓存 + `context_size_now()`（`mod.rs:286`，`min(configured,detected)` / 全无 8192）；`reload_provider` 清缓存（`mod.rs:277`）；`fork_for_isolated` 共享父级缓存（`mod.rs:528`）；构建期不再同步探测（`cli.rs:567` 仅传 `configured.unwrap_or(8192)` 作降级基线）；使用点已迁移 `maybe_auto_compact`（`mod.rs:677`）、`/compact`（`slash.rs:205`）、`/config`（`slash.rs:336`）；含回归测试 `test_context_size_now_follows_provider_switch`。
+- **残留已清（2026-08-29）**：`/stats`（`slash.rs`）原直读冻结基线 `agent.context_size`，已迁移 `context_size_now()`（与 `/config` 一致），展示的 context_size/阈值/占比跟随当前模型。
 - 待决（本项不实现）：探测结果磁盘缓存（按 base_url+model，存 sqlite）——与 #11 的「探测收敛/缓存」合并，重启免重复探测；先靠懒解析 + reload 失效解决正确性与启动阻塞。
 - 附带影响：`context_size_now` 是 async，`/config`/`/compact` 路径随之 async（本就 async 上下文，无碍）；`--temp` 切换时 live_config 模型未更新，`configured` 取到旧模型值作为 min 上限，属可接受的临时实验边界。
 

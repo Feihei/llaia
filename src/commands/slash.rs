@@ -246,9 +246,11 @@ pub async fn try_handle(
             let tools_json = serde_json::to_string(&agent.tools.specs()).unwrap_or_default();
             let tools_tokens = tools_json.chars().count() / 4;
             let total = tokens + tools_tokens;
-            let threshold_tokens = (agent.context_size as f64 * agent.context_threshold) as usize;
-            let usage = if agent.context_size > 0 {
-                (total as f64 / agent.context_size as f64 * 100.0) as u32
+            // 懒解析窗口（跟随活动 provider），不读构建期冻结基线（plan.md #F 残留）
+            let context_size = agent.context_size_now().await;
+            let threshold_tokens = (context_size as f64 * agent.context_threshold) as usize;
+            let usage = if context_size > 0 {
+                (total as f64 / context_size as f64 * 100.0) as u32
             } else {
                 0
             };
@@ -289,7 +291,7 @@ summary: {}
 tools: {}
 \
                  compact_provider: {}",
-                agent.context_size,
+                context_size,
                 agent.context_threshold,
                 threshold_tokens,
                 total,
