@@ -94,20 +94,21 @@
   - 现状：`native_tool_calling` 是每个 model 的布尔字段（`config.rs` `ModelConfig`，缺省默认 `true`），两种模式协议本质不同——native 发 `tools` 参数并期待结构化 `tool_calls`；标签降级不发 tools、靠注入 `<tool_call>` 协议指令 + prompt 约束。P4-b 已让 `ToolCallStreamParser` 始终清洗文本流（native 也剥标签），但请求载荷差异仍在，无法完全二合一。
   - 定案（grill 2026-08-24）：**并入 Compat 自动探测**——`compat.rs::detect` 按 provider 预设（ollama/llamacpp/以及 #4 新增的 deepseek/glm/kimi）推断 `native_tool_calling`，字段允许 `None=auto`（缺省跟随探测），用户不再手设；**不做**单次请求内动态降级（复杂度不值）。无实际踩坑，属预防性简化。
   - 已实现：`Compat` 新增 `native_tool_calling` 字段（bare/ollama/llamacpp 预设均 `true`，`compat.rs:49-52`）；`ModelConfig.native_tool_calling` 改 `Option<bool>`（`None=auto` 跟随探测，`config.rs`）；`[provider.<id>.compat]` 可逐字段覆盖。与 #4 合并为同一套探测框架，无两套逻辑。
-- [ ] 启动速度优化（必要性：**中** / 难度：★★☆）— **部分交付**：bug A/B 已修，②③ 待做
+- [x] 启动速度优化（必要性：**中** / 难度：★★☆）— 已交付（2026-08-29：A/B 修复 + ②耗时打点 + ③MCP 并行）
   - 现状：`build_agent`（`channels/cli.rs:625`）启动主路径串行执行：① `McpRegistry::connect_all`（`mcp/client.rs:249` 串行 for，每 server `transport.connect` + `handshake`(30s 超时) + `tools/list`）→ ② `load_skills` → ③ 逐个 build 子 Agent + main Agent。
   - 实测（2026-08-24 用户 trace）：启动首日志→registry built ≈ **840ms**，其中 MCP 握手+注册 ~1ms（单 server）、skills 扫描(37) ~7ms 均非瓶颈；**大头是 `detect_context_size` 的 llama.cpp `/props` 探测**——coder 一次 ~206ms、main 探两次 ~225ms，合计 400–600ms 独占近 2/3。
   - 原定案（grill）：MCP `join_all` 并行连接。**实测表明对当前单 server 配置几乎无收益，方向转向**：
     1. **`/props` 探测收敛/去重**：`final=0` 却覆盖 `configured=128000`（疑似 bug，探测盖掉显式配置）；子 Agent 与 main 重复探测、main 探两次。先查根因（为何 `/props` 返 0、为何多次探、为何覆盖配置），再谈缓存/并行。
     2. MCP `join_all` 并行仍值得做，但对多 server 才有效，且不是当前用户瓶颈——降至次要。
     3. 给 build_agent 加阶段耗时打点（`elapsed_ms`），后续 trace 不用再靠猜。
-  - 待办：~~① 定位 `context_size final=0 且覆盖 configured` 的根因与重复探测~~（已修，见下）；② 加阶段耗时打点；③ MCP 并行连接保留为次要优化。
+  - 待办：~~① 定位 `context_size final=0 且覆盖 configured` 的根因与重复探测~~（已修，见下）；~~② 加阶段耗时打点~~；~~③ MCP 并行连接~~（②③ 已交付，见下）。
   - **根因定位（2026-08-24 用户 trace 深挖）**：
     - **A（bug：`final=0` 覆盖显式配置）**：后端为 llama.cpp，`/props` 返回 `n_ctx: 0`（服务器以 auto/0 启动，0 表示用模型默认，非真实窗口）；`try_llamacpp_props`（`openai_compat.rs:483-495`）对 `n==0` 仍返 `Some(0)`；`cli.rs:564-574` 走 `configured.min(detected)` → `128000.min(0)=0`。显式配置被无意义 0 覆盖。→ 修：`n==0` 视为 `None`（Ollama `.context_length==0` 同理），探测失败时 `final` 保持 `configured`。
       - ✅ 已修（2026-08-28 核实）：`try_llamacpp_props` 末尾 `n_ctx.filter(|&n| n > 0)`（`openai_compat.rs:499-501`），Ollama `.context_length==0` 同处理；含 mockito 回归测试。
     - **B（性能：#11 大头）**：`FallbackProvider::detect_context_size`（`fallback.rs:82-91`）逐探测 fallback 链上每个 provider；main 带 2 模型链 → main 探 2 次 + coder 1 次 = 3 次 GET /props@~200ms ≈ 600ms，占启动 2/3。同一后端多模型探测必同值，冗余。→ 修：同后端去重 / 只探 `main()`。
       - ✅ 已修（2026-08-28 核实）：`fallback.rs:86` 只探 `self.main()`，注释声明「避免同一后端多模型重复探测拖慢启动」，含回归测试。
     - **C（次要）**：main与子 agent 同后端各自探测同值 → 可缓存。已被 #F 的懒解析 + 缓存间接覆盖（`context_size_now` 结果进 `Agent.resolved_context_size`，fork 子 agent 共享该缓存）。
+  - **②③ 已实现（2026-08-29）**：② `build_agent`（`channels/cli.rs`）四阶段独立计时——mcp connect / skills / sub agents / main agent 各带 `elapsed_ms`，末行 `AgentRegistry built` 带 `total_elapsed_ms`；③ `connect_all`（`mcp/client.rs`）改 `join_all` 并发握手，结果仍按原配置顺序注册（`tool_index` 稳定），单 server 超时（30s）不再串行累加。
 
 ### 🧩 主干代码体检记录（2026-08-26，例行第 1 轮）
 

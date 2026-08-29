@@ -635,7 +635,11 @@ pub async fn build_agent(
     let log_dir = PathBuf::from(&config.log.dir);
     let audit = Arc::new(crate::audit::AuditLog::new(&log_dir));
 
+    // 启动阶段耗时打点（plan.md 启动优化②）：各阶段独立计时，启动慢时可直接看日志定位
+    let build_start = std::time::Instant::now();
+
     // MCP：加载 mcp.toml，连接所有 enabled server（单个失败 log + 跳过，不阻塞启动）
+    let phase = std::time::Instant::now();
     let mcp_path = config_dir.join("mcp.toml");
     let mcp_cfg = crate::mcp::McpConfig::load(&mcp_path)?;
     let mcp_registry =
@@ -648,22 +652,25 @@ pub async fn build_agent(
             mcp_registry.clone(),
         )));
     }
-    if !mcp_tools.is_empty() {
-        tracing::info!(tools = mcp_tools.len(), "MCP tools loaded");
-    }
+    tracing::info!(
+        tools = mcp_tools.len(),
+        elapsed_ms = phase.elapsed().as_millis() as u64,
+        "startup phase: mcp connect"
+    );
 
     // Skills（P3-e）：扫描 <config_dir>/skills/，首次运行时种子内置示例并同步 skills.json
+    let phase = std::time::Instant::now();
     let skills = crate::skill::loader::load_skills(&config_dir.join("skills"));
     let active_skills = skills.iter().filter(|s| s.active).count();
-    if !skills.is_empty() {
-        tracing::info!(
-            total = skills.len(),
-            active = active_skills,
-            "skills loaded"
-        );
-    }
+    tracing::info!(
+        total = skills.len(),
+        active = active_skills,
+        elapsed_ms = phase.elapsed().as_millis() as u64,
+        "startup phase: skills loaded"
+    );
 
     // 构建子 Agent（跳过 main）
+    let phase = std::time::Instant::now();
     let mut sub_agents: Vec<(String, Arc<Mutex<Agent>>)> = Vec::new();
     for (alias, cfg) in &config.agent {
         if alias == "main" {
@@ -682,9 +689,15 @@ pub async fn build_agent(
         .await?;
         sub_agents.push((alias.clone(), agent));
     }
+    tracing::info!(
+        count = sub_agents.len(),
+        elapsed_ms = phase.elapsed().as_millis() as u64,
+        "startup phase: sub agents built"
+    );
 
     // 构建 main Agent
     // 若 [agent.main] 未配置（init 模板默认状态），用空 model 构造降级 agent
+    let phase = std::time::Instant::now();
     let main_cfg = config.agent.get("main").cloned().unwrap_or_else(|| {
         tracing::warn!(
             "[agent.main] not configured, main agent entering degraded mode (no provider)"
@@ -711,6 +724,10 @@ pub async fn build_agent(
         &skills,
     )
     .await?;
+    tracing::info!(
+        elapsed_ms = phase.elapsed().as_millis() as u64,
+        "startup phase: main agent built"
+    );
 
     let registry = AgentRegistry::new(main_agent, main_workspace);
     for (alias, agent) in sub_agents {
@@ -735,6 +752,7 @@ pub async fn build_agent(
 
     tracing::info!(
         sub_agents = registry.available_sub_agents().len(),
+        total_elapsed_ms = build_start.elapsed().as_millis() as u64,
         "AgentRegistry built"
     );
     Ok((registry, cron_tool, mcp_registry))

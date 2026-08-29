@@ -241,17 +241,24 @@ pub struct McpRegistry {
 
 impl McpRegistry {
     /// 初始化所有 enabled server；单个失败 log + 跳过，不阻塞启动。
+    /// 所有 server **并发**连接（plan.md 启动优化③）：单 server 握手超时（30s）
+    /// 不再串行累加；连接完成后按原配置顺序注册，保证 tool_index 稳定。
     pub async fn connect_all(configs: &[McpServerConfig]) -> Self {
         let mut servers = Vec::new();
         let mut tool_index = HashMap::new();
         let mut failed = HashMap::new();
 
-        for cfg in configs {
-            if !cfg.enabled {
-                tracing::info!(server = %cfg.id, "MCP server disabled, skip");
-                continue;
-            }
-            match McpServer::connect(cfg.clone()).await {
+        for cfg in configs.iter().filter(|c| !c.enabled) {
+            tracing::info!(server = %cfg.id, "MCP server disabled, skip");
+        }
+        let enabled: Vec<McpServerConfig> = configs.iter().filter(|c| c.enabled).cloned().collect();
+        let results = futures_util::future::join_all(
+            enabled.iter().map(|cfg| McpServer::connect(cfg.clone())),
+        )
+        .await;
+
+        for (cfg, result) in enabled.iter().zip(results) {
+            match result {
                 Ok(server) => {
                     let idx = servers.len();
                     for def in server.tools_snapshot().await {
