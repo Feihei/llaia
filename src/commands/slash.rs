@@ -204,7 +204,12 @@ pub async fn try_handle(
             Some(p) => {
                 let context_size = agent.context_size_now().await;
                 match agent.context.compact(p.as_ref(), 6, context_size).await {
-                    Ok(_) => Ok(SlashOutcome::Handled("[compacted]".into())),
+                    Ok(compacted) => {
+                        if compacted {
+                            agent.ensure_session_title(p.as_ref()).await;
+                        }
+                        Ok(SlashOutcome::Handled("[compacted]".into()))
+                    }
                     Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
                 }
             }

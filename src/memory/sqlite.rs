@@ -110,6 +110,9 @@ pub struct SessionListItem {
     pub token_count: i64,
     pub state: String,
     pub message_count: i64,
+    /// 会话主题标题（压缩时由 compact provider 生成，plan.md 会话主题自动总结）；
+    /// 未生成过为 None，前端回退显示 channel。
+    pub title: Option<String>,
 }
 
 /// 消息 + 关联工具调用（WebUI 会话详情，P5 W1）。
@@ -166,7 +169,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at    TEXT NOT NULL,
     last_activity TEXT NOT NULL,
     token_count   INTEGER NOT NULL DEFAULT 0,
-    state         TEXT NOT NULL DEFAULT 'idle'
+    state         TEXT NOT NULL DEFAULT 'idle',
+    title         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -230,6 +234,16 @@ END;
              WHERE m.role IN ('user','assistant')
                AND m.id NOT IN (SELECT rowid FROM message_fts);",
         )?;
+        // sessions.title（plan.md 会话主题自动总结）：存量库没有该列，幂等补加
+        // （sqlite 的 ALTER TABLE ADD COLUMN 没有 IF NOT EXISTS，先查 table_info）
+        let has_title = conn
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == "title");
+        if !has_title {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT;")?;
+        }
         Ok(())
     }
 
@@ -241,6 +255,27 @@ END;
             rusqlite::params![session_uuid, channel, now],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// 读会话标题（未生成过为 None；plan.md 会话主题自动总结）。
+    pub fn session_title(&self, session_id: i64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT title FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![session_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// 写会话标题（压缩时由 compact provider 生成；幂等覆盖）。
+    pub fn set_session_title(&self, session_id: i64, title: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET title = ?2 WHERE id = ?1",
+            rusqlite::params![session_id, title],
+        )?;
+        Ok(())
     }
 
     pub fn latest_session(&self) -> Result<Option<(i64, String)>> {
@@ -649,7 +684,8 @@ END;
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT s.session_uuid, s.channel, s.created_at, s.last_activity, s.token_count, s.state,
-                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
+                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
+                    s.title
              FROM sessions s
              ORDER BY s.last_activity DESC LIMIT ?1 OFFSET ?2",
         )?;
@@ -662,6 +698,7 @@ END;
                 token_count: row.get(4)?,
                 state: row.get(5)?,
                 message_count: row.get(6)?,
+                title: row.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -1086,5 +1123,79 @@ mod tests {
             .sum();
         assert_eq!(total_in_series, 150);
         assert_eq!(stats.series.iter().map(|d| d.requests).sum::<i64>(), 1);
+    }
+
+    #[test]
+    fn test_session_title_round_trip() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("uuid-title", "web").unwrap();
+        // 新会话无标题
+        assert_eq!(store.session_title(sid).unwrap(), None);
+        assert_eq!(store.list_sessions(10, 0).unwrap()[0].title, None);
+
+        store.set_session_title(sid, "配置迁移讨论").unwrap();
+        assert_eq!(
+            store.session_title(sid).unwrap().as_deref(),
+            Some("配置迁移讨论")
+        );
+        // list_sessions 一并带出（WebUI 会话列表展示）
+        let items = store.list_sessions(10, 0).unwrap();
+        let item = items
+            .iter()
+            .find(|i| i.session_uuid == "uuid-title")
+            .unwrap();
+        assert_eq!(item.title.as_deref(), Some("配置迁移讨论"));
+
+        // 幂等覆盖
+        store.set_session_title(sid, "新标题").unwrap();
+        assert_eq!(store.session_title(sid).unwrap().as_deref(), Some("新标题"));
+
+        // 不存在的会话：读返回 None，写不报错（影响 0 行）
+        assert_eq!(store.session_title(99999).unwrap(), None);
+        store.set_session_title(99999, "x").unwrap();
+    }
+
+    #[test]
+    fn test_title_column_added_to_legacy_db() {
+        // 存量库（旧 schema 无 title 列）经 init_schema 幂等补列
+        let db_path = std::env::temp_dir().join(format!(
+            "llaia-test-title-migrate-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_file(&db_path);
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_uuid TEXT NOT NULL UNIQUE,
+                    channel TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_activity TEXT NOT NULL,
+                    token_count INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL DEFAULT 'idle'
+                );
+                INSERT INTO sessions (session_uuid, channel, created_at, last_activity)
+                    VALUES ('old-1', 'cli', 't', 't');",
+            )
+            .unwrap();
+        }
+        let store = SessionStore::open(&db_path).unwrap();
+        let sid = store.session_by_uuid("old-1").unwrap().unwrap().0;
+        assert_eq!(store.session_title(sid).unwrap(), None);
+        store.set_session_title(sid, "回填测试").unwrap();
+        assert_eq!(
+            store.session_title(sid).unwrap().as_deref(),
+            Some("回填测试")
+        );
+        // 再次打开不报错（幂等），旧行数据保留
+        drop(store);
+        let store2 = SessionStore::open(&db_path).unwrap();
+        assert_eq!(
+            store2.session_title(sid).unwrap().as_deref(),
+            Some("回填测试")
+        );
+        std::fs::remove_file(&db_path).ok();
     }
 }

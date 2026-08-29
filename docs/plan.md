@@ -68,11 +68,9 @@
 
 ### 🧩 待 grill 明确后立项（需求/设计类）
 
-- [ ] 会话主题自动总结（必要性：**中** / 难度：★★☆）— 已定案，**未实现**
-  - 现状：无代码基础；`sessions` 表加 `title` 字段。
+- [x] 会话主题自动总结（必要性：**中** / 难度：★★☆）— 已交付（2026-08-29）
   - 定案（grill 2026-08-24）：**压缩时顺带**用 compact provider 生成标题，落 `sessions.title`，WebUI 会话列表展示；失败降级为默认标题。存储即随会话。
-  - 待实现：压缩流程内加一步标题生成 + 更新行 + WebUI 读列。
-  - 核实（2026-08-28）：`sessions` 建表语句（`memory/sqlite.rs:162`）仍无 `title` 列，代码中无标题生成路径。
+  - 实现：`sessions` 表加 `title` 列（`memory/sqlite.rs`，存量库幂等 `ALTER TABLE` 补列）；`Agent::ensure_session_title`（`agent/mod.rs`）在自动压缩（`maybe_auto_compact`）与 `/compact` 实际发生 LLM 压缩后调用——仅当标题为空时生成一次，素材为前 6 条 user/assistant 消息，失败/空回复降级为首条用户消息截断（40 字符），标题清洗（剥引号/书名号、取首行、60 字符上限）；`list_sessions` 带出 `title`，WebUI 会话列表优先显示标题（无标题回退 channel）。
 - [x] deepseek / glm / kimi 等 provider 针对性优化（必要性：**高** / 难度：★★☆）— 已交付（2026-08-28 核实）
   - 现状：`compat.rs::detect` 仅覆盖 ollama/llamacpp 预设，线上 provider（deepseek/glm/kimi/moonshot…）走 bare；用户实测**非本地 provider 的 probe/探测常失败**，疑似线上 API 规则不同。
   - .ref 现成实现（已探明，可照抄）：

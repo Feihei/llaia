@@ -683,12 +683,99 @@ impl Agent {
         }
         let compact_provider = self.provider_for_compact().await;
         match compact_provider.as_ref() {
-            Some(p) => {
-                if let Err(e) = self.context.compact(p.as_ref(), 6, context_size).await {
-                    tracing::warn!(error = %e, "auto-compact failed");
+            Some(p) => match self.context.compact(p.as_ref(), 6, context_size).await {
+                // 压缩顺带生成会话标题（仅实际发生 LLM 压缩时，见 ensure_session_title）
+                Ok(true) => self.ensure_session_title(p.as_ref()).await,
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, "auto-compact failed"),
+            },
+            None => tracing::warn!("skip auto-compact: no provider available"),
+        }
+    }
+
+    /// 压缩顺带生成会话标题（plan.md 会话主题自动总结）。
+    /// 仅当 `sessions.title` 为空时生成一次（不覆盖已有标题）；用 compact provider
+    /// 提炼短标题，失败降级为首条用户消息截断；连降级素材都没有则留空待下次压缩。
+    /// 任何失败都只记日志，不阻断主流程。
+    pub async fn ensure_session_title(&mut self, provider: &dyn Provider) {
+        // 已有标题不重复生成；读取失败时宁可不生成，避免反复打 LLM
+        let has_title = match self.session_store.session_title(self.session_id) {
+            Ok(Some(t)) => !t.trim().is_empty(),
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        if has_title {
+            return;
+        }
+
+        // 素材：前若干条 user/assistant 正文（各截 300 字符，最多 6 条），首条用户消息
+        // 天然在最前，通常就是主题句
+        let mut material = String::new();
+        let mut picked = 0usize;
+        for m in &self.context.history {
+            if m.role != Role::User && m.role != Role::Assistant {
+                continue;
+            }
+            let t = m.content.as_text();
+            if t.trim().is_empty() {
+                continue;
+            }
+            let head: String = t.chars().take(300).collect();
+            let who = if m.role == Role::User {
+                "user"
+            } else {
+                "assistant"
+            };
+            material.push_str(&format!("[{}] {}\n", who, head));
+            picked += 1;
+            if picked >= 6 {
+                break;
+            }
+        }
+        if material.is_empty() {
+            return;
+        }
+
+        // 降级默认标题：首条用户消息截断
+        let fallback = self
+            .context
+            .history
+            .iter()
+            .find(|m| m.role == Role::User && !m.content.as_text().trim().is_empty())
+            .map(|m| cap_chars(&sanitize_title(&m.content.as_text()), 40));
+
+        let system = "You title conversations. Read the exchange and output one short title capturing the main topic (no more than 8 words, or 20 CJK characters). Output only the title text: no quotes, no trailing punctuation, no explanation.";
+        let messages = vec![ChatMessage::system(system), ChatMessage::user(&material)];
+        let req = ChatRequest {
+            messages: &messages,
+            tools: None,
+            disable_thinking: false,
+        };
+        let title = match provider.chat(&req).await {
+            Ok(resp) => {
+                let t = sanitize_title(&resp.text.unwrap_or_default());
+                if t.is_empty() {
+                    fallback
+                } else {
+                    Some(cap_chars(&t, 60))
                 }
             }
-            None => tracing::warn!("skip auto-compact: no provider available"),
+            Err(e) => {
+                tracing::warn!(error = %e, "session title generation failed, falling back to first user message");
+                fallback
+            }
+        };
+
+        let Some(title) = title else {
+            return;
+        };
+        if let Err(e) = self
+            .session_store
+            .set_session_title(self.session_id, &title)
+        {
+            tracing::warn!(error = %e, "failed to persist session title");
+        } else {
+            tracing::info!(title = %title, "session title set");
         }
     }
 
@@ -1246,6 +1333,45 @@ fn build_repeated_tool_warning(tool_name: &str, streak: u32) -> String {
             tool_name, streak
         )
     }
+}
+
+/// 标题清洗（会话主题自动总结）：只取首行，剥引号/书名号/结尾标点，防模型发挥。
+fn sanitize_title(raw: &str) -> String {
+    let first_line = raw.lines().next().unwrap_or("");
+    first_line
+        .trim()
+        .trim_matches(|c| {
+            matches!(
+                c,
+                '"' | '\''
+                    | '`'
+                    | '“'
+                    | '”'
+                    | '‘'
+                    | '’'
+                    | '《'
+                    | '》'
+                    | '【'
+                    | '】'
+                    | '「'
+                    | '」'
+                    | '『'
+                    | '』'
+                    | '：'
+                    | ':'
+            )
+        })
+        .trim()
+        .to_string()
+}
+
+/// 按字符数截断，超长补省略号（中文标题按字符而非字节计）。
+fn cap_chars(s: &str, n: usize) -> String {
+    let mut out: String = s.chars().take(n).collect();
+    if s.chars().count() > n {
+        out.push('…');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2326,5 +2452,201 @@ mod tests {
             tool_results
         );
         assert!(done);
+    }
+
+    // ---- 会话主题自动总结（plan.md P6）----
+
+    /// 标题生成 provider：`chat` 返回预设文本（Ok）或报错（Err），记录调用次数。
+    struct TitleMockProvider {
+        reply: std::result::Result<String, ()>,
+        calls: Arc<StdMutex<usize>>,
+    }
+    #[async_trait]
+    impl Provider for TitleMockProvider {
+        async fn chat(&self, _req: &ChatRequest<'_>) -> Result<ChatResponse> {
+            *self.calls.lock().unwrap() += 1;
+            match &self.reply {
+                Ok(t) => Ok(ChatResponse {
+                    text: Some(t.clone()),
+                    ..Default::default()
+                }),
+                Err(_) => Err(anyhow::anyhow!("title provider down")),
+            }
+        }
+        async fn chat_stream(&self, _req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
+            Box::pin(futures_util::stream::empty())
+        }
+        fn native_tool_calling(&self) -> bool {
+            true
+        }
+    }
+
+    async fn make_title_agent(store: Arc<SessionStore>, sid: i64) -> Agent {
+        let provider: Arc<dyn Provider> = Arc::new(CtxMockProvider {
+            label: "p.m",
+            size: None,
+        });
+        let tools = Arc::new(ToolRegistry::new());
+        let cfg = Config::default_for_workspace("/tmp/llaia-test");
+        Agent::new(
+            &cfg,
+            Some(provider),
+            None,
+            None,
+            tools,
+            store,
+            sid,
+            "test system".into(),
+            8192,
+            std::path::PathBuf::from("/tmp/llaia-test/workspace"),
+            Arc::new(RwLock::new(std::path::PathBuf::from(
+                "/tmp/llaia-test/workspace",
+            ))),
+            std::path::PathBuf::from("/tmp/llaia-test"),
+            true,
+            "main".into(),
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_ensure_session_title_llm_generated() {
+        let store = Arc::new(SessionStore::open_in_memory().unwrap());
+        let sid = store.create_session("t1", "web").unwrap();
+        let mut agent = make_title_agent(store.clone(), sid).await;
+        agent
+            .context
+            .history
+            .push(ChatMessage::user("帮我查一下 QQ 频道 token 过期的问题"));
+        agent
+            .context
+            .history
+            .push(ChatMessage::assistant("好的，我来看日志"));
+
+        let calls = Arc::new(StdMutex::new(0usize));
+        let tp = TitleMockProvider {
+            // 模型带引号发挥，应被 sanitize 剥掉
+            reply: Ok("「QQ Token 排查」".into()),
+            calls: calls.clone(),
+        };
+        agent.ensure_session_title(&tp).await;
+
+        assert_eq!(
+            store.session_title(sid).unwrap().as_deref(),
+            Some("QQ Token 排查")
+        );
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_session_title_fallback_on_error() {
+        let store = Arc::new(SessionStore::open_in_memory().unwrap());
+        let sid = store.create_session("t2", "web").unwrap();
+        let mut agent = make_title_agent(store.clone(), sid).await;
+        agent
+            .context
+            .history
+            .push(ChatMessage::user("帮我看看启动配置迁移的问题"));
+
+        let calls = Arc::new(StdMutex::new(0usize));
+        let tp = TitleMockProvider {
+            reply: Err(()),
+            calls: calls.clone(),
+        };
+        agent.ensure_session_title(&tp).await;
+
+        // 降级：首条用户消息清洗截断
+        assert_eq!(
+            store.session_title(sid).unwrap().as_deref(),
+            Some("帮我看看启动配置迁移的问题")
+        );
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_session_title_empty_reply_falls_back() {
+        let store = Arc::new(SessionStore::open_in_memory().unwrap());
+        let sid = store.create_session("t3", "web").unwrap();
+        let mut agent = make_title_agent(store.clone(), sid).await;
+        agent
+            .context
+            .history
+            .push(ChatMessage::user("排查 WebUI 启动报错"));
+
+        let calls = Arc::new(StdMutex::new(0usize));
+        let tp = TitleMockProvider {
+            reply: Ok("".into()),
+            calls: calls.clone(),
+        };
+        agent.ensure_session_title(&tp).await;
+
+        assert_eq!(
+            store.session_title(sid).unwrap().as_deref(),
+            Some("排查 WebUI 启动报错")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_session_title_skips_when_present() {
+        let store = Arc::new(SessionStore::open_in_memory().unwrap());
+        let sid = store.create_session("t4", "web").unwrap();
+        store.set_session_title(sid, "已有标题").unwrap();
+        let mut agent = make_title_agent(store.clone(), sid).await;
+        agent.context.history.push(ChatMessage::user("任意消息"));
+
+        let calls = Arc::new(StdMutex::new(0usize));
+        let tp = TitleMockProvider {
+            reply: Ok("新标题".into()),
+            calls: calls.clone(),
+        };
+        agent.ensure_session_title(&tp).await;
+
+        // 已有标题不覆盖、不打 LLM
+        assert_eq!(
+            store.session_title(sid).unwrap().as_deref(),
+            Some("已有标题")
+        );
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_session_title_no_material() {
+        let store = Arc::new(SessionStore::open_in_memory().unwrap());
+        let sid = store.create_session("t5", "web").unwrap();
+        let mut agent = make_title_agent(store.clone(), sid).await;
+        // history 为空：无素材，留空且不打 LLM
+
+        let calls = Arc::new(StdMutex::new(0usize));
+        let tp = TitleMockProvider {
+            reply: Ok("x".into()),
+            calls: calls.clone(),
+        };
+        agent.ensure_session_title(&tp).await;
+
+        assert_eq!(store.session_title(sid).unwrap(), None);
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_sanitize_title() {
+        assert_eq!(sanitize_title("\"Hello World\""), "Hello World");
+        assert_eq!(sanitize_title("'标题'"), "标题");
+        assert_eq!(sanitize_title("《中文标题》"), "中文标题");
+        assert_eq!(sanitize_title("「QQ Token 排查」"), "QQ Token 排查");
+        assert_eq!(sanitize_title("  空格修剪  "), "空格修剪");
+        assert_eq!(sanitize_title("标题："), "标题");
+        // 只取首行
+        assert_eq!(sanitize_title("第一行\n第二行"), "第一行");
+        assert_eq!(sanitize_title(""), "");
+    }
+
+    #[test]
+    fn test_cap_chars() {
+        assert_eq!(cap_chars("abcdef", 3), "abc…");
+        assert_eq!(cap_chars("abc", 3), "abc");
+        // 中文按字符计
+        assert_eq!(cap_chars("文字截断测试", 4), "文字截断…");
+        assert_eq!(cap_chars("", 5), "");
     }
 }
