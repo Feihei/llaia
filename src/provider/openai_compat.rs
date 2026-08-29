@@ -456,6 +456,15 @@ impl Provider for OpenAiCompatibleProvider {
     /// 先尝试 llama.cpp 特征端点 /props，再尝试 Ollama 的 /api/tags + /api/show。
     /// 探测失败返回 None。
     async fn detect_context_size(&self) -> Option<usize> {
+        // 只探本地后端（plan.md #4 残余）：/props、/api/* 是 llama.cpp / Ollama 等
+        // 本地服务的管理端点，云 provider 没有，探测纯属白跑两次请求
+        if !probe_host_is_local(self.probe_base()) {
+            tracing::debug!(
+                base_url = %self.base_url,
+                "skip context_size probe: non-local host"
+            );
+            return None;
+        }
         // llama.cpp: GET /props → default_generation_settings.n_ctx
         if let Some(n) = self.try_llamacpp_props().await {
             tracing::info!(n_ctx = n, "detected context_size from llama.cpp /props");
@@ -471,6 +480,40 @@ impl Provider for OpenAiCompatibleProvider {
 
     fn label(&self) -> String {
         self.model.clone()
+    }
+}
+
+/// 探测目标是否为本地后端（plan.md #4 残余）。
+/// `/props`、`/api/*` 只有 llama.cpp / Ollama / LMStudio 这类本地服务实现，
+/// 按 host 判定：localhost、`.local`（mDNS 局域网）、回环 / 私网 / 链路本地 IP 视为本地，
+/// 其余（公网域名、公网 IP）跳过探测。
+fn probe_host_is_local(base: &str) -> bool {
+    let rest = base
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    // authority = host[:port]，截到第一个 '/'
+    let authority = rest.split('/').next().unwrap_or(rest);
+    // 带括号的 IPv6（"[::1]" / "[::1]:8080"）直接取括号内，避免误拆冒号
+    let host = if let Some(end) = authority.find(']') {
+        authority
+            .strip_prefix('[')
+            .map(|s| &s[..end - 1])
+            .unwrap_or(authority)
+    } else {
+        // 其余形态：最后一个 ':' 之前是 host（剥端口）
+        match authority.rsplit_once(':') {
+            Some((h, _)) => h,
+            None => authority,
+        }
+    };
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".local") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback(),
+        Err(_) => false,
     }
 }
 
@@ -884,5 +927,34 @@ mod tests {
         assert_eq!(p.detect_context_size().await, Some(131072));
         tags.assert();
         show.assert();
+    }
+
+    #[test]
+    fn probe_host_is_local_classifies_hosts() {
+        // 本地后端形态：探测放行
+        for base in [
+            "http://localhost:11434",
+            "http://localhost:1234/v1",
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1/v1",
+            "http://[::1]:8080",
+            "http://[::1]",
+            "http://192.168.1.50:8080",
+            "http://10.0.0.2:11434/v1",
+            "http://172.20.10.3",
+            "http://my-nas.local:8080",
+        ] {
+            assert!(probe_host_is_local(base), "should be local: {}", base);
+        }
+        // 云 provider 形态：跳过本地专属探测（plan.md #4 残余）
+        for base in [
+            "https://api.deepseek.com/v1",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://api.moonshot.cn/v1",
+            "http://some-llm-gateway.example.com:8080/v1",
+            "http://8.8.8.8:8080",
+        ] {
+            assert!(!probe_host_is_local(base), "should be remote: {}", base);
+        }
     }
 }

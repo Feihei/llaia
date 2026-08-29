@@ -80,7 +80,7 @@
     - **goose** `crates/goose-providers/src/openai.rs`：`PROVIDERS_NEEDING_MAX_TOKENS_REMAP`（cerebras/custom_deepseek/groq/kimi/mistral/moonshot…→ 传统 `max_tokens`）、`PROVIDERS_NEEDING_REASONING_EFFORT_MAPPING`、Meta effort 折叠。
   - 定案方向（grill 2026-08-24）：`Compat::detect` 扩展——detect 不只看 base_url host，还要能按其 provider 预设（deepseek/glm/kimi/moonshot）设定 `max_tokens_field` / `reasoning_to_content` / thinking 参数，模式对齐 nanobot/goose 的 per-model 表；把 `native_tool_calling` 并入同套探测（见 #10）。
   - 已实现（`provider/compat.rs:104-165`）：`Compat::detect(base_url, model)` 在 ollama/llamacpp 之外新增 deepseek / zhipu·bigmodel·glm / moonshot·kimi host 预设（开 `streaming_usage`）；per-model 规则对齐 nanobot/goose——o 系与 `kimi-k3` 切 `max_completion_tokens`（`max_tokens_field`）、`deepseek-reasoner`/`deepseek-r1`/`kimi-k` 开 `reasoning_to_content`；`native_tool_calling` 并入同套探测（见 #10）。全部带回归测试。
-  - 残余（未做）：`probe 失败`的具体根因未实测定位。已知一端：`detect_context_size`（`openai_compat.rs:458`）对**云 provider 也照打 `/props` + `/api/tags`**，端点不存在必然失败 → 退回 `configured`（非正确性 bug，但白跑两次请求 + 日志噪音）。可顺手按 host 跳过本地专属探测。
+  - 残余已收（2026-08-29）：`detect_context_size` 按 host 门控——仅本地后端（localhost / `.local` / 回环 / 私网 / 链路本地）才打 `/props`、`/api/tags`，云 provider 直接跳过（`openai_compat.rs::probe_host_is_local`，含分类回归测试）。`probe 失败`的其余根因（若有）待后续实测。
 - [x] `memory_research` 工具：跨 session 搜索历史记忆（必要性：**中** / 难度：★★☆）— 已定案 → 已实现
   - 现状：`sessions/messages/tool_calls` 已在 sqlite（`memory/sqlite.rs`）。
   - 定案（grill 2026-08-24）：**仅搜索 messages 文本**，FTS5，返回 N 条 + 所属 session + 时间，**暴露为模型可调工具**。结果上限与隐私边界实现时定（先给硬上限 N=20）。
