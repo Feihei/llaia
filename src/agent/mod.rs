@@ -143,6 +143,9 @@ pub struct Agent {
 pub struct TurnToolCall {
     pub name: String,
     pub args: serde_json::Value,
+    /// 本次调用是否成功返回（结果未以 `[error: ...]` 开头）。
+    /// 供 cron agent 模式的交付门判断「本轮是否所有工具都失败了」。
+    pub ok: bool,
 }
 
 /// 模型上下文窗口的全局兜底值：配置未设、provider 探测失败时的最小窗口。
@@ -1203,14 +1206,6 @@ impl Agent {
                     .await;
             }
 
-            // 记录工具调用到 turn_tool_calls（供 delegate 提取产出文件）
-            for tc in &calls {
-                self.turn_tool_calls.push(TurnToolCall {
-                    name: tc.name.clone(),
-                    args: tc.arguments.clone(),
-                });
-            }
-
             let ctx = crate::agent::approval::ApprovalContext {
                 profile: self.permission_profile.read().await.clone(),
                 workspace: self.workspace_root.read().await.clone(),
@@ -1221,6 +1216,25 @@ impl Agent {
             };
             let (tool_msgs, deferred) =
                 execute_tool_calls(&self.tools, &calls, channel, &ctx, Some(&event_tx)).await?;
+            // 记录本轮工具调用及成败（delegate 取产出文件；cron 交付门据此判断整轮是否白跑）。
+            // 成败按结果文本前缀判定——runner 把所有失败统一包成 `[error: ...]`；用
+            // tool_call_id 关联而非位置对齐，避免占位/跳过类结果导致错位。
+            let ok_by_id: std::collections::HashMap<&str, bool> = tool_msgs
+                .iter()
+                .map(|m| {
+                    (
+                        m.tool_call_id.as_deref().unwrap_or_default(),
+                        !m.content.as_text().starts_with("[error: "),
+                    )
+                })
+                .collect();
+            for tc in &calls {
+                self.turn_tool_calls.push(TurnToolCall {
+                    name: tc.name.clone(),
+                    args: tc.arguments.clone(),
+                    ok: ok_by_id.get(tc.id.as_str()).copied().unwrap_or(false),
+                });
+            }
             // tool_call_id → 工具名映射：图片桥接提示语标注来源工具
             let name_by_id: std::collections::HashMap<&str, &str> = calls
                 .iter()

@@ -2,9 +2,10 @@
 //!
 //! - agent 模式：构造独立 session，唤醒主 agent 跑一轮，回复推送给 pusher。
 //! - tools 模式：按 steps 顺序执行工具链，最后一步输出推送给 pusher。
-//! - 失败处理：推送失败通知 + 返回 Err（不重试、不 disable）。
+//! - 失败处理：provider 报错 / 超时 / 交付门判定「白跑」→ agent 模式至多重试 3 次；
+//!   仍失败则推送失败通知 + 返回 Err（不 disable）。
 
-use crate::agent::Agent;
+use crate::agent::{Agent, TurnToolCall};
 use crate::cron::{CronMode, CronTask, ProactivePusher};
 use serde_json::Value;
 use std::sync::Arc;
@@ -100,6 +101,31 @@ pub async fn run_tools_mode(
     Ok(())
 }
 
+/// 交付门：判断 agent 模式一轮的回复值不值得推给用户。
+///
+/// 只挡两种确定的「白跑」：
+/// 1. 回复是空白；
+/// 2. 本轮调用过工具但**全部失败**——模型常就着错误结果认输，回一句模板填充语。实测
+///    ornith-1.5-35b 在唯一的 `send_file`（路径是它编的）失败后回了 `No response requested.`，
+///    它非空、两次 provider 请求都 200，于是被当成成功简讯原样推给了用户，后台零报错。
+///
+/// 刻意保守：没有工具调用 + 有文本一律放行（凭上下文直接作答的任务是合法的）。不做
+/// 「无意义文本」黑名单式判据——那是猜不完的，误杀正常简讯的代价比漏放一句残句更大。
+fn evaluate_agent_reply(reply: &str, calls: &[TurnToolCall]) -> Result<(), String> {
+    if reply.trim().is_empty() {
+        return Err("agent returned an empty reply".to_string());
+    }
+    if !calls.is_empty() && calls.iter().all(|c| !c.ok) {
+        let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+        return Err(format!(
+            "all {} tool call(s) failed, nothing was accomplished: {}",
+            calls.len(),
+            names.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// agent 模式：构造独立 session，唤醒主 agent 跑一轮，回复推送到 pusher。
 pub async fn run_agent_mode(
     agent: Arc<tokio::sync::Mutex<Agent>>,
@@ -156,7 +182,29 @@ pub async fn run_agent_mode(
             )),
         };
         match r {
-            Ok(text) => break Ok(text),
+            Ok(text) => {
+                // 交付门：provider 顺利返回不等于「真的把活干了」。白跑一次也按失败重试，
+                // 耗尽次数则返回 Err——宁可推一条失败通知，也不把残句当简讯推给频道。
+                match evaluate_agent_reply(&text, &forked.turn_tool_calls) {
+                    Ok(()) => break Ok(text),
+                    Err(why) => {
+                        if attempt >= CRON_TURN_MAX_ATTEMPTS {
+                            break Err(anyhow::anyhow!(why));
+                        }
+                        tracing::warn!(
+                            task = %task.id,
+                            attempt,
+                            max = CRON_TURN_MAX_ATTEMPTS,
+                            reason = %why,
+                            "cron turn delivered nothing useful, retrying"
+                        );
+                        forked = {
+                            let a = agent.lock().await;
+                            a.fork_for_isolated(session_id, true)
+                        };
+                    }
+                }
+            }
             Err(e) => {
                 if attempt >= CRON_TURN_MAX_ATTEMPTS {
                     break Err(e);
@@ -293,5 +341,40 @@ mod tests {
         let args = json!("{{prev}}");
         let out = substitute_placeholders(&args, "P", "N");
         assert_eq!(out, json!("P"));
+    }
+
+    fn call(name: &str, ok: bool) -> TurnToolCall {
+        TurnToolCall {
+            name: name.into(),
+            args: json!({}),
+            ok,
+        }
+    }
+
+    #[test]
+    fn test_gate_rejects_empty_reply() {
+        assert!(evaluate_agent_reply("   \n ", &[]).is_err());
+    }
+
+    #[test]
+    fn test_gate_rejects_all_tools_failed_regression() {
+        // 2026-08-31 morning_news：模型一次搜索都没做，唯一的 send_file（路径是编的）失败，
+        // 然后就着错误回了句模板填充语。非空 + provider 全 200，旧代码原样推给了用户。
+        let calls = vec![call("send_file", false)];
+        let err = evaluate_agent_reply("No response requested.", &calls).unwrap_err();
+        assert!(err.contains("all 1 tool call(s) failed"), "got: {}", err);
+        assert!(err.contains("send_file"), "理由要点名失败的工具: {}", err);
+    }
+
+    #[test]
+    fn test_gate_passes_when_any_tool_succeeded() {
+        let calls = vec![call("web_fetch", false), call("search", true)];
+        assert!(evaluate_agent_reply("今天的三条热点……", &calls).is_ok());
+    }
+
+    #[test]
+    fn test_gate_passes_toolless_text_reply() {
+        // 不调工具直接作答的任务合法：门里不含「文本有没有意义」的猜测式判据
+        assert!(evaluate_agent_reply("今天没什么新东西，跳过。", &[]).is_ok());
     }
 }
