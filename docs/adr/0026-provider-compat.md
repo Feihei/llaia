@@ -43,3 +43,32 @@
 ## 待办（实现计划）
 
 见 [`plans/2026-08-14-provider-compat.md`](../plans/2026-08-14-provider-compat.md)。
+
+## 修订记录
+
+### 2026-09-01：`reasoning_to_content` 默认值改为 `false`
+
+**现象**：llama.cpp 端点跑 Qwen3 思考模型时，QQ 频道会原样吐出大段思考内容；显式写
+`[provider.llamacpp.compat] reasoning_to_content = false` 才恢复正常。
+
+**根因**：本 ADR 决策 1 中「折回 content（避免某些端点丢思考）」的前提对 llama.cpp / Ollama
+并不成立——二者的 OpenAI 兼容层在思考模型下 `content` **照常返回正式回答**，`reasoning_content`
+只是**额外**的思考流。折回它的唯一效果是把思考混进可见文本、context 与 sqlite 会话历史
+（进而污染压缩素材）。
+
+更糟的是两层行为相反：模型把思考内联成带 `<think>` 标签的文本时，本就被 `ToolCallStreamParser`
+剥掉（`src/tool_call/stream_parser.rs`）；而端点把思考拆到 `reasoning_content` 字段时反而被折回显示。
+即「带标签的隐藏、分字段的显示」。
+
+**决策**：`Compat::ollama()` / `Compat::llamacpp()` 预设的 `reasoning_to_content` 由 `true` 改为
+`false`。`Compat::default()` 本就是 `false`，故未命中预设的端点（bare / LMStudio / 线上）零回归。
+确实需要折回的端点仍可用 `[provider.<id>.compat] reasoning_to_content = true` 显式开启，
+覆盖优先级（决策 3）不变。
+
+**连带收敛**：per-model 表 `model_folds_reasoning` 一并删除。它对 `deepseek-reasoner` /
+`deepseek-r1` / `deepseek-reasoning` / `kimi-k` 强制开启 `reasoning_to_content`，属同一类问题
+（这些端点同样是 `content` 带正式回答）。该规则源自 nanobot `_MODEL_THINKING_STYLES`，而 nanobot
+原意是「R1 走 `reasoning_content` 字段名而非 `reasoning`」（**字段选择**），并非「折回可见文本」；
+llaia 的流解析（`openai_compat.rs`）本就同时读 `reasoning_content` 与 `thinking`、从不读
+`reasoning`，故这条规则在 llaia 里没有字段选择可言，唯一效果就是强制把思考折回可见文本
+——纯 bug 放大器。删除后 per-model 表只剩 `max_tokens_field` 一项。

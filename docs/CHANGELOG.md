@@ -8,8 +8,47 @@
 
 ## v0.3.2 (unreleased)
 
+**Bug fixes / 稳定性**
+- **provider**：llama.cpp / Ollama 思考模型会把大段思考内容原样吐给用户（实测于 QQ 频道）——`Compat::ollama()` / `Compat::llamacpp()` 预设的 `reasoning_to_content` 默认改为 `false`：这两个端点的 OpenAI 兼容层在思考模型下 `content` 照常返回正式回答，`reasoning_content` 只是额外思考流，折回只会把思考混进可见文本、context 与 sqlite。此前行为还自相矛盾——内联带 `<think>` 标签的思考被 `ToolCallStreamParser` 剥掉，拆到 `reasoning_content` 字段的反而被折回显示。确实需要折回的端点仍可显式 `[provider.<id>.compat] reasoning_to_content = true`（[ADR-0026](adr/0026-provider-compat.md) 修订记录）
+- **provider**：一并删除 per-model 表 `model_folds_reasoning`——它对 `deepseek-reasoner` / `deepseek-r1` / `deepseek-reasoning` / `kimi-k` 强制开启同一字段，导致线上推理模型同样吐思考。该规则移植自 nanobot，但原意是「R1 走 `reasoning_content` 字段名而非 `reasoning`」，而 llaia 流解析本就同时读 `reasoning_content` 与 `thinking`、从不读 `reasoning`，故其在 llaia 内无字段选择作用，只剩强制折回的副作用。per-model 表现在只剩 `max_tokens_field`
+- **provider**：SSE 事件分隔符只认 `\n\n`，CRLF（`\r\n\r\n`）服务端/反代的响应永不分割 → 整条回复静默丢失；三个 provider 统一归一化分隔符
+- **provider**：IP 型 llama.cpp 端点（如 `http://10.0.11.187:8080/v1`）未命中 compat 预设 → 流式 usage 不上报、`/stats` 抓不到 token 数据
+- **agent**：`cheap_normalize` 丢弃空文本 `assistant(tool_calls)` 消息会产生孤儿 tool 消息（违反 OpenAI 协议，严格端点直接 400）；`StreamEvent::Error` 路径丢失错误前已生成的部分输出
+- **qq**：`get_ws_url` 识别 11244 / 中文过期消息体，修复 token 失效后的重连死循环
+- **cron**：agent 模式加交付门——白跑的一轮（无实质产出）不再当作成功推送；`cron_task update` 改为局部 patch，改时间不再牵连 prompt
+- **memory**：`memory_write` 追加前补换行并折叠多行 entry，避免写出不可解析的 MEMORY.md 行
+- **web**：新增 provider 填 api key 后立即生效，不再误报 `environment variable referenced but not set`（WebUI 保存时序问题，key 曾被压成空串、热加载失效）
+- **webui**：`checkUpdate` 缺闭合花括号导致 app.js 语法错误、整个 UI 无法启动
+- **webui**：恢复 pane 高度链，sessions / config 左侧栏不再随内容滚走；会话详情区右下角加「跳顶部/跳底部」悬浮按钮（plan.md W1）
+- **terminal / path-guard**：字面量 `\n` 等含反斜杠片段不再被误判为越界路径；裸 `/` 等命令路径元字符同样不再误判
+- **approval**：verbatim 前缀导致 moved 目录内操作被误审；`/move` 批准后不再注入消息触发模型续跑
+- **stats**：`/stats` 迁移 `context_size_now()`，窗口展示跟随当前模型（切换 provider 后不再显示旧模型的阈值与占比）
+- **skill_edit**：patch 兼容模型二次序列化（字符串含 `{find,replace}` 对象时按替换处理）；成功消息明示操作类型（追加/替换/整篇覆盖），无需模型读回文件分辨
+
+**Features**
+- **session**：压缩时自动生成会话标题，落 `sessions.title` 并在 WebUI 列表展示——仅标题为空时生成一次，失败降级为首条用户消息截断（plan.md「会话主题自动总结」）
+- **memory**：新增 `memory_research` 工具——基于 FTS5 的跨会话历史消息全文搜索，只读无需审批，结果上限 20 条（plan.md #5）
+- **token**：token 用量统计链路打通（plan.md W3）——新增 `turn_usage` 表按回合累计输入/输出 token 并区分 sidecar 调用（compact / vision / reminder）；新增 `GET /api/stats/tokens` 聚合 API 与 WebUI 顶层 Stats tab（范围选择 + 汇总卡 + 每日柱状图 + per-model / per-session 排名，纯 SVG/CSS 手绘、零图表依赖）。已知限制：LMStudio / bare 端点默认不上报 usage，该 provider 无数据是预期行为
+- **webui**：About 页更新检查按钮 + `GET /api/update/check`（比对 GitHub Releases latest，结果分钟级缓存）（plan.md W2）
+- **provider**：`/provider <n|id.alias>` 默认持久化到 `config.toml`（`toml_edit` 定点改 `[agent.<alias>].model`，保住注释），`--temp` 保持纯内存临时切换；`context_size` 与 Agent 解耦为懒解析 + 缓存，reload 后失效（plan.md #E / #F）
+- **provider**：`native_tool_calling` 并入 `Compat` 自动探测，配置改 `Option<bool>`（`None=auto` 跟随探测），用户无需手设（plan.md #10）
+- **move**：`/move` 到外部目录时把该目录的 `AGENTS.md` 加载进系统提示词
+- **tmp**：serve / chat 启动时清理 `workspace/tmp` 下 3 天前的文件，防止工具图片无界增长
+- **skill**：skill 目录只读边界——`file_read` 放行全部配套文件、terminal 读/执行放行（[ADR-0028](adr/0028-skill-dir-read-boundary.md)）
+- **channel**：微信 / 钉钉 / 飞书 / Telegram 的工具调用通知收敛为 QQ 紧凑模式（每回合一条「🔧 正在调用工具...」，结束后把去重工具名拼进回复开头）
+- **slash / i18n**：斜杠命令大小写不敏感；审批提示支持裸 `/ok`；运行时提示统一为英文
+- **docs**：`AGENTS.md` 与 `guide/tools.md` 工具清单补齐 `skill_create` / `skill_edit`（ADR-0027 落地时遗漏）
+
+**Performance**
+- **provider**：`detect_context_size` 按 host 门控——仅本地后端（localhost / `.local` / 回环 / 私网 / 链路本地）才打 `/props`、`/api/tags`，云 provider 直接跳过（plan.md #4 残余）
+- **startup**：`build_agent` 四阶段独立计时打点（mcp connect / skills / sub agents / main agent）；`McpRegistry::connect_all` 改 `join_all` 并发握手，多 server 时不再串行累加 30s 超时（plan.md 启动优化②③）
+
+**Refactor**
+- **skill_edit**：patch union 分派改为对齐 `file_edit` 的扁平三模式
+
 **Breaking / 架构简化**
 - **memory**：整体移除「做梦」（dream）记忆自动整理机制（[ADR-0030](adr/0030-remove-dream.md)，取代 [ADR-0016](adr/0016-dream.md)）：harness 层不再有无人值守自动改写 `MEMORY.md` 的路径；`MEMORY.md` 变更只剩 `memory_write` / `/remember` 确定性写入与 `/memory-compact` 手动压缩。同步删除 `/dream`、`/dream-rollback` 斜杠命令、`CronTask` 的 `kind` / `idle_minutes` 字段与内置任务播种、sqlite dream 游标、agent 侧 `run_isolated_turn(_with)` 专用机制；`write_memory_atomic` 迁至 `src/memory/mod.rs` 供 `memory_write` 继续使用。替代做法：自建普通 cron 任务（prompt + `memory_research` 检索历史、产物推送人工审阅）。存量数据无需迁移（`dream_draft.md` / `MEMORY.backups/` 可手动清理；cron.toml 中如有 `kind = "dream"` 任务段请手删）。
+- **goal**：整体撤销 `/goal` 长期目标系统（[ADR-0021](adr/0021-goal-system.md) 已撤销，−676 行）：移除 `/goal` 斜杠命令、goal 存储与注入逻辑，以及系统提示词中的目标段落。v0.3.0 引入的目标跟踪未达预期，记忆整理改由 memory 侧确定性写入与手动压缩承担
 
 ---
 

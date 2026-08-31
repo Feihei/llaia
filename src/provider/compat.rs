@@ -30,7 +30,12 @@ pub struct Compat {
     /// `false` 时把 developer 内容并入 system。
     /// llaia 当前仅发 `system` role（无 developer），保留该钩子以兼容未来 developer role 引入。
     pub supports_developer_role: bool,
-    /// `true` 时把 `reasoning_content` / `thinking` 折回 `content`，避免某些端点丢思考。
+    /// `true` 时把端点拆分返回的 `reasoning_content` / `thinking` 折进可见文本流
+    /// （用于「思考只在该字段、content 为空」的端点，避免整段输出丢失）。
+    ///
+    /// **默认 `false`**：主流端点（llama.cpp / Ollama / DeepSeek / 各家 OpenAI 兼容层）在思考模型下
+    /// `content` 照常返回正式回答，`reasoning_content` 只是额外思考流，折回会把思考混进
+    /// 用户可见文本、context 与 sqlite 会话历史。仅当确认某端点把回答也塞进该字段时才显式开启。
     pub reasoning_to_content: bool,
     /// 发送 max_tokens 的字段名；`None` 不发送（当前 bare 行为）。
     pub max_tokens_field: MaxTokensField,
@@ -68,11 +73,15 @@ impl Default for Compat {
 }
 
 impl Compat {
-    /// Ollama 预设：reasoning 折回 content、流式 usage、推断 finish_reason、tool 后补 assistant 占位。
+    /// Ollama 预设：流式 usage、推断 finish_reason、tool 后补 assistant 占位。
+    ///
+    /// `reasoning_to_content` 默认关闭：Ollama 的 OpenAI 兼容层在思考模型下
+    /// `content` 照常返回正式回答，`reasoning_content` 是**额外**的思考流，
+    /// 折回只会把思考混进可见文本与会话历史。想看思考用 `[provider.<id>.compat]` 显式开启。
     pub fn ollama() -> Self {
         Self {
             supports_developer_role: false,
-            reasoning_to_content: true,
+            reasoning_to_content: false,
             max_tokens_field: MaxTokensField::None,
             streaming_usage: true,
             infer_finish_reason: true,
@@ -82,11 +91,14 @@ impl Compat {
         }
     }
 
-    /// Llama.cpp 预设：reasoning 折回 content、流式 usage、推断 finish_reason。
+    /// Llama.cpp 预设：流式 usage、推断 finish_reason。
+    ///
+    /// `reasoning_to_content` 默认关闭，理由同 `ollama()`：llama.cpp server 把 `<think>`
+    /// 段解析进 `reasoning_content`，而 `content` 仍是正式回答（Qwen3/R1 等亦如此）。
     pub fn llamacpp() -> Self {
         Self {
             supports_developer_role: false,
-            reasoning_to_content: true,
+            reasoning_to_content: false,
             max_tokens_field: MaxTokensField::None,
             streaming_usage: true,
             infer_finish_reason: true,
@@ -107,8 +119,11 @@ impl Compat {
     /// - 含 `moonshot` / `kimi` → 基础预设（流式 usage）
     /// - 其余 → `Compat::default()`（bare 行为，零回归）
     ///
-    /// **第二步：per-model 表**（按 model slug 子串，对齐 nanobot/goose 的 per-model 规则）
-    /// 覆盖 provider 基础的 `max_tokens_field` / `reasoning_to_content`。
+    /// **第二步：per-model 表**（按 model slug 子串，对齐 goose 的 per-model 规则）
+    /// 只覆盖 `max_tokens_field`。
+    ///
+    /// 注：这里**不再**碰 `reasoning_to_content`——思考默认不折回（见字段注释），
+    /// 需要折回的端点请用 `[provider.<id>.compat]` 显式开启，不靠 model slug 猜。
     pub fn detect(base_url: &str, model: &str) -> Compat {
         let lower = base_url.to_ascii_lowercase();
         let lm = model.to_ascii_lowercase();
@@ -141,9 +156,6 @@ impl Compat {
         if Self::model_uses_max_completion_tokens(&lm) {
             c.max_tokens_field = MaxTokensField::MaxCompletionTokens;
         }
-        if Self::model_folds_reasoning(&lm) {
-            c.reasoning_to_content = true;
-        }
         c
     }
 
@@ -155,15 +167,6 @@ impl Compat {
             || lm.starts_with("o3")
             || lm.starts_with("o4")
             || lm.contains("kimi-k3")
-    }
-
-    /// deepseek / kimi 推理模型把 `reasoning_content` 折回 `content`，避免思考被端点丢弃
-    /// （对齐 nanobot：deepseek-R1/reasoner 走 `reasoning_content` 而非 `reasoning`）。
-    fn model_folds_reasoning(lm: &str) -> bool {
-        lm.contains("deepseek-reasoner")
-            || lm.contains("deepseek-r1")
-            || lm.contains("deepseek-reasoning")
-            || lm.contains("kimi-k")
     }
 
     /// 用配置覆盖层叠加到探测结果之上（配置优先级高于探测）。
@@ -257,7 +260,7 @@ mod tests {
     #[test]
     fn detect_ollama() {
         let c = Compat::detect("http://ollama:11434/v1", "qwen2.5:7b");
-        assert!(c.reasoning_to_content);
+        assert!(!c.reasoning_to_content); // 思考默认不折回可见文本
         assert!(c.streaming_usage);
         assert!(c.infer_finish_reason);
         assert!(c.requires_assistant_after_tool);
@@ -267,10 +270,32 @@ mod tests {
     #[test]
     fn detect_llamacpp() {
         let c = Compat::detect("http://llama:8080/v1", "qwen2.5");
-        assert!(c.reasoning_to_content);
+        assert!(!c.reasoning_to_content); // 思考默认不折回可见文本
         assert!(c.streaming_usage);
         assert!(c.infer_finish_reason);
         assert!(!c.requires_assistant_after_tool);
+    }
+
+    #[test]
+    fn local_presets_hide_reasoning_by_default() {
+        // llama.cpp / Ollama 思考模型：reasoning_content 是额外流，默认不该混进可见文本。
+        // 用户实测（2026-09-01）：默认 true 时 QQ 频道会原样吐出大段思考。
+        for (base, model) in [
+            ("http://llama:8080/v1", "qwen3-30b-a3b"),
+            ("http://10.0.11.187:8080/v1", "Qwen3-32B-Q4_K_M"),
+            ("http://ollama:11434/v1", "qwen3:32b"),
+            ("http://localhost:11434/v1", "qwq:32b"),
+        ] {
+            let c = Compat::detect(base, model);
+            assert!(!c.reasoning_to_content, "base={base} model={model}");
+        }
+        // 显式开启仍然可用（端点把回答也塞进 reasoning_content 的场景）
+        let mut c = Compat::detect("http://llama:8080/v1", "qwen3-30b-a3b");
+        c.apply_override(&CompatConfig {
+            reasoning_to_content: Some(true),
+            ..Default::default()
+        });
+        assert!(c.reasoning_to_content);
     }
 
     #[test]
@@ -317,9 +342,16 @@ mod tests {
         assert_eq!(o3.max_tokens_field, MaxTokensField::MaxCompletionTokens);
         let kimi = Compat::detect("https://api.example.com/v1", "kimi-k3-1025-preview");
         assert_eq!(kimi.max_tokens_field, MaxTokensField::MaxCompletionTokens);
-        // deepseek-reasoner → 折回 reasoning
-        let r1 = Compat::detect("https://api.deepseek.com/v1", "deepseek-reasoner");
-        assert!(r1.reasoning_to_content);
+        // 推理模型不再被 per-model 表强制折回思考（思考默认不可见）
+        for m in [
+            "deepseek-reasoner",
+            "deepseek-r1",
+            "deepseek-reasoning",
+            "kimi-k2-thinking",
+        ] {
+            let c = Compat::detect("https://api.deepseek.com/v1", m);
+            assert!(!c.reasoning_to_content, "model={m}");
+        }
         // deepseek-chat 不折回、不切字段
         let chat = Compat::detect("https://api.deepseek.com/v1", "deepseek-chat");
         assert!(!chat.reasoning_to_content);
@@ -346,12 +378,13 @@ mod tests {
     fn override_beats_detect() {
         let mut c = Compat::detect("http://ollama:11434/v1", "qwen2.5"); // ollama 预设
         c.apply_override(&CompatConfig {
-            reasoning_to_content: Some(false),
+            // 预设默认不折回思考，显式配置可开启（覆盖优先级高于探测）
+            reasoning_to_content: Some(true),
             requires_assistant_after_tool: Some(false),
             max_tokens_field: Some(MaxTokensField::MaxCompletionTokens),
             ..Default::default()
         });
-        assert!(!c.reasoning_to_content); // 被覆盖
+        assert!(c.reasoning_to_content); // 被覆盖
         assert!(!c.requires_assistant_after_tool); // 被覆盖
         assert_eq!(c.max_tokens_field, MaxTokensField::MaxCompletionTokens);
         assert!(c.streaming_usage); // 保留探测值

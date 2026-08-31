@@ -684,7 +684,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ollama_preset_drops_reasoning_by_default() {
+        // 默认预设：reasoning_content 不该混进可见文本，正式回答照常返回。
+        // （用户实测 2026-09-01：默认 true 时 QQ 频道会原样吐出大段思考。）
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(format!(
+                "{}{}{}",
+                sse(json!({"choices":[{"delta":{"reasoning_content":"I think...","content":""}}]})),
+                sse(json!({"choices":[{"delta":{"content":"The answer is 42"}}]})),
+                done()
+            ))
+            .create();
+        let p = OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::ollama())
+            .unwrap();
+        let msgs = vec![ChatMessage::user("hi")];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+            disable_thinking: false,
+        };
+        let resp = p.chat(&req).await.unwrap();
+        let text = resp.text.as_deref().unwrap_or_default();
+        assert!(!text.contains("I think..."), "text={text}");
+        assert!(text.contains("The answer is 42"), "text={text}");
+        m.assert();
+    }
+
+    #[tokio::test]
     async fn ollama_folds_reasoning_and_parses_usage() {
+        // 显式开启 reasoning_to_content 时仍应折回（端点把回答也塞进该字段的场景）。
         let mut server = mockito::Server::new_async().await;
         let m = server
             .mock("POST", "/chat/completions")
@@ -698,8 +729,18 @@ mod tests {
                 done()
             ))
             .create();
-        let p = OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::ollama())
-            .unwrap();
+        let p = OpenAiCompatibleProvider::new(
+            server.url(),
+            "",
+            "m",
+            true,
+            None,
+            Compat {
+                reasoning_to_content: true,
+                ..Compat::ollama()
+            },
+        )
+        .unwrap();
         let msgs = vec![ChatMessage::user("hi")];
         let req = ChatRequest {
             messages: &msgs,
@@ -745,8 +786,8 @@ mod tests {
             disable_thinking: false,
         };
         let resp = p.chat(&req).await.unwrap();
-        // thinking 折回 content
-        assert!(resp.text.as_deref().unwrap().contains("hmm"));
+        // thinking 默认不折回（思考不该混入可见文本）；正式回答照常
+        assert!(!resp.text.as_deref().unwrap().contains("hmm"));
         assert!(resp.text.as_deref().unwrap().contains("done"));
         // 无 finish_reason 但有 tool_calls → 推断 tool_calls
         assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));

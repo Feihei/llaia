@@ -38,7 +38,7 @@
 **状态**：🚧 进行中（起点 2026-08-21，源自 [docs/issues/issues.md](issues/issues.md) 的 9 个问题与设想评估）
 
 > 候选池来自 `docs/issues/issues.md`。评估结论（2026-08-21）：3 个 bug/修复类（其中 2 个可直接实施、1 个需先验证根因），6 个需求/设计类需 grill 明确边界后立项。条目按状态分组，标注**必要性**（高/中/低，不做会持续踩坑或已影响正确性→高；明显改善体验→中；锦上添花→低）与**难度**（★☆☆ 半天内单点 / ★★☆ 一到数天跨模块 / ★★★ 结构性改造，动手前先出 ADR），便于排期。
-> 已交付部分（4 项稳定性修复 + 6 项快赢）随 v0.3.1 发布，完整勾选清单已归档至 [CHANGELOG.md](CHANGELOG.md) §v0.3.1，此处不再重复；主干体检直接修项将随下一版本归档。本节只保留剩余计划与进行中条目。
+> 已交付部分（4 项稳定性修复 + 6 项快赢）随 v0.3.1 发布，完整勾选清单已归档至 [CHANGELOG.md](CHANGELOG.md) §v0.3.1；主干体检直接修项、WebUI 批次（W1/W2/W3）与本节的会话总结 / provider 优化 / `memory_research` / 启动优化等均已归档至 [CHANGELOG.md](CHANGELOG.md) §v0.3.2（2026-09-01 补齐）。本节只保留剩余计划与进行中条目。
 
 ### 🌐 WebUI 改进批次（2026-08-27 评估立项）
 
@@ -197,6 +197,26 @@
 - **残留已清（2026-08-29）**：`/stats`（`slash.rs`）原直读冻结基线 `agent.context_size`，已迁移 `context_size_now()`（与 `/config` 一致），展示的 context_size/阈值/占比跟随当前模型。
 - 待决（本项不实现）：探测结果磁盘缓存（按 base_url+model，存 sqlite）——与 #11 的「探测收敛/缓存」合并，重启免重复探测；先靠懒解析 + reload 失效解决正确性与启动阻塞。
 - 附带影响：`context_size_now` 是 async，`/config`/`/compact` 路径随之 async（本就 async 上下文，无碍）；`--temp` 切换时 live_config 模型未更新，`configured` 取到旧模型值作为 min 上限，属可接受的临时实验边界。
+
+### ⭐ 新增发现（2026-09-01）
+
+**#G llama.cpp / Ollama 思考模型的思考内容被原样吐给用户（已交付）**
+
+- 现象：QQ 频道对话里出现大段模型思考文本；显式写 `[provider.llamacpp.compat] reasoning_to_content = false` 后消失。
+- 根因：`Compat::ollama()` / `Compat::llamacpp()` 预设把 `reasoning_to_content` 默认置 `true`（ADR-0026 原意图是「避免某些端点丢思考」），
+  而 `openai_compat.rs:386-397` 会把流式 `delta.reasoning_content` / `delta.thinking` 折成 `TextDelta` 上抛。
+  但这两个端点的 OpenAI 兼容层在思考模型下 `content` **照常返回正式回答**，`reasoning_content` 只是额外思考流
+  → 折回等于把思考混进可见文本、context 与 sqlite（进而污染压缩素材）。
+- 附带反直觉点：模型把思考内联成带 `<think>` 标签的文本时，本就被 `ToolCallStreamParser`（`tool_call/stream_parser.rs:52`）剥掉；
+  拆到 `reasoning_content` 字段的反而被折回显示 —— 「带标签的隐藏、分字段的显示」，两层行为相反。
+- 修复：两个预设默认值改 `false`（`compat.rs`），字段与预设注释写明依据；`Compat::default()` 本就 `false`，
+  故 bare / LMStudio / 线上端点零回归；确实需要折回的端点仍可 `[provider.<id>.compat] reasoning_to_content = true` 显式开启。
+  新增两组回归测试（默认丢弃 / 显式开启才折回），原有折回测试改为覆盖显式路径。详见 [ADR-0026 修订记录](adr/0026-provider-compat.md)。
+- **连带收敛（同批交付）**：per-model 表 `model_folds_reasoning` 已删除——它对 `deepseek-reasoner` / `deepseek-r1` /
+  `deepseek-reasoning` / `kimi-k` 强制开启该字段，属同类问题。该规则移植自 nanobot `_MODEL_THINKING_STYLES`，
+  但 nanobot 原意是「R1 走 `reasoning_content` 字段名而非 `reasoning`」（字段选择），而 llaia 流解析
+  本就同时读 `reasoning_content` 与 `thinking`、从不读 `reasoning`，故这条规则在 llaia 内唯一效果就是强制折回
+  可见文本。删除后 per-model 表只剩 `max_tokens_field`；`detect_per_model_overrides` 测试已改为断言推理模型不再被折回。
 
 ---
 
