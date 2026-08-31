@@ -117,6 +117,12 @@ pub struct Agent {
     /// provider 是否非 native tool calling（标签降级模式）。
     /// 决定 system 末尾是否追加 tool instructions（热加载 skills 时需重建）。
     system_has_tool_instructions: bool,
+    /// /move 到外部目录后注入的 AGENTS.md 系统提示词段（空串 = 未加载）。
+    /// 仅缓存重构系统中：agent 家目录不加载（SOUL/USER/MEMORY 已在提示词内）。
+    agents_md_prompt: String,
+    /// 上次热加载的 skills 系统提示词段。set_workspace 重建 system 需要它在场
+    /// （reload_skills 只在我们这边缓存、不再另外持参），否则 /move 会把 skills 段挤掉。
+    skills_prompt_cache: String,
     /// 隔离 turn（dream 等内部合成任务）临时关闭向模型暴露工具：推理模型在超大
     /// system + 全套 tools 下可能去调 web_fetch/search 等网络工具卡死整轮 turn，
     /// 而合成任务本不需要工具。仅 `run_isolated_turn_with` 在持有 `&mut self` 期间
@@ -141,6 +147,38 @@ pub struct TurnToolCall {
 
 /// 模型上下文窗口的全局兜底值：配置未设、provider 探测失败时的最小窗口。
 const DEFAULT_CONTEXT_SIZE: usize = 8192;
+
+/// AGENTS.md 注入系统提示词的最大字符数（chars/4 启发式 ≈ 2000 token），防大文件撑爆上下文。
+const AGENTS_MD_CHAR_CAP: usize = 8000;
+
+/// 构建 AGENTS.md 的系统提示词段。
+///
+/// - `root == home`（agent 家目录）：不加载——SOUL/USER/MEMORY 已在系统提示词内，
+///   无需（也不应）再让 AGENTS.md 插一脚。
+/// - `root/AGENTS.md` 缺失或内容为空：返回空串。
+/// - 否则读取并按字符上限截断，包装成独立提示词段。
+fn build_agents_md_prompt(root: &std::path::Path, home: &std::path::Path) -> String {
+    if root == home {
+        return String::new();
+    }
+    let path = root.join("AGENTS.md");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return String::new();
+    };
+    if content.trim().is_empty() {
+        return String::new();
+    }
+    let content: String = content.chars().take(AGENTS_MD_CHAR_CAP).collect();
+    format!(
+        "## Active directory instructions (from AGENTS.md)\n\
+         \n\
+         The current directory scope (set by /move) is `{}`. \
+         It contains AGENTS.md with project / directory-level conventions. \
+         Follow it when working on files or running commands within this directory scope.\n\n{}",
+        root.display(),
+        content
+    )
+}
 
 /// 从实时配置读取 `[agent.<alias>].model` 指向的 model_cfg.context_size（显式上限）。
 /// model 未配置 / 对应 provider.model 缺失 → None（走探测或兜底默认）。
@@ -209,6 +247,8 @@ impl Agent {
             resolved_context_size: Arc::new(RwLock::new(None)),
             system_prompt_base: String::new(),
             system_has_tool_instructions: false,
+            agents_md_prompt: String::new(),
+            skills_prompt_cache: String::new(),
             disable_tools: false,
             disable_thinking: false,
             thinking_off: false,
@@ -222,8 +262,10 @@ impl Agent {
 
     /// 切换工具作用域（/move 命令）：只更新 workspace_root（文件/终端工具实时生效），
     /// 不动 workspace（agent 家目录，SOUL/USER/MEMORY/sessions.db 所在，固定不变）。
+    /// 切换到外部目录时按需加载该目录的 AGENTS.md 进系统提示词；移回 home 时清除。
     pub async fn set_workspace(&mut self, new_workspace: std::path::PathBuf) {
         *self.workspace_root.write().await = new_workspace;
+        self.reload_agents_md().await;
     }
 
     /// 接入共享的实时配置（serve 模式下由 `serve_cmd` 注入 WebUI 持有的同一个 Arc）。
@@ -342,12 +384,24 @@ impl Agent {
         self.max_iterations = config.runtime.max_iterations;
     }
 
-    /// 热加载 skills：重建 system 提示词的 skills 段（前缀与 tool instructions 不变）。
+    /// 热加载 skills：缓存 skills 段后重建 system 提示词（前缀 + AGENTS.md 段 + skills + tool instructions）。
     pub fn reload_skills(&mut self, skills_prompt: &str) {
+        self.skills_prompt_cache = skills_prompt.to_string();
+        self.rebuild_system();
+    }
+
+    /// 统一重建 system 提示词：固定前缀(base) + AGENTS.md 段 + skills 段 + tool instructions。
+    /// 被 `reload_skills`（skills 热加载）与 `reload_agents_md`（/move 触发）共用，
+    /// 保证任一处改动都不会把另一段的注入挤掉。
+    fn rebuild_system(&mut self) {
         let mut sys = self.system_prompt_base.clone();
-        if !skills_prompt.is_empty() {
+        if !self.agents_md_prompt.is_empty() {
             sys.push_str("\n\n");
-            sys.push_str(skills_prompt);
+            sys.push_str(&self.agents_md_prompt);
+        }
+        if !self.skills_prompt_cache.is_empty() {
+            sys.push_str("\n\n");
+            sys.push_str(&self.skills_prompt_cache);
         }
         if self.system_has_tool_instructions {
             sys.push_str(&crate::tool_call::prompt::build_tool_instructions(
@@ -355,6 +409,17 @@ impl Agent {
             ));
         }
         self.context.system = sys;
+    }
+
+    /// /move 后按当前 workspace_root 重载 AGENTS.md 段：外部目录存在 AGENTS.md 则注入，
+    /// 否则清空（含移回 home 的情况）。段有变动才重建 system，避免无谓重复构造。
+    async fn reload_agents_md(&mut self) {
+        let root = self.workspace_root.read().await.clone();
+        let prompt = build_agents_md_prompt(&root, &self.workspace);
+        if prompt != self.agents_md_prompt {
+            self.agents_md_prompt = prompt;
+            self.rebuild_system();
+        }
     }
 
     /// 是否处于降级模式（无 provider）。
@@ -528,6 +593,8 @@ impl Agent {
             resolved_context_size: self.resolved_context_size.clone(),
             system_prompt_base: self.system_prompt_base.clone(),
             system_has_tool_instructions: self.system_has_tool_instructions,
+            agents_md_prompt: self.agents_md_prompt.clone(),
+            skills_prompt_cache: self.skills_prompt_cache.clone(),
         }
     }
 
@@ -908,11 +975,6 @@ impl Agent {
         } else {
             Some(todo_text)
         };
-
-        // 长期目标（ADR-0021）：每轮从 agent 家目录 goal.md 重新读取，仅 active 注入。
-        // 路径用 self.workspace（家目录，固定不随 /move 变化），与 SOUL/USER/MEMORY 同处。
-        let goal_line = crate::goal::read_active_goal_line(&self.workspace);
-        self.context.goal_state = goal_line;
 
         // 拿 provider snapshot：整个 turn 用这个 snapshot，reload 不影响进行中的 turn
         let provider = match self.provider_snapshot().await {
@@ -2648,5 +2710,64 @@ mod tests {
         // 中文按字符计
         assert_eq!(cap_chars("文字截断测试", 4), "文字截断…");
         assert_eq!(cap_chars("", 5), "");
+    }
+
+    #[test]
+    fn test_build_agents_md_prompt_skips_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // 家目录即便有 AGENTS.md 也不加载（SOUL/USER/MEMORY 已在提示词内）
+        std::fs::write(dir.path().join("AGENTS.md"), "# repo guide\n").unwrap();
+        assert_eq!(build_agents_md_prompt(dir.path(), dir.path()), "");
+    }
+
+    #[test]
+    fn test_build_agents_md_prompt_missing_or_empty() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let ext = tempfile::tempdir().expect("tempdir");
+        // 外部目录无 AGENTS.md
+        assert_eq!(build_agents_md_prompt(ext.path(), home.path()), "");
+        // 外部目录 AGENTS.md 为空
+        std::fs::write(ext.path().join("AGENTS.md"), "   \n  ").unwrap();
+        assert_eq!(build_agents_md_prompt(ext.path(), home.path()), "");
+    }
+
+    #[test]
+    fn test_build_agents_md_prompt_loads_content() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let ext = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            ext.path().join("AGENTS.md"),
+            "project conventions: no println!",
+        )
+        .unwrap();
+
+        let prompt = build_agents_md_prompt(ext.path(), home.path());
+        assert!(!prompt.is_empty(), "应返回注入段");
+        assert!(
+            prompt.contains("Active directory instructions"),
+            "got: {prompt}"
+        );
+        assert!(
+            prompt.contains("project conventions: no println!"),
+            "应含原文内容，got: {prompt}"
+        );
+        // 目录路径应体现在段里
+        assert!(prompt.contains(&ext.path().display().to_string()));
+    }
+
+    #[test]
+    fn test_build_agents_md_prompt_caps_oversized() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let ext = tempfile::tempdir().expect("tempdir");
+        let big = "x".repeat(AGENTS_MD_CHAR_CAP + 5000);
+        std::fs::write(ext.path().join("AGENTS.md"), &big).unwrap();
+
+        let prompt = build_agents_md_prompt(ext.path(), home.path());
+        let cap_xs = "x".repeat(AGENTS_MD_CHAR_CAP);
+        assert!(prompt.contains(&cap_xs), "应包含正好一整段上限内容");
+        assert!(
+            !prompt.contains(&"x".repeat(AGENTS_MD_CHAR_CAP + 1)),
+            "不应包含超出上限的溢出片段"
+        );
     }
 }
