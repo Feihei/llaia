@@ -42,7 +42,7 @@ pub async fn try_handle(
     match cmd_lc.as_str() {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -350,36 +350,6 @@ tools: {}
                 agent.tools.names()
             );
             Ok(SlashOutcome::Handled(info))
-        }
-        "/dream" => {
-            // 手动触发一次做梦：两阶段记忆整理（跳过空闲门控）。
-            // 参数一律拒绝：`/dream rollback`（空格）会被解析成 args="rollback" 而本命令
-            // 从不读 args，曾经就这样静默跑了一次整理，让用户误以为回滚已执行。
-            let args = args.trim();
-            if !args.is_empty() {
-                return Ok(SlashOutcome::Handled(format!(
-                    "[dream ignored unknown argument \"{}\", nothing was consolidated]\n\
-                     回滚 MEMORY.md 请用它自己的命令（连字符，不拆参数）：/dream-rollback\n\
-                     手动整理记忆则不带参数：/dream",
-                    args
-                )));
-            }
-            match crate::cron::dream::run_dream(agent, "dream", 30, true).await {
-                Ok(summary) => Ok(SlashOutcome::Handled(summary)),
-                Err(e) => Ok(SlashOutcome::Handled(format!("[dream failed: {}]", e))),
-            }
-        }
-        "/dream-rollback" => {
-            // 回滚 MEMORY.md 到最近一份 .bak 备份。本命令不拆参数（空格写法见上方 /dream 提示）。
-            let memory_path = agent.workspace.join("MEMORY.md");
-            let backup_dir = agent.workspace.join("MEMORY.backups");
-            match crate::memory::dream::restore_memory(&memory_path, &backup_dir, None).await {
-                Ok(restored) => Ok(SlashOutcome::Handled(format!(
-                    "[dream rolled back to backup: {}]",
-                    restored.display()
-                ))),
-                Err(e) => Ok(SlashOutcome::Handled(format!("[dream-rollback failed: {}]", e))),
-            }
         }
         "/skill" => {
             // 技能管理：/skill list [--all] 查看已加载技能及 active 状态

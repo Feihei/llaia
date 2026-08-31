@@ -1,6 +1,6 @@
 # ADR-0029: dream stage2 改为结构化 patch + 程序化合并
 
-- 状态：Proposed
+- 状态：Rejected——未实现，且随 [ADR-0030](0030-remove-dream.md) 移除整个 dream 机制而终结（2026-08-31）
 - 日期：2026-08-31
 - 关联：ADR-0016 §6「写入边界」与 §7「安全兜底」（**部分取代**其「整体重写」决策）；`src/cron/dream.rs`、`src/memory/dream.rs`
 

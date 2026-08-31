@@ -123,18 +123,13 @@ pub struct Agent {
     /// 上次热加载的 skills 系统提示词段。set_workspace 重建 system 需要它在场
     /// （reload_skills 只在我们这边缓存、不再另外持参），否则 /move 会把 skills 段挤掉。
     skills_prompt_cache: String,
-    /// 隔离 turn（dream 等内部合成任务）临时关闭向模型暴露工具：推理模型在超大
-    /// system + 全套 tools 下可能去调 web_fetch/search 等网络工具卡死整轮 turn，
-    /// 而合成任务本不需要工具。仅 `run_isolated_turn_with` 在持有 `&mut self` 期间
-    /// 临时置位，turn 结束即恢复，不影响主会话 / 其他 turn。
-    disable_tools: bool,
-    /// 隔离 turn（dream / cron 等自动化任务）临时关闭模型「深度思考」：推理模型
-    /// （Qwen3 等）在结构化合成任务上思考纯属浪费且撑爆超时。置位后请求带
-    /// `disable_thinking`，由 provider 注入 chat_template_kwargs 关掉思考。
-    /// 仅 `run_isolated_turn_with` 在持有 `&mut self` 期间临时置位，turn 结束即恢复。
+    /// cron 等自动化任务关闭模型「深度思考」：推理模型（Qwen3 等）在结构化
+    /// 合成任务上思考纯属浪费且撑爆超时。置位后请求带 `disable_thinking`，
+    /// 由 provider 注入 chat_template_kwargs 关掉思考。
+    /// `fork_for_isolated` 派生的 cron 副本按需置位，主 agent 恒为 false。
     disable_thinking: bool,
     /// 用户经 `/reasoning off` 设置的会话级思考开关：true = 关闭深度思考。
-    /// 与上面的临时位独立（OR 关系），隔离 turn 的保存/恢复不影响它。
+    /// 与上面的自动任务位独立（OR 关系），cron 副本置位不影响主会话开关。
     pub thinking_off: bool,
 }
 
@@ -252,7 +247,6 @@ impl Agent {
             system_has_tool_instructions: false,
             agents_md_prompt: String::new(),
             skills_prompt_cache: String::new(),
-            disable_tools: false,
             disable_thinking: false,
             thinking_off: false,
         }
@@ -435,8 +429,7 @@ impl Agent {
         let (tx, mut rx) = mpsc::channel(64);
         // 并发 drain：必须边跑边消费。若等 turn 结束再 drain，turn 内事件数一旦超过
         // channel 容量（64），`event_tx.send().await` 会永远阻塞（接收端尚未启动），
-        // 整个 turn 冻结到顶层超时才被 kill——dream stage2 挂 600s×3 的根因
-        // （stage2 输出完整 MEMORY 文件，逐 token delta 必然超 64 事件）。
+        // 整个 turn 冻结到顶层超时才被 kill（长回复逐 token delta 必然超 64 事件）。
         let drain = tokio::spawn(async move {
             let mut text = String::new();
             while let Some(ev) = rx.recv().await {
@@ -450,106 +443,6 @@ impl Agent {
         let text = drain.await.unwrap_or_default();
         result?;
         Ok(text)
-    }
-
-    /// 跑一轮独立 turn：用临时 session_id 和全新 context（不复用用户会话历史），
-    /// 跑完后恢复原 session_id 和 context。供 cron agent 模式使用。
-    ///
-    /// - `prompt`：注入到 agent 上下文的用户消息
-    /// - `channel`：触发渠道（用于审计 + 工具 confirm 判断），cron 用 "cron"
-    /// - `session_id`：独立会话 id（由调用方通过 session_store.create_session 创建）
-    ///
-    /// 返回 agent 最终回复文本。无论成功失败，原 session_id 和 context 都会恢复。
-    /// cron 独立 turn 顶层超时（秒）。防止 provider 流式挂起（如 SSE keepalive 使
-    /// per-chunk 120s 超时永不触发）导致整个 turn 无限悬挂、永久持有 agent 锁且永不
-    /// 推送结果——表现为"cron 静默无消息"。超时即返回 Err，runner 会推送失败通知。
-    const CRON_TURN_TIMEOUT_SECS: u64 = 600;
-    /// 独立 turn 单次挂起（provider 流式卡死 / 网络抖动）时的最大重试次数。
-    /// 实测 agnes-2.5-flash 等模型在大上下文生成时会偶发「开始流式但绝不发 [DONE]」，
-    /// 一次挂起往往为瞬时抖动，重试常能恢复；超过次数才判定失败并推送失败通知。
-    const CRON_TURN_MAX_ATTEMPTS: usize = 3;
-
-    pub async fn run_isolated_turn(
-        &mut self,
-        prompt: &str,
-        channel: &str,
-        session_id: i64,
-    ) -> Result<String> {
-        self.run_isolated_turn_with(prompt, channel, session_id, None, false, false)
-            .await
-    }
-
-    /// `run_isolated_turn` 的可控变体。
-    ///
-    /// - `system_override`：替换隔离 turn 的系统提示（`None`=沿用当前上下文的 system）。
-    ///   内部合成任务（dream 两阶段）传最小 system，避免把完整 agent system
-    ///   （含全量 tool specs + MEMORY + 指令）喂给模型——推理模型（如 qwen 深度思考版）
-    ///   在超大 system + 全套 tools 下会爆量推理撑过顶层超时，或误调 web_fetch/search 卡死整轮。
-    /// - `disable_tools`：隔离 turn 不向模型暴露任何工具。dream 是纯文本合成，绝不应触发
-    ///   网络工具；暴露工具既无意义，又会让模型在长推理中尝试调用而卡死。
-    /// - `disable_thinking`：隔离 turn 关闭模型「深度思考」。推理模型（Qwen3 等）在结构化
-    ///   合成任务上思考纯属浪费且撑爆超时；关闭后由 provider 注入 chat_template_kwargs
-    ///   使模型直接作答（实测同一 dream 任务从数百秒降至数秒）。
-    pub async fn run_isolated_turn_with(
-        &mut self,
-        prompt: &str,
-        channel: &str,
-        session_id: i64,
-        system_override: Option<&str>,
-        disable_tools: bool,
-        disable_thinking: bool,
-    ) -> Result<String> {
-        let saved_session_id = self.session_id;
-        let saved_system = self.context.system.clone();
-        let saved_disable = self.disable_tools;
-        let saved_thinking = self.disable_thinking;
-        let isolated_system = system_override.unwrap_or(&saved_system).to_string();
-        let saved_context = std::mem::replace(
-            &mut self.context,
-            crate::agent::context::Context::new(isolated_system.clone()),
-        );
-        self.disable_tools = disable_tools;
-        self.disable_thinking = disable_thinking;
-        self.session_id = session_id;
-        // 顶层超时兜底 + 重试：包裹整个 handle_input（含多轮工具调用 + 最终合成）。
-        // 超时 / 错误后 inner future 被丢弃并释放对 self 的借用，随后在仍持有 agent 锁期间
-        // 恢复原 session/context，避免污染主会话；并重试直到成功或达到最大次数。
-        // 每次重试都重置隔离 context：上一次失败尝试残留的 user 消息会被清掉，
-        // 否则重试请求体里 prompt 会逐次翻倍（实测 attempt2 出现双份 user prompt）。
-        let mut attempt = 0usize;
-        let result = loop {
-            attempt += 1;
-            self.context = crate::agent::context::Context::new(isolated_system.clone());
-            let r = tokio::time::timeout(
-                std::time::Duration::from_secs(Self::CRON_TURN_TIMEOUT_SECS),
-                self.handle_input(prompt, channel),
-            )
-            .await;
-            // 把本次尝试结果归一：成功则直接 break 返回文本；失败则得到 err 继续判断是否重试。
-            let err = match r {
-                Ok(Ok(text)) => break Ok(text),
-                Ok(Err(e)) => e,
-                Err(_) => anyhow::anyhow!(
-                    "cron isolated turn timed out after {}s",
-                    Self::CRON_TURN_TIMEOUT_SECS
-                ),
-            };
-            // 走到这里说明本次尝试失败（err 已绑定）；达到最大次数则判定失败，否则重试。
-            if attempt >= Self::CRON_TURN_MAX_ATTEMPTS {
-                break Err(err);
-            }
-            tracing::warn!(
-                attempt,
-                max = Self::CRON_TURN_MAX_ATTEMPTS,
-                "isolated turn attempt failed, retrying"
-            );
-        };
-        // 无论成功/超时/取消，都恢复原状态
-        self.session_id = saved_session_id;
-        self.context = saved_context;
-        self.disable_tools = saved_disable;
-        self.disable_thinking = saved_thinking;
-        result
     }
 
     /// 为 cron / 委派等「独立 turn」派生一个共享底层资源、但拥有独立 `context` 与
@@ -589,7 +482,6 @@ impl Agent {
             audit: self.audit.clone(),
             turn_tool_calls: Vec::new(),
             config: self.config.clone(),
-            disable_tools: self.disable_tools,
             disable_thinking,
             thinking_off: false,
             live_config: self.live_config.clone(),
@@ -1046,7 +938,7 @@ impl Agent {
             self.maybe_auto_compact().await;
 
             let messages = self.context.to_messages(&tz);
-            let tools = if force_summary || self.disable_tools {
+            let tools = if force_summary {
                 None
             } else {
                 let specs = self.tools.specs();
@@ -1992,49 +1884,9 @@ mod tests {
         assert!(done);
     }
 
-    #[tokio::test]
-    async fn test_run_isolated_turn_restores_session_and_context() {
-        let rounds = vec![vec![
-            StreamEvent::TextDelta("cron reply".into()),
-            StreamEvent::Done,
-        ]];
-        let mut agent = make_agent_with_rounds(true, rounds).await;
-
-        // 模拟用户已有会话历史
-        agent.context.push(ChatMessage::user("prior user msg"));
-        agent
-            .context
-            .push(ChatMessage::assistant("prior assistant msg"));
-        let original_session_id = agent.session_id;
-        let original_history_len = agent.context.history.len();
-
-        // 创建独立 session
-        let cron_sid = agent
-            .session_store
-            .create_session("cron-uuid", "cron:test")
-            .unwrap();
-
-        // 跑独立 turn
-        let reply = agent
-            .run_isolated_turn("do the task", "cron", cron_sid)
-            .await;
-        assert!(reply.is_ok(), "run_isolated_turn failed: {:?}", reply.err());
-        assert_eq!(reply.unwrap(), "cron reply");
-
-        // 验证恢复：session_id 和 context 都回到原状
-        assert_eq!(agent.session_id, original_session_id);
-        assert_eq!(agent.context.history.len(), original_history_len);
-        assert_eq!(agent.context.history[0].content.as_text(), "prior user msg");
-        assert_eq!(
-            agent.context.history[1].content.as_text(),
-            "prior assistant msg"
-        );
-    }
-
-    /// 回归（dream stage2 挂 600s×3 的真根因）：回复 delta 数超过事件 channel 容量（64）时
-    /// `handle_input` 必须正常完成。旧实现等 turn 结束才 drain channel，第 65 次
-    /// `event_tx.send().await` 永久阻塞（接收端未启动）→ 整个 turn 冻结到 600s 顶层超时。
-    /// dream stage2 输出完整 MEMORY 文件（逐 token delta 必然超 64）故必挂，stage1 短回复侥幸不挂。
+    /// 回归：回复 delta 数超过事件 channel 容量（64）时 `handle_input` 必须正常完成。
+    /// 旧实现等 turn 结束才 drain channel，第 65 次 `event_tx.send().await` 永久阻塞
+    /// （接收端未启动）→ 整个 turn 冻结到 600s 顶层超时（长回复逐 token delta 必然超 64）。
     #[tokio::test]
     async fn test_handle_input_no_deadlock_over_channel_capacity() {
         // 100 个 delta，远超 channel(64) 容量
@@ -2053,31 +1905,6 @@ mod tests {
         .unwrap();
         assert!(reply.starts_with("t0 t1 "));
         assert!(reply.contains("t99 "));
-    }
-
-    /// 回归（issue 2026-08-18 cron 隔离 turn 超时）：dream 两阶段的隔离 turn 必须把
-    /// `disable_thinking=true` 一路透传到 provider 请求，并关掉工具暴露。思考没关时
-    /// 推理模型会持续吐 reasoning chunk 刷新空闲计时，直到 600s 顶层超时才被 kill。
-    #[tokio::test]
-    async fn test_isolated_turn_propagates_disable_thinking_and_tools() {
-        let rounds = vec![vec![StreamEvent::TextDelta("ok".into()), StreamEvent::Done]];
-        let seen = Arc::new(StdMutex::new(Vec::new()));
-        let mut agent = make_agent_with_rounds_seen(true, rounds, seen.clone()).await;
-        let sid = agent
-            .session_store
-            .create_session("iso-uuid", "cron:dream:dream")
-            .unwrap();
-
-        let reply = agent
-            .run_isolated_turn_with("prompt", "cron", sid, Some("minimal system"), true, true)
-            .await
-            .unwrap();
-        assert_eq!(reply, "ok");
-        // 请求到达 provider 时：disable_thinking=true 且 tools 未暴露
-        assert_eq!(*seen.lock().unwrap(), vec![(true, false)]);
-        // turn 结束后主 agent 状态复原，普通交互不受影响
-        assert!(!agent.disable_thinking);
-        assert!(!agent.disable_tools);
     }
 
     #[tokio::test]

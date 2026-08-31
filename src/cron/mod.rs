@@ -1,4 +1,3 @@
-pub mod dream;
 pub mod runner;
 
 use crate::agent::{Agent, AgentRegistry};
@@ -35,15 +34,6 @@ pub struct CronTask {
     /// mode = "tools" 时：预定义工具链
     #[serde(default)]
     pub steps: Option<Vec<Step>>,
-    /// 内置任务类型（可选）："dream" = 做梦（两阶段记忆整理），由专用编排入口处理，
-    /// 不走普通 run_agent_mode。其它任务留空。
-    #[serde(default)]
-    pub kind: Option<String>,
-    /// 空闲门控（分钟）：距最后一条用户消息不足该时长则跳过。
-    /// 目前仅由内置任务（kind="dream"）的专用编排读取；普通 agent/tools 任务为兼容字段、不生效。
-    /// 0 / 留空 = 不门控。
-    #[serde(default)]
-    pub idle_minutes: Option<u64>,
 }
 
 fn default_enabled() -> bool {
@@ -159,18 +149,6 @@ impl CronScheduler {
                 .map_err(|e| anyhow::anyhow!("add cron job '{}': {}", task.id, e))?;
             job_uuids_map.insert(task.id.clone(), uuid);
         }
-
-        // 播种内置 dream 任务：cron.toml 未定义任何 kind="dream" 任务时，注入默认做梦任务。
-        // 用户可在 cron.toml 自定义（改名/改 schedule/关掉），均被尊重。
-        seed_builtin_dream(
-            &scheduler,
-            &pushers,
-            &registry,
-            timezone,
-            &mut tasks_map,
-            &mut job_uuids_map,
-        )
-        .await?;
 
         scheduler
             .start()
@@ -364,18 +342,7 @@ impl CronScheduler {
             job_uuids_map.insert(task.id.clone(), uuid);
         }
 
-        // 3. dream 种子（与 start 同逻辑：cron.toml 无 dream 任务时补种）
-        seed_builtin_dream(
-            &self.scheduler,
-            &self.pushers,
-            &self.registry,
-            self.timezone,
-            &mut tasks_map,
-            &mut job_uuids_map,
-        )
-        .await?;
-
-        // 4. 更新缓存
+        // 3. 更新缓存
         *self.tasks.lock().await = tasks_map;
         *self.job_uuids.lock().await = job_uuids_map;
         tracing::info!("CronScheduler reloaded (hot)");
@@ -499,49 +466,6 @@ impl CronHandle {
     }
 }
 
-/// 构造 cron 的默认内置 dream 任务（每日 04:00，距上次对话 ≥30 分钟才跑）。
-fn default_dream_task() -> CronTask {
-    CronTask {
-        id: "dream".into(),
-        schedule: "0 4 * * *".into(), // 每日 04:00
-        mode: CronMode::Agent,
-        channel: "cli".into(),
-        enabled: true,
-        prompt: None,
-        steps: None,
-        kind: Some("dream".into()),
-        idle_minutes: Some(30), // 距上次对话 ≥30 分钟才跑
-    }
-}
-
-/// 播种内置 dream 任务：cron.toml 已定义任何 `kind="dream"` 任务则跳过（尊重用户
-/// 自定义，无论改名/改 schedule/关掉），否则注入 [`default_dream_task`] 并注册到调度器。
-async fn seed_builtin_dream(
-    scheduler: &tokio_cron_scheduler::JobScheduler,
-    pushers: &HashMap<String, Arc<dyn ProactivePusher>>,
-    registry: &Arc<AgentRegistry>,
-    tz: Option<Tz>,
-    tasks_map: &mut HashMap<String, CronTask>,
-    job_uuids_map: &mut HashMap<String, uuid::Uuid>,
-) -> anyhow::Result<()> {
-    if tasks_map
-        .values()
-        .any(|t| t.kind.as_deref() == Some("dream"))
-    {
-        return Ok(());
-    }
-    let dream_task = default_dream_task();
-    let job = build_job(&dream_task, pushers, registry, tz)?;
-    let uuid = scheduler
-        .add(job)
-        .await
-        .map_err(|e| anyhow::anyhow!("add builtin dream job: {}", e))?;
-    tasks_map.insert(dream_task.id.clone(), dream_task.clone());
-    job_uuids_map.insert(dream_task.id.clone(), uuid);
-    tracing::info!("seeded builtin dream cron task (daily 04:00, idle>=30min)");
-    Ok(())
-}
-
 /// 构造一个 cron Job：捕获 agent / task / pusher，到点调用 runner::run_task。
 /// `tz` 为调度时区：Some 时按该时区解释 cron 表达式（如 Asia/Shanghai），
 /// None 时退化为 UTC（与历史行为一致，但会与本地时间偏差）。
@@ -611,17 +535,14 @@ fn validate_task(task: &CronTask) -> anyhow::Result<()> {
     }
     match task.mode {
         CronMode::Agent => {
-            // dream 等内置任务由专用编排入口自带 prompt，允许 prompt 为空
-            let is_builtin = task.kind.as_deref() == Some("dream");
-            if !is_builtin
-                && task
-                    .prompt
-                    .as_ref()
-                    .map(|p| p.trim().is_empty())
-                    .unwrap_or(true)
+            if task
+                .prompt
+                .as_ref()
+                .map(|p| p.trim().is_empty())
+                .unwrap_or(true)
             {
                 anyhow::bail!(
-                    "cron task '{}' mode=agent requires non-empty prompt (or kind=dream)",
+                    "cron task '{}' mode=agent requires non-empty prompt",
                     task.id
                 );
             }

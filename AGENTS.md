@@ -160,7 +160,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 - `whitelist`：已废弃，加载时 warn 并 fallback 到 `none`
 
 CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道）/ `llaia init`（生成配置骨架）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
-斜杠命令：`/new` `/exit` `/stop` `/compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/dream` `/dream-rollback` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
+斜杠命令：`/new` `/exit` `/stop` `/compact` `/memory-compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
 
 > **敏感信息 .env 自动化（P5 S1）**：`src/config/secrets.rs`。WebUI `PUT /api/config` 保存时，明文敏感字段（provider api_key、频道 token/secret、搜索 key、TTS key、webui token）**先写入 `<config_dir>/.env`**（幂等 upsert、Unix 0600 权限），config.toml 只保留 `${VAR}` 引用；内存态再展开回明文供热加载（`build_provider_from_config` 不认 `${VAR}`）。`.env` 写入失败 → 保留明文 + warn 降级。存量迁移用 `/migrate-secrets`（toml_edit 定点替换保注释）；启动时扫描明文敏感字段并 warn。`GET /api/config` 返回时敏感字段掩码为 `••••`（保存时空输入 = 保留原值，见 `mask_sensitive`/`merge_masked`）。
 

@@ -280,7 +280,7 @@ END;
 
     pub fn latest_session(&self) -> Result<Option<(i64, String)>> {
         let conn = self.conn.lock().unwrap();
-        // 排除 cron/dream 自动会话：主对话 session 的 source 为 main/web/cli 等，
+        // 排除 cron 自动会话：主对话 session 的 source 为 main/web/cli 等，
         // 而复活的 cron 会话会把 last_activity 刷到最新，若不加过滤会把主对话路由进
         // cron 会话（ADR-0013 会话隔离）。详见 cron 任务诊断。
         let mut stmt = conn.prepare(
@@ -586,72 +586,7 @@ END;
         Ok(())
     }
 
-    // ---- 做梦（Dream）相关 ----
-
-    /// 做梦游标：已处理到的 messages.id 上限。
-    /// 首读自动迁移为「当前最大 id」，即做梦不会重放整段老历史。
-    pub fn get_last_dream_message_id(&self) -> Result<i64> {
-        if let Some(v) = self.get_kv("last_dream_message_id")? {
-            if let Ok(n) = v.parse::<i64>() {
-                return Ok(n);
-            }
-        }
-        // 迁移：置为当前最大 id
-        let max_id: i64 = {
-            let conn = self.conn.lock().unwrap();
-            conn.query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |r| {
-                r.get(0)
-            })?
-        };
-        self.set_kv("last_dream_message_id", &max_id.to_string())?;
-        Ok(max_id)
-    }
-
-    /// 推进做梦游标。
-    pub fn set_last_dream_message_id(&self, id: i64) -> Result<()> {
-        self.set_kv("last_dream_message_id", &id.to_string())
-    }
-
-    /// 读取 id > `after_id` 的增量消息（排除 cron: 会话自身，防做梦轮被自己消化），
-    /// 按 id 升序、最多 limit 条。返回内容串好的文本，供做梦蒸馏。
-    pub fn messages_after(&self, after_id: i64, limit: i64) -> Result<Vec<MessageRow>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT m.id, m.session_id, m.role, m.content, m.reasoning_content, m.created_at
-             FROM messages m
-             JOIN sessions s ON s.id = m.session_id
-             WHERE m.id > ?1 AND s.channel NOT LIKE 'cron:%'
-             ORDER BY m.id ASC LIMIT ?2",
-        )?;
-        let rows: Result<Vec<MessageRow>, _> = stmt
-            .query_map(rusqlite::params![after_id, limit], |row| {
-                Ok(MessageRow {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    role: row.get(2)?,
-                    content: row.get(3)?,
-                    reasoning_content: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })?
-            .collect();
-        Ok(rows?)
-    }
-
-    /// 最近一条用户消息（role='user'）的创建时间（RFC3339 字符串）。
-    /// 用于做梦的空闲门控：距上次对话多久。
-    pub fn last_user_message_time(&self) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT m.created_at
-             FROM messages m
-             JOIN sessions s ON s.id = m.session_id
-             WHERE m.role = 'user' AND s.channel NOT LIKE 'cron:%'
-             ORDER BY m.id DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query([])?;
-        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
-    }
+    // ---- cron 会话过滤 ----
 
     /// 按 channel 前缀查询会话（用于 cron 历史过滤，channel LIKE 'cron:%'）。
     /// 按 last_activity 降序，最多 200 条。
@@ -939,47 +874,6 @@ mod tests {
         assert_eq!(store.get_kv("k").unwrap(), Some("v".to_string()));
         store.set_kv("k", "v2").unwrap();
         assert_eq!(store.get_kv("k").unwrap(), Some("v2".to_string()));
-    }
-
-    #[test]
-    fn test_dream_cursor_migration_and_advance() {
-        let store = SessionStore::open_in_memory().unwrap();
-        let sid1 = store.create_session("s1", "cli").unwrap();
-        let sid2 = store.create_session("s2", "cli").unwrap();
-        let _m1 = store.append_message(sid1, &Role::User, "a").unwrap();
-        let _m2 = store.append_message(sid2, &Role::Assistant, "b").unwrap();
-        let _m3 = store.append_message(sid1, &Role::User, "c").unwrap();
-        // 首读：迁移为当前最大 id（3），不重放历史
-        assert_eq!(store.get_last_dream_message_id().unwrap(), 3);
-        store.set_last_dream_message_id(3).unwrap();
-        assert_eq!(store.get_last_dream_message_id().unwrap(), 3);
-    }
-
-    #[test]
-    fn test_messages_after_excludes_cron() {
-        let store = SessionStore::open_in_memory().unwrap();
-        let sid = store.create_session("s1", "cli").unwrap();
-        let m1 = store.append_message(sid, &Role::User, "u1").unwrap();
-        let _m2 = store.append_message(sid, &Role::Assistant, "a1").unwrap();
-        let _cron_sid = store.create_session("dream1", "cron:dream").unwrap();
-        let after = store.messages_after(0, 100).unwrap();
-        assert_eq!(after.len(), 2);
-        assert!(after.iter().all(|m| m.id <= m1 + 1));
-        // 推进游标后只取新消息
-        let later = store.messages_after(m1, 100).unwrap();
-        assert_eq!(later.len(), 1);
-        assert_eq!(later[0].content, "a1");
-    }
-
-    #[test]
-    fn test_last_user_message_time() {
-        let store = SessionStore::open_in_memory().unwrap();
-        let sid = store.create_session("s1", "cli").unwrap();
-        store.append_message(sid, &Role::Assistant, "ai").unwrap();
-        store.append_message(sid, &Role::User, "human").unwrap();
-        let t = store.last_user_message_time().unwrap();
-        assert!(t.is_some());
-        assert!(t.unwrap().contains('T'));
     }
 
     // ---- P5 W1 WebUI 会话历史 ----

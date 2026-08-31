@@ -13,7 +13,7 @@ LLAIA 用三份核心 Markdown 文件 + 一个 SQLite 数据库来持久化"它�
 | `MEMORY.md` | 长期事实记忆（分条） | agent 通过 `memory_write` 工具 / `llaia remember` / `/remember` |
 | `reminder.md` | 自动生成的抗漂移要点（勿手改） | agent 自动维护 |
 
-`SOUL.md` 与 `USER.md` 永驻上下文（压缩时不会丢）；`MEMORY.md` 是事实记忆，会被「做梦」定期整理。
+`SOUL.md` 与 `USER.md` 永驻上下文（压缩时不会丢）；`MEMORY.md` 是事实记忆。
 
 ## Tail Reminder（抗长会话漂移）
 
@@ -33,14 +33,12 @@ LLAIA 的对策：由 LLM 从 SOUL+USER 自动提炼一份 ≤120 token 的关�
 - 用更便宜的模型压缩：`[runtime].compact_model`。
 - 更聪明的压缩策略见 [ADR-0019](../adr/0019-smart-compaction.md)。
 
-## 做梦（Dream）
+## 记忆整理
 
-「做梦」是两阶段记忆整理：把零散对话沉淀为干净的长期记忆，写入 `MEMORY.md`。
+内置**没有**自动改写 `MEMORY.md` 的机制（原「做梦」已移除，见 [ADR-0030](../adr/0030-remove-dream.md)）。可选的替代做法：
 
-- 空闲 30 分钟自动触发一次（daily `0 4 * * *` 的兜底也保留）。
-- 手动触发：`/dream`（跳过空闲门控，立即整理）。
-- 回滚：`/dream-rollback` 把 `MEMORY.md` 恢复到最近一份 `MEMORY.backups/` 备份。
-- 备份：`MEMORY.md` 每次被做梦改写前会落到 `workspace/MEMORY.backups/`。
+- `/memory-compact`：MEMORY 超限时手动去重压缩（写前备份到 `workspace/backups/`）。
+- 自建 cron 任务：普通 agent 模式定时任务，prompt 让 agent 用 `memory_research` 检索历史、把值得记的事实**推送给你审阅**（而非直接改写 MEMORY）。
 
 ## 会话历史
 

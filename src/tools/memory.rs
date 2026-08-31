@@ -92,7 +92,7 @@ impl Tool for MemoryWrite {
             content.push('\n');
         }
         content.push_str(&line);
-        crate::memory::dream::write_memory_atomic(&self.memory_path, &content)
+        crate::memory::write_memory_atomic(&self.memory_path, &content)
             .await
             .map_err(|e| anyhow!("write memory: {}", e))?;
         Ok(format!("remembered: {}", entry))

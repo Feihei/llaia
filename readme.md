@@ -74,7 +74,7 @@ LLAIA is modular. Each capability has a dedicated user guide — start from the 
 | **Cron** | [docs/guide/cron.md](docs/guide/cron.md) | scheduled tasks (`cron.toml`): agent mode / tool-chain mode |
 | **MCP** | [docs/guide/mcp.md](docs/guide/mcp.md) | plug in external tools & data sources |
 | **Skills** | [docs/guide/skills.md](docs/guide/skills.md) | reusable workflows (`SKILL.md`, user/project level) |
-| **Memory & Context** | [docs/guide/memory-and-context.md](docs/guide/memory-and-context.md) | SOUL/USER/MEMORY, sessions.db, compaction, dream |
+| **Memory & Context** | [docs/guide/memory-and-context.md](docs/guide/memory-and-context.md) | SOUL/USER/MEMORY, sessions.db, compaction |
 | **Slash Commands** | [docs/guide/slash-commands.md](docs/guide/slash-commands.md) | in-session `/` commands |
 | **Tools** | [docs/guide/tools.md](docs/guide/tools.md) | built-in tools (file / terminal / web / search / memory / delegate) |
 | **Permissions & Safety** | [docs/guide/permissions.md](docs/guide/permissions.md) | permission profiles, interactive approval, hard boundaries |

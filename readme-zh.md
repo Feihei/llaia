@@ -74,7 +74,7 @@ LLAIA 是模块化的。每个能力都有专门的用户指南——从你需�
 | **定时任务 Cron** | [docs/guide/cron.md](docs/guide/cron.md) | 计划任务（`cron.toml`）：agent 模式 / 工具链模式 |
 | **MCP** | [docs/guide/mcp.md](docs/guide/mcp.md) | 接入外部工具与数据源 |
 | **技能 Skills** | [docs/guide/skills.md](docs/guide/skills.md) | 可复用工作流（`SKILL.md`，用户级 / 项目级） |
-| **记忆与上下文** | [docs/guide/memory-and-context.md](docs/guide/memory-and-context.md) | SOUL/USER/MEMORY、sessions.db、压缩、dream |
+| **记忆与上下文** | [docs/guide/memory-and-context.md](docs/guide/memory-and-context.md) | SOUL/USER/MEMORY、sessions.db、压缩 |
 | **斜杠命令** | [docs/guide/slash-commands.md](docs/guide/slash-commands.md) | 会话内 `/` 命令 |
 | **工具** | [docs/guide/tools.md](docs/guide/tools.md) | 内置工具（文件 / 终端 / 网页 / 搜索 / 记忆 / 委派） |
 | **权限与安全** | [docs/guide/permissions.md](docs/guide/permissions.md) | 权限档案、交互式批准、硬性边界 |

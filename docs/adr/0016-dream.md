@@ -1,6 +1,6 @@
 # ADR-0016: 「做梦」——闲时自动整理记忆
 
-- 状态：Accepted（2026-08-11 增补两阶段管线设计）
+- 状态：Superseded by [ADR-0030](0030-remove-dream.md)（2026-08-31 整体移除做梦机制；本文仅存历史）
 - 日期：2026-08-10
 - 关联：[ADR-0013 cron 定时任务调度](0013-cron-scheduling.md)、[docs/plan.md P4](../../plan.md)
 - 参考实现：nanobot 的 Dream 两阶段设计（Consolidator → `history.jsonl`；Dream → 手术式编辑 SOUL/USER/MEMORY.md，git 版本化）

@@ -75,8 +75,6 @@ async fn test_run_tools_mode_signature_compiles() {
                 args: json!({"text": "done {{now}}"}),
             },
         ]),
-        kind: None,
-        idle_minutes: None,
     };
     let pusher = Arc::new(MockPusher {
         messages: tokio::sync::Mutex::new(vec![]),
@@ -95,8 +93,6 @@ async fn test_run_agent_mode_signature_compiles() {
         enabled: true,
         prompt: Some("hello".into()),
         steps: None,
-        kind: None,
-        idle_minutes: None,
     };
     let _pusher = Arc::new(MockPusher {
         messages: tokio::sync::Mutex::new(vec![]),

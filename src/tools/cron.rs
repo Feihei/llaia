@@ -272,8 +272,6 @@ fn parse_task(args: &Value) -> Result<CronTask> {
         enabled,
         prompt,
         steps,
-        kind: None,
-        idle_minutes: None,
     })
 }
 
@@ -300,8 +298,6 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 /// 之前 update 与 create 共用 `parse_task`——要求 id/schedule/mode/channel/prompt 全量字段。
 /// 后果是「只改个推送时间」也必须把 prompt 整段重打一遍，而模型是凭记忆重打的：
 /// morning_news 的 prompt 就这么被静默改短（丢了「同一个 URL 不要重复抓取，抓完立即总结」）。
-/// 按 patch 合并同时还有一个附带修复：`kind` / `idle_minutes` 随原任务保留，
-/// 全量重建会把内置 dream 任务的 `kind="dream"` 抹掉、让它退化成普通 agent 任务。
 /// 合并结果不合法（如切到 tools 却没给 steps）由 `scheduler.update_task` 里的
 /// `validate_task` 统一拒绝，这里不重复一套校验。
 fn merge_task_patch(mut task: CronTask, args: &Value) -> Result<CronTask> {
@@ -509,8 +505,6 @@ mod tests {
             enabled: true,
             prompt: Some(NEWS_PROMPT.into()),
             steps: None,
-            kind: None,
-            idle_minutes: None,
         }
     }
 
@@ -524,21 +518,6 @@ mod tests {
         assert_eq!(t.prompt.as_deref(), Some(NEWS_PROMPT));
         assert_eq!(t.channel, "qq");
         assert!(t.enabled);
-    }
-
-    #[test]
-    fn test_patch_preserves_builtin_kind_and_idle_gate() {
-        // 全量重建会把 kind="dream" 抹掉，内置做梦任务会退化成普通 agent 任务
-        let mut base = agent_task();
-        base.id = "dream".into();
-        base.prompt = None;
-        base.kind = Some("dream".into());
-        base.idle_minutes = Some(30);
-        let args = json!({"action": "update", "id": "dream", "schedule": "0 5 * * *"});
-        let t = merge_task_patch(base, &args).unwrap();
-        assert_eq!(t.kind.as_deref(), Some("dream"));
-        assert_eq!(t.idle_minutes, Some(30));
-        assert_eq!(t.schedule, "0 5 * * *");
     }
 
     #[test]

@@ -40,7 +40,7 @@
 ## 怎么备份 / 回滚记忆？
 
 - `sessions.db` 是会话历史 source of truth，直接备份文件即可。
-- `MEMORY.md` 被「做梦」改写前会存 `workspace/MEMORY.backups/`；`/dream-rollback` 一键回滚到最近备份。
+- `MEMORY.md` 直接备份文件即可；内置不再有自动改写它的机制（见 [ADR-0030](../adr/0030-remove-dream.md)），`/memory-compact` 压缩前会备份到 `workspace/backups/`。
 
 ## 想从头重来
 

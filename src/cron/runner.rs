@@ -240,37 +240,16 @@ pub async fn run_agent_mode(
     }
 }
 
-/// 执行一个 cron 任务：内置任务（kind）走专用编排，否则按 mode 分发。
+/// 执行一个 cron 任务：按 mode 分发。
 pub async fn run_task(
     agent: Arc<tokio::sync::Mutex<Agent>>,
     task: &CronTask,
     pusher: &dyn ProactivePusher,
 ) {
     let task_id = task.id.clone();
-    let result = if task.kind.as_deref() == Some("dream") {
-        // 做梦两阶段管线：独立编排入口，不使用通用 agent 模式 turn
-        let mut a = agent.lock().await;
-        match crate::cron::dream::run_dream(&mut a, &task.id, task.idle_minutes.unwrap_or(0), false)
-            .await
-        {
-            Ok(summary) => {
-                if let Err(e) = pusher.push(&summary).await {
-                    tracing::warn!(error = %e, task = %task.id, "push dream summary failed");
-                }
-                Ok(())
-            }
-            Err(e) => {
-                let msg = format!("[cron:{} failed] dream: {}", task.id, e);
-                tracing::error!("{}", msg);
-                let _ = pusher.push(&msg).await;
-                Err(anyhow::anyhow!(msg))
-            }
-        }
-    } else {
-        match task.mode {
-            CronMode::Agent => run_agent_mode(agent, task, pusher).await,
-            CronMode::Tools => run_tools_mode(agent, task, pusher).await,
-        }
+    let result = match task.mode {
+        CronMode::Agent => run_agent_mode(agent, task, pusher).await,
+        CronMode::Tools => run_tools_mode(agent, task, pusher).await,
     };
     if let Err(e) = result {
         tracing::error!(task = %task_id, error = %e, "cron task failed");

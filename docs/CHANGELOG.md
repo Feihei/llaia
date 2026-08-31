@@ -6,6 +6,13 @@
 
 ---
 
+## v0.3.2 (unreleased)
+
+**Breaking / 架构简化**
+- **memory**：整体移除「做梦」（dream）记忆自动整理机制（[ADR-0030](adr/0030-remove-dream.md)，取代 [ADR-0016](adr/0016-dream.md)）：harness 层不再有无人值守自动改写 `MEMORY.md` 的路径；`MEMORY.md` 变更只剩 `memory_write` / `/remember` 确定性写入与 `/memory-compact` 手动压缩。同步删除 `/dream`、`/dream-rollback` 斜杠命令、`CronTask` 的 `kind` / `idle_minutes` 字段与内置任务播种、sqlite dream 游标、agent 侧 `run_isolated_turn(_with)` 专用机制；`write_memory_atomic` 迁至 `src/memory/mod.rs` 供 `memory_write` 继续使用。替代做法：自建普通 cron 任务（prompt + `memory_research` 检索历史、产物推送人工审阅）。存量数据无需迁移（`dream_draft.md` / `MEMORY.backups/` 可手动清理；cron.toml 中如有 `kind = "dream"` 任务段请手删）。
+
+---
+
 ## v0.3.1 (2026-08-24)
 
 **Milestone**: P6 稳定性修复 + 快赢项。源自 `docs/issues/issues.md` 的 9 个问题评估（详见 [plan.md](plan.md) P6 节）。
