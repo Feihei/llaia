@@ -75,13 +75,24 @@ impl Tool for MemoryWrite {
 
         let _g = self.lock.lock().await;
         let today = crate::time::now(&self.timezone).ymd();
+        // MEMORY.md 的契约是一行一条：折叠 entry 内部换行，避免写出解析不了的裸行
+        let entry = entry
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
         let line = format!("- [{}] {}\n", today, entry);
 
         let mut content = tokio::fs::read_to_string(&self.memory_path)
             .await
             .unwrap_or_default();
+        // 缺尾换行时先补一个，否则新条目会粘在最后一条记忆的同一行上，两条一起报废
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
         content.push_str(&line);
-        tokio::fs::write(&self.memory_path, &content)
+        crate::memory::dream::write_memory_atomic(&self.memory_path, &content)
             .await
             .map_err(|e| anyhow!("write memory: {}", e))?;
         Ok(format!("remembered: {}", entry))
