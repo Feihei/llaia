@@ -14,8 +14,6 @@ function llaiaApp() {
     // todo (ADR-0024, read-only display; v1 no click-to-toggle from UI)
     todos: [],
     questions: [],
-    // 长期目标（ADR-0021，只读展示）
-    goal: null,
     // 环境探测（P6，只读展示）
     env: '',
     doctorChecks: [],
@@ -178,9 +176,6 @@ function llaiaApp() {
           // ask_user（ADR-0022）：只读轮询待回答问题
           this.loadQuestions();
           this._questionTimer = setInterval(() => this.loadQuestions(), 5000);
-          // 长期目标（ADR-0021）：只读轮询 goal.md 状态
-          this.loadGoal();
-          this._goalTimer = setInterval(() => this.loadGoal(), 5000);
           // 环境探测（P6）：变化低频，登录时加载一次 + 手动刷新
           this.loadEnv();
         }
@@ -219,15 +214,6 @@ function llaiaApp() {
         if (r.ok) {
           const j = await r.json();
           this.questions = j.questions || [];
-        }
-      } catch (e) { /* 非致命：UI 静默跳过 */ }
-    },
-    async loadGoal() {
-      try {
-        const r = await this.apiFetch('/api/goal');
-        if (r.ok) {
-          const j = await r.json();
-          this.goal = j.goal || null;
         }
       } catch (e) { /* 非致命：UI 静默跳过 */ }
     },

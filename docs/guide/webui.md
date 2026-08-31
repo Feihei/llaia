@@ -27,7 +27,6 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 
 - **TODO**：当前会话的任务清单（agent 用 `todo` 工具维护）。
 - **QUESTIONS**：agent 通过 `ask_user` 抛出的待回答问题。
-- **GOAL**：当前长期目标（`/goal` 设定）。
 - **ENV**：本机环境探测结果（工具链快照），点 Refresh 重新探测。
 
 ## 文件
@@ -60,7 +59,7 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 | `POST /api/cron/:id/trigger` | 手动触发某个任务 |
 | `GET /api/mcp` · `POST /api/mcp` · `DELETE /api/mcp` | 列出 / 增 / 删 MCP server |
 | `GET|POST|PUT|DELETE /api/skills/:name` | 技能管理 |
-| `GET /api/todos` · `GET /api/questions` · `GET /api/goal` | 只读面板数据源 |
+| `GET /api/todos` · `GET /api/questions` | 只读面板数据源 |
 | `GET /api/env` · `POST /api/env/refresh` | 环境探测缓存 / 重探 |
 | `GET /api/doctor` | 运行诊断检查 |
 | `GET /api/sessions` | 会话历史列表 / 详情 / 删除 / 导出 |

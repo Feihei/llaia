@@ -215,7 +215,9 @@ agent 通过 `skill_create` / `skill_edit` 工具直接写/改 SKILL.md（skill 
 
 ---
 
-### ✅ P5-7 长期目标 /goal（[ADR-0021](adr/0021-goal-system.md) 文件方案修订）
+### ⚠️ P5-7 长期目标 /goal（[ADR-0021](adr/0021-goal-system.md) 文件方案修订）— **已于 2026-08-31 撤销**
+
+> **撤销（2026-08-31，随 v0.3.2 移除）**：交付后从未产生真实使用，且结构性问题大于收益——单活跃目标存放在 agent 家目录一份文件、跨 session 跨全部频道生效，而收尾完全依赖用户手敲 `/goal-done` 或 agent 自觉调工具，无过期机制，目标一旦作废即永久污染每轮上下文；长期意图本属 MEMORY.md（system prompt 常驻），会话内拆解本属 `todo`，属第四套平行机制。已删除：`src/goal/`、`goal` 工具、`/goal` `/goal-list` `/goal-done` `/goal-cancel`、`Context.goal_state` 注入、`GET /api/goal` 与 WebUI GOAL 面板。理由与后续重立项条件见 [ADR-0021 撤销节](adr/0021-goal-system.md)。**下方保留为原交付记录。**
 
 把跨 session 持续推进的「长期目标」持久化为 `goal.md` 文件（**不进 `sessions` schema**，零迁移），每轮从文件重新注入 Runtime Context。
 

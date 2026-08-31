@@ -2,7 +2,6 @@ use crate::agent::approval::{format_move_prompt, validate_move_target, PendingKi
 use crate::agent::Agent;
 use crate::agent::AgentRegistry;
 use crate::config::Config;
-use crate::goal::{read_goal, set_goal, update_status, GoalStatus};
 use crate::memory::markdown::compress_memory;
 use anyhow::Result;
 use serde_json::json;
@@ -43,7 +42,7 @@ pub async fn try_handle(
     match cmd_lc.as_str() {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /goal <text> /goal-list /goal-done /goal-cancel /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /dream /dream-rollback /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -245,7 +244,7 @@ pub async fn try_handle(
             }
         }
         "/stats" => {
-            // 文本部分（system/summary/history/状态栏/todo/goal/env）+ tool definitions
+            // 文本部分（system/summary/history/状态栏/todo/env）+ tool definitions
             // （实际发送给 provider 的 tools JSON schema）合并估算，避免低估真实发送量。
             let tokens = agent.context.estimate_tokens();
             let tools_json = serde_json::to_string(&agent.tools.specs()).unwrap_or_default();
@@ -369,55 +368,6 @@ tools: {}
                     restored.display()
                 ))),
                 Err(e) => Ok(SlashOutcome::Handled(format!("[dream-rollback failed: {}]", e))),
-            }
-        }
-        "/goal" => {
-            // 设定/重置长期目标（覆盖式）。落盘到 agent 家目录 goal.md。
-            if args.is_empty() {
-                return Ok(SlashOutcome::Handled(
-                    "usage: /goal <objective text> — set or reset the long-term goal".into(),
-                ));
-            }
-            match set_goal(&agent.workspace, args) {
-                Ok(p) => Ok(SlashOutcome::Handled(format!(
-                    "[goal set] active. persisted to {}\nobjective: {}",
-                    p.display(),
-                    args
-                ))),
-                Err(e) => Ok(SlashOutcome::Handled(format!("[goal failed: {}]", e))),
-            }
-        }
-        "/goal-list" => {
-            // 只读展示当前目标状态。
-            match read_goal(&agent.workspace) {
-                Some(g) => {
-                    let mut s = String::from("current goal:\n");
-                    s.push_str(&format!("status: {}\n", g.status.as_str()));
-                    if let Some(c) = &g.created_at {
-                        s.push_str(&format!("created_at: {c}\n"));
-                    }
-                    if let Some(u) = &g.updated_at {
-                        s.push_str(&format!("updated_at: {u}\n"));
-                    }
-                    s.push_str(&format!("objective: {}\n", g.objective));
-                    s.push_str(&format!("progress: {}", g.progress));
-                    Ok(SlashOutcome::Handled(s))
-                }
-                None => Ok(SlashOutcome::Handled(
-                    "[no goal set] use /goal <text> to define a long-term objective".into(),
-                )),
-            }
-        }
-        "/goal-done" => {
-            match update_status(&agent.workspace, GoalStatus::Done) {
-                Ok(()) => Ok(SlashOutcome::Handled("[goal marked done]".into())),
-                Err(e) => Ok(SlashOutcome::Handled(format!("[goal-done failed: {}]", e))),
-            }
-        }
-        "/goal-cancel" => {
-            match update_status(&agent.workspace, GoalStatus::Cancelled) {
-                Ok(()) => Ok(SlashOutcome::Handled("[goal cancelled]".into())),
-                Err(e) => Ok(SlashOutcome::Handled(format!("[goal-cancel failed: {}]", e))),
             }
         }
         "/skill" => {

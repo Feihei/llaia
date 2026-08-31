@@ -143,7 +143,7 @@
 
 **#B /move 后的目录信任模型（分析·待决策，未实现）**
 
-- 现状：`approval_decision` 的 `workspace` 参数取自 `workspace_root`（`mod.rs:927`），/move 后**目录内**的 file/terminal 操作在 default 档本就自动放行（`within→Approved`）。因此「每次都批准」仅出现在**逃出被移动目录**的操作：绝对路径指向别处、`..` 上退、terminal 触碰 moved 目录之外（含 agent 自家 home workspace 的 goal.md/MEMORY 等记账文件）→ 每次 /ok。
+- 现状：`approval_decision` 的 `workspace` 参数取自 `workspace_root`（`mod.rs:927`），/move 后**目录内**的 file/terminal 操作在 default 档本就自动放行（`within→Approved`）。因此「每次都批准」仅出现在**逃出被移动目录**的操作：绝对路径指向别处、`..` 上退、terminal 触碰 moved 目录之外（含 agent 自家 home workspace 的 reminder.md/MEMORY 等记账文件）→ 每次 /ok。
 - 用户诉求：一次 /move 批准后应信任该目录，且 move 审批信息里提醒信任范围。
 - 已落最小改动：`format_move_prompt` 提示补充「切换后该目录内的文件读写/终端命令默认放行，仅目录外的路径仍需审批」（`approval.rs`）。
 - 待决设计（需选型，暂不实现）：
@@ -169,7 +169,7 @@
 - **与 /move 耦合（用户补充**：移动到 workspace 外目录往往意味着「在该目录执行主线以外的任务」→ 可作为**自动触发任务 session 的信号**：/move 到外部目录时，提示把该目录绑定为一个新任务 session（绑定目录 + 独立上下文）。这与 #B 的「受信目录」天然成一套：**任务 session = 受信目录 + 独立上下文边界**。
 - 待决问题（勿提前实现）：
   - 触发边界：显式 `/task <名>` +/move 自动建议为主，规则猜测不可靠。
-  - 可发现性：需任务列表/入口；评估能否合并现有 goal/todo，避免三套平行「有边界的事」。
+  - 可发现性：需任务列表/入口；评估能否合并现有 todo，避免两套平行「有边界的事」。
   - 任务 session 持久化：独立上下文如何落 sqlite（session 类型字段 + 关联目录？）。
   - 跨频道进出任务：换频道能否回到某任务线。
 

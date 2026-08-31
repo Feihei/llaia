@@ -52,7 +52,7 @@ MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消�
 
 > **系统提示词 MEMORY 上限（ADR-0025）**：`build_single_agent` 把 MEMORY.md **全量**塞进 `system_prompt_base`，但在拼装前经 `src/memory/trim.rs::trim_memory_to_budget` 按 `[agent.<alias>].memory_token_budget`（默认 4000，chars/4 启发式）裁剪——超限时最旧溢出段交给 `compact_provider` 摘要、无则硬截断保留近期；SOUL/USER **永留全量、不计入预算**。裁剪结果由 `init_system_meta` 缓存，全频道共享且 skill 热重载稳定。主动持久化压缩用斜杠命令 `/memory-compact`（写前备份到 `workspace/backups/`）。
 
-> **Tail Reminder 自动生成（P6，`src/agent/reminder.rs`）**：长会话风格漂移的根因是 LLM 自我模仿 + 中段注意力稀释（SOUL/USER 结构上每轮完整重发，并未丢失）。对策：回合起点对 SOUL+USER 求 md5，与 `workspace/reminder.md` 记录的 hash 失配（或缺失）时**后台隔离 turn** 让 LLM 提炼 ≤120 token 的行为指令清单（走 compact_provider 回退主模型），写盘后下一轮作为请求**最后一条消息**注入（`Context.reminder`，排在状态栏/todo/goal/env 之后）。MEMORY/skills 不参与 hash（避免 memory_write 频繁重生成）；生成失败静默降级；文件头注释声明勿手改。
+> **Tail Reminder 自动生成（P6，`src/agent/reminder.rs`）**：长会话风格漂移的根因是 LLM 自我模仿 + 中段注意力稀释（SOUL/USER 结构上每轮完整重发，并未丢失）。对策：回合起点对 SOUL+USER 求 md5，与 `workspace/reminder.md` 记录的 hash 失配（或缺失）时**后台隔离 turn** 让 LLM 提炼 ≤120 token 的行为指令清单（走 compact_provider 回退主模型），写盘后下一轮作为请求**最后一条消息**注入（`Context.reminder`，排在状态栏/todo/env 之后）。MEMORY/skills 不参与 hash（避免 memory_write 频繁重生成）；生成失败静默降级；文件头注释声明勿手改。
 
 > **两个 `workspace` 的区别**：agent 家目录（SOUL/USER/MEMORY/sessions.db 所在，**固定不变**，位于 `config_dir/workspace/`）与文件/终端工具的实时作用域 `workspace_root`（可被 `/move` 切换）。`migrate.rs` 在 v0.2 后将旧版散落在 `~/.llaia/` 根的文件自动迁入 `workspace/`（写 `.migrated_v0.2` 标记，幂等）。
 
@@ -135,7 +135,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 | `send_media` | `tools/send_media` | 向频道回传图片/文件等媒体 |
 | `tts` | `tools/tts` | 文本合成语音（`[tools.tts]` 配置，OpenAI 兼容 `/audio/speech`，产物落 workspace/tts/，发送走 `send_file`；P5 T1） |
 
-> **环境探测（P5 E1，非工具）**：`src/envprobe.rs` 启动时对 main agent 探测一次本机工具链（shell/python/node/npm/rustc/cargo/go/git/docker，2s/命令 timeout），以 Runtime Context 尾部注入（与 todo/goal 同区，KV 缓存友好）；`/env` 命令手动刷新；WebUI 聊天页 ENV 只读面板（`GET /api/env` 缓存 / `POST /api/env/refresh` 重探）。
+> **环境探测（P5 E1，非工具）**：`src/envprobe.rs` 启动时对 main agent 探测一次本机工具链（shell/python/node/npm/rustc/cargo/go/git/docker，2s/命令 timeout），以 Runtime Context 尾部注入（与 todo 同区，KV 缓存友好）；`/env` 命令手动刷新；WebUI 聊天页 ENV 只读面板（`GET /api/env` 缓存 / `POST /api/env/refresh` 重探）。
 
 > **WebUI Doctor（P6）**：`commands::doctor_checks`（结构化版 CLI doctor）：provider 连通性（openai_compatible 才探 `/models`，5s 超时）、主模型链、context_size 探测、`.env` 存在性+Unix 权限位、sessions.db、cron/mcp 解析、skills 计数。WebUI Config 页 Doctor section 分色展示。
 
@@ -160,7 +160,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 - `whitelist`：已废弃，加载时 warn 并 fallback 到 `none`
 
 CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道）/ `llaia init`（生成配置骨架）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
-斜杠命令：`/new` `/exit` `/stop` `/compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/dream` `/dream-rollback` `/goal <text>` `/goal-list` `/goal-done` `/goal-cancel` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
+斜杠命令：`/new` `/exit` `/stop` `/compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/dream` `/dream-rollback` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
 
 > **敏感信息 .env 自动化（P5 S1）**：`src/config/secrets.rs`。WebUI `PUT /api/config` 保存时，明文敏感字段（provider api_key、频道 token/secret、搜索 key、TTS key、webui token）**先写入 `<config_dir>/.env`**（幂等 upsert、Unix 0600 权限），config.toml 只保留 `${VAR}` 引用；内存态再展开回明文供热加载（`build_provider_from_config` 不认 `${VAR}`）。`.env` 写入失败 → 保留明文 + warn 降级。存量迁移用 `/migrate-secrets`（toml_edit 定点替换保注释）；启动时扫描明文敏感字段并 warn。`GET /api/config` 返回时敏感字段掩码为 `••••`（保存时空输入 = 保留原值，见 `mask_sensitive`/`merge_masked`）。
 

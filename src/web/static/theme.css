@@ -601,8 +601,6 @@ option { background: var(--bg-input); color: var(--text); }
 }
 .todo-mark.done { color: var(--green); }
 .todo-mark.in_progress { color: #d9b34a; }
-.todo-mark.active { color: #6c9eff; }
-.todo-mark.note { color: var(--text-dim); }
 .todo-task { white-space: pre-wrap; word-break: break-word; }
 .todo-task.done {
   text-decoration: line-through;

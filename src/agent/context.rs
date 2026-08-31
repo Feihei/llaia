@@ -14,11 +14,8 @@ pub struct Context {
     /// 规划后执行（ADR-0024）的当前 todo 清单文本，每轮由 agent 在 turn 起点写入；
     /// 作为 Runtime Context 追加到尾部（与 status_bar 同区，不进 system 前缀，KV 缓存友好）。
     pub todo_state: Option<String>,
-    /// 长期目标（/goal，ADR-0021）的注入文本：每轮 turn 起点从 goal.md 读取、
-    /// 仅 active 时注入。与 todo_state 同区，不进 system 前缀（KV 缓存友好）。
-    pub goal_state: Option<String>,
     /// 环境探测（P5 E1）的注入文本：进程启动时对 main agent 探测一次、
-    /// `/env` 命令手动刷新。与 todo/goal 同区，不进 system 前缀（KV 缓存友好）。
+    /// `/env` 命令手动刷新。与 todo 同区，不进 system 前缀（KV 缓存友好）。
     pub env_state: Option<String>,
     /// 自动生成的 Tail Reminder（P6）：LLM 从 SOUL+USER 提炼的抗漂移要点，
     /// 存 `workspace/reminder.md`，hash 失配时后台重生成。排在所有尾部消息
@@ -33,7 +30,6 @@ impl Context {
             history: Vec::new(),
             summary: None,
             todo_state: None,
-            goal_state: None,
             env_state: None,
             reminder: None,
         }
@@ -65,13 +61,6 @@ impl Context {
                 msgs.push(ChatMessage::user(todo.clone()));
             }
         }
-        // 长期目标（ADR-0021）：active 时注入，让模型每轮都知道"在朝哪个大目标推进"。
-        // 不进 system 前缀，逐轮重新从文件读取（KV 缓存友好 + 省 token，不进历史）。
-        if let Some(goal) = &self.goal_state {
-            if !goal.is_empty() {
-                msgs.push(ChatMessage::user(goal.clone()));
-            }
-        }
         // 环境探测（P5 E1）：本机工具链快照，让模型知道环境里有什么、避免建议不存在的工具。
         // 启动探测一次 + /env 手动刷新；不进 system 前缀（KV 缓存友好）。
         if let Some(env) = &self.env_state {
@@ -91,7 +80,7 @@ impl Context {
     /// 估算上下文 token 用量（chars/4 启发式，与 `memory/trim.rs` 口径一致）。
     ///
     /// 覆盖 `to_messages` 实际发送给 provider 的全部文本：system + summary +
-    /// history + 尾部状态栏 + todo/goal/env Runtime Context，另加每条消息的
+    /// history + 尾部状态栏 + todo/env Runtime Context，另加每条消息的
     /// JSON 结构开销（role/header 等，近似 8 token/条）。tool definitions 是
     /// 常量不随对话增长，由调用方按需追加（`/stats` 用 `tools.specs()` 序列化
     /// 估算；压缩判定不依赖它——相对变化不受影响）。
@@ -283,29 +272,6 @@ mod tests {
     }
 
     #[test]
-    fn test_goal_state_injected_when_set() {
-        let mut ctx = Context::new("SOUL".into());
-        ctx.push(ChatMessage::user("hi"));
-        ctx.goal_state = Some("Goal (active): ship P5 / Summary: in progress".into());
-        let msgs = ctx.to_messages(&None);
-        // 末尾两项应为 todo/goal 注入 + 状态栏；goal 在状态栏之前
-        let goal_msg = msgs
-            .iter()
-            .find(|m| m.content.as_text().contains("Goal (active): ship P5"));
-        assert!(goal_msg.is_some(), "goal line should be injected");
-    }
-
-    #[test]
-    fn test_goal_state_skipped_when_none() {
-        let mut ctx = Context::new("SOUL".into());
-        ctx.goal_state = None;
-        let msgs = ctx.to_messages(&None);
-        assert!(!msgs
-            .iter()
-            .any(|m| m.content.as_text().contains("Goal (active)")));
-    }
-
-    #[test]
     fn test_reminder_injected_last() {
         // 回归：Tail Reminder（P6）必须是最后一条消息（离生成点最近，注意力最强）
         let mut ctx = Context::new("SOUL".into());
@@ -388,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_token_estimate_includes_runtime_context() {
-        // 回归：todo/goal/env 等 Runtime Context 必须计入估算（曾漏掉导致 /stats 低估）
+        // 回归：todo/env 等 Runtime Context 必须计入估算（曾漏掉导致 /stats 低估）
         let mut ctx = Context::new("a".repeat(40));
         ctx.push(ChatMessage::user("b".repeat(40)));
         let base = ctx.estimate_tokens();
