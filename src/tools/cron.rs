@@ -65,7 +65,7 @@ impl Tool for CronTool {
                 "action": {
                     "type": "string",
                     "enum": ["create", "update", "delete", "list"],
-                    "description": "Operation type. list needs no other parameters. create requires a full task definition. update requires id plus the fields to update. delete only needs id."
+                    "description": "Operation type. list needs no other parameters. create requires a full task definition. update takes id plus ONLY the fields to change — every other field keeps its current value, so do NOT resend a prompt or schedule you do not mean to change. delete only needs id."
                 },
                 "id": {
                     "type": "string",
@@ -150,10 +150,21 @@ impl Tool for CronTool {
                 ))
             }
             "update" => {
-                let task = parse_task(args)?;
-                let id = task.id.clone();
+                let id = args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("missing 'id' for update"))?;
+                let existing = scheduler
+                    .list_tasks()
+                    .await
+                    .into_iter()
+                    .find(|t| t.id == id)
+                    .ok_or_else(|| anyhow!("cron task not found: {}", id))?;
+                // 局部 patch：只覆盖显式给出的字段，其余沿用原值（见 merge_task_patch）
+                let task = merge_task_patch(existing, args)?;
+                let summary = describe_task(&task);
                 scheduler.update_task(task).await?;
-                Ok(format!("updated cron task: {}", id))
+                Ok(format!("updated cron task: {}\n{}", id, summary))
             }
             "delete" => {
                 let id = args
@@ -218,11 +229,7 @@ fn parse_task(args: &Value) -> Result<CronTask> {
         .get("mode")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("missing 'mode'"))?;
-    let mode = match mode_str.to_lowercase().as_str() {
-        "agent" => CronMode::Agent,
-        "tools" => CronMode::Tools,
-        other => anyhow::bail!("invalid mode '{}', expected 'agent' or 'tools'", other),
-    };
+    let mode = parse_mode(mode_str)?;
 
     let channel = args
         .get("channel")
@@ -268,6 +275,80 @@ fn parse_task(args: &Value) -> Result<CronTask> {
         kind: None,
         idle_minutes: None,
     })
+}
+
+/// 解析 `mode` 字段（create 全量解析与 update 局部 patch 共用）。
+fn parse_mode(s: &str) -> Result<CronMode> {
+    match s.to_lowercase().as_str() {
+        "agent" => Ok(CronMode::Agent),
+        "tools" => Ok(CronMode::Tools),
+        other => anyhow::bail!("invalid mode '{}', expected 'agent' or 'tools'", other),
+    }
+}
+
+/// 取可选的字符串字段：未提供 **或** 提供为空串都视为「本次不改这个字段」。
+/// update 走局部 patch，空串没有语义，按不改处理最安全（不会把 prompt 意外清空）。
+fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// update 用：把 args 里**显式提供**的字段覆盖到已有任务上，其余保持原值。
+///
+/// 之前 update 与 create 共用 `parse_task`——要求 id/schedule/mode/channel/prompt 全量字段。
+/// 后果是「只改个推送时间」也必须把 prompt 整段重打一遍，而模型是凭记忆重打的：
+/// morning_news 的 prompt 就这么被静默改短（丢了「同一个 URL 不要重复抓取，抓完立即总结」）。
+/// 按 patch 合并同时还有一个附带修复：`kind` / `idle_minutes` 随原任务保留，
+/// 全量重建会把内置 dream 任务的 `kind="dream"` 抹掉、让它退化成普通 agent 任务。
+/// 合并结果不合法（如切到 tools 却没给 steps）由 `scheduler.update_task` 里的
+/// `validate_task` 统一拒绝，这里不重复一套校验。
+fn merge_task_patch(mut task: CronTask, args: &Value) -> Result<CronTask> {
+    if let Some(s) = str_arg(args, "schedule") {
+        task.schedule = s.to_string();
+    }
+    if let Some(c) = str_arg(args, "channel") {
+        task.channel = c.to_string();
+    }
+    if let Some(e) = args.get("enabled").and_then(|v| v.as_bool()) {
+        task.enabled = e;
+    }
+    if let Some(m) = str_arg(args, "mode") {
+        task.mode = parse_mode(m)?;
+    }
+    match task.mode {
+        CronMode::Agent => {
+            if let Some(p) = str_arg(args, "prompt") {
+                task.prompt = Some(p.to_string());
+                task.steps = None;
+            }
+        }
+        CronMode::Tools => {
+            if let Some(arr) = args.get("steps").and_then(|v| v.as_array()) {
+                task.steps = Some(arr.iter().map(parse_step).collect::<Result<Vec<_>>>()?);
+                task.prompt = None;
+            }
+        }
+    }
+    Ok(task)
+}
+
+/// 单个任务的完整定义（一行）。update 成功后回显用——prompt **不截断**，
+/// 否则改坏了提示词还是看不出来（`list` 为了紧凑才截断）。
+fn describe_task(t: &CronTask) -> String {
+    let mode_str = match t.mode {
+        CronMode::Agent => "agent",
+        CronMode::Tools => "tools",
+    };
+    let payload = match t.mode {
+        CronMode::Agent => format!("prompt={}", t.prompt.as_deref().unwrap_or("")),
+        CronMode::Tools => format!("{} steps", t.steps.as_ref().map(|s| s.len()).unwrap_or(0)),
+    };
+    format!(
+        "- {} | {} | mode={} | channel={} | enabled={} | {}",
+        t.id, t.schedule, mode_str, t.channel, t.enabled, payload
+    )
 }
 
 /// 解析单个 step：tool 必填，args 缺省为空对象 {}。
@@ -415,5 +496,101 @@ mod tests {
             .unwrap();
         assert!(result.contains("unknown action"));
         assert!(result.contains("foobar"));
+    }
+
+    const NEWS_PROMPT: &str = "请查今天的 AI 科技热点，整理成 3-5 条简讯推送给我。抓取不超过 3 个来源，同一个 URL 不要重复抓取，抓完立即总结。";
+
+    fn agent_task() -> CronTask {
+        CronTask {
+            id: "morning_news".into(),
+            schedule: "0 8 * * *".into(),
+            mode: CronMode::Agent,
+            channel: "qq".into(),
+            enabled: true,
+            prompt: Some(NEWS_PROMPT.into()),
+            steps: None,
+            kind: None,
+            idle_minutes: None,
+        }
+    }
+
+    #[test]
+    fn test_patch_keeps_prompt_when_only_schedule_changes() {
+        // 真实事故回归：用户只想把 8:00 改成 7:30，旧实现却要求重打全部字段，
+        // 模型凭记忆重打 prompt 时把「同一个 URL 不要重复抓取，抓完立即总结」丢了。
+        let args = json!({"action": "update", "id": "morning_news", "schedule": "30 7 * * *"});
+        let t = merge_task_patch(agent_task(), &args).unwrap();
+        assert_eq!(t.schedule, "30 7 * * *");
+        assert_eq!(t.prompt.as_deref(), Some(NEWS_PROMPT));
+        assert_eq!(t.channel, "qq");
+        assert!(t.enabled);
+    }
+
+    #[test]
+    fn test_patch_preserves_builtin_kind_and_idle_gate() {
+        // 全量重建会把 kind="dream" 抹掉，内置做梦任务会退化成普通 agent 任务
+        let mut base = agent_task();
+        base.id = "dream".into();
+        base.prompt = None;
+        base.kind = Some("dream".into());
+        base.idle_minutes = Some(30);
+        let args = json!({"action": "update", "id": "dream", "schedule": "0 5 * * *"});
+        let t = merge_task_patch(base, &args).unwrap();
+        assert_eq!(t.kind.as_deref(), Some("dream"));
+        assert_eq!(t.idle_minutes, Some(30));
+        assert_eq!(t.schedule, "0 5 * * *");
+    }
+
+    #[test]
+    fn test_patch_overwrites_only_provided_fields() {
+        let args = json!({
+            "action": "update",
+            "id": "morning_news",
+            "prompt": "换一批关键词",
+            "channel": "web",
+            "enabled": false
+        });
+        let t = merge_task_patch(agent_task(), &args).unwrap();
+        assert_eq!(t.prompt.as_deref(), Some("换一批关键词"));
+        assert_eq!(t.channel, "web");
+        assert!(!t.enabled);
+        assert_eq!(t.schedule, "0 8 * * *");
+    }
+
+    #[test]
+    fn test_patch_empty_string_is_noop() {
+        let args =
+            json!({"action": "update", "id": "morning_news", "prompt": "", "schedule": "  "});
+        let t = merge_task_patch(agent_task(), &args).unwrap();
+        assert_eq!(t.schedule, "0 8 * * *");
+        assert_eq!(t.prompt.as_deref(), Some(NEWS_PROMPT));
+    }
+
+    #[test]
+    fn test_patch_mode_switch_replaces_payload() {
+        let args = json!({
+            "action": "update",
+            "id": "morning_news",
+            "mode": "tools",
+            "steps": [{ "tool": "memory_write", "args": { "entry": "x" } }]
+        });
+        let t = merge_task_patch(agent_task(), &args).unwrap();
+        assert!(matches!(t.mode, CronMode::Tools));
+        assert_eq!(t.steps.as_ref().map(|s| s.len()), Some(1));
+        assert!(t.prompt.is_none(), "切到 tools 后应清掉另一模式的载荷");
+        assert!(describe_task(&t).contains("1 steps"));
+    }
+
+    #[test]
+    fn test_describe_task_keeps_full_prompt() {
+        // update 回显里 prompt 不截断，否则改坏了还是看不出来
+        let d = describe_task(&agent_task());
+        assert!(d.contains("抓完立即总结"), "got: {}", d);
+    }
+
+    #[test]
+    fn test_parse_mode_rejects_unknown() {
+        assert!(parse_mode("scheduel").is_err());
+        assert!(matches!(parse_mode("Tools").unwrap(), CronMode::Tools));
     }
 }
