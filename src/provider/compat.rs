@@ -115,7 +115,10 @@ impl Compat {
         // provider 预设基础
         let mut c = if lower.contains("ollama") {
             Compat::ollama()
-        } else if lower.contains("llama") {
+        } else if lower.contains("llama") || lower.contains("8080") || lower.contains("completion")
+        {
+            // llama.cpp 默认端口 8080 / 含 completion 的路径：命中 IP 型 host（如 10.0.11.187:8080）
+            // 或自建端点也能正确识别，保证流式 usage（token 统计）上报。
             Compat::llamacpp()
         } else if lower.contains("deepseek")
             || lower.contains("zhipu")
@@ -267,6 +270,21 @@ mod tests {
         assert!(c.streaming_usage);
         assert!(c.infer_finish_reason);
         assert!(!c.requires_assistant_after_tool);
+    }
+
+    #[test]
+    fn detect_llamacpp_via_port_or_path() {
+        // IP 型 host 不含 "llama"，依赖 8080 端口 / completion 路径识别（GitHub issue: stats 抓不到数据）
+        for base in [
+            "http://10.0.11.187:8080/v1", // 家用 llama.cpp，主 agent 实际配置
+            "http://192.168.1.10:8080/v1",
+            "http://server.local/completion",
+        ] {
+            let c = Compat::detect(base, "ornith-1.5-35b");
+            assert!(c.streaming_usage, "base={base}");
+            assert!(c.infer_finish_reason, "base={base}");
+            assert!(!c.requires_assistant_after_tool, "base={base}");
+        }
     }
 
     #[test]
