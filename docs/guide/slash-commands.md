@@ -21,8 +21,8 @@
 | `/deny <id>` | 拒绝一个待确认的操作。 |
 | `/move [<path>\|home]` · `/cd` | 切换工作目录；无参数 / `home` / `~` / `-` 恢复到原始 workspace；其它路径需 `/ok` 确认。 |
 | `/config` | 显示当前生效的运行参数（阈值、迭代上限、上下文大小、工具等）。 |
-| `/dream` | 手动触发一次「做梦」记忆整理。 |
-| `/dream-rollback` | 把 `MEMORY.md` 回滚到最近备份。 |
+| `/dream` | 手动触发一次「做梦」记忆整理。**不带任何参数**；带参数会被拒绝（写成 `/dream rollback` 曾被解析成 `/dream` + 参数而静默跑一次整理，让人误以为回滚已执行）。 |
+| `/dream-rollback` | 把 `MEMORY.md` 回滚到最近备份。独立命令，必须带连字符整体书写。 |
 | `/delegate-list` | 列出后台委派任务（主 agent 委派给子 agent 的异步任务）。 |
 | `/delegate-cancel <id>` | 取消某个后台委派任务。 |
 | `/help` | 打印上述命令列表。 |
