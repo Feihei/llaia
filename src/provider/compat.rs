@@ -98,9 +98,10 @@ impl Compat {
 
     /// 按 base_url host 子串 + model slug 探测兼容预设（plan #4 / #10 同一套框架）。
     ///
-    /// **第一步：provider 预设**（按 base_url host 子串）
-    /// - 含 `ollama` → ollama 预设
-    /// - 含 `llama` / `llamacpp` → llamacpp 预设
+    /// **第一步：provider 预设**（按 base_url host 子串 + 端口/路径特征）
+    /// - 含 `ollama` → ollama 预设（默认端口 11434，host 里带 `ollama` 才命中）
+    /// - 含 `llama` / `8080` / `completion` → llamacpp 预设（IP 型 host 不含 `llama`
+    ///   字样时靠默认端口或路径识别，如 `http://10.0.11.187:8080/v1`）
     /// - 含 `deepseek` → 基础预设（流式 usage）
     /// - 含 `zhipu` / `bigmodel` / `glm` → 基础预设（流式 usage）
     /// - 含 `moonshot` / `kimi` → 基础预设（流式 usage）
