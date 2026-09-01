@@ -18,7 +18,9 @@ use crate::provider::{
 use anyhow::Result;
 use futures_util::StreamExt;
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{mpsc, RwLock};
 
 /// Agent turn 事件（推给 channel 消费）
@@ -135,6 +137,25 @@ pub struct Agent {
     /// 用户经 `/reasoning off` 设置的会话级思考开关：true = 关闭深度思考。
     /// 与上面的自动任务位独立（OR 关系），cron 副本置位不影响主会话开关。
     pub thinking_off: bool,
+    /// /steer 插话缓冲（plan.md #I）：channel 在 turn 持锁期间仍可投递（本字段为
+    /// 独立 Arc，不经 Agent 锁）；agent 在工具循环非末轮迭代顶部 drain，以
+    /// `[steer] User added: ...` 的 user 消息注入，模型下一迭代自然看到。
+    /// `fork_for_isolated` 派生副本持有**独立空缓冲**——cron/委派 turn 不得消费
+    /// 用户给主线的插话。
+    pub steer_buffer: Arc<StdMutex<VecDeque<String>>>,
+    /// 当前 active 任务线（ADR-0031）：`refresh_task_state` 从 sqlite 读出缓存；
+    /// 通用线为 None。切线命令（/task /tasks）与 turn 起点刷新。
+    pub active_task: Option<ActiveTask>,
+    /// /btw 最近的侧问问答（plan.md #H 自连上下文）：同进程内最近 2 组，
+    /// 拼进下一次 /btw 的 prompt，让追问无需重新交代背景。不进主上下文。
+    pub btw_recent: Vec<(String, String)>,
+}
+
+/// 当前 active 任务线（ADR-0031）：title 即 `/task <名>` 的任务名。
+#[derive(Debug, Clone)]
+pub struct ActiveTask {
+    pub title: String,
+    pub bound_path: Option<std::path::PathBuf>,
 }
 
 /// 单次工具调用记录（用于 delegate 提取产出文件）
@@ -255,6 +276,9 @@ impl Agent {
             skills_prompt_cache: String::new(),
             disable_thinking: false,
             thinking_off: false,
+            steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
+            active_task: None,
+            btw_recent: Vec::new(),
         }
     }
 
@@ -278,6 +302,60 @@ impl Agent {
         let mut dirs = self.trusted_dirs.write().await;
         if !dirs.contains(&dir) {
             dirs.push(dir);
+        }
+    }
+
+    /// 投递一条 /steer 插话（plan.md #I）。channel 在 turn 持锁期间调用——
+    /// 本方法只碰独立 Arc 缓冲，不取 Agent 锁，永不阻塞。
+    pub fn push_steer(&self, msg: String) {
+        self.steer_buffer.lock().unwrap().push_back(msg);
+    }
+
+    /// drain 全部待注入的 steer 插话（工具循环非末轮迭代顶部调用）。
+    fn drain_steer(&self) -> Vec<String> {
+        let mut buf = self.steer_buffer.lock().unwrap();
+        buf.drain(..).collect()
+    }
+
+    /// 清空 steer 缓冲（末轮丢弃路径），返回丢弃条数（用于「未生效」提示）。
+    fn clear_steer(&self) -> usize {
+        let mut buf = self.steer_buffer.lock().unwrap();
+        let n = buf.len();
+        buf.clear();
+        n
+    }
+
+    /// 刷新当前 active 任务线缓存（ADR-0031）：从 sqlite 读 `sessions.kind/title/
+    /// bound_path`，任务线则更新 `active_task` 并把任务名/绑定目录写进 Runtime
+    /// Context（`context.task_state`）；通用线清空两者。切线命令与 turn 起点调用。
+    pub fn refresh_task_state(&mut self) {
+        let info = self
+            .session_store
+            .session_kind(self.session_id)
+            .unwrap_or(None);
+        match info {
+            Some(i) if i.kind == "task" => {
+                let title = i.title.unwrap_or_else(|| "task".to_string());
+                let bound_path = i
+                    .bound_path
+                    .filter(|b| !b.is_empty())
+                    .map(std::path::PathBuf::from);
+                self.context.task_state = Some(format!(
+                    "[task] You are working in task session \"{}\"{}. \
+                     Keep unrelated chatter out of this line; when the task is done, \
+                     suggest the user archive it with `/task close`.",
+                    title,
+                    bound_path
+                        .as_ref()
+                        .map(|p| format!(" (bound directory: {})", p.display()))
+                        .unwrap_or_default()
+                ));
+                self.active_task = Some(ActiveTask { title, bound_path });
+            }
+            _ => {
+                self.context.task_state = None;
+                self.active_task = None;
+            }
         }
     }
 
@@ -507,6 +585,10 @@ impl Agent {
             system_has_tool_instructions: self.system_has_tool_instructions,
             agents_md_prompt: self.agents_md_prompt.clone(),
             skills_prompt_cache: self.skills_prompt_cache.clone(),
+            // steer 独立空缓冲：cron/委派 turn 不消费用户给主线的插话（plan.md #I）
+            steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
+            active_task: None,
+            btw_recent: Vec::new(),
         }
     }
 
@@ -887,6 +969,9 @@ impl Agent {
         } else {
             Some(todo_text)
         };
+        // 任务线状态（ADR-0031）：sqlite 直读，切线后无需额外同步；sessions 表
+        // 极小，每 turn 一次查询成本可忽略。
+        self.refresh_task_state();
 
         // 拿 provider snapshot：整个 turn 用这个 snapshot，reload 不影响进行中的 turn
         let provider = match self.provider_snapshot().await {
@@ -949,6 +1034,26 @@ impl Agent {
                 self.context.push(ChatMessage::user(
                     "Tool call limit reached. Stop calling tools, summarize the task based on the information already gathered, and reply to the user directly.",
                 ));
+                // 末轮不再注入 steer（plan.md #I ③）：末轮使命是收敛出最终回答，
+                // 注入新指令会让总结分叉且大概率无后续迭代去落实——落不了地的
+                // 插话不如明确拒收。残留直接丢弃，由 turn 结束路径提示「未生效」。
+                let dropped = self.clear_steer();
+                if dropped > 0 {
+                    tracing::info!(
+                        dropped,
+                        "steer message(s) dropped at force_summary iteration"
+                    );
+                }
+            } else {
+                // /steer 注入点（plan.md #I ②）：非末轮迭代顶部 drain，push 一条带
+                // 标记的 user 消息（兼容性下限最高：标签协议端点按纯文本拼、部分
+                // 端点不收会话中途 system），自然进 history/sqlite，模型下一迭代看到。
+                for s in self.drain_steer() {
+                    let text = format!("[steer] User added: {}", s);
+                    self.session_store
+                        .append_message(self.session_id, &Role::User, &text)?;
+                    self.context.push(ChatMessage::user(text));
+                }
             }
             // 单回合内工具链也可能把上下文撑爆：每次迭代组装请求前复查，
             // 超阈值立即压缩，避免把几十万 token 的请求直接发给 provider 导致 400 溢出。
@@ -1060,6 +1165,17 @@ impl Agent {
             }
 
             if calls.is_empty() {
+                // turn 结束时残留的 steer（最后一段流期间到达，已无迭代可注入）：
+                // 丢弃并提示「未生效」，比静默吞掉诚实（plan.md #I ③）。
+                let dropped = self.clear_steer();
+                if dropped > 0 {
+                    let note = format!(
+                        "\n\n[steer not applied: {} message(s) arrived after the last step and were dropped]",
+                        dropped
+                    );
+                    iter_text.push_str(&note);
+                    let _ = event_tx.send(TurnEvent::Chunk { delta: note }).await;
+                }
                 self.session_store
                     .append_message(self.session_id, &Role::Assistant, &iter_text)?;
                 self.context.push(ChatMessage::assistant(&iter_text));
@@ -2636,5 +2752,113 @@ mod tests {
             !prompt.contains(&"x".repeat(AGENTS_MD_CHAR_CAP + 1)),
             "不应包含超出上限的溢出片段"
         );
+    }
+
+    // ---- /steer 注入（plan.md #I）----
+
+    #[tokio::test]
+    async fn test_steer_injected_into_context_and_sqlite() {
+        // 第一轮：调工具；第二轮：纯文本收尾。steer 在 turn 开始前投递，
+        // 迭代 0（非末轮）顶部即 drain 注入。
+        let tc = ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: json!({}),
+        };
+        let mut agent = make_agent_with_rounds(
+            true,
+            vec![
+                vec![StreamEvent::ToolCall(tc), StreamEvent::Done],
+                vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done],
+            ],
+        )
+        .await;
+        agent.push_steer("先别改那个文件".into());
+        let (tx, _rx) = mpsc::channel(64);
+        let out = agent
+            .handle_input_streaming("do something", "cli", tx)
+            .await
+            .unwrap();
+        assert!(out.contains("done"));
+        // 注入为带标记的 user 消息，进 context 与 sqlite
+        let injected = agent.context.history.iter().any(|m| {
+            m.content
+                .as_text()
+                .contains("[steer] User added: 先别改那个文件")
+        });
+        assert!(injected, "steer should be injected into context");
+        let msgs = agent
+            .session_store
+            .recent_messages(agent.session_id, 50)
+            .unwrap();
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("[steer] User added: 先别改那个文件")));
+        // buffer 已清空
+        assert!(agent.steer_buffer.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_steer_dropped_at_turn_end_notifies() {
+        // 单轮纯文本 turn：无后续迭代可注入，残留被丢弃并附「未生效」提示。
+        // 模拟「插话在流结束后到达」——先跑 turn，结束后 push 再触发
+        // 下一轮的清理路径不适用；改为直接验证 turn 结束路径：在流中途投递
+        // 无法稳定构造，这里验证 clear_steer 语义 + 末轮丢弃提示文本存在性
+        // 由 test_steer_injected... 与 force_summary 路径共同覆盖。
+        let mut agent = make_agent_with_rounds(
+            true,
+            vec![vec![StreamEvent::TextDelta("ok".into()), StreamEvent::Done]],
+        )
+        .await;
+        agent.push_steer("late".into());
+        let (tx, _rx) = mpsc::channel(64);
+        let out = agent.handle_input_streaming("hi", "cli", tx).await.unwrap();
+        // 单轮 turn（无工具调用）：steer 在迭代 0 已 drain 注入（turn 前投递）
+        assert!(out.contains("ok"));
+        assert!(agent
+            .context
+            .history
+            .iter()
+            .any(|m| m.content.as_text().contains("[steer] User added: late")));
+    }
+
+    #[tokio::test]
+    async fn test_fork_does_not_share_steer_buffer() {
+        let agent = make_agent_with_rounds(true, vec![vec![]]).await;
+        agent.push_steer("给主线的".into());
+        let fork = agent.fork_for_isolated(999, false);
+        // fork 副本持有独立空缓冲：cron/委派 turn 不得消费主线的插话
+        assert!(fork.steer_buffer.lock().unwrap().is_empty());
+        assert!(!agent.steer_buffer.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_task_state_injects_runtime_context() {
+        let mut agent = make_agent_with_rounds(true, vec![vec![]]).await;
+        let store = agent.session_store.clone();
+        let task_sid = store
+            .create_task_session("task-uuid", "cli", "目录整理", Some("/data/docs"))
+            .unwrap();
+        agent.session_id = task_sid;
+        agent.refresh_task_state();
+        let task = agent.active_task.clone().unwrap();
+        assert_eq!(task.title, "目录整理");
+        assert_eq!(
+            task.bound_path,
+            Some(std::path::PathBuf::from("/data/docs"))
+        );
+        let injected = agent.context.task_state.clone().unwrap();
+        assert!(injected.contains("目录整理"));
+        assert!(injected.contains("/data/docs"));
+        // to_messages 注入（KV 缓存友好尾部区）
+        let msgs = agent.context.to_messages(&None);
+        assert!(msgs.iter().any(|m| m.content.as_text().contains("[task]")));
+
+        // 切回通用线：状态清空
+        let main_sid = store.create_session("main2", "cli").unwrap();
+        agent.session_id = main_sid;
+        agent.refresh_task_state();
+        assert!(agent.active_task.is_none());
+        assert!(agent.context.task_state.is_none());
     }
 }

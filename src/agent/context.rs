@@ -17,6 +17,9 @@ pub struct Context {
     /// 环境探测（P5 E1）的注入文本：进程启动时对 main agent 探测一次、
     /// `/env` 命令手动刷新。与 todo 同区，不进 system 前缀（KV 缓存友好）。
     pub env_state: Option<String>,
+    /// 当前 active 任务线信息（ADR-0031）：任务线内注入「任务名 + 绑定目录」，
+    /// 让模型知道自己身在哪个任务；通用线为 None。与 todo 同区（KV 缓存友好）。
+    pub task_state: Option<String>,
     /// 自动生成的 Tail Reminder（P6）：LLM 从 SOUL+USER 提炼的抗漂移要点，
     /// 存 `workspace/reminder.md`，hash 失配时后台重生成。排在所有尾部消息
     /// 之后（离生成点最近，注意力最强）。
@@ -31,6 +34,7 @@ impl Context {
             summary: None,
             todo_state: None,
             env_state: None,
+            task_state: None,
             reminder: None,
         }
     }
@@ -66,6 +70,12 @@ impl Context {
         if let Some(env) = &self.env_state {
             if !env.is_empty() {
                 msgs.push(ChatMessage::user(env.clone()));
+            }
+        }
+        // 当前任务线（ADR-0031）：任务线内让模型知道自己身在哪个任务、绑定哪个目录。
+        if let Some(task) = &self.task_state {
+            if !task.is_empty() {
+                msgs.push(ChatMessage::user(task.clone()));
             }
         }
         // Tail Reminder（P6）：抗风格/身份漂移的要点重申，放最后（离生成点最近）。

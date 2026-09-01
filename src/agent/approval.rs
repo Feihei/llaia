@@ -431,8 +431,7 @@ mod tests {
         let other_dir = tempfile::tempdir().expect("tempdir");
 
         let trusted = validate_move_target(trusted_dir.path().to_str().unwrap()).expect("move");
-        let current_ws =
-            validate_move_target(other_dir.path().to_str().unwrap()).expect("move");
+        let current_ws = validate_move_target(other_dir.path().to_str().unwrap()).expect("move");
         let trusted_set = vec![trusted.clone()];
 
         // 受信目录内的读文件 → 免审批（即便 workspace_root 已切到别处）
@@ -447,7 +446,12 @@ mod tests {
 
         // 受信目录内的终端命令 → 免审批
         let cmd = format!("ls {}", trusted_dir.path().join("sub").display());
-        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), &current_ws, &trusted_set);
+        let within = tool_within_workspace(
+            "terminal",
+            &json!({ "command": cmd }),
+            &current_ws,
+            &trusted_set,
+        );
         assert!(within, "受信目录内的终端命令应免审批");
 
         // 同一操作在受信集合为空时仍判为外 → 需审批（对照）
@@ -460,7 +464,11 @@ mod tests {
         assert!(!without_trust, "无受信记录时，受信目录外的读取应需审批");
 
         // 逃出 workspace 与全部受信目录 → 需审批
-        let outside = other_dir.path().join("../elsewhere.txt").to_string_lossy().replace('\\', "/");
+        let outside = other_dir
+            .path()
+            .join("../elsewhere.txt")
+            .to_string_lossy()
+            .replace('\\', "/");
         let within = tool_within_workspace(
             "file_read",
             &json!({ "path": outside }),

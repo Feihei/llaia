@@ -53,6 +53,11 @@ pub enum WebEvent {
     Busy {
         reason: String,
     },
+    /// 侧问/插话回执（/btw 答案、/steer 已排队提示）：独立样式消息块，
+    /// 不参与 turn 事件流（不发 Done、不解除 busy）。
+    Side {
+        text: String,
+    },
     /// 主动推送（cron 任务结果等，非 turn 事件）
     Proactive {
         message: String,
@@ -194,6 +199,9 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         let a = agent.lock().await;
         a.workspace.clone()
     };
+    // /steer 插话缓冲（plan.md #I）：与 main Agent 同一 Arc 的克隆，
+    // turn 持锁期间也能投递（不经 Agent 锁）。
+    let steer_buf = state.registry.steer_buffer.clone();
     let stop: Arc<Notify> = Arc::new(Notify::new());
     let mut current_turn: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -212,12 +220,64 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                 }
                             }
                             Some("chat") => {
+                                let chat: ChatIn = serde_json::from_str(&s).unwrap();
+                                let mut text = chat.text.unwrap_or_default();
+
+                                // /steer（plan.md #I）：turn 运行中非阻塞投递（不经
+                                // Agent 锁，缓冲与 registry 共享 Arc）；空闲降级为普通
+                                // 消息（剥前缀继续走正常 chat 流程）。
+                                if let Some(rest) = crate::commands::slash::split_steer(&text) {
+                                    if current_turn.is_some() {
+                                        if rest.is_empty() {
+                                            let _ = tx.send(WebEvent::Side { text: "usage: /steer <message>".into() }).await;
+                                        } else {
+                                            steer_buf.lock().unwrap().push_back(rest.to_string());
+                                            let _ = tx.send(WebEvent::Side {
+                                                text: format!("[steer queued: {}]", rest),
+                                            }).await;
+                                        }
+                                        // 不发 Done：turn 仍在运行，前端 busy 状态保持
+                                        continue;
+                                    } else if rest.is_empty() {
+                                        let _ = tx.send(WebEvent::Side { text: "usage: /steer <message>".into() }).await;
+                                        let _ = tx.send(WebEvent::Done).await;
+                                        continue;
+                                    } else {
+                                        // 空闲降级：剥前缀当普通消息跑（对齐 OpenClaw）
+                                        text = rest.to_string();
+                                    }
+                                }
+
                                 if current_turn.is_some() {
                                     let _ = tx.send(WebEvent::Busy { reason: "another turn running".into() }).await;
                                 } else {
-                                    let chat: ChatIn = serde_json::from_str(&s).unwrap();
-                                    let text = chat.text.unwrap_or_default();
                                     tracing::info!(text = %text, images = chat.images.as_ref().map(|v| v.len()).unwrap_or(0), "web received message");
+
+                                    // /btw（plan.md #H）：侧问走独立单轮调用，答案以
+                                    // Side 事件独立样式呈现，不进 turn 流、不污染上下文。
+                                    // （busy 情形已被上方 current_turn 分支拦成 Busy。）
+                                    if text.starts_with('/') && text.trim().to_ascii_lowercase().starts_with("/btw") {
+                                        let q = text
+                                            .trim()
+                                            .split_once(char::is_whitespace)
+                                            .map(|x| x.1)
+                                            .unwrap_or("")
+                                            .trim()
+                                            .to_string();
+                                        let answer = if q.is_empty() {
+                                            Err(anyhow::anyhow!("usage: /btw <question>"))
+                                        } else {
+                                            let mut a = agent.lock().await;
+                                            crate::commands::slash::run_btw(&mut a, &q).await
+                                        };
+                                        let out = match answer {
+                                            Ok(ans) => ans,
+                                            Err(e) => format!("[btw failed: {}]", e),
+                                        };
+                                        let _ = tx.send(WebEvent::Side { text: out }).await;
+                                        let _ = tx.send(WebEvent::Done).await;
+                                        continue;
+                                    }
 
                                     // 斜杠命令拦截（P4-d）：与其它频道一致地走审批/续跑流。
                                     // web 用 type:"stop" 中断（见上面 "stop" 分支），不认 /stop，故排除之。

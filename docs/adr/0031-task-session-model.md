@@ -1,6 +1,6 @@
 # ADR-0031: 任务 session 模型——通用线 + 任务线
 
-- 状态：Accepted（grill 2026-09-01·3 逐项拍板完毕；**待实现**）
+- 状态：Accepted（已实现 2026-09-01，实现记录见文末）
 - 日期：2026-09-01
 - 关联：plan.md #D（本 ADR 即其设计探索产出）；plan.md #B 受信目录（已实现，任务 session 与其共用目录信任语义）
 
@@ -121,3 +121,15 @@ ALTER TABLE sessions ADD COLUMN bound_path TEXT;                     -- 任务�
 **WebUI（未决 4 定案）**：会话列表 `kind` 徽标区分 main/task，`list_sessions` 带出 `kind`，归档会话可筛看；列为实施附带小项，不单独设计。
 
 **状态**：已定案、待实现。
+
+## 实现记录（2026-09-01）
+
+按「grill 定案记录」全量落地：
+
+- **schema**（`memory/sqlite.rs`）：`sessions` 幂等补 `kind`（默认 `main`）/ `bound_path` 两列（存量库 `ALTER TABLE`，同 title 先例）；`create_task_session` / `find_open_task`（按名取最近活跃）/ `list_open_tasks` / `archive_session`（state='archived'）/ `latest_main_session`；`latest_session` 排除归档线（归档不续接）。
+- **切线回灌**：`recent_messages_within_budget`（尾部按 6000 字符预算封顶、不截半条）+ `slash.rs::backfill_context`（只回灌 user/assistant 正文——tool 消息的 tool_call_id 配对无法从 messages 表重建，硬塞会产生孤儿 tool 消息违反 OpenAI 协议）；切换必 `context.clear()` → 回灌天然幂等，无需跨切换游标。
+- **命令**（`commands/slash.rs`）：`/task <名>`（存在→切换+回灌该线尾部；不存在→新建+回灌通用线尾部当 brief，bound_path=当前目录≠home 时绑定）；`/task`（无参→回通用线+回灌）；`/task close`（归档+回通用线）；`/tasks`（列表，`*` 标当前）。`/new` 顺带 `refresh_task_state`。
+- **Runtime Context**：`Context.task_state`（`agent/mod.rs::refresh_task_state`，turn 起点与切线时刷新）注入任务名+绑定目录，与 todo/env 同区（KV 缓存友好）。
+- **/move 提示**：批准路径 notice 追加「tip: `/task <name>` 可开绑定该目录的隔离任务」（不自动创建）。
+- **WebUI**：`list_sessions` 带出 `kind`，会话列表 `[task]` / `[archived]` 徽标。
+- **回归测试**：`test_task_switch_backfill_and_archive`（新建/切回/无参回主线/close 归档/同名重建五段）、`test_task_session_lifecycle`、`test_recent_messages_within_budget`、`test_task_columns_added_to_legacy_db`（存量库迁移）、`test_refresh_task_state_injects_runtime_context`。

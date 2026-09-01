@@ -82,6 +82,7 @@
             <template x-if="m.role==='user'"><div><b>User:</b> <span x-text="m.text"></span></div></template>
             <template x-if="m.role==='assistant'"><div><b>Assistant:</b> <div x-html="renderMd(m.text)"></div></div></template>
             <template x-if="m.role==='tool'"><div><b>Tool:</b> <span x-text="m.text"></span></div></template>
+            <template x-if="m.role==='side'"><div><b>Side:</b> <div class="side-body" x-html="renderMd(m.text)"></div></div></template>
             <template x-if="m.role==='media'">
               <div>
                 <b>Media:</b>
@@ -145,7 +146,7 @@
           <div x-show="sessionMsg" class="err" x-text="sessionMsg"></div>
           <template x-for="s in sessions" :key="s.session_uuid">
             <div class="session-item" :class="{active: selectedSession === s.session_uuid}" @click="openSession(s.session_uuid)">
-              <div class="session-item-title"><b x-text="s.title || s.channel"></b> <span class="hint" x-text="s.message_count + ' msgs'"></span></div>
+              <div class="session-item-title"><b x-text="s.title || s.channel"></b> <span class="hint" x-text="s.message_count + ' msgs'"></span> <span class="hint" x-show="s.kind === 'task'">[task]</span> <span class="hint" x-show="s.state === 'archived'">[archived]</span></div>
               <div class="hint" x-text="(s.title ? s.channel + ' · ' : '') + fmtTime(s.last_activity)"></div>
             </div>
           </template>

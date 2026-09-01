@@ -162,7 +162,14 @@ pub async fn execute_tool_calls(
             }
         }
 
-        match approval_decision(tool.as_ref(), &call.arguments, workspace, trusted, profile, channel) {
+        match approval_decision(
+            tool.as_ref(),
+            &call.arguments,
+            workspace,
+            trusted,
+            profile,
+            channel,
+        ) {
             // 直接执行
             ApprovalAction::Approved => {}
             // 非交互频道无法等待用户：自动拒绝

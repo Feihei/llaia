@@ -144,6 +144,9 @@ option { background: var(--bg-input); color: var(--text); }
 .msg.assistant { background: var(--bg-panel);          border-left-color: var(--border-bright); }
 .msg.tool      { background: rgba(79, 214, 201, .05);  color: var(--cyan);
                  font-family: var(--mono); font-size: 12px; border-left-color: var(--cyan); }
+/* /btw 侧问与 /steer 回执：独立样式（plan.md #H），区别于 assistant 正文 */
+.msg.side      { background: rgba(154, 108, 245, .06); border-left-color: #9a6cf5; }
+.msg.side .side-body { font-size: 13px; }
 .msg img { max-width: 400px; border-radius: 0; border: 1px solid var(--border-bright); }
 
 #chat-pane .composer {

@@ -92,6 +92,9 @@ impl Channel for CliChannel {
             let a = agent.lock().await;
             a.workspace.clone()
         };
+        // /steer 插话缓冲（plan.md #I）：与 main Agent 同一 Arc 的克隆，
+        // turn 持锁期间也能投递（不经 Agent 锁）。
+        let steer_buf = registry.steer_buffer.clone();
         // 欢迎 billboard 与 serve 共用同一份文案（见 crate::banner）
         print!("{}", crate::banner::billboard());
 
@@ -153,6 +156,17 @@ impl Channel for CliChannel {
                 println!("[no active generation to stop]");
                 continue;
             }
+
+            // /steer（plan.md #I）：空闲态降级为普通消息（对齐 OpenClaw）——
+            // 剥前缀后走正常输入路径，不进 slash 分支（那里没有 /steer 命令）。
+            let line = match crate::commands::slash::split_steer(&line) {
+                Some("") => {
+                    println!("usage: /steer <message>  (inject into a running turn; when idle it just runs as a normal message)");
+                    continue;
+                }
+                Some(rest) => rest.to_string(),
+                None => line,
+            };
 
             // 斜杠命令（非 /stop）：同步处理
             if line.starts_with('/') {
@@ -271,15 +285,30 @@ impl Channel for CliChannel {
                     _ = tokio::signal::ctrl_c() => {
                         stop.notify_one();
                     }
-                    // stdin 有输入：/stop 中断，其他排入队列
+                    // stdin 有输入：/stop 中断；/steer 插话；/btw busy 提示；其他排入队列
                     input = stdin_rx.recv() => {
                         match input {
                             Some(Some(l)) if l == "/stop" => {
                                 stop.notify_one();
                             }
                             Some(Some(l)) => {
-                                println!("[queued: {}]", l);
-                                queued_inputs.push(l);
+                                // /steer（plan.md #I ①）：turn 运行中非阻塞投递，
+                                // agent 在下一个工具边界以 [steer] user 消息吸收。
+                                if let Some(rest) = crate::commands::slash::split_steer(&l) {
+                                    if rest.is_empty() {
+                                        println!("usage: /steer <message>");
+                                    } else {
+                                        steer_buf.lock().unwrap().push_back(rest.to_string());
+                                        println!("[steer queued: {}]", rest);
+                                    }
+                                } else if l.to_ascii_lowercase().starts_with("/btw") {
+                                    // /btw（plan.md #H ①）：运行中读不到上下文（Agent 锁
+                                    // 被 turn 持有），明确拒绝优于静默降质。
+                                    println!("[btw busy: a turn is running; ask again when idle]");
+                                } else {
+                                    println!("[queued: {}]", l);
+                                    queued_inputs.push(l);
+                                }
                             }
                             Some(None) | None => {
                                 // stdin EOF：等当前 turn 结束
@@ -621,6 +650,8 @@ pub async fn build_single_agent(
             .cleanup_tmp(std::time::Duration::from_secs(3 * 24 * 60 * 60))
             .await;
     }
+    // 任务线状态（ADR-0031）：启动续接的 session 若是任务线，状态栏注入任务名/绑定目录
+    agent.refresh_task_state();
 
     Ok((
         Arc::new(Mutex::new(agent)),
@@ -739,7 +770,16 @@ pub async fn build_agent(
         "startup phase: main agent built"
     );
 
-    let registry = AgentRegistry::new(main_agent, main_workspace);
+    let mut registry = AgentRegistry::new(main_agent, main_workspace);
+    // /steer 插话缓冲（plan.md #I）：registry 与 main Agent 共享同一 Arc，
+    // channel 在 turn 持锁期间经 registry 投递、agent 工具循环 drain。
+    {
+        let buf = {
+            let a = registry.main.lock().await;
+            a.steer_buffer.clone()
+        };
+        registry.attach_steer_buffer(buf);
+    }
     for (alias, agent) in sub_agents {
         registry.register_sub_agent(alias, agent);
     }

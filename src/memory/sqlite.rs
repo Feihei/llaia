@@ -51,6 +51,33 @@ pub struct ToolCallRow {
     pub created_at: String,
 }
 
+/// 未归档任务线（ADR-0031 /tasks 列表）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskSessionRow {
+    pub session_id: i64,
+    pub session_uuid: String,
+    pub title: String,
+    pub bound_path: Option<String>,
+    pub channel: String,
+    pub last_activity: String,
+}
+
+/// /btw 侧问记录（plan.md #H，独立表不进 FTS）。
+#[derive(Debug, Clone)]
+pub struct SideMessageRow {
+    pub question: String,
+    pub answer: String,
+    pub created_at: String,
+}
+
+/// 会话类型信息（ADR-0031）：kind（main/task）+ title + bound_path。
+#[derive(Debug, Clone)]
+pub struct SessionKindInfo {
+    pub kind: String,
+    pub title: Option<String>,
+    pub bound_path: Option<String>,
+}
+
 // ---- plan.md W3 token 用量 dashboard ----
 
 /// 一次模型调用的 token 用量（plan.md W3）：逐请求记录，供 Stats dashboard 聚合。
@@ -113,6 +140,8 @@ pub struct SessionListItem {
     /// 会话主题标题（压缩时由 compact provider 生成，plan.md 会话主题自动总结）；
     /// 未生成过为 None，前端回退显示 channel。
     pub title: Option<String>,
+    /// 会话类型（ADR-0031）：'main'（通用线，默认）/ 'task'（任务线）。
+    pub kind: String,
 }
 
 /// 消息 + 关联工具调用（WebUI 会话详情，P5 W1）。
@@ -170,7 +199,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_activity TEXT NOT NULL,
     token_count   INTEGER NOT NULL DEFAULT 0,
     state         TEXT NOT NULL DEFAULT 'idle',
-    title         TEXT
+    title         TEXT,
+    kind          TEXT NOT NULL DEFAULT 'main',
+    bound_path    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -196,6 +227,18 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- /btw 侧问问答（plan.md #H）：独立表落库，不进 messages/FTS——上下文零污染，
+-- 留作可回查记录；是否扩进 memory_research 检索待有真实需求再议。
+CREATE TABLE IF NOT EXISTS side_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    question   TEXT NOT NULL,
+    answer     TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_side_messages_session ON side_messages(session_id);
 
 -- 逐请求 token 用量（plan.md W3 token dashboard）：一行 = 一次模型调用
 CREATE TABLE IF NOT EXISTS turn_usage (
@@ -234,15 +277,27 @@ END;
              WHERE m.role IN ('user','assistant')
                AND m.id NOT IN (SELECT rowid FROM message_fts);",
         )?;
-        // sessions.title（plan.md 会话主题自动总结）：存量库没有该列，幂等补加
-        // （sqlite 的 ALTER TABLE ADD COLUMN 没有 IF NOT EXISTS，先查 table_info）
-        let has_title = conn
-            .prepare("PRAGMA table_info(sessions)")?
-            .query_map([], |r| r.get::<_, String>(1))?
-            .filter_map(|r| r.ok())
-            .any(|name| name == "title");
-        if !has_title {
-            conn.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT;")?;
+        // 存量库幂等补列（sqlite 的 ALTER TABLE ADD COLUMN 没有 IF NOT EXISTS，
+        // 先查 table_info 再补）：title（会话主题）/ kind、bound_path（ADR-0031 任务线）
+        for (col, ddl) in [
+            ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
+            (
+                "kind",
+                "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'main';",
+            ),
+            (
+                "bound_path",
+                "ALTER TABLE sessions ADD COLUMN bound_path TEXT;",
+            ),
+        ] {
+            let has = conn
+                .prepare("PRAGMA table_info(sessions)")?
+                .query_map([], |r| r.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .any(|name| name == col);
+            if !has {
+                conn.execute_batch(ddl)?;
+            }
         }
         Ok(())
     }
@@ -283,8 +338,11 @@ END;
         // 排除 cron 自动会话：主对话 session 的 source 为 main/web/cli 等，
         // 而复活的 cron 会话会把 last_activity 刷到最新，若不加过滤会把主对话路由进
         // cron 会话（ADR-0013 会话隔离）。详见 cron 任务诊断。
+        // 归档任务线（ADR-0031 state='archived'）也不续接——归档即不可续写。
         let mut stmt = conn.prepare(
-            "SELECT id, session_uuid FROM sessions WHERE channel NOT LIKE 'cron:%' ORDER BY last_activity DESC LIMIT 1",
+            "SELECT id, session_uuid FROM sessions
+             WHERE channel NOT LIKE 'cron:%' AND state != 'archived'
+             ORDER BY last_activity DESC LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
@@ -292,6 +350,176 @@ END;
         } else {
             Ok(None)
         }
+    }
+
+    // ---- ADR-0031 任务线 ----
+
+    /// 创建任务线 session：kind='task'，title 即任务名（查找键），bound_path 为
+    /// 创建时的工作目录（!= home 时才绑定；纯元数据，不参与审批/执行判定）。
+    pub fn create_task_session(
+        &self,
+        session_uuid: &str,
+        channel: &str,
+        title: &str,
+        bound_path: Option<&str>,
+    ) -> Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_uuid, channel, created_at, last_activity, state, title, kind, bound_path)
+             VALUES (?1, ?2, ?3, ?3, 'idle', ?4, 'task', ?5)",
+            rusqlite::params![session_uuid, channel, now, title, bound_path],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// 按任务名查找未归档任务线（`/task <名>` 的切换键；同名取最近活跃）。
+    pub fn find_open_task(&self, title: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM sessions
+             WHERE kind = 'task' AND state != 'archived' AND title = ?1
+             ORDER BY last_activity DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![title])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
+    /// 列出所有未归档任务线（/tasks）。
+    pub fn list_open_tasks(&self) -> Result<Vec<TaskSessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_uuid, COALESCE(title, ''), bound_path, channel, last_activity
+             FROM sessions WHERE kind = 'task' AND state != 'archived'
+             ORDER BY last_activity DESC LIMIT 200",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TaskSessionRow {
+                session_id: r.get(0)?,
+                session_uuid: r.get(1)?,
+                title: r.get(2)?,
+                bound_path: r.get(3)?,
+                channel: r.get(4)?,
+                last_activity: r.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 归档会话（`/task close`）：state='archived' 后不可续写，消息仍可被检索。
+    pub fn archive_session(&self, session_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET state = 'archived' WHERE id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// 读会话类型信息（ADR-0031）；不存在返回 None。
+    pub fn session_kind(&self, session_id: i64) -> Result<Option<SessionKindInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT kind, title, bound_path FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![session_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(SessionKindInfo {
+                kind: row.get(0)?,
+                title: row.get(1)?,
+                bound_path: row.get(2)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// 最近的通用线（kind='main'，排除 cron 与归档）——`/task` 无参 / close 的回归目标。
+    pub fn latest_main_session(&self) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM sessions
+             WHERE kind = 'main' AND channel NOT LIKE 'cron:%' AND state != 'archived'
+             ORDER BY last_activity DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query([])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
+    /// 会话尾部消息回灌（ADR-0031 切线）：从最新往回取，按字符预算封顶、
+    /// 不截断半条消息（首条超预算的单条消息也保留，保证至少回灌一条）。
+    /// 供 slash 切线路径把目标线 sqlite 尾部装回内存 context。
+    pub fn recent_messages_within_budget(
+        &self,
+        session_id: i64,
+        char_budget: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, role, content, reasoning_content, created_at
+             FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT 500",
+        )?;
+        let desc: Vec<MessageRow> = stmt
+            .query_map(rusqlite::params![session_id], |row| {
+                Ok(MessageRow {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content: row.get(3)?,
+                    reasoning_content: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        let mut picked: Vec<MessageRow> = Vec::new();
+        let mut used = 0usize;
+        for m in desc {
+            let len = m.content.chars().count();
+            if !picked.is_empty() && used + len > char_budget {
+                break;
+            }
+            used += len;
+            picked.push(m);
+            if used >= char_budget {
+                break;
+            }
+        }
+        picked.reverse();
+        Ok(picked)
+    }
+
+    // ---- /btw 侧问（plan.md #H）----
+
+    /// 落一条侧问问答（独立表，不进 messages/FTS）。
+    pub fn add_side_message(&self, session_id: i64, question: &str, answer: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO side_messages (session_id, question, answer, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, question, answer, now],
+        )?;
+        Ok(())
+    }
+
+    /// 最近的侧问问答（自连上下文用，倒序取最新 N 条）。
+    pub fn recent_side_messages(&self, session_id: i64, limit: i64) -> Result<Vec<SideMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT question, answer, created_at FROM side_messages
+             WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_id, limit], |r| {
+            Ok(SideMessageRow {
+                question: r.get(0)?,
+                answer: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?;
+        let mut out = rows.collect::<Result<Vec<_>, _>>()?;
+        out.reverse(); // 时间正序
+        Ok(out)
     }
 
     /// 按 channel 精确查找最近一次（last_activity 最大）的会话 id。
@@ -620,7 +848,7 @@ END;
         let mut stmt = conn.prepare(
             "SELECT s.session_uuid, s.channel, s.created_at, s.last_activity, s.token_count, s.state,
                     (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
-                    s.title
+                    s.title, s.kind
              FROM sessions s
              ORDER BY s.last_activity DESC LIMIT ?1 OFFSET ?2",
         )?;
@@ -634,6 +862,7 @@ END;
                 state: row.get(5)?,
                 message_count: row.get(6)?,
                 title: row.get(7)?,
+                kind: row.get(8)?,
             })
         })?;
         let mut out = Vec::new();
@@ -1090,6 +1319,148 @@ mod tests {
             store2.session_title(sid).unwrap().as_deref(),
             Some("回填测试")
         );
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn test_task_session_lifecycle() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let main = store.create_session("main-uuid", "web").unwrap();
+        store.append_message(main, &Role::User, "主线消息").unwrap();
+
+        // 创建任务线（带绑定目录）
+        let t1 = store
+            .create_task_session("task-uuid", "web", "目录整理", Some("/data/docs"))
+            .unwrap();
+        let info = store.session_kind(t1).unwrap().unwrap();
+        assert_eq!(info.kind, "task");
+        assert_eq!(info.title.as_deref(), Some("目录整理"));
+        assert_eq!(info.bound_path.as_deref(), Some("/data/docs"));
+
+        // 按名查找命中；通用线 kind=main
+        assert_eq!(store.find_open_task("目录整理").unwrap(), Some(t1));
+        assert_eq!(store.find_open_task("不存在").unwrap(), None);
+        assert_eq!(
+            store.session_kind(main).unwrap().unwrap().kind,
+            "main".to_string()
+        );
+
+        // /tasks 列表带出
+        let tasks = store.list_open_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "目录整理");
+        assert_eq!(tasks[0].bound_path.as_deref(), Some("/data/docs"));
+
+        // 归档后：不可被 find/list/latest 命中
+        store.archive_session(t1).unwrap();
+        assert_eq!(store.find_open_task("目录整理").unwrap(), None);
+        assert!(store.list_open_tasks().unwrap().is_empty());
+        assert_eq!(store.latest_session().unwrap().unwrap().0, main);
+        // latest_main_session 排除归档任务线
+        assert_eq!(store.latest_main_session().unwrap(), Some(main));
+    }
+
+    #[test]
+    fn test_latest_main_session_prefers_recent() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let m1 = store.create_session("m1", "cli").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.create_session("cron:x", "cron:x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let m2 = store.create_session("m2", "web").unwrap();
+        // cron 会话 last_activity 更新也不能抢走 main 归属
+        assert_eq!(store.latest_main_session().unwrap(), Some(m2));
+        assert_ne!(store.latest_main_session().unwrap(), Some(m1));
+    }
+
+    #[test]
+    fn test_recent_messages_within_budget() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("uuid-bf", "cli").unwrap();
+        for i in 0..6 {
+            store
+                .append_message(sid, &Role::User, &format!("msg{}", i))
+                .unwrap();
+        }
+        // 预算只够 2 条（每条 4 字符）
+        let msgs = store.recent_messages_within_budget(sid, 8).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].content, "msg4");
+        assert_eq!(msgs[1].content, "msg5");
+        // 不截断半条：预算 5 仍取 2 条（msg5 单条已超也不丢首条）
+        let msgs = store.recent_messages_within_budget(sid, 5).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "msg5");
+        // 大预算全量、时间正序
+        let msgs = store.recent_messages_within_budget(sid, 10_000).unwrap();
+        assert_eq!(msgs.len(), 6);
+        assert_eq!(msgs[0].content, "msg0");
+    }
+
+    #[test]
+    fn test_side_messages_round_trip() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("uuid-side", "web").unwrap();
+        assert!(store.recent_side_messages(sid, 5).unwrap().is_empty());
+        store.add_side_message(sid, "q1", "a1").unwrap();
+        store.add_side_message(sid, "q2", "a2").unwrap();
+        let rows = store.recent_side_messages(sid, 1).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].question, "q2");
+        let rows = store.recent_side_messages(sid, 5).unwrap();
+        assert_eq!(rows.len(), 2);
+        // 时间正序：q1 在前
+        assert_eq!(rows[0].question, "q1");
+        assert_eq!(rows[1].answer, "a2");
+        // 不进 messages / FTS
+        assert!(store.recent_messages(sid, 100).unwrap().is_empty());
+        assert!(store.search_messages("q1", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_task_columns_added_to_legacy_db() {
+        // 存量库（旧 schema 无 kind/bound_path）经 init_schema 幂等补列
+        let db_path = std::env::temp_dir().join(format!(
+            "llaia-test-task-migrate-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_file(&db_path);
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_uuid TEXT NOT NULL UNIQUE,
+                    channel TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_activity TEXT NOT NULL,
+                    token_count INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL DEFAULT 'idle',
+                    title TEXT
+                );
+                INSERT INTO sessions (session_uuid, channel, created_at, last_activity)
+                    VALUES ('old-1', 'cli', 't', 't');",
+            )
+            .unwrap();
+        }
+        let store = SessionStore::open(&db_path).unwrap();
+        let sid = store.session_by_uuid("old-1").unwrap().unwrap().0;
+        // 旧会话默认 main；list_sessions 带出 kind 供 WebUI 徽标
+        assert_eq!(
+            store.session_kind(sid).unwrap().unwrap().kind,
+            "main".to_string()
+        );
+        assert_eq!(store.list_sessions(10, 0).unwrap()[0].kind, "main");
+        // 新任务线照常创建（kind 列已补）
+        let t = store
+            .create_task_session("t-new", "cli", "新任务", None)
+            .unwrap();
+        assert_eq!(store.find_open_task("新任务").unwrap(), Some(t));
+        // 幂等重开
+        drop(store);
+        let store2 = SessionStore::open(&db_path).unwrap();
+        assert_eq!(store2.find_open_task("新任务").unwrap(), Some(t));
         std::fs::remove_file(&db_path).ok();
     }
 }

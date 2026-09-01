@@ -335,12 +335,7 @@ mod tests {
             .await
             .expect("受信目录内写入应放行");
 
-        let read_tool = FileRead::new(
-            Arc::new(RwLock::new(moved_dir)),
-            trusted,
-            true,
-            None,
-        );
+        let read_tool = FileRead::new(Arc::new(RwLock::new(moved_dir)), trusted, true, None);
         let out = read_tool
             .execute(
                 &json!({"path": home_ws.join("note.md").to_str().unwrap()}),

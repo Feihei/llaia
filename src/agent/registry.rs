@@ -37,6 +37,9 @@ pub struct AgentRegistry {
     /// 当前轮结果投递目标：channel 在 run_turn 前注入（serve→pusher，CLI→stdout）。
     /// 异步委派 spawn 时克隆此值，完成后主动推送结果。
     pub delivery: Arc<Mutex<Option<DeliveryTarget>>>,
+    /// 主线 /steer 插话缓冲（plan.md #I）：与 main Agent 持同一 Arc，
+    /// channel 在 turn 持锁期间经它投递（不取 Agent 锁）。
+    pub steer_buffer: Arc<Mutex<std::collections::VecDeque<String>>>,
 }
 
 impl AgentRegistry {
@@ -47,7 +50,14 @@ impl AgentRegistry {
             sub_agents: Mutex::new(HashMap::new()),
             background_tasks: Arc::new(Mutex::new(HashMap::new())),
             delivery: Arc::new(Mutex::new(None)),
+            steer_buffer: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
+    }
+
+    /// 把 registry 的 steer 缓冲接到 main Agent 的那一份上（build_agent 构建后调用）。
+    /// 不接也不影响功能正确性，只是 /steer 投递落不到正在跑的 turn。
+    pub fn attach_steer_buffer(&mut self, buf: Arc<Mutex<std::collections::VecDeque<String>>>) {
+        self.steer_buffer = buf;
     }
 
     /// 注入本轮的结果投递目标（各 channel 在 run_turn 前调用）。

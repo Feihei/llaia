@@ -384,6 +384,11 @@ function llaiaApp() {
           if (ev.type === 'interrupted') this.messages.push({ role: 'tool', text: '[Interrupted]' });
           break;
         case 'busy': alert(ev.reason); break;
+        case 'side':
+          // /btw 侧问答案、/steer 回执：独立样式消息块，不参与 turn 事件流
+          this.messages.push({ role: 'side', text: ev.text });
+          this.scrollBottom();
+          break;
         case 'proactive':
           // cron 任务结果等主动推送：插入 chat 流便于用户查看
           this.messages.push({ role: 'tool', text: `[cron] ${ev.message}` });

@@ -3,12 +3,14 @@ use crate::agent::Agent;
 use crate::agent::AgentRegistry;
 use crate::config::Config;
 use crate::memory::markdown::compress_memory;
+use crate::provider::{ChatMessage, ChatRequest, Role};
 use anyhow::Result;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[derive(Debug)]
 pub enum SlashOutcome {
     Handled(String),
     Exit,
@@ -42,7 +44,7 @@ pub async fn try_handle(
     match cmd_lc.as_str() {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /task [<name>|close] /tasks /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /btw <question> (side question, context read-only) /steer <message> (inject into a running turn) /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -192,7 +194,146 @@ pub async fn try_handle(
             agent.session_id = new_id;
             agent.context.clear();
             agent.context.summary = None;
+            agent.refresh_task_state();
             Ok(SlashOutcome::Handled("[new session]".into()))
+        }
+        "/task" => match args.trim() {
+            // 无参 = 回通用线（ADR-0031 未决 2 定案）；看列表用 /tasks
+            "" => switch_to_main(agent).await,
+            // close = 归档当前任务线并回通用线
+            "close" => {
+                let cur = agent.active_task.as_ref().map(|t| t.title.clone());
+                match cur {
+                    Some(title) => {
+                        agent.session_store.archive_session(agent.session_id)?;
+                        // 归档即不可续写；切回通用线并回灌其尾部
+                        match switch_to_main(agent).await {
+                            Ok(SlashOutcome::Handled(msg)) => Ok(SlashOutcome::Handled(format!(
+                                "[task \"{}\" archived]\n{}",
+                                title, msg
+                            ))),
+                            other => other,
+                        }
+                    }
+                    None => Ok(SlashOutcome::Handled(
+                        "[not in a task session] usage: /task <name> | /task close | /task (back to main)"
+                            .into(),
+                    )),
+                }
+            }
+            name => {
+                let name = name.trim();
+                // 已在同名任务线：幂等提示
+                if agent.active_task.as_ref().map(|t| t.title.as_str()) == Some(name) {
+                    return Ok(SlashOutcome::Handled(format!(
+                        "[already in task \"{}\"]",
+                        name
+                    )));
+                }
+                match agent.session_store.find_open_task(name)? {
+                    // 存在 → 切回并回灌该任务线尾部（ADR-0031 未决 5：不回灌则续做体验不成立）
+                    Some(task_id) => {
+                        let n = switch_session(agent, task_id, TASK_BACKFILL_CHAR_BUDGET)?;
+                        Ok(SlashOutcome::Handled(format!(
+                            "[switched to task \"{}\"] {} message(s) restored from this task line",
+                            name, n
+                        )))
+                    }
+                    // 不存在 → 新建；回灌通用线尾部当 brief，任务不丢主线背景
+                    None => {
+                        let channel = agent
+                            .session_store
+                            .channel_of(agent.session_id)?
+                            .unwrap_or_else(|| "cli".to_string());
+                        // 绑定目录：当前工作目录在 home 之外时记录（元数据，不参与审批判定）
+                        let current_root = agent.workspace_root.read().await.clone();
+                        let bound = if current_root != agent.workspace {
+                            Some(current_root.to_string_lossy().to_string())
+                        } else {
+                            None
+                        };
+                        // 通用线尾部先取（仍处于旧 session 时取的是通用线自身的尾部）
+                        let main_id = if agent.active_task.is_some() {
+                            agent.session_store.latest_main_session()?
+                        } else {
+                            Some(agent.session_id)
+                        };
+                        let brief_n = match main_id {
+                            Some(mid) => {
+                                let msgs = agent
+                                    .session_store
+                                    .recent_messages_within_budget(
+                                        mid,
+                                        TASK_BACKFILL_CHAR_BUDGET,
+                                    )
+                                    .unwrap_or_default();
+                                backfill_context(agent, msgs)
+                            }
+                            None => 0,
+                        };
+                        let task_id = agent.session_store.create_task_session(
+                            &Uuid::new_v4().to_string(),
+                            &channel,
+                            name,
+                            bound.as_deref(),
+                        )?;
+                        agent.session_id = task_id;
+                        agent.context.summary = None;
+                        agent.refresh_task_state();
+                        Ok(SlashOutcome::Handled(format!(
+                            "[new task \"{}\"{}] started; {} message(s) of main-line context carried over",
+                            name,
+                            bound
+                                .as_ref()
+                                .map(|b| format!(" (bound: {})", b))
+                                .unwrap_or_default(),
+                            brief_n
+                        )))
+                    }
+                }
+            }
+        },
+        "/tasks" => {
+            let tasks = agent.session_store.list_open_tasks()?;
+            if tasks.is_empty() {
+                return Ok(SlashOutcome::Handled(
+                    "[no open task sessions] usage: /task <name> to start one".into(),
+                ));
+            }
+            let active = agent.active_task.as_ref().map(|t| t.title.as_str());
+            let mut out = String::from("open task sessions:\n");
+            for t in &tasks {
+                let mark = if active == Some(t.title.as_str()) {
+                    " *"
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    "- {}{} — {} · {} · last activity {}\n",
+                    t.title,
+                    mark,
+                    t.bound_path.as_deref().unwrap_or("(no bound dir)"),
+                    t.channel,
+                    t.last_activity
+                ));
+            }
+            out.push_str("\n`/task <name>` to switch · `/task close` to archive the current one · `/task` to return to the main line");
+            Ok(SlashOutcome::Handled(out))
+        }
+        "/btw" => {
+            let q = args.trim();
+            if q.is_empty() {
+                return Ok(SlashOutcome::Handled(
+                    "usage: /btw <question>  (side question: reads the current context but never writes to it)"
+                        .into(),
+                ));
+            }
+            // busy 语义由 channel 层保证：web 在 turn 运行中根本进不到 slash 分支（Busy），
+            // CLI 运行中该命令被拦截提示；这里到达即 idle。
+            match run_btw(agent, q).await {
+                Ok(answer) => Ok(SlashOutcome::Handled(answer)),
+                Err(e) => Ok(SlashOutcome::Handled(format!("[btw failed: {}]", e))),
+            }
         }
         "/clear" => {
             agent.context.clear();
@@ -529,8 +670,10 @@ async fn resolve_approval(
             // #B：批准过的目录登记为会话级受信目录——之后 /move home 切走再回来、
             // 或切换期间触碰该目录内路径，均免审批（逃出全部受信范围的仍需审批）。
             agent.add_trusted_dir(target.clone()).await;
+            // ADR-0031 Q1：/move 到外部目录是「在该目录执行主线以外任务」的意图信号，
+            // 提示（不自动创建）绑定该目录的任务 session。
             format!(
-                "[switched working directory to {}] (trusted for this session)",
+                "[switched working directory to {}] (trusted for this session)\ntip: to run this as an isolated task with its own context, start one with `/task <name>`",
                 target.display()
             )
         } else {
@@ -595,6 +738,207 @@ async fn resolve_question(
         q.question, text
     );
     Ok(Some((notice, message)))
+}
+
+// ---- ADR-0031 任务线：切线 / 回灌 ----
+
+/// 切线回灌的字符预算（≈1500 token）：够带过最近的讨论脉络，又不会把
+/// 通用线的大段历史整体搬进任务线（那会破坏任务隔离）。
+const TASK_BACKFILL_CHAR_BUDGET: usize = 6000;
+
+/// /btw 侧问读取主上下文的字符预算（快照仅用于回答，不进上下文）。
+const BTW_CONTEXT_CHAR_BUDGET: usize = 6000;
+
+/// `/task`（无参）/`/task close` 的回归路径：切到最近的通用线并回灌其尾部。
+async fn switch_to_main(agent: &mut Agent) -> Result<SlashOutcome> {
+    if agent.active_task.is_none() {
+        return Ok(SlashOutcome::Handled(
+            "[already on the main line] usage: /task <name> to enter a task session".into(),
+        ));
+    }
+    let main_id = match agent.session_store.latest_main_session()? {
+        Some(id) => id,
+        None => {
+            // 没有可用通用线（理论上少见）：新建一条
+            let channel = agent
+                .session_store
+                .channel_of(agent.session_id)?
+                .unwrap_or_else(|| "cli".to_string());
+            agent
+                .session_store
+                .create_session(&Uuid::new_v4().to_string(), &channel)?
+        }
+    };
+    let n = switch_session(agent, main_id, TASK_BACKFILL_CHAR_BUDGET)?;
+    Ok(SlashOutcome::Handled(format!(
+        "[back to main line] {} message(s) restored from the main line",
+        n
+    )))
+}
+
+/// 切换到目标 session 并回灌其 sqlite 尾部（ADR-0031 未决 5 定案）：
+/// context.clear + 回灌目标线尾部（user/assistant 正文，按预算封顶不截半条）。
+/// 切换必 clear → 回灌天然幂等，无需跨切换游标。
+/// 返回回灌条数。
+fn switch_session(agent: &mut Agent, session_id: i64, char_budget: usize) -> Result<usize> {
+    agent.session_id = session_id;
+    agent.context.clear();
+    agent.context.summary = None;
+    let msgs = agent
+        .session_store
+        .recent_messages_within_budget(session_id, char_budget)
+        .unwrap_or_default();
+    let n = backfill_context(agent, msgs);
+    agent.refresh_task_state();
+    Ok(n)
+}
+
+/// 把 sqlite 消息行装回内存 context（回灌）。只取 user/assistant 正文：
+/// tool 消息的 tool_call_id 配对无法从 messages 表重建，硬塞会产生
+/// 孤儿 tool 消息违反 OpenAI 协议（严格端点 400）。返回回灌条数。
+fn backfill_context(agent: &mut Agent, msgs: Vec<crate::memory::sqlite::MessageRow>) -> usize {
+    let mut n = 0usize;
+    for m in msgs {
+        let msg = match m.role.as_str() {
+            "user" => ChatMessage::user(m.content),
+            "assistant" => ChatMessage::assistant(m.content),
+            _ => continue, // system/tool 不回灌
+        };
+        if n == 0 {
+            // 边界标记：让模型知道历史从何处恢复，不至于误以为是完整对话
+            agent.context.push(ChatMessage::user(
+                "[context restored: the most recent messages of this line follow]",
+            ));
+        }
+        agent.context.push(msg);
+        n += 1;
+    }
+    n
+}
+
+// ---- /btw 侧问（plan.md #H）----
+
+/// 跑一次 /btw 侧问：锁内快照 context → 独立 provider 单轮调用（无工具、
+/// 不经 handle_message_streaming、不写 context）→ 落 side_messages。
+/// 自连上下文：拼入同进程内最近 2 组侧问 Q&A，追问无需重新交代背景。
+/// 供 slash `/btw` 与 web 频道（Side 事件渲染）共用。
+pub async fn run_btw(agent: &mut Agent, question: &str) -> Result<String> {
+    let provider = match agent.compact_provider_snapshot().await {
+        Some(p) => Some(p),
+        None => agent.provider_snapshot().await,
+    };
+    let provider = provider.ok_or_else(|| anyhow::anyhow!("no provider configured"))?;
+
+    // 快照：context 尾部（预算封顶，user/assistant 正文）+ 已有摘要
+    let mut snapshot: Vec<ChatMessage> = Vec::new();
+    if let Some(s) = &agent.context.summary {
+        snapshot.push(ChatMessage::system(format!(
+            "[Previous conversation summary]\n{}",
+            s
+        )));
+    }
+    let mut used = 0usize;
+    for m in agent.context.history.iter().rev() {
+        if m.role != Role::User && m.role != Role::Assistant {
+            continue;
+        }
+        let t = m.content.as_text();
+        if t.trim().is_empty() {
+            continue;
+        }
+        let len = t.chars().count();
+        if used + len > BTW_CONTEXT_CHAR_BUDGET && !snapshot.is_empty() {
+            break;
+        }
+        used += len;
+        snapshot.push(m.clone());
+        if used >= BTW_CONTEXT_CHAR_BUDGET {
+            break;
+        }
+    }
+    snapshot.reverse();
+
+    // 自连：最近 2 组侧问 Q&A（时间正序）
+    let prior = agent
+        .session_store
+        .recent_side_messages(agent.session_id, 2)
+        .unwrap_or_default();
+    let prior = if prior.is_empty() {
+        agent.btw_recent.clone()
+    } else {
+        prior
+            .into_iter()
+            .map(|r| (r.question, r.answer))
+            .collect::<Vec<_>>()
+    };
+
+    let mut messages = vec![ChatMessage::system(
+        "You are answering a quick side question the user asked while working on something else. \
+         You can see a snapshot of the current conversation for context, but your answer will \
+         NOT be added to it. Be concise and direct. Answer in the language of the question.",
+    )];
+    if !prior.is_empty() {
+        let mut p = String::from("[earlier side questions in this process]\n");
+        for (q, a) in &prior {
+            p.push_str(&format!("Q: {}\nA: {}\n", q, a));
+        }
+        messages.push(ChatMessage::user(p));
+    }
+    if !snapshot.is_empty() {
+        messages.push(ChatMessage::user(
+            "[conversation snapshot (read-only)]".to_string(),
+        ));
+        messages.extend(snapshot);
+    }
+    messages.push(ChatMessage::user(question.to_string()));
+
+    let req = ChatRequest {
+        messages: &messages,
+        tools: None,
+        disable_thinking: false,
+    };
+    let resp = provider.chat(&req).await?;
+    let answer = resp
+        .text
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("empty answer"))?;
+
+    // 落库（独立表，不进 messages/FTS）+ 更新进程内自连缓存（cap 2）
+    if let Err(e) = agent
+        .session_store
+        .add_side_message(agent.session_id, question, &answer)
+    {
+        tracing::warn!(error = %e, "persist side_message failed");
+    }
+    agent
+        .btw_recent
+        .push((question.to_string(), answer.clone()));
+    let cap = 2;
+    if agent.btw_recent.len() > cap {
+        let drop_n = agent.btw_recent.len() - cap;
+        agent.btw_recent.drain(..drop_n);
+    }
+    Ok(answer)
+}
+
+// ---- /steer 前缀解析（channel 层共用，plan.md #I）----
+
+/// 识别 `/steer <msg>` 前缀（大小写不敏感）。返回 `Some(rest)`：
+/// - rest 非空 → 插话内容；
+/// - rest 为空 → 用户只敲了 `/steer`（channel 层给 usage 提示）。
+///
+/// idle 时 channel 层对非空 rest 做「降级为普通消息」处理（对齐 OpenClaw）。
+pub fn split_steer(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "/steer" {
+        return Some("");
+    }
+    let rest = lower
+        .strip_prefix("/steer ")
+        .or_else(|| lower.strip_prefix("/steer\t"))?;
+    // 原文对应切片（保留原始大小写）
+    Some(&trimmed[trimmed.len() - rest.len()..])
 }
 
 /// 把 config 中所有 provider/model 组合 flatten 成有序 model ref 列表
@@ -760,6 +1104,26 @@ mod tests {
         }
         fn label(&self) -> String {
             self.0.clone()
+        }
+    }
+
+    /// run_btw 用：chat() 返回固定文本
+    struct AnswerProvider(&'static str);
+    #[async_trait]
+    impl Provider for AnswerProvider {
+        async fn chat(&self, _req: &ChatRequest<'_>) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                text: Some(self.0.to_string()),
+                tool_calls: vec![],
+                usage: None,
+                finish_reason: None,
+            })
+        }
+        async fn chat_stream(&self, _req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
+            Box::pin(futures_util::stream::empty())
+        }
+        fn native_tool_calling(&self) -> bool {
+            true
         }
     }
 
@@ -973,5 +1337,236 @@ mod tests {
 
         // 清理临时目录
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_split_steer() {
+        assert_eq!(split_steer("/steer 加上 X"), Some("加上 X"));
+        assert_eq!(
+            split_steer("  /STEER  保持大小写 Msg"),
+            Some(" 保持大小写 Msg")
+        );
+        assert_eq!(split_steer("/steer"), Some(""));
+        assert_eq!(split_steer("/steered"), None);
+        assert_eq!(split_steer("hello /steer"), None);
+        assert_eq!(split_steer("/other"), None);
+    }
+
+    #[tokio::test]
+    async fn test_task_switch_backfill_and_archive() {
+        let mut agent = test_agent(test_config()).await;
+        // 通用线攒一些消息
+        let main_sid = agent.session_id;
+        agent
+            .session_store
+            .append_message(main_sid, &Role::User, "主线问题")
+            .unwrap();
+        agent
+            .session_store
+            .append_message(main_sid, &Role::Assistant, "主线回答")
+            .unwrap();
+        agent.context.clear();
+
+        // /task 整理：新任务线 + 回灌通用线尾部当 brief
+        let out = try_handle("/task 整理", &mut agent, None).await.unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => assert!(msg.contains("[new task \"整理\"]"), "{}", msg),
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        assert!(agent.active_task.is_some());
+        let task_sid = agent.session_id;
+        assert_ne!(task_sid, main_sid);
+        // 回灌：标记 + 主线两条
+        let texts: Vec<String> = agent
+            .context
+            .history
+            .iter()
+            .map(|m| m.content.as_text())
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("context restored")));
+        assert!(texts.iter().any(|t| t == "主线问题"));
+        assert!(texts.iter().any(|t| t == "主线回答"));
+        // task_state 注入
+        agent.refresh_task_state();
+        assert!(agent
+            .context
+            .task_state
+            .as_deref()
+            .unwrap()
+            .contains("整理"));
+
+        // 任务线内落消息
+        agent
+            .session_store
+            .append_message(task_sid, &Role::User, "任务内消息")
+            .unwrap();
+
+        // /tasks 列表含该任务
+        let out = try_handle("/tasks", &mut agent, None).await.unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => assert!(msg.contains("整理"), "{}", msg),
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+
+        // /task 无参：回通用线并回灌通用线尾部（不含任务内消息）
+        let out = try_handle("/task", &mut agent, None).await.unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => assert!(msg.contains("[back to main line]"), "{}", msg),
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        assert_eq!(agent.session_id, main_sid);
+        assert!(agent.active_task.is_none());
+        assert!(agent.context.task_state.is_none());
+        let texts: Vec<String> = agent
+            .context
+            .history
+            .iter()
+            .map(|m| m.content.as_text())
+            .collect();
+        assert!(texts.iter().any(|t| t == "主线问题"));
+        assert!(!texts.iter().any(|t| t == "任务内消息"));
+
+        // /task 整理：切回任务线，回灌其尾部（含任务内消息）
+        let out = try_handle("/task 整理", &mut agent, None).await.unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("[switched to task \"整理\"]"), "{}", msg)
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        assert_eq!(agent.session_id, task_sid);
+        let texts: Vec<String> = agent
+            .context
+            .history
+            .iter()
+            .map(|m| m.content.as_text())
+            .collect();
+        assert!(texts.iter().any(|t| t == "任务内消息"));
+
+        // /task close：归档 + 回通用线；归档后不可再切回
+        let out = try_handle("/task close", &mut agent, None).await.unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("[task \"整理\" archived]"), "{}", msg)
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        assert_eq!(agent.session_id, main_sid);
+        assert_eq!(agent.session_store.find_open_task("整理").unwrap(), None);
+        // 同名再建：新建一条全新任务线（不复用归档）
+        try_handle("/task 整理", &mut agent, None).await.unwrap();
+        assert_ne!(agent.session_id, task_sid);
+    }
+
+    async fn test_agent_with_provider(provider: Arc<dyn Provider>) -> Agent {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("test", "test").unwrap();
+        Agent::new(
+            &test_config(),
+            Some(provider),
+            None,
+            None,
+            Arc::new(crate::agent::runner::ToolRegistry::new()),
+            Arc::new(store),
+            sid,
+            "sys".into(),
+            8192,
+            "/tmp/llaia-test/workspace".into(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/tmp/llaia-test/workspace",
+            ))),
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            "/tmp/llaia-test".into(),
+            true,
+            "main".into(),
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_btw_answers_without_polluting_context() {
+        let mut agent = test_agent_with_provider(Arc::new(AnswerProvider("侧问答案"))).await;
+        // 主上下文已有对话
+        agent.context.push(ChatMessage::user("主线问题"));
+        agent.context.push(ChatMessage::assistant("主线回答"));
+        let history_len = agent.context.history.len();
+
+        let answer = run_btw(&mut agent, "顺带一问").await.unwrap();
+        assert_eq!(answer, "侧问答案");
+        // 零污染：history 不变
+        assert_eq!(agent.context.history.len(), history_len);
+        // 落 side_messages 独立表（不在 messages）
+        let rows = agent
+            .session_store
+            .recent_side_messages(agent.session_id, 5)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].question, "顺带一问");
+        assert_eq!(rows[0].answer, "侧问答案");
+        assert!(agent
+            .session_store
+            .recent_messages(agent.session_id, 10)
+            .unwrap()
+            .is_empty());
+        // 自连缓存
+        assert_eq!(agent.btw_recent.len(), 1);
+
+        // 追问：再次 /btw，自连上下文生效（缓存 cap 2）
+        run_btw(&mut agent, "追问").await.unwrap();
+        assert_eq!(agent.btw_recent.len(), 2);
+        run_btw(&mut agent, "再追问").await.unwrap();
+        assert_eq!(agent.btw_recent.len(), 2);
+        assert_eq!(agent.btw_recent[1].0, "再追问");
+    }
+
+    #[tokio::test]
+    async fn test_btw_carries_recent_side_qa() {
+        // 自连：第二次调用的 prompt 应包含第一次的问答文本
+        // （用记录请求的 provider 验证）
+        use std::sync::Mutex as StdMutex;
+        struct RecordingProvider {
+            seen: StdMutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl Provider for RecordingProvider {
+            async fn chat(&self, req: &ChatRequest<'_>) -> Result<ChatResponse> {
+                let dump = req
+                    .messages
+                    .iter()
+                    .map(|m| m.content.as_text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.seen.lock().unwrap().push(dump);
+                Ok(ChatResponse {
+                    text: Some("答".into()),
+                    tool_calls: vec![],
+                    usage: None,
+                    finish_reason: None,
+                })
+            }
+            async fn chat_stream(
+                &self,
+                _req: &ChatRequest<'_>,
+            ) -> BoxStream<'_, Result<StreamEvent>> {
+                Box::pin(futures_util::stream::empty())
+            }
+            fn native_tool_calling(&self) -> bool {
+                true
+            }
+        }
+        let seen = Arc::new(RecordingProvider {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let mut agent = test_agent_with_provider(seen.clone()).await;
+        agent.context.push(ChatMessage::user("主线话题"));
+        run_btw(&mut agent, "第一问").await.unwrap();
+        run_btw(&mut agent, "第二问").await.unwrap();
+        let calls = seen.seen.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        // 第二次调用包含第一问的问答 + 主线快照 + 第二问本身
+        assert!(calls[1].contains("Q: 第一问"));
+        assert!(calls[1].contains("主线话题"));
+        assert!(calls[1].contains("第二问"));
     }
 }

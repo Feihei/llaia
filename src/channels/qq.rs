@@ -651,8 +651,69 @@ impl QqChannel {
             "qq received message"
         );
 
+        // /steer（plan.md #I）：turn 运行中非阻塞投递（不 lock agent，
+        // 缓冲经 registry 共享 Arc）；空闲则降级为普通消息（剥前缀继续往下走）。
+        let steer_stripped;
+        let text: &str = if let Some(rest) = crate::commands::slash::split_steer(text) {
+            let running = self.running_stops.lock().await.contains_key(user_openid);
+            if running {
+                if rest.is_empty() {
+                    let _ = self
+                        .send_c2c_message(
+                            user_openid,
+                            "usage: /steer <message>",
+                            Some(msg_id.as_str()),
+                        )
+                        .await;
+                } else {
+                    registry
+                        .steer_buffer
+                        .lock()
+                        .unwrap()
+                        .push_back(rest.to_string());
+                    let _ = self
+                        .send_c2c_message(
+                            user_openid,
+                            &format!("[steer queued: {}]", rest),
+                            Some(msg_id.as_str()),
+                        )
+                        .await;
+                }
+                return Ok(());
+            }
+            // 空闲：剥前缀当普通消息跑（对齐 OpenClaw 降级）；空参给 usage
+            if rest.is_empty() {
+                let _ = self
+                    .send_c2c_message(
+                        user_openid,
+                        "usage: /steer <message>",
+                        Some(msg_id.as_str()),
+                    )
+                    .await;
+                return Ok(());
+            }
+            steer_stripped = rest.to_string();
+            &steer_stripped
+        } else {
+            text
+        };
+
         // 斜杠命令：在锁内处理，把输出发回用户（忽略附件）
         if text.trim().starts_with('/') {
+            // /btw（plan.md #H ①）：turn 运行中读不到上下文（锁被 turn 持有，
+            // 排队等锁会变成「turn 结束后才答」），明确拒绝优于静默延迟。
+            if text.trim().to_ascii_lowercase().starts_with("/btw")
+                && self.running_stops.lock().await.contains_key(user_openid)
+            {
+                let _ = self
+                    .send_c2c_message(
+                        user_openid,
+                        "[btw busy: a turn is running; ask again when idle]",
+                        Some(msg_id.as_str()),
+                    )
+                    .await;
+                return Ok(());
+            }
             // /stop：中断当前正在执行的 turn（不需要 lock agent，避免被长任务阻塞）
             if text.trim().eq_ignore_ascii_case("/stop") {
                 let notify = {
@@ -755,7 +816,9 @@ impl QqChannel {
 
             let mut parts: Vec<ContentPart> = Vec::new();
             if !text.is_empty() {
-                parts.push(ContentPart::Text { text: text.clone() });
+                parts.push(ContentPart::Text {
+                    text: text.to_string(),
+                });
             }
             for att in &incoming.attachments {
                 match self.download_attachment(att, &uploads_dir, msg_id).await {
