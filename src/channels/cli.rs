@@ -783,12 +783,18 @@ pub async fn build_agent(
     let mut registry = AgentRegistry::new(main_agent, main_workspace);
     // /steer 插话缓冲（plan.md #I）：registry 与 main Agent 共享同一 Arc，
     // channel 在 turn 持锁期间经 registry 投递、agent 工具循环 drain。
+    // 同批接上实时作用域 Arc：WebUI /file 请求时直接读，避免 turn 持锁期间锁 main。
     {
-        let buf = {
+        let (buf, root, trusted) = {
             let a = registry.main.lock().await;
-            a.steer_buffer.clone()
+            (
+                a.steer_buffer.clone(),
+                a.workspace_root.clone(),
+                a.trusted_dirs.clone(),
+            )
         };
         registry.attach_steer_buffer(buf);
+        registry.attach_main_scope(root, trusted);
     }
     for (alias, agent) in sub_agents {
         registry.register_sub_agent(alias, agent);

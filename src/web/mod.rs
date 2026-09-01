@@ -114,6 +114,26 @@ pub fn resolve_within(base: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(canon_joined)
 }
 
+/// 在实时作用域（当前工作目录 ∪ 受信目录 ∪ 家目录）内解析 `/file` 请求路径：
+/// 绝对/相对路径均可（与 send 工具同一套 `validate_path_in_scope`，家目录作为
+/// 固定额外范围）；相对路径按当前工作目录解析，若该处不存在则回退家目录
+/// （如 `/upload` 产物 `uploads/<name>` 恒落家目录，`/move` 后相对引用不断链）。
+pub fn resolve_file_in_scope(
+    root: &Path,
+    trusted: &[PathBuf],
+    home: &Path,
+    path: &str,
+) -> Result<PathBuf, String> {
+    let mut abs = crate::path_guard::validate_path_in_scope(root, trusted, path, Some(home))
+        .map_err(|e| e.to_string())?;
+    if !abs.exists() && !Path::new(path).is_absolute() {
+        if let Ok(p) = crate::path_guard::validate_path(home, path, None) {
+            abs = p;
+        }
+    }
+    Ok(abs)
+}
+
 #[derive(RustEmbed)]
 #[folder = "src/web/static/"]
 struct StaticAsset;
@@ -260,7 +280,10 @@ pub async fn upload(
     (StatusCode::BAD_REQUEST, "no file field").into_response()
 }
 
-/// GET /file?path=<rel>&token=<token>：返回 workspace 内文件流
+/// GET /file?path=<path>&token=<token>：返回作用域内文件流。
+/// 作用域与 send 工具同源：当前工作目录（workspace_root，/move 可变）∪ 受信目录
+/// ∪ agent 家目录——从 main Agent 实时读取。绝对路径与相对路径均可（相对路径按
+/// 当前工作目录解析）。
 pub async fn serve_file(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -281,7 +304,18 @@ pub async fn serve_file(
     if !token_ok {
         return unauthorized();
     }
-    match resolve_within(&state.workspace, &q.path) {
+    // 实时作用域取自 registry 缓存的 Arc（与 main Agent 同一份，/move 原地可见）。
+    // 不锁 main：turn 持锁期间锁 main 会阻塞到回合结束，恰好卡住媒体回显的文件拉取。
+    // 未接（如直接构造 AppState 的测试）→ 退化为静态家目录（旧行为）。
+    let (root, trusted) = match (
+        &state.registry.main_workspace_root,
+        &state.registry.main_trusted_dirs,
+    ) {
+        (Some(r), Some(t)) => (r.read().await.clone(), t.read().await.clone()),
+        _ => (state.workspace.clone(), Vec::new()),
+    };
+    let home = state.workspace.clone();
+    match resolve_file_in_scope(&root, &trusted, &home, &q.path) {
         Ok(abs) => match tokio::fs::read(&abs).await {
             Ok(data) => {
                 let mime = mime_guess::from_path(&abs).first_or_octet_stream();
@@ -2348,6 +2382,59 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let r = resolve_within(tmp.path(), "C:\\Windows\\system32");
         assert!(r.is_err());
+    }
+
+    /// 回归（用户报告同源）：/move 后 WebUI `/file` 仍能取到媒体——
+    /// moved 目录绝对/相对路径可达、家目录作为额外范围可达、
+    /// 家目录相对产物（uploads/）回退不断链、作用域外拒绝。
+    #[test]
+    fn test_resolve_file_in_scope_after_move() {
+        let home = tempfile::tempdir().unwrap();
+        let moved = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let home_p = home.path().to_path_buf();
+        let moved_p = moved.path().to_path_buf();
+
+        fs::create_dir_all(home_p.join("uploads")).unwrap();
+        fs::write(home_p.join("uploads/pic.png"), b"home upload").unwrap();
+        fs::write(home_p.join("voice.mp3"), b"tts output").unwrap();
+        fs::write(moved_p.join("report.pptx"), b"moved file").unwrap();
+        fs::write(outside.path().join("stranger.pptx"), b"x").unwrap();
+
+        // 模拟 /move：root=moved，受信集合登记 moved 目标，家目录不在受信里
+        let trusted = vec![moved_p.clone()];
+
+        // moved 目录内绝对路径（媒体事件携带的形态）→ 可达
+        let abs = moved_p.join("report.pptx");
+        assert!(
+            resolve_file_in_scope(&moved_p, &trusted, &home_p, abs.to_str().unwrap()).is_ok(),
+            "moved 目录内绝对路径应可达"
+        );
+
+        // 相对路径按新根解析
+        assert!(
+            resolve_file_in_scope(&moved_p, &trusted, &home_p, "report.pptx").is_ok(),
+            "相对路径应解析到 moved 目录"
+        );
+
+        // 家目录不在受信集合，但作为额外范围恒可达（/move 后媒体不断联）
+        let voice = home_p.join("voice.mp3");
+        assert!(
+            resolve_file_in_scope(&moved_p, &trusted, &home_p, voice.to_str().unwrap()).is_ok(),
+            "家目录产物应可达"
+        );
+
+        // 家目录相对产物：新根下不存在 → 回退家目录解析（/upload 产物场景）
+        let r = resolve_file_in_scope(&moved_p, &trusted, &home_p, "uploads/pic.png")
+            .expect("uploads/ 相对路径应回退家目录");
+        assert!(r.exists(), "回退后应指向家目录的真实文件");
+
+        // 作用域之外 → 拒绝
+        let stranger = outside.path().join("stranger.pptx");
+        assert!(
+            resolve_file_in_scope(&moved_p, &trusted, &home_p, stranger.to_str().unwrap()).is_err(),
+            "作用域外路径必须被拒绝"
+        );
     }
 
     fn sample_config() -> Config {

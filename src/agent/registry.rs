@@ -28,6 +28,11 @@ pub struct AgentRegistry {
     pub main: Arc<AsyncMutex<Agent>>,
     /// 主 Agent 工作区根（缓存，避免 delegate 在持有 main 锁的调用链中再次 lock 导致死锁）
     pub main_workspace: PathBuf,
+    /// 主 Agent 实时作用域 Arc 缓存（与 main 内部同一份）：请求时消费方（如 WebUI
+    /// `/file`）直接读它们即可，无需锁 main——turn 持锁期间锁 main 会阻塞到回合结束，
+    /// 恰好卡住媒体回显的文件拉取。未接（`attach_main_scope` 未调用）时为 None。
+    pub main_workspace_root: Option<Arc<tokio::sync::RwLock<PathBuf>>>,
+    pub main_trusted_dirs: Option<Arc<tokio::sync::RwLock<Vec<PathBuf>>>>,
     /// 子 Agent：alias → 实例。
     /// 用 std::sync::Mutex 包一层以支持热加载时原地替换（rebuild_sub_agents 经 `&self` 调用）。
     /// 读取时只 clone 出 Arc、不持有锁跨 await。
@@ -47,6 +52,8 @@ impl AgentRegistry {
         Self {
             main,
             main_workspace,
+            main_workspace_root: None,
+            main_trusted_dirs: None,
             sub_agents: Mutex::new(HashMap::new()),
             background_tasks: Arc::new(Mutex::new(HashMap::new())),
             delivery: Arc::new(Mutex::new(None)),
@@ -58,6 +65,18 @@ impl AgentRegistry {
     /// 不接也不影响功能正确性，只是 /steer 投递落不到正在跑的 turn。
     pub fn attach_steer_buffer(&mut self, buf: Arc<Mutex<std::collections::VecDeque<String>>>) {
         self.steer_buffer = buf;
+    }
+
+    /// 把 main Agent 的实时作用域 Arc（workspace_root / trusted_dirs）接到 registry
+    /// （build_agent 构建后调用，与 attach_steer_buffer 同一时机）。不接则请求时消费方
+    /// （如 WebUI /file）读不到实时作用域，退化为各自的静态兜底。
+    pub fn attach_main_scope(
+        &mut self,
+        root: Arc<tokio::sync::RwLock<PathBuf>>,
+        trusted: Arc<tokio::sync::RwLock<Vec<PathBuf>>>,
+    ) {
+        self.main_workspace_root = Some(root);
+        self.main_trusted_dirs = Some(trusted);
     }
 
     /// 注入本轮的结果投递目标（各 channel 在 run_turn 前调用）。

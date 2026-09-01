@@ -269,7 +269,8 @@
 - 修复：
   1. **send_image/send_file 作用域对齐**：改持与文件工具同一对 `workspace_root` + `trusted_dirs` Arc，走 `validate_path_in_scope`；家目录作为固定额外可发送范围（同 `file_read` extra_readable 语义）——/move 后 tts/、uploads/ 产物不断联。回归 `test_send_media_follows_moved_workspace`（moved 绝对/相对路径、家目录可达、作用域外拒绝）。
   2. **QQ 上传双路径**（`channels/qq.rs`）：图片续走 base64 直传（补 `file_name` 字段——缺它在 QQ 端显示未命名文件），失败自动降级分片；**文件类走官方分片上传**——`upload_prepare`（file_type/file_size/file_name/md5/sha1/md5_10m，md5_10m 口径按文档为前 **10002432** 字节）→ 预签名地址 PUT 分片（失败重试一次）→ 逐片 `upload_part_finish` → `/files` 带 `upload_id` 合并换 `file_info` → msg_type=7 发送不变。新增 `post_json_authed`（11244 token 刷新重试）、`qq_file_checksums`/`qq_md5_hex` 校验值助手；依赖新增 `sha1 = "0.10"`。
-  3. 回归：`tests/qq_http.rs` 三条（分片全流程含请求体字段断言 / 图片 base64 带 file_name / base64 500 后图片降级分片）+ `qq.rs` 校验值单测三条（含 10002432 边界）。517 lib tests + 全部集成测试绿。
+  3. **WebUI `/file` 同源残留（复查发现，同日修）**：`serve_file` 原用静态家目录 + 拒绝绝对路径的 `resolve_within`——`/move` 后媒体事件携带的绝对路径拉不到文件。抽出 `resolve_file_in_scope`（同一套 `validate_path_in_scope`，家目录为额外范围；相对路径新根下不存在时回退家目录，保 `/upload` 产物）；实时作用域经 `AgentRegistry::attach_main_scope` 缓存 workspace_root/trusted_dirs Arc（与 `main_workspace` 缓存同一防死锁动机：**请求时锁 main 会被运行中的 turn 阻塞到回合结束，恰好卡住媒体回显拉取**）。回归 `test_resolve_file_in_scope_after_move`。
+  4. 回归：`tests/qq_http.rs` 三条（分片全流程含请求体字段断言 / 图片 base64 带 file_name / base64 500 后图片降级分片）+ `qq.rs` 校验值单测三条（含 10002432 边界）。518 lib tests + 全部集成测试绿。
 
 ---
 
