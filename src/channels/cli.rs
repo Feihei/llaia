@@ -328,6 +328,9 @@ pub async fn build_single_agent(
     std::fs::create_dir_all(&workspace).ok();
     // 与文件/终端工具共享的工作区根（P4-d /move 一处更新、所有工具即时生效）
     let workspace_root = Arc::new(RwLock::new(workspace.clone()));
+    // 会话级受信目录（plan.md #B）：/move 批准过的目录集合，与 Agent 及文件/终端
+    // 工具共享同一 Arc——审批判定与执行校验都按 workspace ∪ 受信 放行。
+    let trusted_dirs: Arc<RwLock<Vec<std::path::PathBuf>>> = Arc::new(RwLock::new(Vec::new()));
 
     let soul_path = workspace.join("SOUL.md");
     let user_path = workspace.join("USER.md");
@@ -440,15 +443,25 @@ pub async fn build_single_agent(
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(FileRead::new(
             workspace_root.clone(),
+            trusted_dirs.clone(),
             is_main,
             Some(skills_dir.clone()),
         )),
-        Arc::new(FileWrite::new(workspace_root.clone(), is_main)),
-        Arc::new(FileEdit::new(workspace_root.clone(), is_main)),
+        Arc::new(FileWrite::new(
+            workspace_root.clone(),
+            trusted_dirs.clone(),
+            is_main,
+        )),
+        Arc::new(FileEdit::new(
+            workspace_root.clone(),
+            trusted_dirs.clone(),
+            is_main,
+        )),
         Arc::new(Terminal::new(
             config.tools.terminal.command_policy.clone(),
             config.tools.terminal.command_whitelist.clone(),
             workspace_root.clone(),
+            trusted_dirs.clone(),
             Some(skills_dir.clone()),
         )),
         Arc::new({
@@ -588,6 +601,7 @@ pub async fn build_single_agent(
         context_size,
         workspace.clone(),
         workspace_root,
+        trusted_dirs,
         config_dir.to_path_buf(),
         is_main,
         alias.to_string(),

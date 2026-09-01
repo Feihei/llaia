@@ -201,6 +201,8 @@ pub fn is_interactive_channel(channel: &str) -> bool {
 ///
 /// `trusted` 为会话级受信目录集合（#B）：/move 批准过的目标目录，与 `workspace`
 /// 同等对待——落在其中任一目录内的操作自动放行，逃出全部范围的仍需审批。
+/// 复用执行层的范围感知校验（`path_guard::*_in_scope`），保证「审批判定」与
+/// 「工具执行校验」永远同一套语义：判 within 的操作执行必过，判外的必挡。
 pub fn tool_within_workspace(
     tool_name: &str,
     args: &Value,
@@ -210,17 +212,14 @@ pub fn tool_within_workspace(
     match tool_name {
         "file_write" | "file_edit" | "file_read" => {
             let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            path_within_any(workspace, trusted, |ws| {
-                crate::path_guard::validate_path(ws, p, None).is_ok()
-            })
+            crate::path_guard::validate_path_in_scope(workspace, trusted, p, None).is_ok()
         }
         "terminal" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             // 不把 skills_dir 作为 extra_readable 传进来：terminal 引用 skill 目录
             // 脚本仍判为 workspace 外 → 走审批（执行 skill 代码需人肉确认，符合 ADR-0028）。
-            path_within_any(workspace, trusted, |ws| {
-                crate::path_guard::validate_command_paths(cmd, ws, None).is_ok()
-            })
+            crate::path_guard::validate_command_paths_in_scope(cmd, workspace, trusted, None)
+                .is_ok()
         }
         // MCP 工具一律视为 workspace 外（ADR-0020：安全默认，需审批）
         name if name.starts_with("mcp_") => false,
@@ -228,18 +227,6 @@ pub fn tool_within_workspace(
         // 一律视为在 workspace 内
         _ => true,
     }
-}
-
-/// 依次以 workspace、各受信目录为基准跑同一个校验闭包，任一通过即视为「在范围内」。
-fn path_within_any(
-    workspace: &Path,
-    trusted: &[PathBuf],
-    check: impl Fn(&Path) -> bool,
-) -> bool {
-    if check(workspace) {
-        return true;
-    }
-    trusted.iter().any(|d| check(d))
 }
 
 /// 审批决策

@@ -26,7 +26,7 @@
 - **skill_edit**：patch 兼容模型二次序列化（字符串含 `{find,replace}` 对象时按替换处理）；成功消息明示操作类型（追加/替换/整篇覆盖），无需模型读回文件分辨
 
 **Features**
-- **approval**：/move 受信目录模型（plan.md #B）——批准过的目录登记为会话级受信集合，与 workspace_root 同等参与「是否在 workspace 内」判定：`/move home` 切走再回来、或切换期间触碰受信目录内的路径均免审批，逃出全部范围的仍需审批。受信目录仅存内存（重启清空），只能经 `validate_move_target`（canonicalize + 黑名单）进入
+- **approval**：/move 受信目录模型（plan.md #B）——批准过的目录登记为会话级受信集合，与 workspace_root 同等参与「是否在 workspace 内」判定：`/move home` 切走再回来、或切换期间触碰受信目录内的路径均免审批，逃出全部范围的仍需审批。**审批层与执行层共用同一判定**（`path_guard` 的 scope 系列函数 + 共享受信集合 Arc），杜绝「审批放行但执行报 outside workspace」的割裂。受信目录仅存内存（重启清空），只能经 `validate_move_target`（canonicalize + 黑名单）进入
 - **session**：压缩时自动生成会话标题，落 `sessions.title` 并在 WebUI 列表展示——仅标题为空时生成一次，失败降级为首条用户消息截断（plan.md「会话主题自动总结」）
 - **memory**：新增 `memory_research` 工具——基于 FTS5 的跨会话历史消息全文搜索，只读无需审批，结果上限 20 条（plan.md #5）
 - **token**：token 用量统计链路打通（plan.md W3）——新增 `turn_usage` 表按回合累计输入/输出 token 并区分 sidecar 调用（compact / vision / reminder）；新增 `GET /api/stats/tokens` 聚合 API 与 WebUI 顶层 Stats tab（范围选择 + 汇总卡 + 每日柱状图 + per-model / per-session 排名，纯 SVG/CSS 手绘、零图表依赖）。已知限制：LMStudio / bare 端点默认不上报 usage，该 provider 无数据是预期行为

@@ -234,6 +234,50 @@ pub fn validate_command_paths(
     Ok(())
 }
 
+/// 在「workspace_root ∪ 受信目录」范围内校验路径（plan.md #B 受信目录）。
+///
+/// 与 `validate_path` 同一套三层校验，但绝对路径可依次尝试 workspace 与各受信目录，
+/// 任一通过即返回。相对路径只按 workspace 解析（cwd 语义，不尝试受信目录——
+/// 否则同一个相对名会在多个目录下产生歧义）。审批层（`tool_within_workspace`）与
+/// 工具执行层共用本函数，保证「审批判定」与「执行校验」永远一致。
+pub fn validate_path_in_scope(
+    workspace: &Path,
+    trusted: &[PathBuf],
+    path: &str,
+    extra_readable: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Ok(p) = validate_path(workspace, path, extra_readable) {
+        return Ok(p);
+    }
+    if Path::new(path).is_absolute() {
+        for dir in trusted {
+            if let Ok(p) = validate_path(dir, path, None) {
+                return Ok(p);
+            }
+        }
+    }
+    // 都不通过：以 workspace 视角重跑一次，返回原始错误信息
+    validate_path(workspace, path, extra_readable)
+}
+
+/// `validate_command_paths` 的范围感知版本：命令行每个路径 token 都须落在
+/// workspace ∪ 受信目录内（语义同 `validate_path_in_scope`）。
+pub fn validate_command_paths_in_scope(
+    command: &str,
+    workspace: &Path,
+    trusted: &[PathBuf],
+    extra_readable: Option<&Path>,
+) -> Result<()> {
+    for token in extract_path_tokens(command) {
+        // 裸 `/` 通常是命令的路径元字符而非文件系统路径（同 validate_command_paths）
+        if token == "/" {
+            continue;
+        }
+        validate_path_in_scope(workspace, trusted, &token, extra_readable)?;
+    }
+    Ok(())
+}
+
 /// 命令黑名单（内置，不可配）
 pub const COMMAND_BLACKLIST: &[&str] = &[
     "rm -rf /",

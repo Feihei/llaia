@@ -212,6 +212,7 @@ impl Agent {
         context_size: usize,
         workspace: std::path::PathBuf,
         workspace_root: Arc<RwLock<std::path::PathBuf>>,
+        trusted_dirs: Arc<RwLock<Vec<std::path::PathBuf>>>,
         config_dir: std::path::PathBuf,
         is_main: bool,
         alias: String,
@@ -239,7 +240,7 @@ impl Agent {
             permission_profile: Arc::new(RwLock::new(permission)),
             workspace: workspace.clone(),
             workspace_root,
-            trusted_dirs: Arc::new(RwLock::new(Vec::new())),
+            trusted_dirs,
             config_dir,
             is_main,
             alias,
@@ -1448,6 +1449,7 @@ mod tests {
             Arc::new(RwLock::new(std::path::PathBuf::from(
                 "/tmp/llaia-test/workspace",
             ))),
+            Arc::new(RwLock::new(Vec::new())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),
@@ -1508,6 +1510,7 @@ mod tests {
             Arc::new(RwLock::new(std::path::PathBuf::from(
                 "/tmp/llaia-test/workspace",
             ))),
+            Arc::new(RwLock::new(Vec::new())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),
@@ -1646,6 +1649,7 @@ mod tests {
             Arc::new(RwLock::new(std::path::PathBuf::from(
                 "/tmp/llaia-test/workspace",
             ))),
+            Arc::new(RwLock::new(Vec::new())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),
@@ -1743,6 +1747,7 @@ mod tests {
             100_000, // 大窗口，避免 auto-compact 干扰断言
             ws.clone(),
             Arc::new(RwLock::new(ws.clone())),
+            Arc::new(RwLock::new(Vec::new())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),
@@ -1835,6 +1840,7 @@ mod tests {
             100_000,
             ws.clone(),
             Arc::new(RwLock::new(ws.clone())),
+            Arc::new(RwLock::new(Vec::new())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),
@@ -2279,6 +2285,7 @@ mod tests {
             Arc::new(RwLock::new(std::path::PathBuf::from(
                 "/tmp/llaia-test/workspace/subagent/coder",
             ))),
+            Arc::new(RwLock::new(Vec::new())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             false,
             "coder".into(),
@@ -2324,6 +2331,7 @@ mod tests {
             8192,
             main_workspace.clone(),
             Arc::new(RwLock::new(main_workspace.clone())),
+            Arc::new(RwLock::new(Vec::new())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),
@@ -2422,6 +2430,7 @@ mod tests {
             Arc::new(RwLock::new(std::path::PathBuf::from(
                 "/tmp/llaia-test/workspace",
             ))),
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),

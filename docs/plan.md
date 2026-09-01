@@ -153,6 +153,7 @@
   - 失效边界：仅存内存，Agent 生命周期（重启/新进程）后清空，需重新 /move 批准；`/move home` 不撤销既有受信记录。
   - 回归测试：`test_trusted_dirs_keep_moved_dir_approved_after_switch_away`（切走后受信目录内免审批 / 无受信时需审批 / 逃出全部范围需审批三断言）；`format_move_prompt` 文案更新。
   - 安全权衡落点：受信目录只能经 `validate_move_target` 进入（canonicalize + 危险前缀黑名单复核），`C:\` 等黑名单目录无法成为受信目录。
+  - **执行层对齐（同日补）**：初版只改了审批层，工具 `execute()` 内部的 `validate_path` / `validate_command_paths` 仍只认 workspace_root——审批放行的受信目录内操作会在执行层报 "outside workspace"（批准了却执行失败）。修复：`path_guard` 新增 `validate_path_in_scope` / `validate_command_paths_in_scope`（workspace ∪ trusted 依次校验），file 三工具与 terminal 执行路径改用 scope 版并持有与 `Agent.trusted_dirs` **同一 Arc**（`cli.rs` 构造时共享，`/move` 登记后工具即时可见）；审批层 `tool_within_workspace` 同步改调同一组 scope 函数，**审批与执行从此不可能出现判定分歧**。回归：`test_trusted_dir_operations_execute_after_move_away`（/move 切走后受信目录内写入/读取放行、第三方目录仍拒绝）。
 
 ### ⭐ 新增发现与技术探讨（2026-08-26·3）
 

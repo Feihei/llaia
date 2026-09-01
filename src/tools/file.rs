@@ -9,40 +9,62 @@ use tokio::sync::RwLock;
 
 pub struct FileRead {
     workspace: Arc<RwLock<PathBuf>>,
+    /// 会话级受信目录（plan.md #B，与 Agent 共享同一 Arc）：执行层边界 = workspace ∪ 受信
+    trusted: Arc<RwLock<Vec<PathBuf>>>,
     is_main: bool,
     /// skills 目录（<config_dir>/skills）：SKILL.md 特殊放行用，None 时不放行
     skills_dir: Option<PathBuf>,
 }
 pub struct FileWrite {
     workspace: Arc<RwLock<PathBuf>>,
+    trusted: Arc<RwLock<Vec<PathBuf>>>,
     is_main: bool,
 }
 pub struct FileEdit {
     workspace: Arc<RwLock<PathBuf>>,
+    trusted: Arc<RwLock<Vec<PathBuf>>>,
     is_main: bool,
 }
 
 impl FileRead {
     pub fn new(
         workspace: Arc<RwLock<PathBuf>>,
+        trusted: Arc<RwLock<Vec<PathBuf>>>,
         is_main: bool,
         skills_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             workspace,
+            trusted,
             is_main,
             skills_dir,
         }
     }
 }
 impl FileWrite {
-    pub fn new(workspace: Arc<RwLock<PathBuf>>, is_main: bool) -> Self {
-        Self { workspace, is_main }
+    pub fn new(
+        workspace: Arc<RwLock<PathBuf>>,
+        trusted: Arc<RwLock<Vec<PathBuf>>>,
+        is_main: bool,
+    ) -> Self {
+        Self {
+            workspace,
+            trusted,
+            is_main,
+        }
     }
 }
 impl FileEdit {
-    pub fn new(workspace: Arc<RwLock<PathBuf>>, is_main: bool) -> Self {
-        Self { workspace, is_main }
+    pub fn new(
+        workspace: Arc<RwLock<PathBuf>>,
+        trusted: Arc<RwLock<Vec<PathBuf>>>,
+        is_main: bool,
+    ) -> Self {
+        Self {
+            workspace,
+            trusted,
+            is_main,
+        }
     }
 }
 
@@ -95,7 +117,8 @@ impl Tool for FileRead {
         } else {
             None
         };
-        let resolved = path_guard::validate_path(&ws, path, extra.as_deref())?;
+        let trusted = self.trusted.read().await.clone();
+        let resolved = path_guard::validate_path_in_scope(&ws, &trusted, path, extra.as_deref())?;
         let content = tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| anyhow!("read {:?}: {}", resolved, e))?;
@@ -136,7 +159,8 @@ impl Tool for FileWrite {
 
         let ws = self.workspace.read().await;
         // 主 agent 写 subagent/ 路径时拒绝（.inbox/ 例外由 delegate 系统层处理，不经 file 工具）
-        let resolved = path_guard::validate_path(&ws, path, None)?;
+        let trusted = self.trusted.read().await.clone();
+        let resolved = path_guard::validate_path_in_scope(&ws, &trusted, path, None)?;
         if self.is_main {
             let subagent_dir = ws.join("subagent");
             if resolved.starts_with(&subagent_dir) {
@@ -195,7 +219,8 @@ impl Tool for FileEdit {
             .ok_or_else(|| anyhow!("missing 'new_string'"))?;
 
         let ws = self.workspace.read().await;
-        let resolved = path_guard::validate_path(&ws, path, None)?;
+        let trusted = self.trusted.read().await.clone();
+        let resolved = path_guard::validate_path_in_scope(&ws, &trusted, path, None)?;
         if self.is_main {
             let subagent_dir = ws.join("subagent");
             if resolved.starts_with(&subagent_dir) {
@@ -242,7 +267,12 @@ mod tests {
         let ws = tempdir().unwrap();
         let ws_path = ws.path().to_path_buf();
         std::fs::write(ws_path.join("test.txt"), "hello world").unwrap();
-        let tool = FileRead::new(Arc::new(RwLock::new(ws_path)), true, None);
+        let tool = FileRead::new(
+            Arc::new(RwLock::new(ws_path)),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+            None,
+        );
         let result = tool
             .execute(&json!({"path": "test.txt"}), "cli")
             .await
@@ -254,17 +284,81 @@ mod tests {
     async fn test_workspace_boundary_blocks_parent_traversal() {
         let ws = tempdir().unwrap();
         let ws_path = ws.path().to_path_buf();
-        let write_tool = FileWrite::new(Arc::new(RwLock::new(ws_path.clone())), true);
+        let write_tool = FileWrite::new(
+            Arc::new(RwLock::new(ws_path.clone())),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+        );
         write_tool
             .execute(&json!({"path": "inside.txt", "content": "ok"}), "cli")
             .await
             .unwrap();
 
-        let read_tool = FileRead::new(Arc::new(RwLock::new(ws_path)), true, None);
+        let read_tool = FileRead::new(
+            Arc::new(RwLock::new(ws_path)),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+            None,
+        );
         let escaped = read_tool
             .execute(&json!({"path": "../outside.txt"}), "cli")
             .await;
         assert!(escaped.is_err());
+    }
+
+    /// 回归（plan.md #B 执行层）：受信目录内的操作在执行层必须放行——
+    /// 审批层按 workspace ∪ 受信放行后，执行层若仍只认 workspace_root，
+    /// 会出现「批准了却执行失败」的割裂。信任列表与工具共享同一 Arc，
+    /// /move 批准登记后（无需 /move 切走）目标目录内读写即时生效。
+    #[tokio::test]
+    async fn test_trusted_dir_operations_execute_after_move_away() {
+        let home = tempdir().unwrap();
+        let moved = tempdir().unwrap();
+        let home_ws = home.path().join("workspace");
+        std::fs::create_dir_all(&home_ws).unwrap();
+        let moved_dir = moved.path().to_path_buf();
+
+        let trusted: Arc<RwLock<Vec<PathBuf>>> = Arc::new(RwLock::new(Vec::new()));
+        // workspace_root 已 /move 到 moved_dir，home 的旧 workspace 进受信集合
+        *trusted.write().await = vec![home_ws.clone()];
+
+        let write_tool = FileWrite::new(
+            Arc::new(RwLock::new(moved_dir.clone())),
+            trusted.clone(),
+            true,
+        );
+        write_tool
+            .execute(
+                &json!({"path": home_ws.join("note.md").to_str().unwrap(), "content": "hi"}),
+                "cli",
+            )
+            .await
+            .expect("受信目录内写入应放行");
+
+        let read_tool = FileRead::new(
+            Arc::new(RwLock::new(moved_dir)),
+            trusted,
+            true,
+            None,
+        );
+        let out = read_tool
+            .execute(
+                &json!({"path": home_ws.join("note.md").to_str().unwrap()}),
+                "cli",
+            )
+            .await
+            .expect("受信目录内读取应放行");
+        assert!(out.contains("hi"));
+
+        // 未受信的第三方目录仍拒绝
+        let other = tempdir().unwrap();
+        let result = read_tool
+            .execute(
+                &json!({"path": other.path().join("x.txt").to_str().unwrap()}),
+                "cli",
+            )
+            .await;
+        assert!(result.is_err(), "逃出 workspace ∪ 受信的路径应拒绝");
     }
 
     #[tokio::test]
@@ -275,7 +369,12 @@ mod tests {
         std::fs::create_dir_all(&subagent_dir).unwrap();
         std::fs::write(subagent_dir.join("result.md"), "sub output").unwrap();
 
-        let tool = FileRead::new(Arc::new(RwLock::new(ws_path)), true, None);
+        let tool = FileRead::new(
+            Arc::new(RwLock::new(ws_path)),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+            None,
+        );
         let result = tool
             .execute(&json!({"path": "subagent/coder/result.md"}), "cli")
             .await;
@@ -289,7 +388,11 @@ mod tests {
         let ws_path = ws.path().to_path_buf();
         std::fs::create_dir_all(ws_path.join("subagent").join("coder")).unwrap();
 
-        let tool = FileWrite::new(Arc::new(RwLock::new(ws_path)), true);
+        let tool = FileWrite::new(
+            Arc::new(RwLock::new(ws_path)),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+        );
         let result = tool
             .execute(
                 &json!({"path": "subagent/coder/evil.txt", "content": "hack"}),
@@ -314,7 +417,12 @@ mod tests {
         std::fs::create_dir_all(&searcher_ws).unwrap();
         std::fs::write(searcher_ws.join("secret.txt"), "secret").unwrap();
 
-        let tool = FileRead::new(Arc::new(RwLock::new(coder_ws)), false, None);
+        let tool = FileRead::new(
+            Arc::new(RwLock::new(coder_ws)),
+            Arc::new(RwLock::new(Vec::new())),
+            false,
+            None,
+        );
         let result = tool
             .execute(&json!({"path": "../searcher/secret.txt"}), "cli")
             .await;
@@ -340,6 +448,7 @@ mod tests {
 
         let tool = FileRead::new(
             Arc::new(RwLock::new(ws_path)),
+            Arc::new(RwLock::new(Vec::new())),
             true,
             Some(skills_dir.clone()),
         );
@@ -371,6 +480,7 @@ mod tests {
         // 未配 skills_dir 时 SKILL.md 也拒绝
         let tool_no_skills = FileRead::new(
             Arc::new(RwLock::new(root.path().join("workspace"))),
+            Arc::new(RwLock::new(Vec::new())),
             true,
             None,
         );

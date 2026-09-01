@@ -218,6 +218,7 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
                 "/tmp/llaia-test/workspace",
             ))),
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
             std::path::PathBuf::from("/tmp/llaia-test"),
             true,
             "main".into(),
