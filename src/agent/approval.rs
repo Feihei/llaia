@@ -179,6 +179,9 @@ impl ApprovalGate {
 pub struct ApprovalContext {
     pub profile: String,
     pub workspace: PathBuf,
+    /// 会话级受信目录集合（#B）：/move 批准过的目标目录，canonical 形态。
+    /// 判定「是否在 workspace 内」时与 `workspace` 同等对待，令目录内操作免审批。
+    pub trusted: Vec<PathBuf>,
     pub gate: Arc<ApprovalGate>,
     pub agent_alias: String,
     pub audit: Option<Arc<crate::audit::AuditLog>>,
@@ -194,18 +197,30 @@ pub fn is_interactive_channel(channel: &str) -> bool {
     )
 }
 
-/// 判定工具操作是否落在 workspace 内（用于 default 档位的审批范围）
-pub fn tool_within_workspace(tool_name: &str, args: &Value, workspace: &Path) -> bool {
+/// 判定工具操作是否落在 workspace 或任一受信目录内（用于 default 档位的审批范围）。
+///
+/// `trusted` 为会话级受信目录集合（#B）：/move 批准过的目标目录，与 `workspace`
+/// 同等对待——落在其中任一目录内的操作自动放行，逃出全部范围的仍需审批。
+pub fn tool_within_workspace(
+    tool_name: &str,
+    args: &Value,
+    workspace: &Path,
+    trusted: &[PathBuf],
+) -> bool {
     match tool_name {
         "file_write" | "file_edit" | "file_read" => {
             let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            crate::path_guard::validate_path(workspace, p, None).is_ok()
+            path_within_any(workspace, trusted, |ws| {
+                crate::path_guard::validate_path(ws, p, None).is_ok()
+            })
         }
         "terminal" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             // 不把 skills_dir 作为 extra_readable 传进来：terminal 引用 skill 目录
             // 脚本仍判为 workspace 外 → 走审批（执行 skill 代码需人肉确认，符合 ADR-0028）。
-            crate::path_guard::validate_command_paths(cmd, workspace, None).is_ok()
+            path_within_any(workspace, trusted, |ws| {
+                crate::path_guard::validate_command_paths(cmd, ws, None).is_ok()
+            })
         }
         // MCP 工具一律视为 workspace 外（ADR-0020：安全默认，需审批）
         name if name.starts_with("mcp_") => false,
@@ -213,6 +228,18 @@ pub fn tool_within_workspace(tool_name: &str, args: &Value, workspace: &Path) ->
         // 一律视为在 workspace 内
         _ => true,
     }
+}
+
+/// 依次以 workspace、各受信目录为基准跑同一个校验闭包，任一通过即视为「在范围内」。
+fn path_within_any(
+    workspace: &Path,
+    trusted: &[PathBuf],
+    check: impl Fn(&Path) -> bool,
+) -> bool {
+    if check(workspace) {
+        return true;
+    }
+    trusted.iter().any(|d| check(d))
 }
 
 /// 审批决策
@@ -225,11 +252,12 @@ pub enum ApprovalAction {
     Denied { reason: String },
 }
 
-/// 根据权限档位 + 工具副作用 + workspace 范围，决定一次工具调用是否需要审批
+/// 根据权限档位 + 工具副作用 + workspace/受信目录范围，决定一次工具调用是否需要审批
 pub fn approval_decision(
     tool: &dyn Tool,
     args: &Value,
     workspace: &Path,
+    trusted: &[PathBuf],
     profile: &str,
     channel: &str,
 ) -> ApprovalAction {
@@ -243,7 +271,7 @@ pub fn approval_decision(
     if !tool.requires_confirm() {
         return ApprovalAction::Approved;
     }
-    let within = tool_within_workspace(tool.name(), args, workspace);
+    let within = tool_within_workspace(tool.name(), args, workspace, trusted);
     let required = match profile {
         "read-only" => true,
         // default 或未识别档位：仅 workspace 外需审批
@@ -348,7 +376,7 @@ pub fn format_approval_prompt(
 /// 格式化 /move 审批提示
 pub fn format_move_prompt(new_workspace: &Path, id: &str) -> String {
     format!(
-        "\n🔀 Requesting approval to switch the working directory (workspace) to:\n   {}\n   ⚠️ After switching, file/terminal tools will only operate inside this directory; operations within it are approved by default (no per-step confirmation). Only paths touching outside the directory still require approval.\n   Reply `/ok {id}` to confirm the switch or `/deny {id}` to cancel. When only one approval is pending, a bare `/ok` or `/deny` works.\n",
+        "\n🔀 Requesting approval to switch the working directory (workspace) to:\n   {}\n   ⚠️ After switching, file/terminal tools will only operate inside this directory; operations within it are approved by default (no per-step confirmation). Only paths touching outside the directory still require approval. The directory is remembered as trusted for this session, so switching back later keeps it auto-approved.\n   Reply `/ok {id}` to confirm the switch or `/deny {id}` to cancel. When only one approval is pending, a bare `/ok` or `/deny` works.\n",
         new_workspace.display(),
     )
 }
@@ -404,8 +432,55 @@ mod tests {
 
         // 目录内绝对路径的终端命令应视为 workspace 内 → default 档免审批
         let cmd = format!("cat {}", dir.path().join("notes.txt").display());
-        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), &moved);
+        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), &moved, &[]);
         assert!(within, "moved 目录内绝对路径命令应判定为 workspace 内");
+    }
+
+    // #B 受信目录：/move 批准过的目录加入受信集合后，即使 workspace 已切走，
+    // 落在受信目录内的 file/terminal 操作仍免审批；逃出全部范围的仍需审批。
+    #[test]
+    fn test_trusted_dirs_keep_moved_dir_approved_after_switch_away() {
+        let trusted_dir = tempfile::tempdir().expect("tempdir");
+        let other_dir = tempfile::tempdir().expect("tempdir");
+
+        let trusted = validate_move_target(trusted_dir.path().to_str().unwrap()).expect("move");
+        let current_ws =
+            validate_move_target(other_dir.path().to_str().unwrap()).expect("move");
+        let trusted_set = vec![trusted.clone()];
+
+        // 受信目录内的读文件 → 免审批（即便 workspace_root 已切到别处）
+        let file_in_trusted = trusted.join("doc.md").to_string_lossy().replace('\\', "/");
+        let within = tool_within_workspace(
+            "file_read",
+            &json!({ "path": file_in_trusted }),
+            &current_ws,
+            &trusted_set,
+        );
+        assert!(within, "受信目录内的文件读取应免审批");
+
+        // 受信目录内的终端命令 → 免审批
+        let cmd = format!("ls {}", trusted_dir.path().join("sub").display());
+        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), &current_ws, &trusted_set);
+        assert!(within, "受信目录内的终端命令应免审批");
+
+        // 同一操作在受信集合为空时仍判为外 → 需审批（对照）
+        let without_trust = tool_within_workspace(
+            "file_read",
+            &json!({ "path": file_in_trusted }),
+            &current_ws,
+            &[],
+        );
+        assert!(!without_trust, "无受信记录时，受信目录外的读取应需审批");
+
+        // 逃出 workspace 与全部受信目录 → 需审批
+        let outside = other_dir.path().join("../elsewhere.txt").to_string_lossy().replace('\\', "/");
+        let within = tool_within_workspace(
+            "file_read",
+            &json!({ "path": outside }),
+            &current_ws,
+            &trusted_set,
+        );
+        assert!(!within, "逃出 workspace 与受信集合的操作仍应需审批");
     }
 
     // 用 db 里真实 /move 后的命令在真实 moved 目录上验证：命令都以 `cd "E:/<moved>" &&`
@@ -424,7 +499,7 @@ mod tests {
             "cd \"E:/AIAD_Group/20260807-Agent科普\" && ls -la",
         ] {
             let within =
-                tool_within_workspace("terminal", &json!({ "command": real }), &ws);
+                tool_within_workspace("terminal", &json!({ "command": real }), &ws, &[]);
             assert!(within, "moved 目录内的真实命令应免审批:\n{real}");
         }
     }
@@ -437,7 +512,7 @@ mod tests {
         // 等价于 `cd "E:/AIAD_Group/20260807-Agent科普" && ls -la`
         let quoted = ws.to_string_lossy().replace('\\', "/");
         let cmd = format!("cd \"{}\" && ls -la", quoted);
-        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), ws);
+        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), ws, &[]);
         assert!(
             within,
             "moved 目录内带引号的 cd 命令应判定为 workspace 内:\n{cmd}"

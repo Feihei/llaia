@@ -526,7 +526,13 @@ async fn resolve_approval(
                     .unwrap_or(""),
             )?;
             agent.set_workspace(target.clone()).await;
-            format!("[switched working directory to {}]", target.display())
+            // #B：批准过的目录登记为会话级受信目录——之后 /move home 切走再回来、
+            // 或切换期间触碰该目录内路径，均免审批（逃出全部受信范围的仍需审批）。
+            agent.add_trusted_dir(target.clone()).await;
+            format!(
+                "[switched working directory to {}] (trusted for this session)",
+                target.display()
+            )
         } else {
             "[denied] working directory unchanged".to_string()
         };

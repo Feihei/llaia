@@ -73,9 +73,10 @@ pub async fn execute_tool_calls(
     ctx: &ApprovalContext,
     event_tx: Option<&mpsc::Sender<TurnEvent>>,
 ) -> Result<(Vec<ChatMessage>, bool)> {
-    let (profile, workspace, gate, agent_alias, audit) = (
+    let (profile, workspace, trusted, gate, agent_alias, audit) = (
         &ctx.profile,
         &ctx.workspace,
+        &ctx.trusted,
         &ctx.gate,
         &ctx.agent_alias,
         &ctx.audit,
@@ -161,7 +162,7 @@ pub async fn execute_tool_calls(
             }
         }
 
-        match approval_decision(tool.as_ref(), &call.arguments, workspace, profile, channel) {
+        match approval_decision(tool.as_ref(), &call.arguments, workspace, trusted, profile, channel) {
             // 直接执行
             ApprovalAction::Approved => {}
             // 非交互频道无法等待用户：自动拒绝
@@ -319,6 +320,7 @@ mod tests {
             &ApprovalContext {
                 profile: "default".into(),
                 workspace: PathBuf::from("/tmp"),
+                trusted: Vec::new(),
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,
@@ -350,6 +352,7 @@ mod tests {
             &ApprovalContext {
                 profile: "default".into(),
                 workspace: PathBuf::from("/tmp"),
+                trusted: Vec::new(),
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,
@@ -403,6 +406,7 @@ mod tests {
             &ApprovalContext {
                 profile: "read-only".into(),
                 workspace: PathBuf::from("/tmp"),
+                trusted: Vec::new(),
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,
@@ -424,6 +428,7 @@ mod tests {
             &ApprovalContext {
                 profile: "yolo".into(),
                 workspace: PathBuf::from("/tmp"),
+                trusted: Vec::new(),
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,
@@ -444,6 +449,7 @@ mod tests {
             &ApprovalContext {
                 profile: "default".into(),
                 workspace: PathBuf::from("/tmp"),
+                trusted: Vec::new(),
                 gate: ApprovalGate::new(),
                 agent_alias: "main".into(),
                 audit: None,

@@ -35,9 +35,9 @@
 
 ## P6 — 下一步计划
 
-**状态**：🚧 进行中（起点 2026-08-21，源自 [docs/issues/issues.md](issues/issues.md) 的 9 个问题与设想评估）
+**状态**：🚧 进行中（起点 2026-08-21，源自本地候选池 `docs/issues/issues.md` 的 9 个问题与设想评估；该目录被 gitignore 排除、不入库，仅作本地随手记录）
 
-> 候选池来自 `docs/issues/issues.md`。评估结论（2026-08-21）：3 个 bug/修复类（其中 2 个可直接实施、1 个需先验证根因），6 个需求/设计类需 grill 明确边界后立项。条目按状态分组，标注**必要性**（高/中/低，不做会持续踩坑或已影响正确性→高；明显改善体验→中；锦上添花→低）与**难度**（★☆☆ 半天内单点 / ★★☆ 一到数天跨模块 / ★★★ 结构性改造，动手前先出 ADR），便于排期。
+> 候选池来自本地 `docs/issues/issues.md`（gitignore 排除、不入库，clone 后无此文件属预期）。评估结论（2026-08-21）：3 个 bug/修复类（其中 2 个可直接实施、1 个需先验证根因），6 个需求/设计类需 grill 明确边界后立项。条目按状态分组，标注**必要性**（高/中/低，不做会持续踩坑或已影响正确性→高；明显改善体验→中；锦上添花→低）与**难度**（★☆☆ 半天内单点 / ★★☆ 一到数天跨模块 / ★★★ 结构性改造，动手前先出 ADR），便于排期。
 > 已交付部分（4 项稳定性修复 + 6 项快赢）随 v0.3.1 发布，完整勾选清单已归档至 [CHANGELOG.md](CHANGELOG.md) §v0.3.1；主干体检直接修项、WebUI 批次（W1/W2/W3）与本节的会话总结 / provider 优化 / `memory_research` / 启动优化等均已归档至 [CHANGELOG.md](CHANGELOG.md) §v0.3.2（2026-09-01 补齐）。本节只保留剩余计划与进行中条目。
 
 ### 🌐 WebUI 改进批次（2026-08-27 评估立项）
@@ -141,16 +141,18 @@
 - 修复：`runtime_config` **先于 `apply_refs` 克隆**（保留明文），磁盘仍写 `${VAR}` 引用；`expand_config_secrets` 对非引用明文透传、不查询 env → 无警告、key 立即生效。
 - 说明：这是布局级最小改动（移动一行克隆 + 注释），符合「成功才应用引用 / 失败保留明文」既有降级语义。
 
-**#B /move 后的目录信任模型（分析·待决策，未实现）**
+**#B /move 后的目录信任模型（已交付，2026-09-01）**
 
-- 现状：`approval_decision` 的 `workspace` 参数取自 `workspace_root`（`mod.rs:927`），/move 后**目录内**的 file/terminal 操作在 default 档本就自动放行（`within→Approved`）。因此「每次都批准」仅出现在**逃出被移动目录**的操作：绝对路径指向别处、`..` 上退、terminal 触碰 moved 目录之外（含 agent 自家 home workspace 的 reminder.md/MEMORY 等记账文件）→ 每次 /ok。
+- 现状：`approval_decision` 的 `workspace` 参数取自 `workspace_root`（`mod.rs`），/move 后**目录内**的 file/terminal 操作在 default 档本就自动放行（`within→Approved`）。因此「每次都批准」仅出现在**逃出被移动目录**的操作：绝对路径指向别处、`..` 上退、terminal 触碰 moved 目录之外（含 agent 自家 home workspace 的 reminder.md/MEMORY 等记账文件）→ 每次 /ok；且 `/move home` 切回后再碰原目录又要重新审批。
 - 用户诉求：一次 /move 批准后应信任该目录，且 move 审批信息里提醒信任范围。
-- 已落最小改动：`format_move_prompt` 提示补充「切换后该目录内的文件读写/终端命令默认放行，仅目录外的路径仍需审批」（`approval.rs`）。
-- 待决设计（需选型，暂不实现）：
-  - **选 1（推荐）**：会话级持久「受信目录」——把 /move 目标 canonical 目录加入受信集合（随 workspace_root 持久化），`tool_within_workspace` 以「落在任一受信目录内」判定，令 moved 目录内操作自动放行；逃出集合仍审批。负担低、语义清晰。
-  - **选 2**：恢复 home workspace 也应视为受信（等价于选 1 默认含 home）。
-  - **选 3（谨慎）**：仅保留现有「workspace_root 内放行」+ 提示澄清，不引入受信集合（省改动，但 home 记账文件反复审批的摩擦仍在）。
-  - 安全权衡：/move 到过宽的目录（如 `C:\`）会把几乎全部文件操作划为「内」，需与黑名单校验配合评估；受信目录需 canonicalize + 黑名单复核。
+- 选型（三选一）：**选 1 会话级持久受信目录**（推荐已采纳）/ 选 2 home 也默认受信 / 选 3 仅提示澄清不引入集合。
+- 已实现（选 1）：
+  - `Agent.trusted_dirs: Arc<RwLock<Vec<PathBuf>>>`（`agent/mod.rs`）：会话级受信集合，fork 派生共享同一 Arc。
+  - `/move` 批准路径（`slash.rs::resolve_approval`）：`set_workspace` 后调 `agent.add_trusted_dir(target)` 登记（canonical + 黑名单校验由 `validate_move_target` 保证，去重）；提示文案注明 `(trusted for this session)`。
+  - 审批判定（`agent/approval.rs`）：`tool_within_workspace` / `approval_decision` 增加 `trusted` 参数，file/terminal 校验依次以 workspace_root、各受信目录为基准（`path_within_any`），任一通过即免审批；逃出全部范围仍审批。`ApprovalContext` 增加 `trusted: Vec<PathBuf>`。
+  - 失效边界：仅存内存，Agent 生命周期（重启/新进程）后清空，需重新 /move 批准；`/move home` 不撤销既有受信记录。
+  - 回归测试：`test_trusted_dirs_keep_moved_dir_approved_after_switch_away`（切走后受信目录内免审批 / 无受信时需审批 / 逃出全部范围需审批三断言）；`format_move_prompt` 文案更新。
+  - 安全权衡落点：受信目录只能经 `validate_move_target` 进入（canonicalize + 危险前缀黑名单复核），`C:\` 等黑名单目录无法成为受信目录。
 
 ### ⭐ 新增发现与技术探讨（2026-08-26·3）
 
@@ -162,16 +164,13 @@
 - 修复建议（安全层，需谨慎）：`looks_like_path` 收紧——去掉裸 `contains('\')`，改为「含 `\` 且含盘符 `X:\` / 前导 `\`(UNC)」，或「有 `/` `./` `../` `~`」之一。一行改动 + 回归测试。
 - 修复（已交付）：`looks_like_path` 收紧为「前导 `/` `~` `./` `../` `\` || 盘符 `X:` || 含 `/`」，不再把含单个反斜杠的转义片段当路径；新增字面量 `\n`、Windows 盘符/UNC 两个回归测试。fmt/clippy/test 全绿。
 
-**#D session 管理模型：通用线 + 任务线（方向已定·设计探索）**
+**#D session 管理模型：通用线 + 任务线（设计已出 ADR 草稿，待 grill 后实施）**
 
 - 背景：通用 agent 沿用 coding agent 的 session 模型不自然。coding 以「任务」为 session 边界；通用助手日常杂活不该每条都开任务。
 - 定案方向（用户选）：**一条常驻通用 session + 按需显式开启的任务 session**。任务完成/用户关闭即归档，独享完整上下文，不污染通用线。
 - **与 /move 耦合（用户补充**：移动到 workspace 外目录往往意味着「在该目录执行主线以外的任务」→ 可作为**自动触发任务 session 的信号**：/move 到外部目录时，提示把该目录绑定为一个新任务 session（绑定目录 + 独立上下文）。这与 #B 的「受信目录」天然成一套：**任务 session = 受信目录 + 独立上下文边界**。
-- 待决问题（勿提前实现）：
-  - 触发边界：显式 `/task <名>` +/move 自动建议为主，规则猜测不可靠。
-  - 可发现性：需任务列表/入口；评估能否合并现有 todo，避免两套平行「有边界的事」。
-  - 任务 session 持久化：独立上下文如何落 sqlite（session 类型字段 + 关联目录？）。
-  - 跨频道进出任务：换频道能否回到某任务线。
+- 设计草稿已出（2026-09-01）：[ADR-0031](adr/0031-task-session-model.md)（Proposed）——现状盘点（sessions 表无类型字段、/new 切换机制可复用、todo 粒度不同不合并）+ 四个待决问题的决策分支（Q1 触发边界推荐「显式 /task + /move 批准后提示」；Q2 推荐 /tasks 命令、todo 并行不合并；Q3 推荐 sessions 补 `kind`/`bound_path` 两列、归档复用 state；Q4 推荐跨频道切换但全局单活跃）+ 影响面 + 明确不做 + 4 个 grill 确认项。
+- **勿提前实现**：待 grill 逐项拍板后再动代码。
 
 ### ⭐ 新增设计与待实施（2026-08-27），两项一起落地
 

@@ -91,6 +91,10 @@ pub struct Agent {
     pub workspace: std::path::PathBuf,
     /// 与文件/终端工具共享的工作区根（Arc<RwLock>），/move 一处更新、所有工具即时生效
     pub workspace_root: Arc<RwLock<std::path::PathBuf>>,
+    /// 会话级受信目录集合（#B）：/move 批准过的目标目录（canonical、过黑名单校验）。
+    /// 审批判定「是否在 workspace 内」时与 workspace_root 同等对待，令这些目录内的
+    /// 操作免审批；仅存内存、随会话（Agent 生命周期）失效，重启后需重新 /move 批准。
+    pub trusted_dirs: Arc<RwLock<Vec<std::path::PathBuf>>>,
     /// 配置根目录（~/.llaia/），agent 工具不可访问，但用于推导路径
     pub config_dir: std::path::PathBuf,
     /// 是否主 agent（决定能否读 subagent/）
@@ -235,6 +239,7 @@ impl Agent {
             permission_profile: Arc::new(RwLock::new(permission)),
             workspace: workspace.clone(),
             workspace_root,
+            trusted_dirs: Arc::new(RwLock::new(Vec::new())),
             config_dir,
             is_main,
             alias,
@@ -263,6 +268,16 @@ impl Agent {
     pub async fn set_workspace(&mut self, new_workspace: std::path::PathBuf) {
         *self.workspace_root.write().await = new_workspace;
         self.reload_agents_md().await;
+    }
+
+    /// 把 /move 批准过的目录登记为会话级受信目录（#B）：canonical 形态、去重。
+    /// 调用方（slash `/move` 批准路径）须先经 `validate_move_target` 校验
+    /// （canonicalize + 黑名单），此处不再重复校验。
+    pub async fn add_trusted_dir(&self, dir: std::path::PathBuf) {
+        let mut dirs = self.trusted_dirs.write().await;
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
     }
 
     /// 接入共享的实时配置（serve 模式下由 `serve_cmd` 注入 WebUI 持有的同一个 Arc）。
@@ -476,6 +491,7 @@ impl Agent {
             permission_profile: self.permission_profile.clone(),
             workspace: self.workspace.clone(),
             workspace_root: self.workspace_root.clone(),
+            trusted_dirs: self.trusted_dirs.clone(),
             config_dir: self.config_dir.clone(),
             is_main: false,
             alias: self.alias.clone(),
@@ -1101,6 +1117,7 @@ impl Agent {
             let ctx = crate::agent::approval::ApprovalContext {
                 profile: self.permission_profile.read().await.clone(),
                 workspace: self.workspace_root.read().await.clone(),
+                trusted: self.trusted_dirs.read().await.clone(),
                 gate: self.approval_gate.clone(),
                 agent_alias: self.alias.clone(),
                 audit: self.audit.clone(),
