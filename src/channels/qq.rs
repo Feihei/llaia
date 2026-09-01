@@ -111,6 +111,36 @@ async fn write_owner_openid_to_state(ws: &Path, openid: &str) -> Result<()> {
     Ok(())
 }
 
+/// QQ 分片上传要求的文件校验值：(整文件 MD5, 整文件 SHA1, 前 10002432 字节 MD5)。
+/// md5_10m 的口径按官方文档为 10002432 字节（不是惯用的 10MB=10485760），不足则取整文件。
+fn qq_file_checksums(bytes: &[u8]) -> (String, String, String) {
+    const MD5_10M_LEN: usize = 10_002_432;
+    let md5 = qq_md5_hex(bytes);
+    let sha1 = {
+        use sha1::Digest;
+        let mut h = sha1::Sha1::new();
+        h.update(bytes);
+        qq_hex(&h.finalize())
+    };
+    let md5_10m = qq_md5_hex(&bytes[..bytes.len().min(MD5_10M_LEN)]);
+    (md5, sha1, md5_10m)
+}
+
+fn qq_md5_hex(bytes: &[u8]) -> String {
+    use md5::Digest;
+    let mut h = md5::Md5::new();
+    h.update(bytes);
+    qq_hex(&h.finalize())
+}
+
+fn qq_hex(digest: &[u8]) -> String {
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 pub struct QqChannel {
     config: QqConfig,
     http: Client,
@@ -443,6 +473,11 @@ impl QqChannel {
 
     /// 向 QQ 用户发送媒体文件（图片或文件）。
     /// 流程：上传到 QQ 文件服务拿 file_info → 发送 msg_type=7 富媒体消息。
+    ///
+    /// 上传路径选择：
+    /// - 图片：base64 直传（历史验证可用的小体量路径），失败时降级分片上传重试；
+    /// - 文件：官方分片上传（base64 通道对大文件返回 500/850012 "call inner proxy error"，
+    ///   且文件类上传从未在 base64 通道成功过；分片是文档对「本地文件/大文件」的正路，上限 200MB）。
     pub async fn send_media_to_user(
         &self,
         user_openid: &str,
@@ -463,68 +498,35 @@ impl QqChannel {
             // QQ 对空文件返回 "file data empty" (code 10000)，这里提前给出明确错误
             return Err(anyhow!("media file is empty (0 bytes): {:?}", path));
         }
+        // 缺 file_name 时 QQ 端显示为未命名文件（社区实践确认该字段必带）
+        let file_name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
 
-        // 构造上传 JSON body 的闭包（token 过期刷新后需重建）。
-        // v2 接口规范：JSON body 传 `file_type` + `file_data`(base64) 或 `url` + `srv_send_msg`，
-        // 不再支持 multipart 文件上传（旧实现发 multipart `file` 字段被拒，40093006/40093007）。
-        // 见 https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/rich-media.html
-        let build_body = || {
-            let file_data = base64::engine::general_purpose::STANDARD.encode(&file_bytes);
-            serde_json::json!({
-                "file_type": file_type,
-                "file_data": file_data,
-                // false：只上传拿 file_info，随后走 msg_type=7 消息接口（与 send 路径一致）
-                "srv_send_msg": false,
-            })
-        };
-
-        // 1. 上传媒体到 QQ 文件服务
-        let upload_url = format!("{}/v2/users/{}/files", self.api_base, user_openid);
-        let do_upload = || async {
-            let token = self.get_access_token().await?;
-            let resp = self
-                .http
-                .post(&upload_url)
-                .header("Authorization", format!("QQBot {}", token))
-                .json(&build_body())
-                .send()
-                .await?;
-            Ok::<_, anyhow::Error>(resp)
-        };
-        let resp = do_upload().await?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        let text = if !status.is_success() {
-            // token 失效（11244）：刷新一次后重试
-            if text.contains("token not exist or expire") || text.contains("11244") {
-                tracing::warn!(
-                    "qq media upload rejected: token expired, force refreshing and retrying"
-                );
-                self.invalidate_token().await;
-                let resp = do_upload().await?;
-                let s = resp.status();
-                let t = resp.text().await.unwrap_or_default();
-                if !s.is_success() {
-                    return Err(anyhow!("upload media failed: status={}, body={}", s, t));
+        // 1. 上传媒体到 QQ 文件服务拿 file_info
+        let file_info = match kind {
+            crate::agent::MediaKind::Image => {
+                match self
+                    .upload_media_base64(user_openid, file_type, &file_name, &file_bytes)
+                    .await
+                {
+                    Ok(fi) => fi,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "qq base64 media upload failed, falling back to chunked upload"
+                        );
+                        self.upload_media_chunked(user_openid, file_type, &file_name, &file_bytes)
+                            .await?
+                    }
                 }
-                t
-            } else {
-                return Err(anyhow!(
-                    "upload media failed: status={}, body={}",
-                    status,
-                    text
-                ));
             }
-        } else {
-            text
+            crate::agent::MediaKind::File => {
+                self.upload_media_chunked(user_openid, file_type, &file_name, &file_bytes)
+                    .await?
+            }
         };
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow!("parse upload response: {}, body={}", e, text))?;
-        let file_info = v
-            .get("file_info")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("upload response missing file_info: {}", text))?
-            .to_string();
         tracing::info!(file = %path, file_info = %file_info, "media uploaded");
 
         // 2. 发送富媒体消息 msg_type=7
@@ -578,6 +580,257 @@ impl QqChannel {
         }
         tracing::info!(user = %user_openid, file = %path, "media sent");
         Ok(())
+    }
+
+    /// base64 直传（`/v2/users/{openid}/files` + `file_data`）。
+    /// v2 接口规范：JSON body 传 `file_type` + `file_data`(base64) 或 `url` + `srv_send_msg`，
+    /// 不再支持 multipart 文件上传（旧实现发 multipart `file` 字段被拒，40093006/40093007）。
+    /// 见 https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/rich-media.html
+    async fn upload_media_base64(
+        &self,
+        user_openid: &str,
+        file_type: i32,
+        file_name: &str,
+        file_bytes: &[u8],
+    ) -> Result<String> {
+        // 构造上传 JSON body 的闭包（token 过期刷新后需重建）
+        let build_body = || {
+            let file_data = base64::engine::general_purpose::STANDARD.encode(file_bytes);
+            serde_json::json!({
+                "file_type": file_type,
+                "file_data": file_data,
+                "file_name": file_name,
+                // false：只上传拿 file_info，随后走 msg_type=7 消息接口（与 send 路径一致）
+                "srv_send_msg": false,
+            })
+        };
+
+        let upload_url = format!("{}/v2/users/{}/files", self.api_base, user_openid);
+        let do_upload = || async {
+            let token = self.get_access_token().await?;
+            let resp = self
+                .http
+                .post(&upload_url)
+                .header("Authorization", format!("QQBot {}", token))
+                .json(&build_body())
+                .send()
+                .await?;
+            Ok::<_, anyhow::Error>(resp)
+        };
+        let resp = do_upload().await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let text = if !status.is_success() {
+            // token 失效（11244）：刷新一次后重试
+            if text.contains("token not exist or expire") || text.contains("11244") {
+                tracing::warn!(
+                    "qq media upload rejected: token expired, force refreshing and retrying"
+                );
+                self.invalidate_token().await;
+                let resp = do_upload().await?;
+                let s = resp.status();
+                let t = resp.text().await.unwrap_or_default();
+                if !s.is_success() {
+                    return Err(anyhow!("upload media failed: status={}, body={}", s, t));
+                }
+                t
+            } else {
+                return Err(anyhow!(
+                    "upload media failed: status={}, body={}",
+                    status,
+                    text
+                ));
+            }
+        } else {
+            text
+        };
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("parse upload response: {}, body={}", e, text))?;
+        v.get("file_info")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("upload response missing file_info: {}", text))
+    }
+
+    /// 官方分片上传（文档对「本地文件/大文件」的推荐路径，上限 200MB）：
+    /// `upload_prepare` 拿任务与预签名分片地址 → 逐片 PUT + `upload_part_finish`
+    /// → `/files` 带 `upload_id` 合并换 `file_info`。
+    ///
+    /// 背景：大文件走 base64 `file_data` 单包上传时，QQ 内部代理返回
+    /// 500/850012 "call inner proxy error"（非文档错误码），文件类上传实测失败。
+    async fn upload_media_chunked(
+        &self,
+        user_openid: &str,
+        file_type: i32,
+        file_name: &str,
+        file_bytes: &[u8],
+    ) -> Result<String> {
+        let (md5_hex, sha1_hex, md5_10m_hex) = qq_file_checksums(file_bytes);
+
+        // 1. 预上传：声明文件元信息，换 upload_id 与预签名分片地址列表
+        let prepare_url = format!("{}/v2/users/{}/upload_prepare", self.api_base, user_openid);
+        let prepare_body = serde_json::json!({
+            "file_type": file_type,
+            "file_size": file_bytes.len().to_string(),
+            "file_name": file_name,
+            "md5": md5_hex,
+            "sha1": sha1_hex,
+            // 文档口径：文件前 10002432 字节的 MD5（不足则整文件）
+            "md5_10m": md5_10m_hex,
+        });
+        let v = self.post_json_authed(&prepare_url, &prepare_body).await?;
+        let upload_id = v
+            .get("upload_id")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| anyhow!("upload_prepare response missing upload_id: {}", v))?
+            .to_string();
+        let parts = v
+            .get("parts")
+            .and_then(|x| x.as_array())
+            .ok_or_else(|| anyhow!("upload_prepare response missing parts: {}", v))?;
+        if parts.is_empty() {
+            return Err(anyhow!("upload_prepare returned no parts: {}", v));
+        }
+
+        // 2. 逐片 PUT 到预签名地址 + 通知该分片完成
+        let finish_url = format!(
+            "{}/v2/users/{}/upload_part_finish",
+            self.api_base, user_openid
+        );
+        let mut offset = 0usize;
+        for part in parts {
+            let index = part
+                .get("index")
+                .and_then(|x| x.as_i64())
+                .ok_or_else(|| anyhow!("part missing index: {}", part))?;
+            let presigned = part
+                .get("presigned_url")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow!("part missing presigned_url: {}", part))?;
+            let size: usize = part
+                .get("block_size")
+                .and_then(|x| x.as_str())
+                .unwrap_or("0")
+                .parse()
+                .map_err(|e| anyhow!("part block_size invalid: {}, {}", part, e))?;
+            if offset >= file_bytes.len() {
+                return Err(anyhow!(
+                    "server returned parts beyond file size (offset={}, len={})",
+                    offset,
+                    file_bytes.len()
+                ));
+            }
+            let end = (offset + size).min(file_bytes.len());
+            let chunk = &file_bytes[offset..end];
+
+            // PUT 分片：预签名地址自带鉴权，不带 QQBot token；失败重试一次
+            let mut last_err: Option<anyhow::Error> = None;
+            for attempt in 1..=2 {
+                match self
+                    .http
+                    .put(presigned)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(chunk.to_vec())
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        last_err = None;
+                        break;
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        last_err = Some(anyhow!(
+                            "upload part {} failed: status={}, body={}",
+                            index,
+                            status,
+                            text
+                        ));
+                    }
+                    Err(e) => {
+                        last_err = Some(anyhow!("upload part {} error: {}", index, e));
+                    }
+                }
+                if attempt == 1 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+            if let Some(e) = last_err {
+                return Err(e);
+            }
+
+            // 通知分片完成（block_size 按文档为字符串，md5 为该分片校验值）
+            let finish_body = serde_json::json!({
+                "upload_id": upload_id,
+                "part_index": index,
+                "block_size": chunk.len().to_string(),
+                "md5": qq_md5_hex(chunk),
+            });
+            self.post_json_authed(&finish_url, &finish_body).await?;
+            offset = end;
+        }
+        if offset != file_bytes.len() {
+            return Err(anyhow!(
+                "parts covered {} bytes but file is {} bytes",
+                offset,
+                file_bytes.len()
+            ));
+        }
+
+        // 3. 带 upload_id 请求 /files 走分片合并，换 file_info
+        let files_url = format!("{}/v2/users/{}/files", self.api_base, user_openid);
+        let merge_body = serde_json::json!({
+            "file_type": file_type,
+            "file_name": file_name,
+            "upload_id": upload_id,
+            "srv_send_msg": false,
+        });
+        let v = self.post_json_authed(&files_url, &merge_body).await?;
+        v.get("file_info")
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("files merge response missing file_info: {}", v))
+    }
+
+    /// 带 QQBot token 的 JSON POST：token 失效（11244）时刷新一次并重试。
+    /// 非 2xx 返回含 status 与 body 的错误；成功返回解析后的 JSON。
+    async fn post_json_authed(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let mut token_refreshed = false;
+        loop {
+            let token = self.get_access_token().await?;
+            let resp = self
+                .http
+                .post(url)
+                .header("Authorization", format!("QQBot {}", token))
+                .json(body)
+                .send()
+                .await?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                return serde_json::from_str(&text)
+                    .map_err(|e| anyhow!("parse qq api response: {}, body={}", e, text));
+            }
+            if !token_refreshed
+                && (text.contains("token not exist or expire") || text.contains("11244"))
+            {
+                tracing::warn!(url = %url, "qq api rejected: token expired, force refreshing and retrying");
+                self.invalidate_token().await;
+                token_refreshed = true;
+                continue;
+            }
+            return Err(anyhow!(
+                "qq api {} failed: status={}, body={}",
+                url,
+                status,
+                text
+            ));
+        }
     }
 
     /// 下载 QQ 消息附件到本地 uploads 目录。
@@ -1551,5 +1804,37 @@ mod proactive_tests {
             Some("CFG_OPENID"),
             "config owner_openid wins over state and USER.md"
         );
+    }
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::*;
+
+    #[test]
+    fn test_qq_file_checksums_small_file() {
+        // RFC 1321 / FIPS 180-1 经典测试向量
+        let (md5, sha1, md5_10m) = qq_file_checksums(b"abc");
+        assert_eq!(md5, "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        // 不足 10002432 字节时 md5_10m == 整文件 MD5
+        assert_eq!(md5_10m, md5);
+    }
+
+    #[test]
+    fn test_qq_file_checksums_md5_10m_boundary() {
+        // 超过 10002432 字节时，md5_10m 只取前 10002432 字节
+        let mut bytes = vec![0u8; 10_002_433];
+        bytes[10_002_432] = 0xFF; // 最后一字节不参与 md5_10m
+        let (md5, _, md5_10m) = qq_file_checksums(&bytes);
+        let expected_prefix = qq_md5_hex(&bytes[..10_002_432]);
+        assert_eq!(md5_10m, expected_prefix);
+        assert_ne!(md5_10m, md5, "整文件 MD5 与截断 MD5 不应相同");
+    }
+
+    #[test]
+    fn test_qq_md5_hex_empty() {
+        // 空输入的 MD5（分片逻辑不应走到，但函数本身须有定义）
+        assert_eq!(qq_md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
     }
 }

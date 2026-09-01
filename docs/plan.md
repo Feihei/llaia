@@ -259,6 +259,18 @@
 - ~~待 grill~~（**全部拍板，grill 2026-09-01·3**）：① **仅显式 `/steer`**——运行中普通消息维持 Busy 现状，不改全频道默认语义（插话/新题/取消的意图无法可靠判断）；`busy_input_mode`（interrupt/queue/steer）留到有真实使用反馈再议，届时也只是 Busy 分支一处路由改动。② 注入形态 = **user 消息带 `[steer]` 前缀**——兼容性下限最高（标签协议降级端点按纯文本拼接、无法区分中途 system；部分 OpenAI 兼容端点亦不收会话中途 system），且自然进 history/sqlite，WebUI 透明可见。③ **drain 仅在非 force_summary 迭代顶部**（`mod.rs:940` 循环内 `to_messages` 组装前）——末轮使命是收敛出最终回答，注入新指令会让总结分叉且大概率无后续迭代落实；末轮残留直接丢弃并在输出尾部提示「steer 未生效」，比静默吞掉诚实。
 - 已实现（2026-09-01）：`Agent.steer_buffer`（独立 `Arc<Mutex<VecDeque>>` 不经 Agent 锁；registry 持同一 Arc 供频道投递，`fork_for_isolated` 派生独立空缓冲——cron/委派 turn 不消费主线插话）+ 注入点在 `handle_message_streaming` 非末轮迭代顶部（drain → `[steer] User added: ...` user 消息进 context/sqlite）+ 末轮/turn 结束残留丢弃并附「[steer not applied]」提示 + 三频道拦截（web：运行中投递+Side 回执、空闲降级为普通消息；CLI：运行中投递不排队、空闲剥前缀；QQ：`running_stops` 判运行态，同构）。回归测试：注入进 context/sqlite、fork 缓冲隔离、`split_steer` 解析。
 
+### ⭐ 新增发现（2026-09-01·3）
+
+**#J send_media 作用域滞后 /move + QQ 大文件上传 500/850012（已交付，2026-09-01）**
+
+- 现象：/move 到 home 外目录做完 PPT 任务，`send_file` 发 moved 目录里的成品被拒 `outside workspace`（workspace_root 已是 E:\，send_file 却只认静态家目录）；agent 自救把文件拷回 home 重发后，QQ 上传 5.24MB pptx 返回 500/850012 "call inner proxy error"，用户没收到文件（sessions.db sess18 + llaia.log 完整证据链）。
+- 根因 1（工具层）：`SendImage/SendFile` 构造时（`cli.rs`）持有**静态家目录 PathBuf**，走 `resolve_within` 只认 home，未共享文件三件套与 terminal 的 `workspace_root`/`trusted_dirs` Arc → /move 后作用域分叉：绝对路径被拒、相对路径解析回旧家目录。
+- 根因 2（QQ 侧）：日志证据——历史上传**全部是图片且全部成功**（最大 2.77MB，base64 body ≈3.7MB）；本次是**第一次 file_type=4 文件类上传**（base64 body ≈7.3MB），被 QQ 内部代理拒绝。850012 不在官方错误码表（超限是 850031）；官方对本地文件/大文件的正路是分片上传（上限 200MB）。
+- 修复：
+  1. **send_image/send_file 作用域对齐**：改持与文件工具同一对 `workspace_root` + `trusted_dirs` Arc，走 `validate_path_in_scope`；家目录作为固定额外可发送范围（同 `file_read` extra_readable 语义）——/move 后 tts/、uploads/ 产物不断联。回归 `test_send_media_follows_moved_workspace`（moved 绝对/相对路径、家目录可达、作用域外拒绝）。
+  2. **QQ 上传双路径**（`channels/qq.rs`）：图片续走 base64 直传（补 `file_name` 字段——缺它在 QQ 端显示未命名文件），失败自动降级分片；**文件类走官方分片上传**——`upload_prepare`（file_type/file_size/file_name/md5/sha1/md5_10m，md5_10m 口径按文档为前 **10002432** 字节）→ 预签名地址 PUT 分片（失败重试一次）→ 逐片 `upload_part_finish` → `/files` 带 `upload_id` 合并换 `file_info` → msg_type=7 发送不变。新增 `post_json_authed`（11244 token 刷新重试）、`qq_file_checksums`/`qq_md5_hex` 校验值助手；依赖新增 `sha1 = "0.10"`。
+  3. 回归：`tests/qq_http.rs` 三条（分片全流程含请求体字段断言 / 图片 base64 带 file_name / base64 500 后图片降级分片）+ `qq.rs` 校验值单测三条（含 10002432 边界）。517 lib tests + 全部集成测试绿。
+
 ---
 
 ## 工程约定

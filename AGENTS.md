@@ -133,7 +133,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 | `delegate` | `tools/delegate` | 后台委派子 Agent 执行长任务（脱离主回合，结果回传） |
 | `cron` | `tools/cron` | 注册/执行定时任务（Agent 模式 / Step 模式） |
 | `mcp` | `tools/mcp` | 接入外部 MCP server 暴露的工具 |
-| `send_media` | `tools/send_media` | 向频道回传图片/文件等媒体 |
+| `send_media` | `tools/send_media` | 向频道回传图片/文件等媒体（作用域 = workspace_root ∪ 受信目录，跟随 `/move`；家目录恒可发送，同 `file_read` extra_readable 语义） |
 | `tts` | `tools/tts` | 文本合成语音（`[tools.tts]` 配置，OpenAI 兼容 `/audio/speech`，产物落 workspace/tts/，发送走 `send_file`；P5 T1） |
 
 > **环境探测（P5 E1，非工具）**：`src/envprobe.rs` 启动时对 main agent 探测一次本机工具链（shell/python/node/npm/rustc/cargo/go/git/docker，2s/命令 timeout），以 Runtime Context 尾部注入（与 todo 同区，KV 缓存友好）；`/env` 命令手动刷新；WebUI 聊天页 ENV 只读面板（`GET /api/env` 缓存 / `POST /api/env/refresh` 重探）。
@@ -235,6 +235,8 @@ app_secret = ""
 > 各频道完整字段见 `src/config.rs` 中的 `*Config` 结构体。
 
 QQ 鉴权流程：启动时用 `app_id` + `app_secret` 调 `https://bots.qq.com/app/getAppAccessToken` 换取 `access_token`（有效期 7200 秒，过期前 60 秒自动刷新），HTTPS 请求头 `Authorization: QQBot {access_token}`，WS IDENTIFY 的 `token` 字段同此格式。
+
+> **QQ 媒体上传（双路径）**：图片走 base64 直传（`/v2/users/{openid}/files` + `file_data`），失败自动降级分片；文件类（pptx 等）走官方分片上传——`upload_prepare`（file_type/file_size/file_name/md5/sha1/md5_10m）→ 预签名地址 PUT 分片 → `upload_part_finish` → `/files` 带 `upload_id` 合并换 `file_info`，上限 200MB。背景：大文件 base64 单包会被 QQ 内部代理以 500/850012 拒绝（非文档错误码）。上传 body 必带 `file_name`（否则 QQ 端显示未命名）。
 
 详见 [docs/adr/0007-project-structure-and-conventions.md](docs/adr/0007-project-structure-and-conventions.md) 与 [docs/adr/0008-config-schema-v1.1.md](docs/adr/0008-config-schema-v1.1.md)。
 

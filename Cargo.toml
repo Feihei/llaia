@@ -48,6 +48,8 @@ tokio-cron-scheduler = "0.15"
 dotenvy = "0.15"
 aes = "0.8"
 md-5 = "0.10"
+# QQ 富媒体分片上传要求整文件 SHA1 校验值（与 md-5 同属 RustCrypto digest 0.10 系）
+sha1 = "0.10"
 # default features pull in `aws-lc-rs`, which conflicts with the `ring`
 # provider already selected transitively by reqwest/hyper-rustls and
 # tokio-tungstenite/tokio-rustls. Having both enabled makes rustls 0.23

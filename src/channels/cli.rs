@@ -514,8 +514,18 @@ pub async fn build_single_agent(
         Arc::new(crate::tools::memory::MemoryResearch::new(
             session_store.clone(),
         )),
-        Arc::new(SendImage::new(workspace.clone())),
-        Arc::new(SendFile::new(workspace.clone())),
+        // send 系工具与文件工具共享 workspace_root / trusted_dirs（/move 实时生效）；
+        // 家目录作为固定额外范围，tts/、uploads/ 等产出不因 /move 失联。
+        Arc::new(SendImage::new(
+            workspace_root.clone(),
+            trusted_dirs.clone(),
+            workspace.clone(),
+        )),
+        Arc::new(SendFile::new(
+            workspace_root.clone(),
+            trusted_dirs.clone(),
+            workspace.clone(),
+        )),
         // todo 工具无条件注册（无需 api_key）：agent 自管当前会话子步骤清单。
         Arc::new(crate::tools::todo::TodoTool::new(todo_store.clone())),
         // ask_user 工具无条件注册（无需 api_key）：agent 执行中主动向用户抛问题并阻塞等待。
