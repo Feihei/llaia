@@ -230,6 +230,8 @@
             <div class="form-row"><label>max_iterations</label><input type="number" min="1" x-model.number="cfg.runtime.max_iterations"></div>
             <div class="form-row"><label>timezone</label><input type="text" x-model="cfg.runtime.timezone" placeholder="Asia/Shanghai (IANA)"></div>
             <div class="form-row"><label>permission</label><select x-model="cfg.runtime.permission"><option value="">unset (→ default)</option><option value="default">default</option><option value="read-only">read-only</option><option value="yolo">yolo</option></select></div>
+            <div class="form-row"><label>keepalive_interval_secs</label><input type="number" min="30" x-model.number="cfg.runtime.keepalive_interval_secs" title="长任务心跳间隔（秒）：聊天频道每这么久发一条 still working"></div>
+            <div class="form-row"><label>max_turn_duration_secs</label><input type="number" min="60" x-model.number="cfg.runtime.max_turn_duration_secs" title="单轮最大运行时长（秒）：超过即自动中断，防无限循环"></div>
             <button @click="saveConfig()">Save</button>
           </div>
         </template>

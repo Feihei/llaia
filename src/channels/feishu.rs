@@ -777,11 +777,20 @@ impl OutputSink for FeishuSink {
         }
     }
 
-    async fn on_keepalive(&mut self) {
+    // 长任务心跳：墙钟每 10 分钟一次并带上已运行分钟数，避免用户误以为卡死
+    async fn on_keepalive(&mut self, elapsed: std::time::Duration) {
+        let mins = elapsed.as_secs() / 60;
         let _ = self
             .fs
-            .reply(&self.chat_id, "⏳ still working, please wait...")
+            .reply(
+                &self.chat_id,
+                &format!("⏳ 已运行 {mins} 分钟，仍在处理中，请稍候..."),
+            )
             .await;
+    }
+    // 单轮超时自动中断：向用户说明原因，避免静默卡死
+    async fn on_auto_stopped(&mut self, reason: &str) {
+        let _ = self.fs.reply(&self.chat_id, reason).await;
     }
 
     async fn on_tool_start(&mut self, name: &str) {

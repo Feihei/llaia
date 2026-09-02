@@ -807,6 +807,14 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         Some(p) => println!("runtime.permission: {}", p),
         None => println!("runtime.permission: <unset> (effective: default)"),
     }
+    println!(
+        "runtime.keepalive_interval_secs: {}s",
+        cfg.runtime.keepalive_interval_secs
+    );
+    println!(
+        "runtime.max_turn_duration_secs: {}s",
+        cfg.runtime.max_turn_duration_secs
+    );
 
     // provider 配置检查：无 [provider.<id>] section 时 warn（不 error，serve 可降级启动）
     if cfg.provider.is_empty() {

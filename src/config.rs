@@ -67,6 +67,14 @@ pub struct RuntimeConfig {
     /// （主模型 / vision provider）或截断，避免 280k 字符的 base64 撑爆上下文。
     #[serde(default = "default_tool_result_cap")]
     pub tool_result_cap: usize,
+    /// 长任务心跳间隔（秒）：聊天频道每这么久发一条 "still working"，避免用户以为卡死。
+    /// 默认 600（10 分钟）。按墙钟计，与事件是否密集无关。
+    #[serde(default = "default_keepalive_interval")]
+    pub keepalive_interval_secs: u64,
+    /// 单轮最大运行时长（秒）：超过即自动中断，防止模型无限循环却对用户静默。
+    /// 默认 3600（1 小时）；需大于心跳间隔才有意义。
+    #[serde(default = "default_max_turn_duration")]
+    pub max_turn_duration_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -80,6 +88,8 @@ impl Default for RuntimeConfig {
             permission: None,
             ask_user_timeout_secs: default_ask_user_timeout(),
             tool_result_cap: default_tool_result_cap(),
+            keepalive_interval_secs: default_keepalive_interval(),
+            max_turn_duration_secs: default_max_turn_duration(),
         }
     }
 }
@@ -98,6 +108,14 @@ fn default_ask_user_timeout() -> usize {
 
 fn default_tool_result_cap() -> usize {
     32_768
+}
+
+fn default_keepalive_interval() -> u64 {
+    600
+}
+
+fn default_max_turn_duration() -> u64 {
+    3600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -820,6 +838,28 @@ impl Config {
                 config.runtime.permission = Some(v);
             }
         }
+        // 长任务心跳/超时校验：过小或倒挂的值会让心跳刷屏或直接秒停，兜底恢复默认
+        if config.runtime.keepalive_interval_secs < 30 {
+            tracing::warn!(
+                secs = config.runtime.keepalive_interval_secs,
+                "runtime.keepalive_interval_secs too small (<30s), using default 600"
+            );
+            config.runtime.keepalive_interval_secs = default_keepalive_interval();
+        }
+        if config.runtime.max_turn_duration_secs < 60 {
+            tracing::warn!(
+                secs = config.runtime.max_turn_duration_secs,
+                "runtime.max_turn_duration_secs too small (<60s), using default 3600"
+            );
+            config.runtime.max_turn_duration_secs = default_max_turn_duration();
+        }
+        if config.runtime.max_turn_duration_secs <= config.runtime.keepalive_interval_secs {
+            tracing::warn!(
+                max = config.runtime.max_turn_duration_secs,
+                keep = config.runtime.keepalive_interval_secs,
+                "runtime.max_turn_duration_secs <= keepalive_interval_secs, no heartbeat will ever fire"
+            );
+        }
         // agent fallback 链引用校验：无效项移除（备用链是容错手段，不应阻塞启动）
         for (alias, agent_cfg) in config.agent.iter_mut() {
             let before = agent_cfg.fallback.len();
@@ -1021,6 +1061,9 @@ dir = "~/.llaia-test/logs"
         // runtime
         assert_eq!(config.runtime.context_threshold, 0.8);
         assert_eq!(config.runtime.max_iterations, 5);
+        // 未显式配置的两个新字段走默认
+        assert_eq!(config.runtime.keepalive_interval_secs, 600);
+        assert_eq!(config.runtime.max_turn_duration_secs, 3600);
 
         // provider with nested models
         let p = config.provider.get("default").unwrap();

@@ -1187,15 +1187,23 @@ impl OutputSink for QqSink {
                 .await;
         }
     }
-    // 长任务心跳：turn 静默超 10 分钟后周期性提示，避免用户误以为卡死
-    async fn on_keepalive(&mut self) {
+    // 长任务心跳：墙钟每 10 分钟一次并带上已运行分钟数，避免用户误以为卡死
+    async fn on_keepalive(&mut self, elapsed: std::time::Duration) {
+        let mins = elapsed.as_secs() / 60;
         let _ = self
             .qq
             .send_c2c_message(
                 &self.user_openid,
-                "⏳ still working, please wait...",
+                &format!("⏳ 已运行 {mins} 分钟，仍在处理中，请稍候..."),
                 Some(&self.msg_id),
             )
+            .await;
+    }
+    // 单轮超时自动中断：向用户说明原因，避免静默卡死
+    async fn on_auto_stopped(&mut self, reason: &str) {
+        let _ = self
+            .qq
+            .send_c2c_message(&self.user_openid, reason, Some(&self.msg_id))
             .await;
     }
     async fn on_tool_start(&mut self, name: &str) {
