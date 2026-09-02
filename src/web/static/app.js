@@ -532,6 +532,8 @@ function llaiaApp() {
         streaming_usage: null,
         infer_finish_reason: null,
         requires_assistant_after_tool: null,
+        disable_thinking_template: null,
+        native_tool_calling: null,
       };
     },
     disableCompat(pid) {
@@ -542,7 +544,7 @@ function llaiaApp() {
       const alias = prompt('Enter new model alias (e.g., qwen3, gpt4):');
       if (!alias || !alias.trim()) return;
       if (this.cfg.provider[pid].model[alias]) { alert('Model already exists: ' + alias); return; }
-      this.cfg.provider[pid].model[alias] = { model: '', native_tool_calling: null, context_size: null };
+      this.cfg.provider[pid].model[alias] = { model: '', context_size: null, max_tokens: null };
     },
     deleteModel(pid, alias) {
       if (!confirm('Delete model ' + pid + '.' + alias + '?')) return;
@@ -600,7 +602,7 @@ function llaiaApp() {
       const models = this.cfg.provider[pid].model;
       for (const m of picked) {
         const alias = this.genModelAlias(pid, m.id);
-        models[alias] = { model: m.id, native_tool_calling: null, context_size: null };
+        models[alias] = { model: m.id, context_size: null, max_tokens: null };
       }
       this.probeModels[pid] = [];
       this.probeChecked[pid] = {};

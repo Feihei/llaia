@@ -288,11 +288,19 @@
                         <label class="switch"><input type="checkbox" x-model="p.compat.infer_finish_reason"> infer finish_reason = tool_calls</label>
                         <label class="switch"><input type="checkbox" x-model="p.compat.requires_assistant_after_tool"> assistant placeholder after tool</label>
                         <label class="switch"><input type="checkbox" x-model="p.compat.supports_developer_role"> supports developer role</label>
+                        <label class="switch"><input type="checkbox" x-model="p.compat.disable_thinking_template"> disable_thinking_template</label>
                         <label class="switch">max_tokens field:
                           <select x-model="p.compat.max_tokens_field">
                             <option :value="null">inherit (auto)</option>
                             <option value="max_tokens">max_tokens</option>
                             <option value="max_completion_tokens">max_completion_tokens</option>
+                          </select>
+                        </label>
+                        <label class="switch">native tool calls:
+                          <select x-model="p.compat.native_tool_calling">
+                            <option :value="null">inherit (auto-detect, default true)</option>
+                            <option :value="true">true</option>
+                            <option :value="false">false</option>
                           </select>
                         </label>
                         <button type="button" class="btn-delete" @click="disableCompat(pid)">Remove overrides (use auto-detect)</button>
@@ -305,14 +313,8 @@
                   <div class="model-row">
                     <label x-text="alias"></label>
                     <input x-model="m.model" style="width:200px" placeholder="model id">
-                    <label> native
-                      <select x-model="m.native_tool_calling">
-                        <option :value="null">auto</option>
-                        <option :value="true">true</option>
-                        <option :value="false">false</option>
-                      </select>
-                    </label>
-                    <input type="number" placeholder="ctx" x-model.number="m.context_size" style="width:80px">
+                    <input type="number" placeholder="ctx" title="context window (tokens)" x-model.number="m.context_size" style="width:80px">
+                    <input type="number" placeholder="max_tokens" title="single-response token cap (per-model)" x-model.number="m.max_tokens" style="width:100px">
                     <button class="btn-delete" @click="deleteModel(pid, alias)">×</button>
                   </div>
                 </template>
