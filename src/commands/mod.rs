@@ -231,6 +231,30 @@ const MCP_TEMPLATE: &str = r#"# LLAIA MCP server configuration (restart llaia se
 /// llaia init: scaffold ~/.llaia/ and base templates, then point the user to the WebUI to finish setup.
 /// Idempotent: existing files are not overwritten (unless force).
 pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
+    init_scaffold(config_dir, force)?;
+
+    // Terminal onboarding output
+    println!("✓ created directory structure at {}", config_dir.display());
+    println!("✓ generated config.toml (with commented template)");
+    println!("✓ generated SOUL.md / USER.md / MEMORY.md templates");
+    println!("✓ generated cron.toml (cron template, all commented by default)");
+    println!("✓ generated mcp.toml (MCP server template, all commented by default)");
+    println!("✓ generated .env (secret template; fill in real values, do not commit to git)");
+    println!();
+    println!("Next steps:");
+    println!("  1. edit ~/.llaia/.env and fill in API keys and other secrets");
+    println!(
+        "  2. edit ~/.llaia/config.toml, set model reference in [agent.main] (e.g. default.qwen)"
+    );
+    println!("     or run llaia serve and configure via WebUI at http://127.0.0.1:51217");
+    println!("  3. start the service: llaia serve");
+    println!("  4. CLI debug: llaia chat");
+    Ok(())
+}
+
+/// 创建目录骨架并按模板补齐缺失文件（serve/chat 启动时也会调用，force=false）。
+/// 返回是否有文件被新建/覆盖，供调用方记录日志。
+fn init_scaffold(config_dir: &Path, force: bool) -> Result<bool> {
     let config_dir_expanded = shellexpand::tilde(&config_dir.to_string_lossy()).into_owned();
     let config_dir = PathBuf::from(&config_dir_expanded);
 
@@ -246,70 +270,62 @@ pub fn init_cmd(config_dir: &Path, force: bool) -> Result<()> {
     std::fs::create_dir_all(&subagent_dir)?;
 
     // 2. Generate config.toml
+    let mut changed = false;
     let config_path = config_dir.join("config.toml");
-    write_file_if_needed(&config_path, CONFIG_TEMPLATE, force)?;
-    println!("✓ created directory structure at {}", config_dir.display());
-    println!("✓ generated config.toml (with commented template)");
+    changed |= write_file_if_needed(&config_path, CONFIG_TEMPLATE, force)?;
 
     // 3. Generate SOUL.md / USER.md / MEMORY.md templates (sync, small files)
     let soul_path = workspace.join("SOUL.md");
     let user_path = workspace.join("USER.md");
     let memory_path = workspace.join("MEMORY.md");
-    write_file_if_needed(&soul_path, crate::memory::SOUL_TEMPLATE, force)?;
-    write_file_if_needed(&user_path, crate::memory::USER_TEMPLATE, force)?;
-    write_file_if_needed(&memory_path, crate::memory::MEMORY_TEMPLATE, force)?;
-    println!("✓ generated SOUL.md / USER.md / MEMORY.md templates");
+    changed |= write_file_if_needed(&soul_path, crate::memory::SOUL_TEMPLATE, force)?;
+    changed |= write_file_if_needed(&user_path, crate::memory::USER_TEMPLATE, force)?;
+    changed |= write_file_if_needed(&memory_path, crate::memory::MEMORY_TEMPLATE, force)?;
 
     // 4. Generate cron.toml template
     let cron_path = config_dir.join("cron.toml");
-    write_file_if_needed(&cron_path, CRON_TEMPLATE, force)?;
-    println!("✓ generated cron.toml (cron template, all commented by default)");
+    changed |= write_file_if_needed(&cron_path, CRON_TEMPLATE, force)?;
 
     // 5. Generate mcp.toml template
     let mcp_path = config_dir.join("mcp.toml");
-    write_file_if_needed(&mcp_path, MCP_TEMPLATE, force)?;
-    println!("✓ generated mcp.toml (MCP server template, all commented by default)");
+    changed |= write_file_if_needed(&mcp_path, MCP_TEMPLATE, force)?;
 
     // 6. Generate .env template (secrets centralized; config.toml references via ${VAR})
     let env_path = config_dir.join(".env");
-    write_file_if_needed(&env_path, ENV_TEMPLATE, force)?;
-    println!("✓ generated .env (secret template; fill in real values, do not commit to git)");
+    changed |= write_file_if_needed(&env_path, ENV_TEMPLATE, force)?;
 
-    // 7. Terminal onboarding output
-    println!();
-    println!("Next steps:");
-    println!("  1. edit ~/.llaia/.env and fill in API keys and other secrets");
-    println!(
-        "  2. edit ~/.llaia/config.toml, set model reference in [agent.main] (e.g. default.qwen)"
-    );
-    println!("     or run llaia serve and configure via WebUI at http://127.0.0.1:51217");
-    println!("  3. start the service: llaia serve");
-    println!("  4. CLI debug: llaia chat");
-    Ok(())
+    Ok(changed)
 }
 
-/// 写文件：文件不存在则写入；存在时若 force=true 覆盖，否则跳过。
-fn write_file_if_needed(path: &Path, content: &str, force: bool) -> Result<()> {
+/// 写文件：文件不存在则写入；存在时若 force=true 覆盖，否则跳过。返回是否有写入动作。
+fn write_file_if_needed(path: &Path, content: &str, force: bool) -> Result<bool> {
     if path.exists() && !force {
         tracing::debug!(path = %path.display(), "file exists, skip (use --force to overwrite)");
-        return Ok(());
+        return Ok(false);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, content)?;
+    Ok(true)
+}
+
+/// 启动路径共享的目录准备：先迁移旧结构，再幂等补齐 init 模板，之后才加载配置。
+/// 顺序约束：迁移必须先于模板补齐（否则模板会遮蔽待迁移的旧版散落文件），
+/// 补齐必须先于配置加载（否则新生成的 config.toml 模板不会被本次加载，走了内存默认值）。
+fn prepare_startup_dir(config_dir: &Path) -> Result<()> {
+    crate::migrate::migrate_if_needed(config_dir)?;
+    if init_scaffold(config_dir, false)? {
+        tracing::info!(dir = %config_dir.display(), "scaffolded missing init templates");
+    }
     Ok(())
 }
 
 /// 终端交互模式：只启动 CliChannel，不连 QQ 等后台频道
 pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
+    prepare_startup_dir(config_dir)?;
     let config = load_config_or_init(config_dir)?;
     warn_plaintext_secrets(config_dir);
-
-    // 目录结构迁移
-    if crate::migrate::migrate_if_needed(config_dir)? {
-        tracing::info!("directory migrated, reloading config");
-    }
 
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
@@ -340,13 +356,9 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
 
 /// 守护进程模式：启动所有非 CLI 的后台频道（QQ、未来 WebUI 等），不启动终端交互
 pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
+    prepare_startup_dir(config_dir)?;
     let config = load_config_or_init(config_dir)?;
     warn_plaintext_secrets(config_dir);
-
-    // 目录结构迁移
-    if crate::migrate::migrate_if_needed(config_dir)? {
-        tracing::info!("directory migrated, reloading config");
-    }
 
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
@@ -1126,5 +1138,70 @@ mod tests {
         assert!(checks
             .iter()
             .any(|c| c.name == "sessions.db" && c.status == "warn"));
+    }
+
+    #[test]
+    fn init_scaffold_creates_full_layout_on_fresh_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(init_scaffold(dir.path(), false).unwrap());
+        for rel in [
+            "config.toml",
+            "cron.toml",
+            "mcp.toml",
+            ".env",
+            "workspace/SOUL.md",
+            "workspace/USER.md",
+            "workspace/MEMORY.md",
+            "workspace/uploads",
+            "workspace/subagent",
+            "logs",
+        ] {
+            assert!(dir.path().join(rel).exists(), "missing {rel}");
+        }
+    }
+
+    #[test]
+    fn init_scaffold_is_idempotent_and_preserves_user_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        init_scaffold(dir.path(), false).unwrap();
+        let custom = "[agent.main]\nmodel = \"my.provider\"\n";
+        std::fs::write(dir.path().join("config.toml"), custom).unwrap();
+
+        assert!(!init_scaffold(dir.path(), false).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            custom
+        );
+    }
+
+    #[test]
+    fn init_scaffold_force_overwrites_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        init_scaffold(dir.path(), false).unwrap();
+        std::fs::write(dir.path().join("config.toml"), "garbage").unwrap();
+
+        assert!(init_scaffold(dir.path(), true).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            CONFIG_TEMPLATE
+        );
+    }
+
+    #[test]
+    fn prepare_startup_dir_migrates_old_layout_before_scaffolding() {
+        // 旧版散落文件（无 .migrated_v0.2 标记）：迁移必须先于模板补齐，
+        // 否则 workspace/SOUL.md 会被模板占据、旧文件被遮蔽
+        let dir = tempfile::tempdir().unwrap();
+        let old_soul = "# my precious soul\n";
+        std::fs::write(dir.path().join("SOUL.md"), old_soul).unwrap();
+
+        prepare_startup_dir(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("workspace/SOUL.md")).unwrap(),
+            old_soul
+        );
+        assert!(!dir.path().join("SOUL.md").exists());
+        // 其余模板仍被补齐
+        assert!(dir.path().join("config.toml").exists());
     }
 }

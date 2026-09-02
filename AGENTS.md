@@ -160,7 +160,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 - `always`：跳过需确认工具，回复用户原因
 - `whitelist`：已废弃，加载时 warn 并 fallback 到 `none`
 
-CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道）/ `llaia init`（生成配置骨架）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
+CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道）/ `llaia init`（显式生成配置骨架；`--force` 覆盖重建。serve / chat 启动时经 `prepare_startup_dir` 自动做「迁移 → 幂等补齐模板 → 加载配置」，缺啥补啥、绝不覆盖已有文件，裸 `llaia serve` 在全新机器可直接跑）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
 斜杠命令：`/new` `/task [<名>|close]` `/tasks` `/exit` `/stop` `/compact` `/memory-compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/btw <question>`（侧问：读上下文零污染，答案落 `side_messages` 独立表、WebUI Side 样式渲染） `/steer <msg>`（运行中插话：channel 层拦截投 `Agent.steer_buffer`，agent 工具循环非末轮迭代顶部以 `[steer] User added:` user 消息注入；空闲时降级为普通消息） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
 
 > **敏感信息 .env 自动化（P5 S1）**：`src/config/secrets.rs`。WebUI `PUT /api/config` 保存时，明文敏感字段（provider api_key、频道 token/secret、搜索 key、TTS key、webui token）**先写入 `<config_dir>/.env`**（幂等 upsert、Unix 0600 权限），config.toml 只保留 `${VAR}` 引用；内存态再展开回明文供热加载（`build_provider_from_config` 不认 `${VAR}`）。`.env` 写入失败 → 保留明文 + warn 降级。存量迁移用 `/migrate-secrets`（toml_edit 定点替换保注释）；启动时扫描明文敏感字段并 warn。`GET /api/config` 返回时敏感字段掩码为 `••••`（保存时空输入 = 保留原值，见 `mask_sensitive`/`merge_masked`）。

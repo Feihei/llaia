@@ -50,9 +50,9 @@ LLAIA does **not** bundle a model — you point it at an OpenAI-compatible or An
 Full walkthrough in [**docs/guide/quick-start.md**](docs/guide/quick-start.md).
 
 ```bash
-llaia init                              # scaffold ~/.llaia/ (config, .env, workspace, skills)
-# edit ~/.llaia/.env + config.toml, or just run serve and configure in the browser
 llaia serve                             # Web UI + background channels (recommended)
+# first run auto-scaffolds ~/.llaia/ (config, .env, workspace); configure in the browser
+# or edit ~/.llaia/.env + config.toml manually; `llaia init` scaffolds explicitly
 llaia chat                              # terminal-only interactive chat
 ```
 
