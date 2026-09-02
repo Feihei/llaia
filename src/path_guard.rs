@@ -161,6 +161,14 @@ pub fn validate_path(
 /// 会因此被误判为路径并触发越界拒绝（#C：officecli 多行文本 `\n` 失败即此因）。
 /// 真实路径至少满足：带盘符 `X:`、前导 `\`(UNC)、前导 `/`/`~`/`./`/`../`、或含 `/`。
 fn looks_like_path(token: &str) -> bool {
+    // Windows 命令行开关（tree /F /A、dir /S /B、cmd /C）以 `/`+单字符出现，
+    // 与"根路径"语法形同但并非文件系统路径；PathBuf 会把它解析到盘符根 `X:\`，
+    // 永远落在移到目录之外 → 干净命令被误判越界、每次都要审批（同 #C 的改法）。
+    // 只在 Windows 排除：Linux 上 `/x` 更可能是真实路径，保持原有语义。
+    #[cfg(windows)]
+    if token.len() == 2 && token.starts_with('/') {
+        return false;
+    }
     token.starts_with('/')
         || token.starts_with('~')
         || token.starts_with("./")
@@ -415,6 +423,32 @@ mod tests {
         let tokens = extract_path_tokens(r"copy C:\Users\me\file.txt \\srv\share\x");
         assert!(tokens.contains(&r"C:\Users\me\file.txt".to_string()));
         assert!(tokens.contains(&r"\\srv\share\x".to_string()));
+    }
+
+    /// 回归：Windows 单字符开关（tree /F /A，dir /S /B）不算路径，
+    /// 不得因被解析到盘符根 X:\ 而把 workspace 内干净命令误判越界。
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_short_flags_are_not_paths() {
+        // /F、/A 是 tree 的开关，不应被当成本节路径 token
+        let tokens = extract_path_tokens(r"tree /F /A E:\play\coding\ico-gomoku");
+        assert!(
+            !tokens.iter().any(|t| t == "/F" || t == "/A"),
+            "单字符开关不应被判为路径: {tokens:?}"
+        );
+        // 工作目录内真实存在的绝对路径命令应判定为 workspace 内 → 免审批
+        let ws = tempdir().unwrap();
+        let within = validate_command_paths_in_scope(
+            &format!("tree /F /A {}", ws.path().display()),
+            ws.path(),
+            &[],
+            None,
+        );
+        assert!(
+            within.is_ok(),
+            "tree /F /A <workspace 内路径> 应免审批，实际: {:?}",
+            within.map_err(|e| e.to_string())
+        );
     }
 
     #[test]
