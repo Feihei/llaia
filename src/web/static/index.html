@@ -153,19 +153,31 @@
           <div class="hint" x-show="sessions.length === 0">No sessions recorded yet.</div>
         </div>
         <div class="session-detail">
+          <!-- 吸顶头部：挂在滚动容器外部，随侧栏固定不随内容滚动 -->
+          <template x-if="sessionDetail">
+            <div class="config-head session-head">
+              <span>&#x276F; SESSION <span class="hint" x-text="sessionDetail.session ? sessionDetail.session.session_uuid : ''"></span></span>
+              <span class="session-head-actions">
+                <button @click="exportSession(sessionDetail.session.session_uuid)">Export JSON</button>
+                <button class="btn-delete" @click="deleteSession(sessionDetail.session.session_uuid)">Delete</button>
+                <button :class="{active: manageMode}" @click="toggleManage()">Manage</button>
+                <button class="btn-delete" x-show="manageMode && delSel.length" @click="deleteSelected()">Delete (<span x-text="delSel.length"></span>)</button>
+              </span>
+            </div>
+          </template>
+          <div class="hint session-manage-hint" x-show="sessionDetail && manageMode">Manage mode: check 1 or more messages, then press Delete above. Only cleans stored history; live context &amp; token budget are not affected.</div>
           <!-- 跳顶/跳底（plan.md W1）：按钮挂在滚动容器外部，滚动时保持原位 -->
           <button class="scroll-fab scroll-fab-top" title="Jump to top" @click="$refs.detailScroll.scrollTo({top: 0, behavior: 'smooth'})">&#8593;</button>
           <button class="scroll-fab scroll-fab-bottom" title="Jump to bottom" @click="$refs.detailScroll.scrollTo({top: $refs.detailScroll.scrollHeight, behavior: 'smooth'})">&#8595;</button>
           <div class="session-detail-scroll" x-ref="detailScroll">
           <template x-if="sessionDetail">
             <div>
-              <div class="config-head">&#x276F; SESSION <span class="hint" x-text="sessionDetail.session ? sessionDetail.session.session_uuid : ''"></span>
-                <button class="btn-delete" @click="deleteSession(sessionDetail.session.session_uuid)">Delete</button>
-                <button @click="exportSession(sessionDetail.session.session_uuid)">Export JSON</button>
-              </div>
               <template x-for="m in sessionDetail.messages" :key="m.id">
-                <div class="msg" :class="m.role">
-                  <div><b x-text="m.role"></b> <span class="hint" x-text="fmtTime(m.created_at)"></span></div>
+                <div class="msg" :class="[m.role, {manage: manageMode, checked: delSel.includes(m.id)}]">
+                  <label class="msg-check" x-show="manageMode" @click.stop>
+                    <input type="checkbox" :checked="delSel.includes(m.id)" @change="toggleMessage(m)">
+                  </label>
+                  <div class="msg-head"><b x-text="m.role"></b> <span class="hint" x-text="fmtTime(m.created_at)"></span></div>
                   <template x-if="m.role === 'tool' && m.content">
                     <div class="tool-result" x-data="{open: false}">
                       <div class="tool-result-head" @click="open = !open">

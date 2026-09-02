@@ -956,6 +956,38 @@ END;
         )?;
         Ok(n > 0)
     }
+
+    /// 删除某会话内指定 ids 的消息（可多条）。tool_calls 由外键 ON DELETE CASCADE 级联清理，
+    /// FTS 由触发器清理。返回实际删除条数。
+    pub fn delete_messages(&self, session_id: i64, ids: &[i64]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let placeholders: Vec<_> = std::iter::repeat("?").take(ids.len()).collect();
+        let sql = format!(
+            "DELETE FROM messages WHERE session_id = ?1 AND id IN ({})",
+            placeholders.join(",")
+        );
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 1);
+        params.push(&session_id);
+        for id in ids {
+            params.push(id);
+        }
+        let n = conn.execute(&sql, rusqlite::params_from_iter(params))?;
+        Ok(n as u64)
+    }
+
+    /// 该 message id 是否属于指定会话（用于删除前校验）。
+    pub fn message_in_session(&self, session_id: i64, msg_id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND id = ?2",
+            rusqlite::params![session_id, msg_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
 }
 
 #[cfg(test)]
@@ -1201,6 +1233,44 @@ mod tests {
         drop(conn);
         // 二次删除返回 false
         assert!(!store.delete_session("uuid-z").unwrap());
+    }
+
+    #[test]
+    fn test_delete_messages_ids() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("uuid-del", "cli").unwrap();
+        let m1 = store.append_message(sid, &Role::User, "keep me").unwrap();
+        let m2 = store
+            .append_message(sid, &Role::Assistant, "loop marker X7F")
+            .unwrap();
+        let m3 = store
+            .append_message(sid, &Role::Tool, "bloat X7F")
+            .unwrap();
+        store
+            .append_tool_call(m2, "call_loop", "terminal", "{}", Some("out"))
+            .unwrap();
+
+        // 归属校验
+        assert!(store.message_in_session(sid, m2).unwrap());
+        assert!(!store.message_in_session(sid, 999_999).unwrap());
+        assert!(store.delete_messages(sid, &[]).unwrap() == 0);
+
+        // 删除 m2 与 m3，留下 m1
+        assert_eq!(store.delete_messages(sid, &[m2, m3]).unwrap(), 2);
+        let left = store.recent_messages(sid, 10).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, m1);
+
+        // 级联：m2 的工具调用一并删除
+        let conn = store.conn.lock().unwrap();
+        let tc_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tc_count, 0);
+        drop(conn);
+
+        // FTS：删除的行不再命中
+        assert!(store.search_messages("X7F", 10).unwrap().is_empty());
     }
 
     #[test]

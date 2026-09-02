@@ -2118,6 +2118,71 @@ pub async fn delete_session_api(
     }
 }
 
+/// 删除消息请求体：`{ ids: [..] }`（单条时 ids 长度 1）。
+#[derive(Deserialize)]
+pub struct DeleteMessagesBody {
+    pub ids: Option<Vec<i64>>,
+}
+
+/// 删除某会话内指定 ids 的消息（可多条）。仅清理历史存储，不改动 token 预算。
+pub async fn delete_session_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StatsQuery>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    body: Option<axum::extract::Json<DeleteMessagesBody>>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    let Some((sid, _row)) = agent.session_store.session_by_uuid(&uuid).unwrap_or(None) else {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "session not found" })),
+        )
+            .into_response();
+    };
+    let Some(b) = body else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": "missing body" })),
+        )
+            .into_response();
+    };
+    let b = b.0; // 解包 Json 提取器
+    let mut ids = b.ids.unwrap_or_default();
+    if ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": "provide a non-empty `ids` list" })),
+        )
+            .into_response();
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    // 校验所有 id 确实属于该会话，防止跨会话 id 误删
+    for &id in &ids {
+        if !agent
+            .session_store
+            .message_in_session(sid, id)
+            .unwrap_or(false)
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": "message(s) not in this session" })),
+            )
+                .into_response();
+        }
+    }
+    let deleted = agent.session_store.delete_messages(sid, &ids).unwrap_or(0);
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "deleted": deleted })),
+    )
+        .into_response()
+}
+
 /// GET /api/sessions/:uuid/export → 导出会话为 JSON（消息 + 工具调用完整留底）。
 pub async fn export_session(
     State(state): State<AppState>,
@@ -2265,6 +2330,10 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route(
             "/api/sessions/:uuid",
             axum::routing::get(get_session_detail).delete(delete_session_api),
+        )
+        .route(
+            "/api/sessions/:uuid/messages",
+            axum::routing::delete(delete_session_messages),
         )
         .route(
             "/api/sessions/:uuid/export",

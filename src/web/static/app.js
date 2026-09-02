@@ -151,6 +151,9 @@ function llaiaApp() {
     selectedSession: null,
     sessionDetail: null,
     sessionMsg: '',
+    // 消息管理模式：勾选单条/多条后删除（仅清理历史，不影响 live context / token 预算）
+    manageMode: false,
+    delSel: [],
 
     async init() {
       // 标记已成功进入初始化，供 index.html 的启动失败兜底检测使用
@@ -283,6 +286,40 @@ function llaiaApp() {
         }
       } catch (e) {
         this.sessionMsg = 'Export failed: ' + e.message;
+      }
+    },
+    // ---- 消息删除（manage 模式：勾选单条/多条）----
+    toggleManage() {
+      this.manageMode = !this.manageMode;
+      this.delSel = [];
+    },
+    toggleMessage(m) {
+      if (!this.manageMode) return;
+      const i = this.delSel.indexOf(m.id);
+      if (i >= 0) this.delSel.splice(i, 1);
+      else this.delSel.push(m.id);
+    },
+    async deleteSelected() {
+      const uuid = this.selectedSession;
+      const ids = [...this.delSel];
+      if (!ids.length || !uuid) return;
+      if (!confirm('Delete ' + ids.length + ' message(s) permanently? It only cleans the stored history; the live context and token budget are NOT affected.')) return;
+      try {
+        const r = await this.apiFetch('/api/sessions/' + encodeURIComponent(uuid) + '/messages', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        });
+        if (r.ok) {
+          this.manageMode = false;
+          this.delSel = [];
+          this.sessionMsg = 'Deleted ' + ids.length + ' message(s).';
+          await this.openSession(uuid);
+        } else {
+          this.sessionMsg = 'Delete messages failed: ' + r.status;
+        }
+      } catch (e) {
+        this.sessionMsg = 'Delete messages failed: ' + e.message;
       }
     },
     fmtTime(iso) {
