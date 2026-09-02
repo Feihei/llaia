@@ -1,6 +1,6 @@
 # MCP（Model Context Protocol）
 
-通过 MCP 把外部工具与数据源接进 LLAIA。server 定义在 `mcp.toml`，修改后**重启 `serve`/`chat` 生效**。`llaia init` 会生成全注释模板。
+通过 MCP 把外部工具与数据源接进 LLAIA。server 定义在 `mcp.toml`，修改后**重启 `serve`/`chat` 生效**。首次 `serve`/`chat` 启动（或 `llaia init`）会生成全注释模板。
 
 > 客户端实现与协议细节见开发文档 [ADR-0014](../adr/0014-mcp-client.md)。
 

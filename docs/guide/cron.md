@@ -1,6 +1,6 @@
 # 定时任务（Cron）
 
-在 `cron.toml` 里定义重复或一次性任务，唤醒主 agent 或直接跑工具链，结果可推送到指定频道。`llaia init` 会生成全注释的模板。
+在 `cron.toml` 里定义重复或一次性任务，唤醒主 agent 或直接跑工具链，结果可推送到指定频道。首次 `serve`/`chat` 启动（或 `llaia init`）会生成全注释的模板。
 
 > 调度设计与字段语义见开发文档 [ADR-0013](../adr/0013-cron-scheduling.md)。
 

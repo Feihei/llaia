@@ -9,7 +9,7 @@
 | 文档 | 内容 |
 |---|---|
 | [安装](installation.md) | 二进制 / Docker / 从源码编译 |
-| [快速开始](quick-start.md) | init → 配 provider → 启动 → 第一次对话 |
+| [快速开始](quick-start.md) | 启动（自动就绪）→ 配 provider → 第一次对话 |
 | [CLI 参考](cli.md) | `chat` / `serve` / `init` / `config` / `doctor` / `remember` 与全局 `--config-dir` |
 | [配置参考](configuration.md) | `config.toml` 全部字段（runtime / provider / agent / webui / tools / channels） |
 

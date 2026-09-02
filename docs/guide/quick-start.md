@@ -2,15 +2,18 @@
 
 本页带你在 5 分钟内跑通第一次对话。更细的配置、频道、定时任务、MCP、技能等，见本指南其余章节。
 
-## 1. 初始化数据目录
+## 1. 数据目录（自动就绪）
 
-`serve` / `chat` 启动时会**自动补齐**缺失的目录与模板（绝不覆盖已有文件），所以这步可跳过。想显式生成，或之后想用 `--force` 重造模板时才用：
+首次 `llaia serve` / `llaia chat` 会**自动补齐**数据目录：缺什么补什么，已有文件一律不动。全新机器直接跳到第 3 步跑起来即可，无需先初始化。
+
+`llaia init` 于是只剩两个显式用途——**修复**与**覆盖重建**：
 
 ```bash
-llaia init
+llaia init            # 修复：只补缺失的文件（如误删的 SOUL.md / cron.toml），已有内容不动
+llaia init --force    # 覆盖：用模板重建全部文件（config.toml 的 provider 配置、.env 会被重置，慎用）
 ```
 
-会在 `~/.llaia/`（可用 `--config-dir <path>` 改到其他地方）生成：
+无论哪种方式，生成的是这套结构（位于 `~/.llaia/`，可用 `--config-dir <path>` 改到其他地方）：
 
 ```
 ~/.llaia/
@@ -29,7 +32,7 @@ llaia init
      └─ sessions.db    # 会话历史（SQLite，source of truth）
 ```
 
-- **幂等**：已存在的文件不会被覆盖。`--force` 可强制重新生成模板。
+- 自动生成的 `config.toml` 是全注释模板（`[agent.main] model = ""`），所以首次 `serve` 会以**降级模式**起来：聊天暂不可用，但 Web UI 能打开并配置 provider（见第 2 步 A）。
 - 想换数据目录：之后所有命令加 `--config-dir <path>`（全局参数）。
 
 ## 2. 配置模型 Provider
