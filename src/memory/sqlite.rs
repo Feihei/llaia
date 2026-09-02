@@ -964,7 +964,7 @@ END;
             return Ok(0);
         }
         let conn = self.conn.lock().unwrap();
-        let placeholders: Vec<_> = std::iter::repeat("?").take(ids.len()).collect();
+        let placeholders: Vec<_> = std::iter::repeat_n("?", ids.len()).collect();
         let sql = format!(
             "DELETE FROM messages WHERE session_id = ?1 AND id IN ({})",
             placeholders.join(",")
@@ -1243,9 +1243,7 @@ mod tests {
         let m2 = store
             .append_message(sid, &Role::Assistant, "loop marker X7F")
             .unwrap();
-        let m3 = store
-            .append_message(sid, &Role::Tool, "bloat X7F")
-            .unwrap();
+        let m3 = store.append_message(sid, &Role::Tool, "bloat X7F").unwrap();
         store
             .append_tool_call(m2, "call_loop", "terminal", "{}", Some("out"))
             .unwrap();
