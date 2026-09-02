@@ -1,9 +1,11 @@
 name: Deploy
 
-# Triggers: push to main, or manual workflow_dispatch
+# Triggers: release tags (v*), or manual workflow_dispatch.
+# docker 镜像构建+推送较耗时，仅在做 release 时执行；日常 push 只跑 CI check。
 on:
   push:
-    branches: [main]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
