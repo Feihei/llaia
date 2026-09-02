@@ -2,7 +2,13 @@
 
 ## `llaia doctor` 都查什么？
 
-检查项：config 目录、provider 连通性（请求 `/models` 探活）、`runtime` 参数、`timezone` / `permission` 合法性、`cron.toml` / `mcp.toml` 解析与启用数、skills 扫描、`sessions.db` 存在性。排错第一步先跑它。
+检查项：模板文件（`config.toml` / `cron.toml` / `mcp.toml` / `.env` 的存在性与可解析性）、provider 连通性（请求 `/models` 探活，5s 超时）、`runtime` 参数、`timezone` / `permission` 合法性、任务与 server 启用数、skills 扫描、`sessions.db` 存在性。排错第一步先跑它。
+
+两点设计：**config.toml 语法坏了也照样出诊断**（把解析失败作为一条 `error` 报出来并跳过依赖它的 provider / agent 探测，不会整个命令退出）；**缺失项直接告诉你跑什么命令**——补模板指向 `llaia init`，迁移明文密钥指向 `/migrate-secrets`。
+
+## config.toml 改坏了（serve 起不来、报 TOML parse error）
+
+`llaia doctor` 会打印出错行列。按提示手工改正语法后重跑 `llaia doctor` 确认；实在救不回就**先备份该文件**，再 `llaia init --force` 重置成模板重配（注意会一并重置 `cron.toml` / `mcp.toml` / `.env`）。
 
 ## 启动报 "No provider configured, cannot start chat"
 

@@ -20,7 +20,7 @@ llaia --config-dir /data/llaia serve
 | `llaia serve` | 后台服务模式：启动 Web UI + 所有已启用的频道（QQ / Telegram / 钉钉 / 微信 / 邮箱 / 飞书）。无 provider 时进入**降级模式**（聊天不可用，但 Web UI 仍可配置）。 |
 | `llaia init [--force]` | 生成数据目录骨架与默认模板（config / .env / cron / mcp / SOUL·USER·MEMORY）。serve / chat 启动时会自动补齐缺失文件，故此命令通常无需手动执行。显式用途：`llaia init` = **修复**（只补缺失项，已有文件不动）；`llaia init --force` = **覆盖**（用模板重建全部文件，会重置 config.toml 与 .env）。 |
 | `llaia config` | 打印当前生效配置（解析后、展开 `~` 与 `${VAR}` 之后）。 |
-| `llaia doctor` | 诊断：config 目录、provider 连通性（请求 `/models`）、cron.toml / mcp.toml / skills 扫描、sessions.db 存在性。 |
+| `llaia doctor` | 诊断：模板文件（config / cron / mcp / .env 存在性与可解析性）、provider 连通性（`/models`，5s 超时）、runtime 参数、cron/mcp 任务与 server、skills、sessions.db。**config.toml 解析失败也会出诊断**（作为 `error` 项报出并跳过依赖它的探测）；缺失项提示 `llaia init` 补齐。纯只读，不写任何文件。 |
 | `llaia remember "<text>"` | 往 `MEMORY.md` 追加一行长期记忆（带日期前缀）。等价于会话内 `/remember <text>`。 |
 
 ### 示例

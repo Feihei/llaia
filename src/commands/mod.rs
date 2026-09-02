@@ -628,10 +628,162 @@ pub fn config_cmd(config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
-    let cfg = load_config_or_init(config_dir)?;
+/// 诊断专用容错加载：`config.toml` **解析失败不阻断诊断**，回退内存默认值并把错误文本交回调用方。
+/// `doctor_cmd` / `doctor_checks` 第一版的 `load_config_or_init(...)?` 会在用户手改坏配置的瞬间
+/// 直接退出——那恰恰是最需要 doctor 的时刻，故此路径必须容错。
+fn load_config_for_doctor(config_dir: &Path) -> (Config, Option<String>) {
+    let config_path = config_dir.join("config.toml");
+    if !config_path.exists() {
+        return (
+            Config::default_for_workspace(&config_dir.to_string_lossy()),
+            None,
+        );
+    }
+    match Config::load(&config_path) {
+        Ok(cfg) => (cfg, None),
+        Err(e) => (
+            Config::default_for_workspace(&config_dir.to_string_lossy()),
+            Some(format!("{:#}", e)),
+        ),
+    }
+}
 
+/// 模板类文件检查（config / cron / mcp / .env）：这些不依赖 config 是否可解析，
+/// 坏配置下也必须报，且缺失项统一指向 `llaia init`（serve / chat 启动也会自动补齐）。
+fn template_file_checks(config_dir: &Path, parse_err: Option<&str>) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+
+    let config_path = config_dir.join("config.toml");
+    checks.push(match parse_err {
+        Some(e) => DoctorCheck::error(
+            "config.toml",
+            format!(
+                "{}: {} — 手工修正语法后重跑；确认救不回再备份并 `llaia init --force` 重置模板",
+                config_path.display(),
+                // detail 保持单行（WebUI 表格内展示）；完整多行错误由 CLI 头部打印
+                e.lines().next().unwrap_or(e)
+            ),
+        ),
+        None if config_path.exists() => {
+            DoctorCheck::ok("config.toml", config_path.display().to_string())
+        }
+        None => DoctorCheck::warn(
+            "config.toml",
+            "not found（下次 `llaia serve` / `llaia chat` 会自动生成模板，或显式 `llaia init`）",
+        ),
+    });
+
+    let cron_path = config_dir.join("cron.toml");
+    if cron_path.exists() {
+        match crate::cron::CronConfig::load(&cron_path) {
+            Ok(c) => checks.push(DoctorCheck::ok(
+                "cron.toml",
+                format!("{} ({} tasks)", cron_path.display(), c.task.len()),
+            )),
+            Err(e) => checks.push(DoctorCheck::error(
+                "cron.toml",
+                format!("{}: {}", cron_path.display(), e),
+            )),
+        }
+    } else {
+        checks.push(DoctorCheck::warn(
+            "cron.toml",
+            "not found（`llaia init` 可补齐模板，或等下次 serve/chat 自动生成）",
+        ));
+    }
+
+    let mcp_path = config_dir.join("mcp.toml");
+    if mcp_path.exists() {
+        match crate::mcp::McpConfig::load(&mcp_path) {
+            Ok(c) => checks.push(DoctorCheck::ok(
+                "mcp.toml",
+                format!("{} ({} servers)", mcp_path.display(), c.server.len()),
+            )),
+            Err(e) => checks.push(DoctorCheck::error(
+                "mcp.toml",
+                format!("{}: {}", mcp_path.display(), e),
+            )),
+        }
+    } else {
+        checks.push(DoctorCheck::warn(
+            "mcp.toml",
+            "not found（`llaia init` 可补齐模板，或等下次 serve/chat 自动生成）",
+        ));
+    }
+
+    // .env 存在性（敏感信息自动化 P5 S1）；Unix 额外查权限位
+    let env_path = config_dir.join(".env");
+    if env_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&env_path)
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0);
+            if mode & 0o077 != 0 {
+                checks.push(DoctorCheck::warn(
+                    ".env",
+                    format!("permissions too open: {:o} (expected 0600)", mode & 0o777),
+                ));
+            } else {
+                checks.push(DoctorCheck::ok(
+                    ".env",
+                    format!("{} (0600)", env_path.display()),
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        checks.push(DoctorCheck::ok(".env", env_path.display().to_string()));
+    } else {
+        checks.push(DoctorCheck::warn(
+            ".env",
+            "not found (plaintext secrets stay in config.toml; save via WebUI or run /migrate-secrets)",
+        ));
+    }
+
+    checks
+}
+
+pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
+    let (cfg, parse_err) = load_config_for_doctor(config_dir);
     println!("config_dir: {}", config_dir.display());
+
+    // 配置解析失败：provider / agent / context_size 检查全部失去依据（内存默认值不是用户本意），
+    // 报完文件层检查即退出——但绝不 panic、绝不吞掉诊断。
+    if let Some(e) = &parse_err {
+        println!("\n[error] config.toml 解析失败: {}", e);
+        println!(
+            "        修复：手工改正语法后重跑 `llaia doctor`；确认救不回时备份该文件再 `llaia init --force` 重置模板"
+        );
+        println!("\n其余文件层检查（provider / agent 检查依赖有效配置，已跳过）:");
+        for c in template_file_checks(config_dir, Some(e)) {
+            if c.name == "config.toml" {
+                continue; // 已在上方展开
+            }
+            println!("  [{}] {}: {}", c.status, c.name, c.detail);
+        }
+        return Ok(());
+    }
+
+    // 正常路径也报模板文件状态：缺失时指向 `llaia init`（serve / chat 启动会自动补齐）
+    let config_path = config_dir.join("config.toml");
+    if config_path.exists() {
+        println!("config.toml: {}", config_path.display());
+    } else {
+        println!(
+            "\n[warn] config.toml not found —— 下次 `llaia serve` / `llaia chat` 会自动生成模板（也可 `llaia init`）；以下按内置默认值诊断"
+        );
+    }
+
+    let env_path = config_dir.join(".env");
+    if env_path.exists() {
+        println!(".env: {}", env_path.display());
+    } else {
+        println!(
+            "\n[warn] .env not found —— 敏感字段将以明文留在 config.toml；在 WebUI 保存配置会自动改为 ${{VAR}} 引用，或跑 /migrate-secrets 迁移存量"
+        );
+    }
+
     println!("log.dir: {}", cfg.log.dir);
     println!(
         "runtime.context_threshold: {}",
@@ -660,7 +812,7 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
     if cfg.provider.is_empty() {
         println!("\n[warn] No provider configured; llaia serve will start in degraded mode (chat unavailable, WebUI config usable)");
         println!(
-            "       suggestion: run `llaia init`, then edit {}/config.toml to uncomment [provider.default]",
+            "       suggestion: 启动 `llaia serve` 后在 WebUI Config 页填写 provider，或编辑 {}/config.toml 取消注释 [provider.default]",
             config_dir.display()
         );
     } else {
@@ -813,13 +965,16 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
                         m.model,
                         native_label(m.native_tool_calling)
                     );
-                    match reqwest::Client::new()
+                    match reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("failed to build http client: {}", e))?
                         .get(format!("{}/models", p.base_url.trim_end_matches('/')))
                         .send()
                         .await
                     {
                         Ok(resp) => println!("  /models status: {}", resp.status()),
-                        Err(e) => println!("  /models error: {}", e),
+                        Err(e) => println!("  /models error: {} (5s timeout)", e),
                     }
                 } else {
                     println!(
@@ -870,14 +1025,21 @@ impl DoctorCheck {
 }
 
 /// 结构化诊断（与 CLI `doctor_cmd` 同源的检查集，供 WebUI 展示）：
-/// provider 连通性、主模型链、context_size 探测、.env、sessions.db、cron/mcp/skills。
-/// 网络探测带 5s 超时；任何单项失败不阻断其余检查。
+/// 模板文件（config/cron/mcp/.env）、provider 连通性、主模型链、context_size 探测、sessions.db、skills。
+/// 网络探测带 5s 超时；任何单项失败不阻断其余检查。**config.toml 解析失败时仍返回文件层结果而非 Err**。
 pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
-    let cfg = load_config_or_init(config_dir)?;
+    let (cfg, parse_err) = load_config_for_doctor(config_dir);
     let mut checks = Vec::new();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
+
+    // 文件层检查先行：坏配置下也必须报，且缺失项统一指向 `llaia init`
+    checks.extend(template_file_checks(config_dir, parse_err.as_deref()));
+    if parse_err.is_some() {
+        // provider / agent / context_size 依赖有效配置（内存默认值不代表用户意图），就此为止
+        return Ok(checks);
+    }
 
     // provider 连通性：仅探测 openai_compatible（anthropic/gemini 的 /models 语义不同）
     if cfg.provider.is_empty() {
@@ -944,64 +1106,6 @@ pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
                     ),
                 ));
             }
-        }
-    }
-
-    // .env 存在性（敏感信息自动化 P5 S1）；Unix 额外查权限位
-    let env_path = config_dir.join(".env");
-    if env_path.exists() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&env_path)
-                .map(|m| m.permissions().mode())
-                .unwrap_or(0);
-            if mode & 0o077 != 0 {
-                checks.push(DoctorCheck::warn(
-                    ".env",
-                    format!("permissions too open: {:o} (expected 0600)", mode & 0o777),
-                ));
-            } else {
-                checks.push(DoctorCheck::ok(
-                    ".env",
-                    format!("{} (0600)", env_path.display()),
-                ));
-            }
-        }
-        #[cfg(not(unix))]
-        checks.push(DoctorCheck::ok(".env", env_path.display().to_string()));
-    } else {
-        checks.push(DoctorCheck::warn(
-            ".env",
-            "not found (plaintext secrets stay in config.toml; save via WebUI or run /migrate-secrets)",
-        ));
-    }
-
-    // cron.toml / mcp.toml 可解析性
-    if config_dir.join("cron.toml").exists() {
-        let path = config_dir.join("cron.toml");
-        match crate::cron::CronConfig::load(&path) {
-            Ok(c) => checks.push(DoctorCheck::ok(
-                "cron.toml",
-                format!("{} ({} tasks)", path.display(), c.task.len()),
-            )),
-            Err(e) => checks.push(DoctorCheck::error(
-                "cron.toml",
-                format!("{}: {}", path.display(), e),
-            )),
-        }
-    }
-    if config_dir.join("mcp.toml").exists() {
-        let path = config_dir.join("mcp.toml");
-        match crate::mcp::McpConfig::load(&path) {
-            Ok(c) => checks.push(DoctorCheck::ok(
-                "mcp.toml",
-                format!("{} ({} servers)", path.display(), c.server.len()),
-            )),
-            Err(e) => checks.push(DoctorCheck::error(
-                "mcp.toml",
-                format!("{}: {}", path.display(), e),
-            )),
         }
     }
 
@@ -1203,5 +1307,58 @@ mod tests {
         assert!(!dir.path().join("SOUL.md").exists());
         // 其余模板仍被补齐
         assert!(dir.path().join("config.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn doctor_survives_unparsable_config_and_reports_it_as_error() {
+        // 回归：config.toml 语法坏掉时 doctor 必须继续诊断（曾直接返回 Err 退出）
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "this is [not valid toml [[[ model =\n",
+        )
+        .unwrap();
+
+        let checks = doctor_checks(dir.path()).await.unwrap();
+        let cfg_check = checks.iter().find(|c| c.name == "config.toml").unwrap();
+        assert_eq!(cfg_check.status, "error");
+        assert!(cfg_check.detail.contains("llaia init --force"));
+        // 依赖有效配置的探测应被跳过，而不是拿内存默认值去冒充用户配置
+        assert!(
+            !checks.iter().any(|c| c.name.starts_with("provider.")),
+            "provider probes must be skipped when config is unparsable"
+        );
+        assert!(!checks.iter().any(|c| c.name == "agent.main.model"));
+    }
+
+    #[tokio::test]
+    async fn doctor_points_missing_template_files_to_init() {
+        // 全新目录（无任何模板文件）：缺失项报 warn 并给出可执行的修复指引
+        let dir = tempfile::tempdir().unwrap();
+        let checks = doctor_checks(dir.path()).await.unwrap();
+
+        for name in ["config.toml", "cron.toml", "mcp.toml"] {
+            let c = checks
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("missing check {name}"));
+            assert_eq!(c.status, "warn", "{name} should warn when absent");
+            assert!(
+                c.detail.contains("llaia init"),
+                "{name} detail should point to `llaia init`: {}",
+                c.detail
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_ok_for_existing_template_files() {
+        let dir = tempfile::tempdir().unwrap();
+        init_scaffold(dir.path(), false).unwrap();
+        let checks = doctor_checks(dir.path()).await.unwrap();
+        for name in ["config.toml", "cron.toml", "mcp.toml"] {
+            let c = checks.iter().find(|c| c.name == name).unwrap();
+            assert_eq!(c.status, "ok", "{name}: {}", c.detail);
+        }
     }
 }
