@@ -964,6 +964,8 @@ function llaiaApp() {
     async loadStats() {
       this.statsLoading = true;
       this.statsError = '';
+      // 切换 range 时清掉旧数据：避免请求挂起/失败期间继续显示上个 range 的 7d 数字与柱状图
+      this.stats = null;
       try {
         const r = await this.apiFetch('/api/stats/tokens?days=' + this.statsDays, { method: 'GET' });
         if (!this.authed) return;
