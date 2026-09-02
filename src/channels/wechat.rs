@@ -757,6 +757,20 @@ impl OutputSink for WechatSink {
         self.buffer.push_str(delta);
     }
 
+    async fn on_tool_result(&mut self, output: &str) {
+        let trimmed = output.trim();
+        if trimmed.starts_with("[error:") {
+            let _ = self.wx.send_text(&self.user_id, trimmed).await;
+        }
+    }
+
+    async fn on_keepalive(&mut self) {
+        let _ = self
+            .wx
+            .send_text(&self.user_id, "⏳ still working, please wait...")
+            .await;
+    }
+
     async fn on_tool_start(&mut self, name: &str) {
         if !self.tool_names.iter().any(|n| n == name) {
             self.tool_names.push(name.to_string());

@@ -1177,6 +1177,27 @@ impl OutputSink for QqSink {
     async fn on_chunk(&mut self, delta: &str) {
         self.buffer.push_str(delta);
     }
+    // 工具执行出错时即时反馈，避免整轮合并后用户只看到"🔧 calling tools..."却无结果
+    async fn on_tool_result(&mut self, output: &str) {
+        let trimmed = output.trim();
+        if trimmed.starts_with("[error:") {
+            let _ = self
+                .qq
+                .send_c2c_message(&self.user_openid, trimmed, Some(&self.msg_id))
+                .await;
+        }
+    }
+    // 长任务心跳：turn 静默超 10 分钟后周期性提示，避免用户误以为卡死
+    async fn on_keepalive(&mut self) {
+        let _ = self
+            .qq
+            .send_c2c_message(
+                &self.user_openid,
+                "⏳ still working, please wait...",
+                Some(&self.msg_id),
+            )
+            .await;
+    }
     async fn on_tool_start(&mut self, name: &str) {
         if !self.tool_names.iter().any(|n| n == name) {
             self.tool_names.push(name.to_string());

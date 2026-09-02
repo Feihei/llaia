@@ -11,6 +11,9 @@ pub trait OutputSink: Send {
     async fn on_tool_start(&mut self, name: &str);
     /// 工具执行结果（默认忽略，CLI override 打印预览）
     async fn on_tool_result(&mut self, _output: &str) {}
+    /// 长任务心跳：一轮 turn 静默超过阈值时周期性回调（默认忽略；
+    /// 交互聊天频道 override 发送 "still working" 提示，避免用户误以为卡死）
+    async fn on_keepalive(&mut self) {}
     /// Agent 请求发送媒体给用户
     async fn on_media(&mut self, path: &str, kind: MediaKind);
     /// 整轮正常结束
@@ -33,6 +36,10 @@ use tokio::sync::{Mutex, Notify};
 ///   tx closed 优雅退出（保存部分输出到 sqlite/context）。
 /// - agent task 的 `Result<String>` 在此处消费，仅 log 错误；
 ///   channel 已通过 sink 收到全部事件，不需要再拿返回值。
+///
+/// 长任务心跳：一轮 turn 长时间没有任何事件（文本/工具/媒体）时，周期性触发
+/// `sink.on_keepalive()`，让聊天频道发一条 "still working"，避免用户以为卡死。
+/// 一旦有任意事件到达即重置计时。仅聊天频道 override 生效，CLI/Web 忽略。
 pub async fn run_turn(
     agent: Arc<Mutex<Agent>>,
     user_msg: ChatMessage,
@@ -40,6 +47,9 @@ pub async fn run_turn(
     mut sink: Box<dyn OutputSink + Send>,
     stop: Arc<Notify>,
 ) -> Result<()> {
+    // 静默超过该时长即发一次心跳
+    const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TurnEvent>(64);
     let agent_clone = agent.clone();
     let channel_clone = channel.clone();
@@ -51,7 +61,17 @@ pub async fn run_turn(
 
     let mut interrupted = false;
     let mut agent_err: Option<String> = None;
+    // 最近一次有事件到达的时间；静默超过 KEEPALIVE_INTERVAL 即触发心跳
+    let mut last_activity = tokio::time::Instant::now();
     loop {
+        let now = tokio::time::Instant::now();
+        let elapsed = now.saturating_duration_since(last_activity);
+        // 已静默超阈值则立即触发；否则等到余下时长
+        let wait = if elapsed >= KEEPALIVE_INTERVAL {
+            tokio::time::sleep(std::time::Duration::ZERO)
+        } else {
+            tokio::time::sleep(KEEPALIVE_INTERVAL - elapsed)
+        };
         tokio::select! {
             _ = stop.notified() => {
                 interrupted = true;
@@ -59,17 +79,27 @@ pub async fn run_turn(
             }
             ev = rx.recv() => {
                 match ev {
-                    Some(TurnEvent::Chunk { delta }) => sink.on_chunk(&delta).await,
-                    Some(TurnEvent::ToolStart { name, .. }) => sink.on_tool_start(&name).await,
-                    Some(TurnEvent::ToolResult { output, .. }) => sink.on_tool_result(&output).await,
-                    Some(TurnEvent::MediaOutput { path, kind }) => sink.on_media(&path, kind).await,
-                    Some(TurnEvent::Done) => break,
-                    Some(TurnEvent::Error { message }) => {
-                        agent_err = Some(message);
-                        break;
+                    Some(ev) => {
+                        last_activity = tokio::time::Instant::now();
+                        match ev {
+                            TurnEvent::Chunk { delta } => sink.on_chunk(&delta).await,
+                            TurnEvent::ToolStart { name, .. } => sink.on_tool_start(&name).await,
+                            TurnEvent::ToolResult { output, .. } => sink.on_tool_result(&output).await,
+                            TurnEvent::MediaOutput { path, kind } => sink.on_media(&path, kind).await,
+                            TurnEvent::Done => break,
+                            TurnEvent::Error { message } => {
+                                agent_err = Some(message);
+                                break;
+                            }
+                        }
                     }
                     None => break,
                 }
+            }
+            _ = wait => {
+                // 已静默超过一个周期：发心跳并重置计时，继续等待任务
+                sink.on_keepalive().await;
+                last_activity = tokio::time::Instant::now();
             }
         }
     }

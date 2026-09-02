@@ -327,6 +327,20 @@ impl OutputSink for DingtalkSink {
         self.buffer.push_str(delta);
     }
 
+    async fn on_tool_result(&mut self, output: &str) {
+        let trimmed = output.trim();
+        if trimmed.starts_with("[error:") {
+            let _ = self.dt.send_markdown(&self.webhook, trimmed).await;
+        }
+    }
+
+    async fn on_keepalive(&mut self) {
+        let _ = self
+            .dt
+            .send_markdown(&self.webhook, "⏳ still working, please wait...")
+            .await;
+    }
+
     async fn on_tool_start(&mut self, name: &str) {
         if !self.tool_names.iter().any(|n| n == name) {
             self.tool_names.push(name.to_string());
