@@ -33,6 +33,14 @@
 - 确认 `context_size` 合理：本地模型不配 `context_size` 时启动会探测，探测失败回退 8192。可在 model 下显式设 `context_size`。
 - 想用更便宜的模型压缩：`[runtime].compact_model`。
 
+## 模型卡在重复输出 / 思考失控 / 一直没回复？
+
+这是小参数本地模型在长上下文下的典型退化。框架层有 Generation Guard 兜底（默认开启）：检测到重复循环、思考流失控或空输出时会中止并重试一次（强制关思考），连续多轮退化会给出诊断警告。
+
+- 看到警告后先调**推理端**采样参数（llama.cpp 的 repetition penalty / min_p 等），或用 `/provider` 换模型——guard 只能止损，根因在推理配置。
+- 正常输出被误中止（误报）：调高 `[runtime].guard_repeat_threshold`，或 `output_guard = false` 整体关闭。触发时日志带窗口快照，便于定位。
+- 详见 [配置](configuration.md) 的 Generation Guard 小节。
+
 ## 旧配置不认 `[channels.web]` / `confirm_mode = "whitelist"`
 
 - 旧 `[channels.web]` 自动迁移到 `[webui]`（向后兼容）。

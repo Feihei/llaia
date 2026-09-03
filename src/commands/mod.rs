@@ -38,6 +38,23 @@ max_iterations = 10
 # timezone = "Asia/Shanghai"     # optional: IANA timezone name (e.g. Asia/Shanghai / America/New_York); defaults to system timezone
 # compact_model = "default.qwen"  # optional: cheaper model for context compaction; defaults to main model
 # vision_model = "default.gpt-4o"  # optional: model to describe images when main model lacks multimodal; defaults to sending images to main model
+# ask_user_timeout_secs = 300       # optional: blocking ask_user clarification timeout (seconds)
+# tool_result_cap = 32768           # optional: max chars per tool result text (truncated beyond; full result kept in sessions.db)
+# keepalive_interval_secs = 600     # optional: "still working" heartbeat interval for long tasks (seconds)
+# max_turn_duration_secs = 3600     # optional: hard stop for a single turn (seconds)
+#
+# Generation Guard: output degeneration defense for small local models
+# (repetition loops, runaway thinking, empty replies). On detection the
+# stream is aborted, the partial output discarded, and one retry is made
+# with a [guard] hint and thinking disabled. Consecutive failures append
+# a warning telling you to adjust inference-side sampling params.
+# output_guard = true              # optional: master switch, set false to disable entirely
+# guard_repeat_window = 512        # optional: repetition detection sliding window (chars)
+# guard_repeat_gram = 24           # optional: repetition detection n-gram length (chars)
+# guard_repeat_threshold = 4       # optional: max occurrences of the same n-gram in window before abort
+# guard_thinking_cap = 32000       # optional: thinking stream char cap (<think> block + reasoning_content); 0 = unlimited
+# guard_max_retries = 1            # optional: retries after degeneration (with [guard] hint, thinking disabled)
+# guard_breaker_threshold = 2      # optional: consecutive degenerated turns before a prominent warning
 
 [log]
 level = "info"
