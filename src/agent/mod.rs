@@ -1420,9 +1420,10 @@ impl Agent {
     /// 消费一次 chat_stream（Generation Guard 重试框架的单次尝试）。
     ///
     /// - 用户中止（tx closed）与流错误沿用旧语义：保存部分输出后由调用方收尾；
-    /// - guard 启用时逐 TextDelta 检查思考流长度：`<think>` 内容被 parser 剥离后
-    ///   对框架不可见是退化盲区（InThink 丢弃、无计数），这里按累计值超限即中止
-    ///   （drop 流即断连，本地服务端随之停止生成）；
+    /// - guard 启用时逐 TextDelta 检查三个信号：思考流长度（`<think>` 内容被
+    ///   parser 剥离但对框架不可见是退化盲区，按累计值超限即中止）、思考线重复、
+    ///   可见文本线重复（滑动窗口字符 n-gram）；命中即中止（drop 流即断连，
+    ///   本地服务端随之停止生成）；
     /// - parser.finish() 残留照常 flush 为可见文本。
     async fn consume_stream_guarded(
         &mut self,
@@ -1431,6 +1432,23 @@ impl Agent {
         guard: &GuardConfig,
     ) -> Result<StreamOutcome> {
         let mut parser = crate::tool_call::ToolCallStreamParser::new();
+        // 双线检测器：思考线（挂进 parser，InThink 逐字符喂）、可见文本线
+        let (think_monitor, mut visible_monitor) = if guard.enabled && guard.repeat_threshold > 0 {
+            let think = Some(crate::agent::guard::RepetitionDetector::new(
+                guard.repeat_window,
+                guard.repeat_gram,
+                guard.repeat_threshold,
+            ));
+            let visible = Some(crate::agent::guard::RepetitionDetector::new(
+                guard.repeat_window,
+                guard.repeat_gram,
+                guard.repeat_threshold,
+            ));
+            (think, visible)
+        } else {
+            (None, None)
+        };
+        parser.set_think_monitor(think_monitor);
         let mut iter_text = String::new();
         let mut calls: Vec<crate::provider::ToolCall> = Vec::new();
         // 本次请求（尝试）累计的 token 用量：Usage 事件可能在流中多次出现，合并成一条
@@ -1458,23 +1476,41 @@ impl Agent {
                     // 对无标签文本 parser 是透传的，不影响正常输出。
                     // iter_text 存清洗后文本（think/标签不进 context/sqlite）。
                     let user_text = parser.feed(&d);
+                    if let Some(m) = visible_monitor.as_mut() {
+                        m.feed(&user_text);
+                    }
                     if !user_text.is_empty() {
                         iter_text.push_str(&user_text);
                         let _ = event_tx.send(TurnEvent::Chunk { delta: user_text }).await;
                     }
                     let new_calls = parser.take_tool_calls();
                     calls.extend(new_calls);
-                    // guard：思考流长度上限判定
-                    if guard.enabled
-                        && guard.thinking_cap > 0
-                        && parser.think_chars() >= guard.thinking_cap
-                    {
-                        return Ok(StreamOutcome::Degenerate {
-                            reason: format!(
-                                "thinking exceeded {} chars without closing",
-                                guard.thinking_cap
-                            ),
-                        });
+                    // guard：思考流长度上限 / 思考线重复 / 可见线重复
+                    if guard.enabled {
+                        if guard.thinking_cap > 0 && parser.think_chars() >= guard.thinking_cap {
+                            return Ok(StreamOutcome::Degenerate {
+                                reason: format!(
+                                    "thinking exceeded {} chars without closing",
+                                    guard.thinking_cap
+                                ),
+                            });
+                        }
+                        if parser.think_degenerate() {
+                            return Ok(StreamOutcome::Degenerate {
+                                reason: "repetitive loop in thinking stream".to_string(),
+                            });
+                        }
+                        if let Some(m) = visible_monitor.as_ref() {
+                            if m.is_degenerate() {
+                                tracing::info!(
+                                    tail = %m.tail_summary(),
+                                    "visible text repetition detected, aborting stream"
+                                );
+                                return Ok(StreamOutcome::Degenerate {
+                                    reason: "repetitive loop in visible text".to_string(),
+                                });
+                            }
+                        }
                     }
                 }
                 StreamEvent::ToolCall(tc) => {
@@ -1886,6 +1922,42 @@ mod tests {
             .unwrap();
         assert_eq!(t3, "ok");
         assert_eq!(agent.guard_streak, 0, "healthy turn resets the streak");
+    }
+
+    #[tokio::test]
+    async fn test_guard_visible_repetition_abort_and_retry() {
+        // 第一轮可见文本陷入重复循环（正常回复本该是多样的）→ 可见线检测命中、
+        // 流中途 abort；重试强制关思考，第二轮正常作答。
+        let degenerate = "让我重新整理一下思路。".repeat(60);
+        let rounds = vec![
+            vec![StreamEvent::TextDelta(degenerate), StreamEvent::Done],
+            vec![
+                StreamEvent::TextDelta("recovered answer".into()),
+                StreamEvent::Done,
+            ],
+        ];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_with_config(true, rounds, seen.clone(), |_| {}).await;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "recovered answer");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+
+        // 退化的可见文本不落 context（用户看到过但不入库）；[guard] 提示在
+        assert!(!agent
+            .context
+            .history
+            .iter()
+            .any(|m| m.content.as_text().contains("让我重新整理")));
+        assert!(agent
+            .context
+            .history
+            .iter()
+            .any(|m| m.content.as_text().starts_with("[guard]")));
     }
 
     #[tokio::test]

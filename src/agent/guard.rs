@@ -52,6 +52,90 @@ pub const RETRY_HINT: &str = "[guard] Your previous response was discarded becau
 /// 部分输出已被丢弃）。
 pub const RETRY_NOTICE: &str = "\n\n[检测到输出退化（重复/思考失控/空回复），已中止并重新生成…]\n";
 
+/// 滑动窗口字符 n-gram 重复检测器（Generation Guard P1）。
+///
+/// 窗口内任一 `gram` 字符的片段出现 ≥ `threshold` 次即判退化（命中后粘滞）。
+/// 字符级而非 token 级：框架无 tokenizer，引擎无关。窗口 ≤ 千字符量级，
+/// 每 `CHECK_INTERVAL` 字符重建一次窗口内 gram 计数，开销可忽略。
+/// `threshold = 0` 表示禁用：`feed` 短路，`is_degenerate` 恒 false。
+pub struct RepetitionDetector {
+    window: usize,
+    gram: usize,
+    threshold: u32,
+    buf: std::collections::VecDeque<char>,
+    /// 自上次扫描以来新喂入的字符数
+    since_scan: usize,
+    degenerate: bool,
+}
+
+/// 每累计多少字符做一次窗口扫描
+const CHECK_INTERVAL: usize = 16;
+
+impl RepetitionDetector {
+    pub fn new(window: usize, gram: usize, threshold: u32) -> Self {
+        Self {
+            window: window.max(gram),
+            gram,
+            threshold,
+            buf: std::collections::VecDeque::new(),
+            since_scan: 0,
+            degenerate: false,
+        }
+    }
+
+    /// 喂入一段文本
+    pub fn feed(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.feed_char(ch);
+        }
+    }
+
+    /// 喂入单个字符（parser 的 InThink 状态逐字符喂）
+    pub fn feed_char(&mut self, ch: char) {
+        if self.threshold == 0 || self.degenerate {
+            return; // 禁用或已命中：短路
+        }
+        self.buf.push_back(ch);
+        while self.buf.len() > self.window {
+            self.buf.pop_front();
+        }
+        self.since_scan += 1;
+        if self.since_scan >= CHECK_INTERVAL {
+            self.scan();
+        }
+    }
+
+    /// 是否已判定退化（命中后粘滞，不随后续内容回退）
+    pub fn is_degenerate(&self) -> bool {
+        self.degenerate
+    }
+
+    /// 触发时日志用的窗口尾部摘要
+    pub fn tail_summary(&self) -> String {
+        self.buf.iter().rev().take(60).rev().collect()
+    }
+
+    /// 重建窗口内 gram 计数并判定
+    fn scan(&mut self) {
+        self.since_scan = 0;
+        let n = self.buf.len();
+        if self.gram == 0 || n < self.gram {
+            return;
+        }
+        let mut counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::with_capacity(n - self.gram + 1);
+        for start in 0..=(n - self.gram) {
+            let g: String = self.buf.iter().skip(start).take(self.gram).collect();
+            let c = counts.entry(g).or_insert(0);
+            *c += 1;
+            if *c >= self.threshold {
+                self.degenerate = true;
+                return;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +152,68 @@ mod tests {
         assert_eq!(g.thinking_cap, 32_000);
         assert_eq!(g.max_retries, 1);
         assert_eq!(g.breaker_threshold, 2);
+    }
+
+    fn detector() -> RepetitionDetector {
+        RepetitionDetector::new(512, 24, 4)
+    }
+
+    #[test]
+    fn test_degenerate_loop_hits() {
+        // 退化循环：同一句子反复出现 → 24 字符 gram 远超阈值
+        let mut d = detector();
+        d.feed(&"让我重新整理一下思路。".repeat(60));
+        assert!(d.is_degenerate());
+        assert!(!d.tail_summary().is_empty());
+    }
+
+    #[test]
+    fn test_normal_code_repetition_does_not_hit() {
+        // 误报底线：真实风格的测试代码重复行 ×3（24 字符以上的行）不得命中
+        let mut d = detector();
+        let line = "    assert_eq!(compute(input), expected_output);\n";
+        let code = format!("fn t() {{\n{line}{line}{line}}}\n");
+        d.feed(&code);
+        assert!(
+            !d.is_degenerate(),
+            "code with 3 identical lines must not hit"
+        );
+    }
+
+    #[test]
+    fn test_natural_text_does_not_hit() {
+        // 正常中英混排长文本：无高频重复片段
+        let mut d = detector();
+        let text = "Generation Guard 在流式路径上逐字符检测退化模式。窗口内的 n-gram \
+                    计数超过阈值才会触发中止与重试。For English text the same rule \
+                    applies: occasional repeats are fine, sustained loops are not. \
+                    检测全部在框架层完成，不依赖推理引擎。";
+        d.feed(text);
+        d.feed(text); // 整段重复一次也应容忍（两次远低于阈值 4）
+        assert!(!d.is_degenerate());
+    }
+
+    #[test]
+    fn test_short_input_no_verdict() {
+        // 窗口未积累足够字符不判定
+        let mut d = detector();
+        d.feed("短文本");
+        assert!(!d.is_degenerate());
+    }
+
+    #[test]
+    fn test_disabled_threshold_zero_never_hits() {
+        let mut d = RepetitionDetector::new(512, 24, 0);
+        d.feed(&"循环循环循环。".repeat(200));
+        assert!(!d.is_degenerate());
+    }
+
+    #[test]
+    fn test_hit_is_sticky() {
+        let mut d = detector();
+        d.feed(&"重复片段循环输出。".repeat(80));
+        assert!(d.is_degenerate());
+        d.feed("后续正常内容");
+        assert!(d.is_degenerate(), "sticky once triggered");
     }
 }

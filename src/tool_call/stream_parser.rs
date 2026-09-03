@@ -20,6 +20,9 @@ pub struct ToolCallStreamParser {
     /// 思考流累计字符数：InThink 状态被丢弃的内容也逐字符计数（只计数不保存）。
     /// Generation Guard 用它做思考长度上限判定；guard 关闭时无人调用，纯计数开销。
     think_chars: usize,
+    /// 思考线重复检测器（Generation Guard P1，docs/plans/2026-09-03-generation-guard.md）。
+    /// InThink 逐字符喂入；guard 关闭时为 None（零开销）。
+    think_monitor: Option<crate::agent::guard::RepetitionDetector>,
 }
 
 #[derive(PartialEq)]
@@ -101,7 +104,20 @@ impl ToolCallStreamParser {
             completed: Vec::new(),
             open_tag: "",
             think_chars: 0,
+            think_monitor: None,
         }
+    }
+
+    /// 挂载思考线重复检测器（Generation Guard；guard 关闭时不挂载）
+    pub fn set_think_monitor(&mut self, monitor: Option<crate::agent::guard::RepetitionDetector>) {
+        self.think_monitor = monitor;
+    }
+
+    /// 思考线重复检测是否命中（未挂载时恒 false）
+    pub fn think_degenerate(&self) -> bool {
+        self.think_monitor
+            .as_ref()
+            .is_some_and(|m| m.is_degenerate())
     }
 
     /// 喂一个 chunk，返回应发给用户的文本增量
@@ -161,6 +177,9 @@ impl ToolCallStreamParser {
                     // 丢弃所有内容，仅检查 think 闭标签
                     self.buffer.push(ch);
                     self.think_chars += 1;
+                    if let Some(m) = self.think_monitor.as_mut() {
+                        m.feed_char(ch);
+                    }
                     if ends_with_any(&self.buffer, THINK_CLOSE_TAGS).is_some() {
                         self.buffer.clear();
                         self.state = State::Outside;
@@ -410,6 +429,28 @@ mod tests {
         assert_eq!(p.feed(&input), "");
         assert_eq!(p.think_chars(), content.chars().count() + 3);
         assert_eq!(p.finish(), "");
+    }
+
+    #[test]
+    fn test_think_monitor_detects_repetition() {
+        // 思考线重复检测：挂载后 InThink 逐字符喂入，重复循环命中
+        let mut p = ToolCallStreamParser::new();
+        p.set_think_monitor(Some(crate::agent::guard::RepetitionDetector::new(
+            512, 24, 4,
+        )));
+        let input = format!(
+            "{}{}{}done",
+            THINK_OPEN_TAGS[0],
+            "重新考虑一下这个问题。".repeat(60),
+            THINK_CLOSE_TAGS[0]
+        );
+        assert_eq!(p.feed(&input), "done");
+        assert!(p.think_degenerate());
+
+        // 未挂载时恒 false
+        let mut p2 = ToolCallStreamParser::new();
+        p2.feed(&input);
+        assert!(!p2.think_degenerate());
     }
 
     #[test]
