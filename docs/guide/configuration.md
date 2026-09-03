@@ -20,6 +20,23 @@
 | `compact_model` | 未设 | 用更便宜的模型跑上下文压缩，格式 `"provider_id.model_alias"`；不配则复用主模型。 |
 | `vision_model` | 未设 | 主模型无多模态时，用此模型描述图片（文本替换图片注入主模型）。 |
 | `permission` | 未设（= `default`） | 权限档位：`read-only` / `default` / `yolo`。详见 [权限与安全](permissions.md)。 |
+| `ask_user_timeout_secs` | `300` | ask_user 阻塞式澄清超时秒数，超时按"按最合理假设继续"处理。 |
+| `tool_result_cap` | `32768` | 单个工具结果文本最大字符数，超限截断（完整内容留底 sqlite）。 |
+| `keepalive_interval_secs` | `600` | 长任务心跳间隔（秒），聊天频道周期发 "still working"。 |
+| `max_turn_duration_secs` | `3600` | 单轮最大运行时长（秒），超过自动中断。 |
+| `output_guard` | `true` | 输出退化防护总开关（Generation Guard）。详见下方说明。 |
+| `guard_repeat_window` | `512` | 重复检测滑动窗口（字符）。 |
+| `guard_repeat_gram` | `24` | 重复检测 n-gram 长度（字符）。 |
+| `guard_repeat_threshold` | `4` | 窗口内同一 n-gram 出现次数达到该值即判退化。 |
+| `guard_thinking_cap` | `32000` | 思考流字符上限（`<think>` 块与 reasoning_content 累计），`0` = 不限。 |
+| `guard_max_retries` | `1` | 判退化后重试次数（重试注入 `[guard]` 提示并强制关思考）。 |
+| `guard_breaker_threshold` | `2` | 连续退化回合数达到该值时在诊断消息附加醒目警告。 |
+
+**Generation Guard（输出退化防护）**：针对小参数本地模型在长上下文下的退化
+（重复循环、思考流失控、空输出）。流式判定退化 → 中途断流、丢弃退化产物 →
+注入 `[guard]` 提示并强制关闭思考重试；重试耗尽以诊断消息收尾，连续多轮退化
+附加警告提示调整推理端采样参数（只报警不拒服）。`output_guard = false` 可整体
+关闭，行为与旧版一致。详见 `docs/plans/2026-09-03-generation-guard.md`。
 
 ## `[log]`
 

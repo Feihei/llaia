@@ -166,7 +166,7 @@ enum IterOutcome {
   - 首次重试前向 `event_tx` 发一条 `TurnEvent::Chunk`：`\n\n[检测到输出重复/思考失控，已中止并重新生成…]\n`，让已看到部分垃圾的用户知道发生了什么；
   - 全部耗尽 → 熔断路径：诊断消息作为本回合收尾（进 sqlite，用户可见），`guard_streak += 1`，`tracing::warn`。
 - `Agent` 结构体新增 `guard: GuardConfig`（构造时从 `config.runtime` 快照，对齐 `tool_result_cap` 的做法，mod.rs:257-258）与 `guard_streak: u32`。
-- `apply_runtime_config`（mod.rs:465）热加载 guard 配置。
+- `reload_runtime`（mod.rs:467）热加载 guard 配置。
 
 **`src/provider/openai_compat.rs`**
 

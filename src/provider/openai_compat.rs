@@ -25,6 +25,9 @@ pub struct OpenAiCompatibleProvider {
     compat: Compat,
     /// 单次生成最大 token 数；None 时不发送（bare 行为）。
     max_tokens: Option<usize>,
+    /// Generation Guard：思考流（reasoning_content/thinking）字符上限，
+    /// 超限截流（提前 Done）；0 = 不限。经 `with_thinking_cap` 设置。
+    thinking_cap: usize,
 }
 
 impl OpenAiCompatibleProvider {
@@ -48,7 +51,16 @@ impl OpenAiCompatibleProvider {
             native_tool_calling,
             max_tokens,
             compat,
+            thinking_cap: 0,
         })
+    }
+
+    /// 设置思考流字符上限（Generation Guard，docs/plans/2026-09-03-generation-guard.md）。
+    /// reasoning_to_content = false 时 provider 层对 reasoning_content/thinking 计数，
+    /// 超限提前结束流（相当于截断思考）；后续由 agent 层空输出判定接住触发重试。
+    pub fn with_thinking_cap(mut self, cap: usize) -> Self {
+        self.thinking_cap = cap;
+        self
     }
 }
 
@@ -292,6 +304,8 @@ impl Provider for OpenAiCompatibleProvider {
             let mut tc_order: Vec<u32> = Vec::new();
             // 原始 finish_reason（尾 chunk 携带），配合 compat 推断有效 finish_reason
             let mut raw_finish: Option<String> = None;
+            // Generation Guard：思考流（reasoning_content/thinking）累计字符数
+            let mut reasoning_chars: usize = 0;
             // 空闲计时锚点：仅「真实 data 事件」会刷新；keepalive 注释 `: ping` 不会。
             let mut last_data = Instant::now();
 
@@ -393,6 +407,34 @@ impl Provider for OpenAiCompatibleProvider {
                                             if let Some(t) = delta.get("thinking").and_then(|c| c.as_str()) {
                                                 if !t.is_empty() {
                                                     yield StreamEvent::TextDelta(t.to_string());
+                                                }
+                                            }
+                                        } else if self.thinking_cap > 0 {
+                                            // Generation Guard：reasoning 不折回时在此被丢弃、
+                                            // 对框架完全不可见——思考流失控表现为用户侧画面
+                                            // 冻结而 token 空转。此处计数并截流：超限提前
+                                            // Done（相当于截断思考），agent 层空输出判定接住
+                                            // 后触发 [guard] 重试（强制关思考）。
+                                            let n = delta
+                                                .get("reasoning_content")
+                                                .and_then(|c| c.as_str())
+                                                .map(|s| s.chars().count())
+                                                .unwrap_or(0)
+                                                + delta
+                                                    .get("thinking")
+                                                    .and_then(|c| c.as_str())
+                                                    .map(|s| s.chars().count())
+                                                    .unwrap_or(0);
+                                            if n > 0 {
+                                                reasoning_chars += n;
+                                                if reasoning_chars >= self.thinking_cap {
+                                                    tracing::warn!(
+                                                        reasoning_chars,
+                                                        cap = self.thinking_cap,
+                                                        "reasoning stream exceeded thinking cap, truncating stream"
+                                                    );
+                                                    yield StreamEvent::Done;
+                                                    return;
                                                 }
                                             }
                                         }
@@ -710,6 +752,46 @@ mod tests {
         let text = resp.text.as_deref().unwrap_or_default();
         assert!(!text.contains("I think..."), "text={text}");
         assert!(text.contains("The answer is 42"), "text={text}");
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn thinking_cap_truncates_reasoning_stream() {
+        // Generation Guard：reasoning_content 累计超 thinking_cap → 提前 Done 截流，
+        // 后续 delta（含正式回答）不再产出；agent 层空输出判定接住后触发
+        // [guard] 重试（强制关思考）。cap = 0（默认）不截流，见上一个测试。
+        let reasoning = "思考".repeat(60); // 120 chars > cap 100
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(format!(
+                "{}{}{}",
+                sse(json!({"choices":[{"delta":{"reasoning_content": reasoning, "content": ""}}]})),
+                sse(json!({"choices":[{"delta":{"content":"The answer is 42"}}]})),
+                done()
+            ))
+            .create();
+        let p = OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::ollama())
+            .unwrap()
+            .with_thinking_cap(100);
+        let msgs = vec![ChatMessage::user("hi")];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+            disable_thinking: false,
+        };
+        let events: Vec<_> = p.chat_stream(&req).await.collect().await;
+        assert!(
+            matches!(events.last(), Some(Ok(StreamEvent::Done))),
+            "stream should end with Done after truncation: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, Ok(StreamEvent::TextDelta(_)))),
+            "no content should pass through after reasoning cap hit: {events:?}"
+        );
         m.assert();
     }
 

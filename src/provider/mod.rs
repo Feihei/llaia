@@ -265,14 +265,23 @@ pub fn provider_from_ref(
             let native_tool_calling = model_cfg
                 .native_tool_calling
                 .unwrap_or(compat.native_tool_calling);
-            Ok(Arc::new(openai_compat::OpenAiCompatibleProvider::new(
-                &prov_cfg.base_url,
-                &prov_cfg.api_key,
-                &model_cfg.model,
-                native_tool_calling,
-                model_cfg.max_tokens,
-                compat,
-            )?))
+            // Generation Guard：思考流字符上限（output_guard 关闭时传 0 = 不限）
+            let thinking_cap = if config.runtime.output_guard {
+                config.runtime.guard_thinking_cap
+            } else {
+                0
+            };
+            Ok(Arc::new(
+                openai_compat::OpenAiCompatibleProvider::new(
+                    &prov_cfg.base_url,
+                    &prov_cfg.api_key,
+                    &model_cfg.model,
+                    native_tool_calling,
+                    model_cfg.max_tokens,
+                    compat,
+                )?
+                .with_thinking_cap(thinking_cap),
+            ))
         }
     }
 }
