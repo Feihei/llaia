@@ -75,6 +75,31 @@ pub struct RuntimeConfig {
     /// 默认 3600（1 小时）；需大于心跳间隔才有意义。
     #[serde(default = "default_max_turn_duration")]
     pub max_turn_duration_secs: u64,
+    /// 输出退化防护总开关（Generation Guard，docs/plans/2026-09-03-generation-guard.md）。
+    /// 开启后：思考流超限 / 可见文本重复 / 空输出 → 中止 + 带提示重试 →
+    /// 重试耗尽诊断收尾，连续失败附加醒目警告（只报警不拒服）。
+    #[serde(default = "default_output_guard")]
+    pub output_guard: bool,
+    /// 重复检测滑动窗口（字符）。字符级而非 token 级：框架无 tokenizer，引擎无关。
+    #[serde(default = "default_guard_repeat_window")]
+    pub guard_repeat_window: usize,
+    /// 重复检测 n-gram 长度（字符）。
+    #[serde(default = "default_guard_repeat_gram")]
+    pub guard_repeat_gram: usize,
+    /// 窗口内同一 n-gram 出现次数达到该值即判退化（原始提案 3 次对代码重复行
+    /// 误报风险偏高，保守取 4；触发时记日志，按实测调）。
+    #[serde(default = "default_guard_repeat_threshold")]
+    pub guard_repeat_threshold: u32,
+    /// 思考流字符上限（`<think>` 块与 reasoning_content 累计），0 = 不限。
+    /// 兜底值给得宽松（重复检测通常先命中）；超限中止并关思考重试。
+    #[serde(default = "default_guard_thinking_cap")]
+    pub guard_thinking_cap: usize,
+    /// 判退化后的重试次数（重试请求附加 [guard] 提示并强制关思考）。
+    #[serde(default = "default_guard_max_retries")]
+    pub guard_max_retries: u32,
+    /// 连续退化回合数达到该值时在诊断消息中附加醒目警告（熔断只报警不拒服）。
+    #[serde(default = "default_guard_breaker_threshold")]
+    pub guard_breaker_threshold: u32,
 }
 
 impl Default for RuntimeConfig {
@@ -90,6 +115,13 @@ impl Default for RuntimeConfig {
             tool_result_cap: default_tool_result_cap(),
             keepalive_interval_secs: default_keepalive_interval(),
             max_turn_duration_secs: default_max_turn_duration(),
+            output_guard: default_output_guard(),
+            guard_repeat_window: default_guard_repeat_window(),
+            guard_repeat_gram: default_guard_repeat_gram(),
+            guard_repeat_threshold: default_guard_repeat_threshold(),
+            guard_thinking_cap: default_guard_thinking_cap(),
+            guard_max_retries: default_guard_max_retries(),
+            guard_breaker_threshold: default_guard_breaker_threshold(),
         }
     }
 }
@@ -116,6 +148,34 @@ fn default_keepalive_interval() -> u64 {
 
 fn default_max_turn_duration() -> u64 {
     3600
+}
+
+fn default_output_guard() -> bool {
+    true
+}
+
+fn default_guard_repeat_window() -> usize {
+    512
+}
+
+fn default_guard_repeat_gram() -> usize {
+    24
+}
+
+fn default_guard_repeat_threshold() -> u32 {
+    4
+}
+
+fn default_guard_thinking_cap() -> usize {
+    32_000
+}
+
+fn default_guard_max_retries() -> u32 {
+    1
+}
+
+fn default_guard_breaker_threshold() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

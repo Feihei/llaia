@@ -1,10 +1,12 @@
 pub mod approval;
 pub mod context;
+pub mod guard;
 pub mod registry;
 pub mod reminder;
 pub mod runner;
 pub mod sink;
 
+pub use crate::agent::guard::GuardConfig;
 pub use crate::agent::registry::AgentRegistry;
 
 use crate::agent::context::Context;
@@ -149,6 +151,12 @@ pub struct Agent {
     /// /btw 最近的侧问问答（plan.md #H 自连上下文）：同进程内最近 2 组，
     /// 拼进下一次 /btw 的 prompt，让追问无需重新交代背景。不进主上下文。
     pub btw_recent: Vec<(String, String)>,
+    /// Generation Guard 配置快照（docs/plans/2026-09-03-generation-guard.md）：
+    /// 输出退化防护（思考超限 / 可见重复 / 空输出 → 中止重试 → 熔断报警）。
+    pub guard: GuardConfig,
+    /// 连续退化回合计数（熔断）：任一健康流清零；重试耗尽的退化收尾递增，
+    /// 达到 `guard.breaker_threshold` 在诊断消息附加醒目警告。
+    pub guard_streak: u32,
 }
 
 /// 当前 active 任务线（ADR-0031）：title 即 `/task <名>` 的任务名。
@@ -279,6 +287,8 @@ impl Agent {
             steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
             active_task: None,
             btw_recent: Vec::new(),
+            guard: GuardConfig::from_runtime(&config.runtime),
+            guard_streak: 0,
         }
     }
 
@@ -462,7 +472,7 @@ impl Agent {
         self.system_has_tool_instructions = has_tool_instructions;
     }
 
-    /// 热加载 runtime 参数（permission / context_threshold / max_iterations）。
+    /// 热加载 runtime 参数（permission / context_threshold / max_iterations / guard）。
     /// 时区由 live_config 通道已即时生效，这里只覆盖其余 runtime 字段。
     pub async fn reload_runtime(&mut self, config: &Config) {
         let perm = config
@@ -473,6 +483,7 @@ impl Agent {
         *self.permission_profile.write().await = perm;
         self.context_threshold = config.runtime.context_threshold;
         self.max_iterations = config.runtime.max_iterations;
+        self.guard = GuardConfig::from_runtime(&config.runtime);
     }
 
     /// 热加载 skills：缓存 skills 段后重建 system 提示词（前缀 + AGENTS.md 段 + skills + tool instructions）。
@@ -589,6 +600,9 @@ impl Agent {
             steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
             active_task: None,
             btw_recent: Vec::new(),
+            // guard 配置跟随主 agent（fork 时点快照）；退化计数独立归零
+            guard: self.guard.clone(),
+            guard_streak: 0,
         }
     }
 
@@ -1059,110 +1073,115 @@ impl Agent {
             // 超阈值立即压缩，避免把几十万 token 的请求直接发给 provider 导致 400 溢出。
             self.maybe_auto_compact().await;
 
-            let messages = self.context.to_messages(&tz);
-            let tools = if force_summary {
-                None
-            } else {
-                let specs = self.tools.specs();
-                if specs.is_empty() {
+            // Generation Guard 重试框架（docs/plans/2026-09-03-generation-guard.md）：
+            // 判退化（思考超限 / 可见重复 / 空输出）→ 中止流、丢弃产物（不落库不进
+            // context，避免重试请求携带垃圾片段诱导自我模仿）→ 注入 [guard] 提示 +
+            // 强制关思考重试；重试耗尽 → 诊断收尾 + 连续失败报警（熔断只报警不拒服）。
+            let guard = self.guard.clone();
+            let mut attempt: u32 = 0;
+            let (mut iter_text, calls, iter_usage, degenerate) = loop {
+                let messages = self.context.to_messages(&tz);
+                let tools = if force_summary {
                     None
                 } else {
-                    Some(specs)
-                }
-            };
-            let tools_ref = tools.as_deref();
-            let req = ChatRequest {
-                messages: &messages,
-                tools: tools_ref,
-                disable_thinking: self.disable_thinking || self.thinking_off,
-            };
+                    let specs = self.tools.specs();
+                    if specs.is_empty() {
+                        None
+                    } else {
+                        Some(specs)
+                    }
+                };
+                let tools_ref = tools.as_deref();
+                let req = ChatRequest {
+                    messages: &messages,
+                    tools: tools_ref,
+                    // 重试（attempt > 0）强制关思考：思考流失控是退化的主要形态，
+                    // 重试时从根上掐掉（provider 注入 chat_template_kwargs）
+                    disable_thinking: self.disable_thinking || self.thinking_off || attempt > 0,
+                };
 
-            let mut stream = provider.chat_stream(&req).await;
-            let mut iter_text = String::new();
-            let mut calls: Vec<crate::provider::ToolCall> = Vec::new();
-            let mut parser = crate::tool_call::ToolCallStreamParser::new();
-            // 本次请求（迭代）累计的 token 用量：Usage 事件可能在流中多次出现，合并成一条
-            let mut iter_usage: Option<crate::provider::Usage> = None;
-
-            while let Some(ev) = stream.next().await {
-                // 用户中止（Ctrl+C）：event_tx 被关闭，提前结束并保存部分输出
-                if event_tx.is_closed() {
-                    tracing::info!(iter = i, "stream aborted by user (tx closed)");
-                    if !iter_text.is_empty() {
-                        self.session_store.append_message(
-                            self.session_id,
-                            &Role::Assistant,
-                            &iter_text,
-                        )?;
-                        self.context.push(ChatMessage::assistant(&iter_text));
-                    }
-                    return Ok(iter_text);
-                }
-                match ev? {
-                    StreamEvent::TextDelta(d) => {
-                        // 统一走 parser：剥离 think 标签 + 提取 tool_call 标签。
-                        // 无论 native 与否都跑——native 模式下模型偶发把
-                        // <think>/<tool_call> 泄露到文本流，parser 兜底清洗。
-                        // 对无标签文本 parser 是透传的，不影响正常输出。
-                        // iter_text 存清洗后文本（think/标签不进 context/sqlite）。
-                        let user_text = parser.feed(&d);
-                        if !user_text.is_empty() {
-                            iter_text.push_str(&user_text);
-                            let _ = event_tx.send(TurnEvent::Chunk { delta: user_text }).await;
-                        }
-                        let new_calls = parser.take_tool_calls();
-                        calls.extend(new_calls);
-                    }
-                    StreamEvent::ToolCall(tc) => {
-                        calls.push(tc);
-                    }
-                    StreamEvent::Usage(u) => match iter_usage.as_mut() {
-                        Some(acc) => {
-                            acc.prompt_tokens += u.prompt_tokens;
-                            acc.completion_tokens += u.completion_tokens;
-                            acc.total_tokens += u.total_tokens;
-                        }
-                        None => iter_usage = Some(u),
-                    },
-                    StreamEvent::FinishReason(_) => {}
-                    StreamEvent::Done => break,
-                    StreamEvent::Error(msg) => {
-                        // 保存错误前已生成的部分输出（与 tx-closed 中止路径同构）：
-                        // 用户已在频道看到这些文本，不落 context/sqlite 会让下一轮
-                        // 模型不知道自己说过什么。
-                        if !iter_text.is_empty() {
-                            self.session_store.append_message(
-                                self.session_id,
-                                &Role::Assistant,
-                                &iter_text,
-                            )?;
-                            self.context.push(ChatMessage::assistant(&iter_text));
-                        }
+                let mut stream = provider.chat_stream(&req).await;
+                match self
+                    .consume_stream_guarded(&mut stream, &event_tx, &guard)
+                    .await?
+                {
+                    StreamOutcome::Aborted { text } => return Ok(text),
+                    StreamOutcome::Failed { message } => {
                         let _ = event_tx
                             .send(TurnEvent::Error {
-                                message: msg.clone(),
+                                message: message.clone(),
                             })
                             .await;
-                        return Err(anyhow::anyhow!(msg));
+                        return Err(anyhow::anyhow!(message));
                     }
+                    StreamOutcome::Degenerate { reason } => {
+                        if attempt < guard.max_retries {
+                            attempt += 1;
+                            self.guard_retry_prep(&event_tx).await?;
+                            continue;
+                        }
+                        break (String::new(), Vec::new(), None, Some(reason));
+                    }
+                    StreamOutcome::Completed { text, calls, usage } => {
+                        // 空输出判定：流正常结束但无文本无工具调用 = 思考流被剥离/
+                        // provider 丢弃后什么都没产出的残余形态，同样判退化走重试。
+                        // 空回复本身就是坏的，无需区分原因。
+                        if guard.enabled && text.trim().is_empty() && calls.is_empty() {
+                            if attempt < guard.max_retries {
+                                attempt += 1;
+                                self.guard_retry_prep(&event_tx).await?;
+                                continue;
+                            }
+                            break (
+                                text,
+                                calls,
+                                usage,
+                                Some("empty output (no text, no tool calls)".to_string()),
+                            );
+                        }
+                        break (text, calls, usage, None);
+                    }
+                }
+            };
+
+            // 本流正常走完（未中途 abort/error/退化中止）：记录 token 用量。
+            // 退化中止的流 usage 丢弃（部分 usage 不完整，统计意义有限）。
+            if degenerate.is_none() {
+                if let Some(u) = iter_usage {
+                    self.record_turn_usage(&u).await;
                 }
             }
 
-            // 统一 finish：流结束时输出 parser 残留（未闭合标签的 buffer）
-            let rest = parser.finish();
-            if !rest.is_empty() {
+            // 熔断收尾：重试耗尽仍退化 → 诊断消息结束本轮，streak 递增；
+            // 达到阈值附加醒目警告（只报警不拒服：退化有随机性，下轮任务可能正常）。
+            if let Some(reason) = degenerate {
+                self.guard_streak += 1;
+                tracing::warn!(
+                    streak = self.guard_streak,
+                    reason = %reason,
+                    "generation degenerated, gave up after retries"
+                );
+                let mut diag =
+                    format!("[guard] 生成退化（{reason}），已中止并放弃重试，本轮到此为止。");
+                if self.guard_streak >= guard.breaker_threshold {
+                    diag.push_str(&format!(
+                        "\n[guard] 已连续 {} 轮生成退化：怀疑当前模型/量化/推理参数撑不住当前上下文，建议调整推理端采样参数（repetition penalty、context 等）或用 /provider 切换模型。",
+                        self.guard_streak
+                    ));
+                }
+                self.session_store
+                    .append_message(self.session_id, &Role::Assistant, &diag)?;
+                self.context.push(ChatMessage::assistant(&diag));
                 let _ = event_tx
                     .send(TurnEvent::Chunk {
-                        delta: rest.clone(),
+                        delta: diag.clone(),
                     })
                     .await;
-                iter_text.push_str(&rest);
+                let _ = event_tx.send(TurnEvent::Done).await;
+                return Ok(diag);
             }
-
-            // 本流正常走完（未中途 abort/error）：记录本次模型调用的 token 用量
-            if let Some(u) = iter_usage {
-                self.record_turn_usage(&u).await;
-            }
+            // 健康产出：熔断计数清零
+            self.guard_streak = 0;
 
             if calls.is_empty() {
                 // turn 结束时残留的 steer（最后一段流期间到达，已无迭代可注入）：
@@ -1382,6 +1401,145 @@ impl Agent {
         let _ = event_tx.send(TurnEvent::Done).await;
         Ok(fallback.into())
     }
+
+    /// guard 重试前置：通知用户 + 注入 `[guard]` 提示（持久化进 sqlite/context，
+    /// 模型下一尝试可见）。退化产物本身不落库不进 context（见主循环注释），
+    /// 会话记录里只留提示与最终结果。
+    async fn guard_retry_prep(&mut self, event_tx: &mpsc::Sender<TurnEvent>) -> Result<()> {
+        let _ = event_tx
+            .send(TurnEvent::Chunk {
+                delta: guard::RETRY_NOTICE.to_string(),
+            })
+            .await;
+        self.session_store
+            .append_message(self.session_id, &Role::User, guard::RETRY_HINT)?;
+        self.context.push(ChatMessage::user(guard::RETRY_HINT));
+        Ok(())
+    }
+
+    /// 消费一次 chat_stream（Generation Guard 重试框架的单次尝试）。
+    ///
+    /// - 用户中止（tx closed）与流错误沿用旧语义：保存部分输出后由调用方收尾；
+    /// - guard 启用时逐 TextDelta 检查思考流长度：`<think>` 内容被 parser 剥离后
+    ///   对框架不可见是退化盲区（InThink 丢弃、无计数），这里按累计值超限即中止
+    ///   （drop 流即断连，本地服务端随之停止生成）；
+    /// - parser.finish() 残留照常 flush 为可见文本。
+    async fn consume_stream_guarded(
+        &mut self,
+        stream: &mut futures_util::stream::BoxStream<'_, Result<StreamEvent>>,
+        event_tx: &mpsc::Sender<TurnEvent>,
+        guard: &GuardConfig,
+    ) -> Result<StreamOutcome> {
+        let mut parser = crate::tool_call::ToolCallStreamParser::new();
+        let mut iter_text = String::new();
+        let mut calls: Vec<crate::provider::ToolCall> = Vec::new();
+        // 本次请求（尝试）累计的 token 用量：Usage 事件可能在流中多次出现，合并成一条
+        let mut iter_usage: Option<crate::provider::Usage> = None;
+
+        while let Some(ev) = stream.next().await {
+            // 用户中止（Ctrl+C）：event_tx 被关闭，提前结束并保存部分输出
+            if event_tx.is_closed() {
+                tracing::info!("stream aborted by user (tx closed)");
+                if !iter_text.is_empty() {
+                    self.session_store.append_message(
+                        self.session_id,
+                        &Role::Assistant,
+                        &iter_text,
+                    )?;
+                    self.context.push(ChatMessage::assistant(&iter_text));
+                }
+                return Ok(StreamOutcome::Aborted { text: iter_text });
+            }
+            match ev? {
+                StreamEvent::TextDelta(d) => {
+                    // 统一走 parser：剥离 think 标签 + 提取 tool_call 标签。
+                    // 无论 native 与否都跑——native 模式下模型偶发把
+                    // <think>/<tool_call> 泄露到文本流，parser 兜底清洗。
+                    // 对无标签文本 parser 是透传的，不影响正常输出。
+                    // iter_text 存清洗后文本（think/标签不进 context/sqlite）。
+                    let user_text = parser.feed(&d);
+                    if !user_text.is_empty() {
+                        iter_text.push_str(&user_text);
+                        let _ = event_tx.send(TurnEvent::Chunk { delta: user_text }).await;
+                    }
+                    let new_calls = parser.take_tool_calls();
+                    calls.extend(new_calls);
+                    // guard：思考流长度上限判定
+                    if guard.enabled
+                        && guard.thinking_cap > 0
+                        && parser.think_chars() >= guard.thinking_cap
+                    {
+                        return Ok(StreamOutcome::Degenerate {
+                            reason: format!(
+                                "thinking exceeded {} chars without closing",
+                                guard.thinking_cap
+                            ),
+                        });
+                    }
+                }
+                StreamEvent::ToolCall(tc) => {
+                    calls.push(tc);
+                }
+                StreamEvent::Usage(u) => match iter_usage.as_mut() {
+                    Some(acc) => {
+                        acc.prompt_tokens += u.prompt_tokens;
+                        acc.completion_tokens += u.completion_tokens;
+                        acc.total_tokens += u.total_tokens;
+                    }
+                    None => iter_usage = Some(u),
+                },
+                StreamEvent::FinishReason(_) => {}
+                StreamEvent::Done => break,
+                StreamEvent::Error(msg) => {
+                    // 保存错误前已生成的部分输出（与 tx-closed 中止路径同构）：
+                    // 用户已在频道看到这些文本，不落 context/sqlite 会让下一轮
+                    // 模型不知道自己说过什么。
+                    if !iter_text.is_empty() {
+                        self.session_store.append_message(
+                            self.session_id,
+                            &Role::Assistant,
+                            &iter_text,
+                        )?;
+                        self.context.push(ChatMessage::assistant(&iter_text));
+                    }
+                    return Ok(StreamOutcome::Failed { message: msg });
+                }
+            }
+        }
+
+        // 统一 finish：流结束时输出 parser 残留（未闭合标签的 buffer）
+        let rest = parser.finish();
+        if !rest.is_empty() {
+            let _ = event_tx
+                .send(TurnEvent::Chunk {
+                    delta: rest.clone(),
+                })
+                .await;
+            iter_text.push_str(&rest);
+        }
+
+        Ok(StreamOutcome::Completed {
+            text: iter_text,
+            calls,
+            usage: iter_usage,
+        })
+    }
+}
+
+/// 单次流消费结果（Generation Guard 重试框架的最小单元）。
+enum StreamOutcome {
+    /// 流正常走完
+    Completed {
+        text: String,
+        calls: Vec<crate::provider::ToolCall>,
+        usage: Option<crate::provider::Usage>,
+    },
+    /// guard 判定退化：流已中止，产物丢弃（不落库不进 context）
+    Degenerate { reason: String },
+    /// 用户中止（tx closed）：部分输出已保存
+    Aborted { text: String },
+    /// 流错误：部分输出已保存
+    Failed { message: String },
 }
 
 /// 非图片工具结果超长截断：超过 `cap` 保留头部并附占位说明。
@@ -1572,6 +1730,186 @@ mod tests {
             None,
         )
         .await
+    }
+
+    /// Generation Guard 测试用：可定制 runtime 配置的 agent 构造
+    async fn make_agent_with_config(
+        native: bool,
+        rounds: Vec<Vec<StreamEvent>>,
+        seen: Arc<StdMutex<Vec<(bool, bool)>>>,
+        customize: impl FnOnce(&mut Config),
+    ) -> Agent {
+        let store = SessionStore::open_in_memory().unwrap();
+        let sid = store.create_session("test", "test").unwrap();
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+            native,
+            rounds: Arc::new(StdMutex::new(rounds.into())),
+            seen,
+        });
+        let tools = Arc::new(ToolRegistry::new());
+        let mut config = Config::default_for_workspace("/tmp/llaia-test");
+        customize(&mut config);
+        Agent::new(
+            &config,
+            Some(provider),
+            None,
+            None,
+            tools,
+            Arc::new(store),
+            sid,
+            "test system".into(),
+            8192,
+            std::path::PathBuf::from("/tmp/llaia-test/workspace"),
+            Arc::new(RwLock::new(std::path::PathBuf::from(
+                "/tmp/llaia-test/workspace",
+            ))),
+            Arc::new(RwLock::new(Vec::new())),
+            std::path::PathBuf::from("/tmp/llaia-test"),
+            true,
+            "main".into(),
+            None,
+        )
+        .await
+    }
+
+    // --- Generation Guard（docs/plans/2026-09-03-generation-guard.md）---
+
+    #[tokio::test]
+    async fn test_guard_thinking_cap_triggers_retry() {
+        // 第一轮：超长未闭合 think 流（被 parser 剥离、用户不可见——事故形态）→
+        // 思考超限判退化；重试强制关思考（seen 记录），第二轮正常作答。
+        let think_stream = format!("<think>{}", "让我再想想这个问题。".repeat(20));
+        let rounds = vec![
+            vec![StreamEvent::TextDelta(think_stream), StreamEvent::Done],
+            vec![
+                StreamEvent::TextDelta("recovered answer".into()),
+                StreamEvent::Done,
+            ],
+        ];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_with_config(true, rounds, seen.clone(), |c| {
+            c.runtime.guard_thinking_cap = 100;
+        })
+        .await;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "recovered answer");
+
+        // 重试发生且强制 disable_thinking
+        let rec = seen.lock().unwrap();
+        assert_eq!(rec.len(), 2);
+        assert!(!rec[0].0, "first attempt keeps session thinking setting");
+        assert!(rec[1].0, "retry forces disable_thinking");
+        drop(rec);
+
+        // [guard] 提示已持久化进 context；退化的思考内容不进 context
+        assert!(agent.context.history.iter().any(|m| {
+            m.role == crate::provider::Role::User && m.content.as_text().starts_with("[guard]")
+        }));
+        assert!(!agent
+            .context
+            .history
+            .iter()
+            .any(|m| m.content.as_text().contains("让我再想想")));
+        assert_eq!(agent.guard_streak, 0, "healthy retry clears the streak");
+    }
+
+    #[tokio::test]
+    async fn test_guard_empty_output_retry() {
+        // 第一轮流正常结束但零文本零工具调用（思考流被剥离/provider 丢弃的
+        // 残余形态）→ 判退化重试，第二轮恢复
+        let rounds = vec![
+            vec![StreamEvent::Done],
+            vec![
+                StreamEvent::TextDelta("recovered".into()),
+                StreamEvent::Done,
+            ],
+        ];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_with_config(true, rounds, seen.clone(), |_| {}).await;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "recovered");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(agent.guard_streak, 0);
+    }
+
+    #[tokio::test]
+    async fn test_guard_exhausted_diagnostics_and_breaker_warning() {
+        // 连续两个回合重试耗尽：第一回合诊断收尾（无「连续」警告），
+        // 第二回合 streak 达阈值 → 附加醒目警告；随后健康回合清零。
+        let empty = vec![StreamEvent::Done];
+        let rounds = vec![
+            empty.clone(),
+            empty.clone(),
+            empty.clone(),
+            empty.clone(),
+            vec![StreamEvent::TextDelta("ok".into()), StreamEvent::Done],
+        ];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_with_config(true, rounds, seen.clone(), |c| {
+            c.runtime.guard_max_retries = 1;
+            c.runtime.guard_breaker_threshold = 2;
+        })
+        .await;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let t1 = agent
+            .handle_message_streaming(ChatMessage::user("t1"), "cli", tx.clone())
+            .await
+            .unwrap();
+        assert!(t1.contains("[guard]"));
+        assert!(!t1.contains("已连续"), "first failure should not warn yet");
+        assert_eq!(agent.guard_streak, 1);
+
+        let t2 = agent
+            .handle_message_streaming(ChatMessage::user("t2"), "cli", tx.clone())
+            .await
+            .unwrap();
+        assert!(
+            t2.contains("已连续 2 轮"),
+            "second consecutive failure warns: {t2}"
+        );
+        assert_eq!(agent.guard_streak, 2);
+
+        let t3 = agent
+            .handle_message_streaming(ChatMessage::user("t3"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(t3, "ok");
+        assert_eq!(agent.guard_streak, 0, "healthy turn resets the streak");
+    }
+
+    #[tokio::test]
+    async fn test_guard_disabled_preserves_old_behavior() {
+        // output_guard = false：空输出不重试、无 [guard] 提示，行为与旧版一致
+        let rounds = vec![vec![StreamEvent::Done]];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_with_config(true, rounds, seen.clone(), |c| {
+            c.runtime.output_guard = false;
+        })
+        .await;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(!agent
+            .context
+            .history
+            .iter()
+            .any(|m| m.content.as_text().starts_with("[guard]")));
     }
 
     /// 回归：context_size 与 Agent 解耦（plan.md #F）。`context_size_now` 按活动
@@ -2278,7 +2616,12 @@ mod tests {
             StreamEvent::TextDelta(" after".into()),
             StreamEvent::Done,
         ]];
-        let mut agent = make_agent_with_rounds(false, rounds).await;
+        // 本测试专注标签过滤语义；rounds 耗尽后的空流在 guard 开启时会触发
+        // 重试/诊断（有专属测试），这里关闭 guard 保持旧行为断言不变。
+        let mut agent = make_agent_with_config(false, rounds, Default::default(), |c| {
+            c.runtime.output_guard = false;
+        })
+        .await;
         let (tx, mut rx) = mpsc::channel(64);
         let _ = agent.handle_input_streaming("hi", "cli", tx).await;
 

@@ -17,6 +17,9 @@ pub struct ToolCallStreamParser {
     completed: Vec<ToolCall>,
     /// 进入 InToolCall 时匹配到的开标签，finish() 还原用
     open_tag: &'static str,
+    /// 思考流累计字符数：InThink 状态被丢弃的内容也逐字符计数（只计数不保存）。
+    /// Generation Guard 用它做思考长度上限判定；guard 关闭时无人调用，纯计数开销。
+    think_chars: usize,
 }
 
 #[derive(PartialEq)]
@@ -97,6 +100,7 @@ impl ToolCallStreamParser {
             pending: String::new(),
             completed: Vec::new(),
             open_tag: "",
+            think_chars: 0,
         }
     }
 
@@ -156,15 +160,18 @@ impl ToolCallStreamParser {
                 State::InThink => {
                     // 丢弃所有内容，仅检查 think 闭标签
                     self.buffer.push(ch);
+                    self.think_chars += 1;
                     if ends_with_any(&self.buffer, THINK_CLOSE_TAGS).is_some() {
                         self.buffer.clear();
                         self.state = State::Outside;
                     } else {
-                        // 限制 buffer 仅保留最长闭标签长度的尾部，避免无限增长
+                        // 限制 buffer 仅保留最长闭标签长度的尾部，避免无限增长。
+                        // 按字符数裁剪：String::len()/split_at 是字节口径，中文
+                        // 3 字节/字符会在非字符边界 panic（回归：中文思考流）。
                         let max_close = max_tag_len(THINK_CLOSE_TAGS);
-                        if self.buffer.len() > max_close {
-                            let keep = self.buffer.len() - max_close;
-                            self.buffer = self.buffer.split_at(keep).1.to_string();
+                        if self.buffer.chars().count() > max_close {
+                            let keep = self.buffer.chars().count() - max_close;
+                            self.buffer = self.buffer.chars().skip(keep).collect();
                         }
                     }
                 }
@@ -236,6 +243,12 @@ impl ToolCallStreamParser {
     /// 取出已解析的 ToolCall（清空内部列表）
     pub fn take_tool_calls(&mut self) -> Vec<ToolCall> {
         std::mem::take(&mut self.completed)
+    }
+
+    /// 思考流累计字符数（`<think>` 块内被丢弃的内容也计入）。
+    /// Generation Guard 思考长度上限判定用（docs/plans/2026-09-03-generation-guard.md）。
+    pub fn think_chars(&self) -> usize {
+        self.think_chars
     }
 
     /// 流结束时调用，返回残留内容作为普通文本。
@@ -367,6 +380,35 @@ mod tests {
         let input = format!("{}secret thoughts", THINK_OPEN_TAGS[0]);
         let out = p.feed(&input);
         assert_eq!(out, "");
+        assert_eq!(p.finish(), "");
+    }
+
+    #[test]
+    fn test_think_chars_counted_across_chunks() {
+        // 思考流字符计数跨 chunk 累计（Generation Guard 思考上限判定依据）。
+        // 闭标签字符也计入（常数量级，忽略不计）。
+        let mut p = ToolCallStreamParser::new();
+        let open = THINK_OPEN_TAGS[0];
+        let close = THINK_CLOSE_TAGS[0];
+        assert_eq!(p.feed(open), "");
+        assert_eq!(p.think_chars(), 0);
+        p.feed("1234");
+        assert_eq!(p.think_chars(), 4);
+        p.feed("56");
+        assert_eq!(p.think_chars(), 6);
+        assert_eq!(p.feed(&format!("78{}", close)), "");
+        assert_eq!(p.think_chars(), 16); // 8 内容字符 + 8 闭标签字符
+    }
+
+    #[test]
+    fn test_think_multibyte_buffer_trim_no_panic() {
+        // 回归：InThink buffer 裁剪必须按字符而非字节口径——中文思考流
+        // 曾在 split_at 非字符边界 panic（guard 集成测试暴露）
+        let mut p = ToolCallStreamParser::new();
+        let content = "让我再想想。".repeat(50);
+        let input = format!("{}{}abc", THINK_OPEN_TAGS[0], content);
+        assert_eq!(p.feed(&input), "");
+        assert_eq!(p.think_chars(), content.chars().count() + 3);
         assert_eq!(p.finish(), "");
     }
 
