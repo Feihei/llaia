@@ -2261,18 +2261,32 @@ pub async fn probe_models(
             .into_response();
     };
     let base_url = body.base_url.as_deref().unwrap_or(&provider.base_url);
+    // 前端拿到的 api_key 对非空 key 一律是掩码 '••••'（见 mask_sensitive），
+    // 探测时必须回退到服务端内存中的真实 key（启动时已 env 展开），
+    // 否则把 '••••' 当 Bearer 发出去必然 401。
     let api_key = body.api_key.as_deref().unwrap_or(&provider.api_key);
+    let api_key = if api_key == MASK {
+        provider.api_key.as_str()
+    } else {
+        api_key
+    };
     match crate::provider::probe::probe_openai_compatible(base_url, Some(api_key)).await {
-        Ok(models) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": true, "models": models })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(models) => {
+            tracing::info!(provider = %id, base_url = %base_url, models = models.len(), "models probed");
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true, "models": models })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!(provider = %id, base_url = %base_url, error = %e, "models probe failed");
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            )
+                .into_response()
+        }
     }
 }
 
