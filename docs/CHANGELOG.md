@@ -6,7 +6,7 @@
 
 ---
 
-## v0.3.2 (unreleased)
+## v0.4.0 (2026-09-04)
 
 **Bug fixes / 稳定性**
 - **provider**：llama.cpp / Ollama 思考模型会把大段思考内容原样吐给用户（实测于 QQ 频道）——`Compat::ollama()` / `Compat::llamacpp()` 预设的 `reasoning_to_content` 默认改为 `false`：这两个端点的 OpenAI 兼容层在思考模型下 `content` 照常返回正式回答，`reasoning_content` 只是额外思考流，折回只会把思考混进可见文本、context 与 sqlite。此前行为还自相矛盾——内联带 `<think>` 标签的思考被 `ToolCallStreamParser` 剥掉，拆到 `reasoning_content` 字段的反而被折回显示。确实需要折回的端点仍可显式 `[provider.<id>.compat] reasoning_to_content = true`（[ADR-0026](adr/0026-provider-compat.md) 修订记录）
@@ -39,6 +39,17 @@
 - **channel**：微信 / 钉钉 / 飞书 / Telegram 的工具调用通知收敛为 QQ 紧凑模式（每回合一条「🔧 正在调用工具...」，结束后把去重工具名拼进回复开头）
 - **slash / i18n**：斜杠命令大小写不敏感；审批提示支持裸 `/ok`；运行时提示统一为英文
 - **docs**：`AGENTS.md` 与 `guide/tools.md` 工具清单补齐 `skill_create` / `skill_edit`（ADR-0027 落地时遗漏）
+- **session**：任务线模型（[ADR-0031](adr/0031-task-session-model.md)，plan.md #D）——通用线（`sessions.kind='main'`）之外可显式开任务线（`kind='task'` + `bound_path` 绑定目录）：`/task <名>` 进出、`/tasks` 列表、`/task close` 归档（`state='archived'` 不可续写）。切线回灌目标线 sqlite 尾部（6000 字符预算，**只取 user/assistant 正文**防孤儿 tool 消息），任务名/绑定目录经 `Context.task_state` Runtime Context 注入；`/move` 批准后提示开任务线（不自动建）；WebUI 会话列表 `[task]`/`[archived]` 徽标；`latest_session` 排除归档线。自动周期切分经 grill 否决（短上下文模型会灌爆列表），通用线维持一条流水 + `/new` + 自动压缩不变
+- **slash**：`/btw <question>` 侧问（plan.md #H）——锁内快照 context 尾部 + summary，走 compact_provider 回退主 provider 的单轮无工具调用，答案**不写主上下文**、落 `side_messages` 独立表（不进 messages/FTS）；自连上下文（进程内最近 1-2 组侧问 Q&A）；WebUI `WebEvent::Side` 独立样式块、CLI/QQ busy 时拦截提示
+- **slash**：`/steer <msg>` 运行中插话（plan.md #I）——`Agent.steer_buffer`（独立 `Arc<Mutex<VecDeque>>` 不经 Agent 锁，频道在 turn 持锁期间仍可投递），注入点在工具循环非末轮迭代顶部（drain → `[steer] User added: ...` user 消息进 context/sqlite）；末轮残留丢弃并附 `[steer not applied]`；`fork_for_isolated` 派生独立空缓冲防 cron/委派误消费；三频道拦截（web/CLI/QQ），空闲降级为普通消息
+- **agent**：Generation Guard 输出退化防护——`src/agent/guard.rs` 字符级滑窗 n-gram 重复检测（窗口 512/gram 24/阈值 4）+ 思考超限计数 + 空输出判定，命中即 abort 流、丢弃产物（不落 sqlite/context 防自我模仿）、注入 `[guard]` 提示并强制 `disable_thinking` 重试（`guard_max_retries` 默认 1）；`guard_streak` 连续达阈值只报警不拒服。openai_compat `reasoning_to_content=false` 时对 reasoning 计数、超 cap 提前截流。`[runtime]` 七个 `guard_*` key + `output_guard` 总开关热加载；顺手修 parser `InThink` buffer 按字节 `split_at` 导致中文思考流非字符边界 panic 的存量 bug（[plans/2026-09-03-generation-guard.md](plans/2026-09-03-generation-guard.md)）
+- **agent**：First-run Bootstrap 首运行引导（plan.md 相关，[plans/2026-09-04-first-run-bootstrap.md](plans/2026-09-04-first-run-bootstrap.md)）——SOUL/USER 仍是 init 模板（`memory::is_unfilled`）时，回合起点注入 `[bootstrap]` 指令到 `Context.bootstrap`（排 reminder 之后、绝不进 `system_prompt_base`，保 KV 前缀字节稳定），命令 agent 先办正事、把 ≤5 个问题附在回复末尾、答案用 `file_edit` 写回。零新状态、自我终止（写盘即改指纹、提示消失）。同批修 Tail Reminder 门禁旧条件「任一文件非空」在模板下永真导致首回合白烧隔离 LLM turn，改用 `bootstrap::should_generate_reminder`
+- **provider**：per-model 可用性探测按钮（Config 页 provider 配置内联探测单个 model）
+
+**Bug fixes / 稳定性（补充）**
+- **send_media / qq**：`send_image`/`send_file` 作用域滞后 `/move`（原持静态家目录，moved 目录内绝对路径被拒、相对路径解析回旧家目录）——改持与文件工具同一对 `workspace_root` + `trusted_dirs` Arc、走 `validate_path_in_scope`，家目录作固定额外可发送范围；WebUI `/file` 同源修复（`resolve_file_in_scope` + `attach_main_scope` 缓存作用域 Arc，避免请求路径锁 main 被运行中 turn 阻塞）。QQ 大文件上传 500/850012：文件类改走官方分片上传（`upload_prepare`(md5/sha1/md5_10m=前 10002432 字节)→ 预签名 PUT 分片 → `upload_part_finish` → `/files` 合并），图片续 base64 直传、失败降级分片，body 必带 `file_name`（否则 QQ 显示未命名）（plan.md #J）
+- **provider**：忽略空的 `tool_call` name/id 增量 delta 并做消息 sanitize，避免严格端点 400
+- **agent**：小窗口 provider 的上下文适配加固（context fit）
 
 **Performance**
 - **provider**：`detect_context_size` 按 host 门控——仅本地后端（localhost / `.local` / 回环 / 私网 / 链路本地）才打 `/props`、`/api/tags`，云 provider 直接跳过（plan.md #4 残余）

@@ -1,6 +1,6 @@
 # LLAIA 项目 Roadmap
 
-> 本文档是 LLAIA 的**前瞻路线图**：顶部是已交付阶段一览（索引），主体是下一步计划（P6）。
+> 本文档是 LLAIA 的**前瞻路线图**：顶部是已交付阶段一览（索引），主体是下一步计划（P7）。
 > 各阶段的**完整交付清单**见 [`CHANGELOG.md`](CHANGELOG.md)；详细实现计划见 [`plans/`](plans/)，设计规格见 [`specs/`](specs/)，架构决策见 [`adr/`](adr/)。
 
 **整体目标**：一个单用户、本地优先的私人 AI 助理，跨 CLI/QQ/Web 等多 channel 接入，主 Agent + 可委派子 Agent 协作，持久化记忆与会话。
@@ -29,248 +29,49 @@
 | P3+ | ✅ | 交互增强与生态扩展（快赢/Anthropic/Telegram/钉钉/微信） | [CHANGELOG.md](CHANGELOG.md)（§P3+） |
 | P4 | ✅ | 基础能力增强（时区/做梦/压缩/权限/shutdown/Gemini/飞书…） | [CHANGELOG.md](CHANGELOG.md)（§P4） |
 | P5 | ✅ | Provider Compat / 记忆预算 / 统一搜索 / todo / ask_user / skill 自管 / goal / 剩余项 | [CHANGELOG.md](CHANGELOG.md)（§P5） |
-| P6 | 🚧 | 首批交付（稳定性修复 + 快赢）已随 v0.3.1 发布；WebUI 改进等后续批次进行中 | [CHANGELOG.md](CHANGELOG.md)（§v0.3.1） |
+| P6 | ✅ | 稳定性修复 + 快赢 + WebUI 批次 + 任务线/侧问/插话/媒体作用域 + Generation Guard/首运行引导（代码已全部落地，待发布） | [CHANGELOG.md](CHANGELOG.md)（§v0.3.1、§v0.3.2） |
+
+> **P6 已全部交付并归档**：原 P6 节的完整勾选清单（WebUI W1/W2/W3、会话主题总结、provider 针对性优化、`memory_research`、启动优化 #11、主干代码体检、#A–#J 新增发现、Generation Guard、First-run Bootstrap 等）已随各项实现陆续迁入 [CHANGELOG.md](CHANGELOG.md) §v0.3.1 / §v0.3.2，本文件不再保留已交付明细。其中 `v0.3.2` 尚未打 tag 发布，发布节奏见 AGENTS.md「发版」。
 
 ---
 
-## P6 — 下一步计划
+## P7 — 下一步计划
 
-**状态**：🚧 进行中（起点 2026-08-21，源自本地候选池 `docs/issues/issues.md` 的 9 个问题与设想评估；该目录被 gitignore 排除、不入库，仅作本地随手记录）
+**状态**：⏳ 计划中（起点 2026-09-04）
 
-> 候选池来自本地 `docs/issues/issues.md`（gitignore 排除、不入库，clone 后无此文件属预期）。评估结论（2026-08-21）：3 个 bug/修复类（其中 2 个可直接实施、1 个需先验证根因），6 个需求/设计类需 grill 明确边界后立项。条目按状态分组，标注**必要性**（高/中/低，不做会持续踩坑或已影响正确性→高；明显改善体验→中；锦上添花→低）与**难度**（★☆☆ 半天内单点 / ★★☆ 一到数天跨模块 / ★★★ 结构性改造，动手前先出 ADR），便于排期。
-> 已交付部分（4 项稳定性修复 + 6 项快赢）随 v0.3.1 发布，完整勾选清单已归档至 [CHANGELOG.md](CHANGELOG.md) §v0.3.1；主干体检直接修项、WebUI 批次（W1/W2/W3）与本节的会话总结 / provider 优化 / `memory_research` / 启动优化等均已归档至 [CHANGELOG.md](CHANGELOG.md) §v0.3.2（2026-09-01 补齐）。本节只保留剩余计划与进行中条目。
+### 🛡️ terminal 脚本绕过防护（2026-09-04 立项，待 grill）
 
-### 🌐 WebUI 改进批次（2026-08-27 评估立项）
+**问题**：现有安全模型对「误删大量文件 / 改系统关键位置」的防护建立在**命令行字符串**上——命令黑名单（`path_guard.rs::COMMAND_BLACKLIST`，硬编码）、路径 token 提取（`extract_path_tokens` → `validate_command_paths_in_scope`）、shell 套壳拦截（`check_shell_wrappers`）。但 `python` / `node` / `perl` / `ruby` 等解释器一旦启动，其真正的文件操作发生在解释器内部，框架对子进程的 syscall / 文件系统效果**零感知**。实测三层全部绕过：
 
-> 三项来自用户需求评估（2026-08-27）。W1/W2 是快赢可直接做；W3 有数据采集缺口需先补链路，动手前先定表结构与统计边界。
+- 命令黑名单只做子串匹配，`python -c "..."` 不命中任何条目；
+- `check_shell_wrappers` 只拦 `bash/sh/zsh/fish` + `-c` 和 `eval/exec/source/$()/反引号`，`python` 不在 shell 名单、`-c` 非被拦构造；
+- 路径校验从命令行抠 token，`python evil.py` 只看到 `evil.py`（workspace 内合法）；即便 `shutil.rmtree('C:/Windows')` 被抠成含 `/` 的 token，`validate_path` 的黑名单是「危险前缀**开头**」匹配，token 实际以 `shutil.rmtree(` 开头 → 漏判。
 
-- [x] **W1** sessions / config 页左侧栏固定不随内容滚走 + 会话详情区右下角「跳顶部/跳底部」悬浮按钮（必要性：**中** / 难度：★☆☆）— 已交付（2026-08-28）
-  - 根因已定位（两个页面同源）：`index.html` 里 `<template x-if="authed">` 的匿名包裹 `<div>` 无任何样式，打断了 flex 高度链——`main { flex:1; overflow:hidden }` 因父级不是 flex 容器而失效，pane 高度随内容无限增长、变成整页（body）滚动；sessions 左侧会话列表与 config 左侧分区导航都因此被滚出视口。
-  - 方案：给该包裹 div 加 class 并声明 `display:flex; flex-direction:column; flex:1; min-height:0`，恢复高度约束后 `.session-list` 与 `#config-pane .sidebar`（均已自带 `overflow-y:auto`）各自固定在视口内、右侧内容独立滚动。纯 CSS 改动，一次修两处。
-  - 悬浮按钮：`.session-detail` 设 `position:relative`，右下角两个 absolute 定位按钮（↑/↓），分别 `scrollTo({top:0})` / `scrollTo({top:scrollHeight})`；纯前端改动，无新 API。
-- [x] **W2** About 页更新检查按钮（必要性：**低** / 难度：★☆☆）— 已交付（2026-08-28）
-  - 后端：新增 `GET /api/update/check` —— reqwest 请求 GitHub Releases latest API（`https://api.github.com/repos/Feihei/llaia/releases/latest`，该 API 必须带 User-Agent 头否则 403），`tag_name` 去 `v` 前缀后与 `CARGO_PKG_VERSION` 三段数值比较；返回 `{current, latest, update_available, url}`；失败（离线/限流）透传原因，结果加分钟级内存缓存防连点。无鉴权请求限 60 次/h，单用户足够。
-  - 前端：About section 加 Check Updates 按钮 + 结果行（已最新 / 新版本号 + Release 页下载链接），复用现有 cron-msg 消息展示模式。
-- [x] **W3** token 用量 dashboard，参考 AstrBot WebUI（必要性：**中** / 难度：★★☆）— 已交付（2026-08-28）
-  - 参考实现已探明（`.ref/AstrBot`）：两张表（小时预聚合消息计数 + 逐请求 provider_stats 含 input/cached/output tokens 与 timing）；API 把单次范围查询在 Python 聚合成预成形 `[ts,value]` series；UI 为时间范围选择（1/3/7 天）+ 汇总卡（总 tokens/调用数/avg TTFT/成功率）+ per-provider 堆叠柱图 + per-session Top10。
-  - LLAIA 数据链路现状（2026-08-27 核实）：
-    - Provider 层已备好：`ChatResponse.usage: Option<Usage>`、流式 `StreamEvent::Usage(Usage)`（openai_compat 仅 `compat.streaming_usage=true` 时发送；ollama/llamacpp 自动探测预设默认开启）
-    - 缺口①：agent loop 对 `StreamEvent::Usage` 直接丢弃（`agent/mod.rs:825`），未累计未落库
-    - 缺口②：sqlite 无逐回合用量表；`sessions.token_count` 列存在但零调用者（死列），可回收利用做会话级累计
-    - 缺口③：anthropic/gemini 流式 usage 未解析（anthropic 收集流事件时丢弃 / gemini 恒 None），云端 provider 要计入统计需先补齐——列为本项前置子任务
-  - 最小边界方案：
-    - 采集：回合内累计 usage（工具循环多次迭代合并一条），turn 结束写 `turn_usage(id, session_id, ts, model_ref, prompt_tokens, completion_tokens, kind)`；compact/vision/reminder 等 sidecar LLM 调用用 `kind` 区分，UI 默认只看主对话
-    - API：`GET /api/stats/tokens?days=N` 单查询 SQL 聚合出天/小时 bucket series + 总计 + per-model/per-session 分组；单用户数据量小，不需要 AstrBot 式预聚合表
-    - UI：顶层 tab「Stats」：范围选择 + 汇总卡（tokens/请求数）+ 每日柱状图 + per-model/per-session 排名表
-    - 明确不做：TTFT/TPM/成功率（AstrBot 有是因为记了 timing 埋点，LLAIA Provider 层无此埋点，单独补不值）、引入图表库（纯 SVG/CSS 手绘条形图起步，契合终端风零依赖；不够用再 vendored Chart.js）
-  - 已知限制须在 UI 标注：LMStudio/bare 端点默认不上报 usage（streaming_usage 未开且端点未必支持）→ 该 provider 无数据是预期行为而非 bug。
+**结论**：字符串匹配层无法可靠覆盖「执行任意代码」的载荷，往黑名单里堆关键词是补不完的。真正的防线需要从「检测命令」转向「约束进程」。**候选方案（按可靠度 / 成本排序，待 grill 选型）**：
 
+- [ ] **T1 · OS 级沙箱（根治，★★★）**：把 terminal 及子进程关进 jail，让「碰不到系统目录」成为内核强制事实而非事后判断。Linux `bubblewrap`/`firejail` + namespace + `landlock`/`seccomp`（workspace 外只读 bind 或隐藏）；Windows `Windows Sandbox` / AppContainer / 低权限账户 + ACL；重任务可容器化（Docker）。结构性改造，动手前出 ADR。必要性：**高**（唯一能覆盖未知 payload 的方案）。
+- [ ] **T2 · 无特权账户运行（最省的强防线，★★☆）**：整个 llaia 进程（含 fork 出的解释器）以专用低权限账户运行，该账户对 workspace 外无写权限——OS 直接 `EACCES`，脚本再聪明也绕不过文件系统权限。缺点：主要挡写/删，挡不住读敏感文件（配合 HOME 隔离 + ACL 缓解）。必要性：**高**，性价比最高。
+- [ ] **T3 · 解释器 / 内联执行强制审批（当天可落地的止血，★☆☆）**：既然静态分析 `-c` 与 `.py` 内容不可靠，就不假装能分析，直接把常见解释器首词（`python/python3/node/perl/ruby/php/deno/bun`）与任意 `-c`/`-e` 内联执行标记为高危——命中即强制 `/ok` 审批（或 `deny`）。在 `check_shell_wrappers` 旁加 `check_high_risk_interpreter(command)`，同步 `[tools.terminal]` 可配开关与 CONFIG_TEMPLATE / `docs/guide/configuration.md` / AGENTS.md 四处（新增 runtime/terminal key 的既有约定）。不挡 `python evil.py` 的实际破坏，但把「跑任意代码」升级到人审这一现有唯一能覆盖未知载荷的闸门。必要性：**中**（真防线归 T1/T2，本项是当下无沙箱环境里的务实收敛）。
+- [ ] **T4 · 缩小爆炸半径（兜底，★☆☆）**：workspace git 跟踪 / 定期备份（误删可回滚）；terminal 默认 `read-only` 权限档、需要写时临时提档；考虑 terminal 断网（多数破坏脚本先下载载荷）。多为运维/配置约定而非进程内逻辑。必要性：**低–中**。
 
-### 🧩 待 grill 明确后立项（需求/设计类）
+> 定案方向预判（待 grill 确认）：T3 作为**近期代码改动**先行，T1/T2 作为**部署规范**写进文档（安全/权限相关 guide），T4 作为推荐实践。是否引入 OS 沙箱取决于「是否愿意给 terminal 加运行时依赖」——需与「轻量、可移植、单 crate」的产品定位一并权衡。
 
-- [x] 会话主题自动总结（必要性：**中** / 难度：★★☆）— 已交付（2026-08-29）
-  - 定案（grill 2026-08-24）：**压缩时顺带**用 compact provider 生成标题，落 `sessions.title`，WebUI 会话列表展示；失败降级为默认标题。存储即随会话。
-  - 实现：`sessions` 表加 `title` 列（`memory/sqlite.rs`，存量库幂等 `ALTER TABLE` 补列）；`Agent::ensure_session_title`（`agent/mod.rs`）在自动压缩（`maybe_auto_compact`）与 `/compact` 实际发生 LLM 压缩后调用——仅当标题为空时生成一次，素材为前 6 条 user/assistant 消息，失败/空回复降级为首条用户消息截断（40 字符），标题清洗（剥引号/书名号、取首行、60 字符上限）；`list_sessions` 带出 `title`，WebUI 会话列表优先显示标题（无标题回退 channel）。
-- [x] deepseek / glm / kimi 等 provider 针对性优化（必要性：**高** / 难度：★★☆）— 已交付（2026-08-28 核实）
-  - 现状：`compat.rs::detect` 仅覆盖 ollama/llamacpp 预设，线上 provider（deepseek/glm/kimi/moonshot…）走 bare；用户实测**非本地 provider 的 probe/探测常失败**，疑似线上 API 规则不同。
-  - .ref 现成实现（已探明，可照抄）：
-    - **nanobot** `openai_compat_provider.py`：`_MODEL_THINKING_STYLES` 按模型 slug 映射 thinking 线上参数（`thinking_type`/`enable_thinking`/`reasoning_split`）；`reasoning_content` 加入放行字段并保证 deepseek-R1 走 `reasoning_content` 而非 `reasoning`；`_requires_max_completion_tokens` 对 o 系/kimi-k3 用 `max_completion_tokens`。
-    - **goose** `crates/goose-providers/src/openai.rs`：`PROVIDERS_NEEDING_MAX_TOKENS_REMAP`（cerebras/custom_deepseek/groq/kimi/mistral/moonshot…→ 传统 `max_tokens`）、`PROVIDERS_NEEDING_REASONING_EFFORT_MAPPING`、Meta effort 折叠。
-  - 定案方向（grill 2026-08-24）：`Compat::detect` 扩展——detect 不只看 base_url host，还要能按其 provider 预设（deepseek/glm/kimi/moonshot）设定 `max_tokens_field` / `reasoning_to_content` / thinking 参数，模式对齐 nanobot/goose 的 per-model 表；把 `native_tool_calling` 并入同套探测（见 #10）。
-  - 已实现（`provider/compat.rs:104-165`）：`Compat::detect(base_url, model)` 在 ollama/llamacpp 之外新增 deepseek / zhipu·bigmodel·glm / moonshot·kimi host 预设（开 `streaming_usage`）；per-model 规则对齐 nanobot/goose——o 系与 `kimi-k3` 切 `max_completion_tokens`（`max_tokens_field`）、`deepseek-reasoner`/`deepseek-r1`/`kimi-k` 开 `reasoning_to_content`；`native_tool_calling` 并入同套探测（见 #10）。全部带回归测试。
-  - 残余已收（2026-08-29）：`detect_context_size` 按 host 门控——仅本地后端（localhost / `.local` / 回环 / 私网 / 链路本地）才打 `/props`、`/api/tags`，云 provider 直接跳过（`openai_compat.rs::probe_host_is_local`，含分类回归测试）。`probe 失败`的其余根因（若有）待后续实测。
-- [x] `memory_research` 工具：跨 session 搜索历史记忆（必要性：**中** / 难度：★★☆）— 已定案 → 已实现
-  - 现状：`sessions/messages/tool_calls` 已在 sqlite（`memory/sqlite.rs`）。
-  - 定案（grill 2026-08-24）：**仅搜索 messages 文本**，FTS5，返回 N 条 + 所属 session + 时间，**暴露为模型可调工具**。结果上限与隐私边界实现时定（先给硬上限 N=20）。
-  - 已实现：`message_fts` FTS5 虚拟表 + INSERT/DELETE 触发器 + 存量回填；`SessionStore::search_messages`（`memory/sqlite.rs`）；`MemoryResearch` 工具封装（`tools/memory.rs`，只读无需审批，limit 1..=20，snippet 截断，非法查询降级提示）；CLI 工具集注册。
-- [x] 检查清理基本架构 / agent loop（必要性：**中** / 难度：★★☆~★★★）— 已定案 → **立项为定期例行检查**
-  - 注：本项是**例行项而非一次性交付**，`[x]` 表示已定案立项；各轮实际产出见下方「主干代码体检记录」小节。
-  - 本意（用户澄清 2026-08-25）：**定期体检主干代码**——架构合理性、逻辑反模式、死代码/未接线路径、与 ADR/编码约定（AGENTS.md：无 `#[allow(dead_code)]`、无占位 config、生产路径无 unwrap）的偏差。**非问题驱动**，不是等 loop 卡死/上下文爆炸才查，而是周期性主动检查。
-  - 定案（修正 grill 2026-08-24 的"不立项"结论）：开放发散型例行项，产出为检查记录（发现项 → 直接修 / 单独立项 / 搁置留档），不要求一次清完；主干模块（agent loop / provider / memory / web）逐次过一遍。
-  - 节奏：**不固定，需要时手动触发**（用户定，2026-08-25）；任何时刻想体检直接提即可。
-- [x] provider native 模式默认简化（必要性：**中** / 难度：★★☆）— 已交付（随 #4 同一套探测，2026-08-28 核实）
-  - 现状：`native_tool_calling` 是每个 model 的布尔字段（`config.rs` `ModelConfig`，缺省默认 `true`），两种模式协议本质不同——native 发 `tools` 参数并期待结构化 `tool_calls`；标签降级不发 tools、靠注入 `<tool_call>` 协议指令 + prompt 约束。P4-b 已让 `ToolCallStreamParser` 始终清洗文本流（native 也剥标签），但请求载荷差异仍在，无法完全二合一。
-  - 定案（grill 2026-08-24）：**并入 Compat 自动探测**——`compat.rs::detect` 按 provider 预设（ollama/llamacpp/以及 #4 新增的 deepseek/glm/kimi）推断 `native_tool_calling`，字段允许 `None=auto`（缺省跟随探测），用户不再手设；**不做**单次请求内动态降级（复杂度不值）。无实际踩坑，属预防性简化。
-  - 已实现：`Compat` 新增 `native_tool_calling` 字段（bare/ollama/llamacpp 预设均 `true`，`compat.rs:49-52`）；`ModelConfig.native_tool_calling` 改 `Option<bool>`（`None=auto` 跟随探测，`config.rs`）；`[provider.<id>.compat]` 可逐字段覆盖。与 #4 合并为同一套探测框架，无两套逻辑。
-- [x] 启动速度优化（必要性：**中** / 难度：★★☆）— 已交付（2026-08-29：A/B 修复 + ②耗时打点 + ③MCP 并行）
-  - 现状：`build_agent`（`channels/cli.rs:625`）启动主路径串行执行：① `McpRegistry::connect_all`（`mcp/client.rs:249` 串行 for，每 server `transport.connect` + `handshake`(30s 超时) + `tools/list`）→ ② `load_skills` → ③ 逐个 build 子 Agent + main Agent。
-  - 实测（2026-08-24 用户 trace）：启动首日志→registry built ≈ **840ms**，其中 MCP 握手+注册 ~1ms（单 server）、skills 扫描(37) ~7ms 均非瓶颈；**大头是 `detect_context_size` 的 llama.cpp `/props` 探测**——coder 一次 ~206ms、main 探两次 ~225ms，合计 400–600ms 独占近 2/3。
-  - 原定案（grill）：MCP `join_all` 并行连接。**实测表明对当前单 server 配置几乎无收益，方向转向**：
-    1. **`/props` 探测收敛/去重**：`final=0` 却覆盖 `configured=128000`（疑似 bug，探测盖掉显式配置）；子 Agent 与 main 重复探测、main 探两次。先查根因（为何 `/props` 返 0、为何多次探、为何覆盖配置），再谈缓存/并行。
-    2. MCP `join_all` 并行仍值得做，但对多 server 才有效，且不是当前用户瓶颈——降至次要。
-    3. 给 build_agent 加阶段耗时打点（`elapsed_ms`），后续 trace 不用再靠猜。
-  - 待办：~~① 定位 `context_size final=0 且覆盖 configured` 的根因与重复探测~~（已修，见下）；~~② 加阶段耗时打点~~；~~③ MCP 并行连接~~（②③ 已交付，见下）。
-  - **根因定位（2026-08-24 用户 trace 深挖）**：
-    - **A（bug：`final=0` 覆盖显式配置）**：后端为 llama.cpp，`/props` 返回 `n_ctx: 0`（服务器以 auto/0 启动，0 表示用模型默认，非真实窗口）；`try_llamacpp_props`（`openai_compat.rs:483-495`）对 `n==0` 仍返 `Some(0)`；`cli.rs:564-574` 走 `configured.min(detected)` → `128000.min(0)=0`。显式配置被无意义 0 覆盖。→ 修：`n==0` 视为 `None`（Ollama `.context_length==0` 同理），探测失败时 `final` 保持 `configured`。
-      - ✅ 已修（2026-08-28 核实）：`try_llamacpp_props` 末尾 `n_ctx.filter(|&n| n > 0)`（`openai_compat.rs:499-501`），Ollama `.context_length==0` 同处理；含 mockito 回归测试。
-    - **B（性能：#11 大头）**：`FallbackProvider::detect_context_size`（`fallback.rs:82-91`）逐探测 fallback 链上每个 provider；main 带 2 模型链 → main 探 2 次 + coder 1 次 = 3 次 GET /props@~200ms ≈ 600ms，占启动 2/3。同一后端多模型探测必同值，冗余。→ 修：同后端去重 / 只探 `main()`。
-      - ✅ 已修（2026-08-28 核实）：`fallback.rs:86` 只探 `self.main()`，注释声明「避免同一后端多模型重复探测拖慢启动」，含回归测试。
-    - **C（次要）**：main与子 agent 同后端各自探测同值 → 可缓存。已被 #F 的懒解析 + 缓存间接覆盖（`context_size_now` 结果进 `Agent.resolved_context_size`，fork 子 agent 共享该缓存）。
-  - **②③ 已实现（2026-08-29）**：② `build_agent`（`channels/cli.rs`）四阶段独立计时——mcp connect / skills / sub agents / main agent 各带 `elapsed_ms`，末行 `AgentRegistry built` 带 `total_elapsed_ms`；③ `connect_all`（`mcp/client.rs`）改 `join_all` 并发握手，结果仍按原配置顺序注册（`tool_index` 稳定），单 server 超时（30s）不再串行累加。
+### 🧩 待 grill 明确后立项
 
-### 🧩 主干代码体检记录（2026-08-26，例行第 1 轮）
+- （暂无新增需求项；terminal 安全项见上 T1–T4）
 
-范围：agent loop（mod/sink/context/runner）+ provider 层（openai_compat/fallback/compat）+ memory 层（sqlite/trim）+ 约定扫描。整体评价：主干质量高（锁设计、KV cache 友好注入、compat 零回归约束均有注释与回归测试）。
+---
 
-**直接修（本轮已交付）**：
+## 遗留 backlog（主干体检·主动不做项，2026-08-26 起留档）
 
-- [x] `cheap_normalize` 丢弃空文本 assistant(tool_calls) 消息 → 孤儿 tool 消息违反 OpenAI 协议（`context.rs`；原生工具调用「零文本 + tool_calls」是常态形态，压缩后严格端点直接 400。修：丢弃条件加 `m.tool_calls.is_none()` + 回归测试）
-- [x] `StreamEvent::Error` 路径丢失错误前已生成的部分输出（`agent/mod.rs`；用户看到半截回复但模型下一轮不知道自己说过什么。修：镜像 tx-closed 中止路径保存 `iter_text`）
-- [x] 4 处 `#[allow(dead_code)]` 清理：`sqlite.rs::all_messages`（零调用者）、`feishu.rs::event_id`、`tavily.rs` 两个 DTO 字段
+影响小或需结构性前提，暂缓处理，需要时再评估：
 
-**待修（下轮候选）**：
-
-- [x] SSE 解析只认 `\n\n` 事件分隔符（`openai_compat.rs`）：CRLF（`\r\n\r\n`）服务端/反代事件永不分割 → 整回复静默丢失。触碰流解析核心，单独修 + mockito 双分隔符测试；anthropic/gemini 流解析一并检查 — 已交付（2026-08-28）
-- [x] `workspace/tmp/` 工具图片落盘后无任何清理 → 磁盘无界增长（`agent/mod.rs::persist_tool_image`）。需小设计：启动时清理 N 天前文件 — 已交付（2026-08-28，serve/chat 启动时清理 3 天前文件）
-
-**搁置留档（影响小，暂不动）**：
-
-- 生产路径 `lock().unwrap()`：`slash.rs:476/504`（background_tasks）与 `sqlite.rs` 全文件（conn，约 20 处）。锁内均同步调用、无 await，正确性无问题，仅 poisoning-panic 与编码约定冲突。机械替换 `unwrap_or_else(|e| e.into_inner())` 可解，diff 大
-- `TRIM_CACHE` 无上限增长（`memory/trim.rs`）：单用户 MEMORY 变更频率低，实际影响极小
-- 图片逐张串行 vision 描述（`agent/mod.rs::maybe_describe_images`）：可 `join_all`，但通常单图
-- tools schema 每次请求重建序列化（`openai_compat.rs`）：~20 工具 × 每迭代，微小
-- 常量正则 `unwrap()`（`secrets.rs:52` / `config.rs:957` / `approval.rs:163`）：逻辑上不可 panic，按约定补注释即可
-- 云 provider 启动也打 `/props`、`/api/tags` 探测：已由上方 #4（provider 针对性优化）覆盖，不重复立项
-
-### ⭐ 新增发现（2026-08-26·2）
-
-**#A 新增 provider 填 api key 后报「environment variable referenced but not set」（已修复）**
-
-- 现象：WebUI 添加新 provider（如 modelscope）填 key 保存，日志立刻 WARN `var="LLAIA_PROVIDER_MODELSCOPE_API_KEY" ... replacing with empty string`，且该 provider 内存态 key 被压成空串、热加载失效（重启才恢复）。
-- 根因：**不是 .env 没写**（.env / config.toml 均已正确落盘并引用）。真因在 `web/mod.rs::put_config` 时序：`apply_refs` 把 `merged` 里新 secret 替换成 `${VAR}` **之后**才 `merged.clone()` 出 `runtime_config`，随后 `expand_config_secrets` 对刚写入磁盘、**尚未进入当前进程 env** 的变量做 `std::env::var` → 命中「未设置」降级（运行态从不重载 .env，仅 main.rs 启动加载一次）。
-- 修复：`runtime_config` **先于 `apply_refs` 克隆**（保留明文），磁盘仍写 `${VAR}` 引用；`expand_config_secrets` 对非引用明文透传、不查询 env → 无警告、key 立即生效。
-- 说明：这是布局级最小改动（移动一行克隆 + 注释），符合「成功才应用引用 / 失败保留明文」既有降级语义。
-
-**#B /move 后的目录信任模型（已交付，2026-09-01）**
-
-- 现状：`approval_decision` 的 `workspace` 参数取自 `workspace_root`（`mod.rs`），/move 后**目录内**的 file/terminal 操作在 default 档本就自动放行（`within→Approved`）。因此「每次都批准」仅出现在**逃出被移动目录**的操作：绝对路径指向别处、`..` 上退、terminal 触碰 moved 目录之外（含 agent 自家 home workspace 的 reminder.md/MEMORY 等记账文件）→ 每次 /ok；且 `/move home` 切回后再碰原目录又要重新审批。
-- 用户诉求：一次 /move 批准后应信任该目录，且 move 审批信息里提醒信任范围。
-- 选型（三选一）：**选 1 会话级持久受信目录**（推荐已采纳）/ 选 2 home 也默认受信 / 选 3 仅提示澄清不引入集合。
-- 已实现（选 1）：
-  - `Agent.trusted_dirs: Arc<RwLock<Vec<PathBuf>>>`（`agent/mod.rs`）：会话级受信集合，fork 派生共享同一 Arc。
-  - `/move` 批准路径（`slash.rs::resolve_approval`）：`set_workspace` 后调 `agent.add_trusted_dir(target)` 登记（canonical + 黑名单校验由 `validate_move_target` 保证，去重）；提示文案注明 `(trusted for this session)`。
-  - 审批判定（`agent/approval.rs`）：`tool_within_workspace` / `approval_decision` 增加 `trusted` 参数，file/terminal 校验依次以 workspace_root、各受信目录为基准（`path_within_any`），任一通过即免审批；逃出全部范围仍审批。`ApprovalContext` 增加 `trusted: Vec<PathBuf>`。
-  - 失效边界：仅存内存，Agent 生命周期（重启/新进程）后清空，需重新 /move 批准；`/move home` 不撤销既有受信记录。
-  - 回归测试：`test_trusted_dirs_keep_moved_dir_approved_after_switch_away`（切走后受信目录内免审批 / 无受信时需审批 / 逃出全部范围需审批三断言）；`format_move_prompt` 文案更新。
-  - 安全权衡落点：受信目录只能经 `validate_move_target` 进入（canonicalize + 危险前缀黑名单复核），`C:\` 等黑名单目录无法成为受信目录。
-  - **执行层对齐（同日补）**：初版只改了审批层，工具 `execute()` 内部的 `validate_path` / `validate_command_paths` 仍只认 workspace_root——审批放行的受信目录内操作会在执行层报 "outside workspace"（批准了却执行失败）。修复：`path_guard` 新增 `validate_path_in_scope` / `validate_command_paths_in_scope`（workspace ∪ trusted 依次校验），file 三工具与 terminal 执行路径改用 scope 版并持有与 `Agent.trusted_dirs` **同一 Arc**（`cli.rs` 构造时共享，`/move` 登记后工具即时可见）；审批层 `tool_within_workspace` 同步改调同一组 scope 函数，**审批与执行从此不可能出现判定分歧**。回归：`test_trusted_dir_operations_execute_after_move_away`（/move 切走后受信目录内写入/读取放行、第三方目录仍拒绝）。
-
-### ⭐ 新增发现与技术探讨（2026-08-26·3）
-
-**#C terminal 命令安全扫描把字面量 `\n` 当路径（已交付）**
-
-- 现象：用 terminal 跑 officecli 时，命令里的 `\n`（想表达的换行文本）被视为路径 → 越界拒绝 → 多次失败，被迫转 python-pptx（sessions.db sess17 msg 1163-1205 记录完整试错链）。
-- 根因（非 officecli，是安全扫描层）：`path_guard.rs::extract_path_tokens` 用 `split_whitespace()`（把空格/`\t`/**换行**全拆），且 `looks_like_path` 含 `token.contains(std::path::MAIN_SEPARATOR)`——**Windows 上单个反斜杠即命中**。于是字面量 `\n`（反斜杠+n）所在 token 被判为路径，`validate_path` 越界失败。
-- 附带真实约束（msg1172）：绝对路径 `E:/...` 出 workspace 触发工作区校验 = 正常安全行为，agent 误以为是「换写法绕开」，反而绕进 JSON heredoc 撞上 `\n` 误报。
-- 修复建议（安全层，需谨慎）：`looks_like_path` 收紧——去掉裸 `contains('\')`，改为「含 `\` 且含盘符 `X:\` / 前导 `\`(UNC)」，或「有 `/` `./` `../` `~`」之一。一行改动 + 回归测试。
-- 修复（已交付）：`looks_like_path` 收紧为「前导 `/` `~` `./` `../` `\` || 盘符 `X:` || 含 `/`」，不再把含单个反斜杠的转义片段当路径；新增字面量 `\n`、Windows 盘符/UNC 两个回归测试。fmt/clippy/test 全绿。
-
-**#D session 管理模型：通用线 + 任务线（已交付，2026-09-01）**
-
-- 背景：通用 agent 沿用 coding agent 的 session 模型不自然。coding 以「任务」为 session 边界；通用助手日常杂活不该每条都开任务。
-- 定案方向（用户选）：**一条常驻通用 session + 按需显式开启的任务 session**。任务完成/用户关闭即归档，独享完整上下文，不污染通用线。
-- **与 /move 耦合（用户补充**：移动到 workspace 外目录往往意味着「在该目录执行主线以外的任务」→ 可作为**自动触发任务 session 的信号**：/move 到外部目录时，提示把该目录绑定为一个新任务 session（绑定目录 + 独立上下文）。这与 #B 的「受信目录」天然成一套：**任务 session = 受信目录 + 独立上下文边界**。
-- 设计草稿已出（2026-09-01）：[ADR-0031](adr/0031-task-session-model.md)（Proposed）——现状盘点（sessions 表无类型字段、/new 切换机制可复用、todo 粒度不同不合并）+ 四个待决问题的决策分支（Q1 触发边界推荐「显式 /task + /move 批准后提示」；Q2 推荐 /tasks 命令、todo 并行不合并；Q3 推荐 sessions 补 `kind`/`bound_path` 两列、归档复用 state；Q4 推荐跨频道切换但全局单活跃）+ 影响面 + 明确不做 + 4 个 grill 确认项。
-- **勿提前实现**：待 grill 逐项拍板后再动代码。
-- **补充 grill 轮（2026-09-01·2）：session 切分的必要性重审**
-  - 事实核对（代码核实）：启动时 `latest_session()`（`cli.rs:568`）只续接 session_id，`Context.history` 从空开始、历史**不回灌**；历史的可达性全靠 `memory_research`（FTS5 关键词，天然跨 session）。channel 只是 `sessions.channel` 元数据列，各频道共享同一个 Agent 与全局单 `session_id`；Context 是进程内易失缓冲、session 是 sqlite 持久分区，两者本就解耦。
-  - 用户质疑：既然历史不进上下文、检索跨 session，session 按任务切分的必要性还剩多少？按时间/轮数自动切分（每 N 天或每 N 轮自动换 session）是否更省心？
-  - 评估（待拍板）：
-    - session 切分的真实作用面在**单次进程长运行期内**：`context.clear()` 是唯一真正丢弃垃圾上下文的机制——自动压缩只是摘要化，摘要仍留在上下文且会层层再压缩；重启后大家都是空上下文，切分差异归零。用户重启/重连频繁 → 按任务切分通用线的收益确实被高估。
-    - 时间/轮数自动切分的代价：任务跨切分点被腰斩，两半只靠 memory_research 关键词衔接（语义连续性弱于进程内「工作记忆」）；但该代价与「重启」同构，用户已接受。
-    - 折中方向（推荐评审）：**通用线自动周期切分**（触发时自动打标题——复用现有 compact 摘要机制；可选在切分点生成一段 handoff 摘要注入新 session 开头，软化腰斩）**+ 任务线降级保留**——/task 的价值重定义为「隔离 + 可整体归档 + 绑定受信目录」，而非「让历史可用」（历史可用性 memory_research 已覆盖）。通用线从此零管理。
-  - **拍板轮（2026-09-01·3）：自动切分否决**——若切分挂压缩触发，短上下文模型会频繁建 session、列表被灌爆（用户反例成立）；自动切分收益又只在进程长运行期存在（该场景 `/clear` 手动可覆盖）。**定案：通用线维持现状（一条流水 + /new + 自动压缩，零改动），仅以 /task 切分独立任务线**；Q6/Q7（切分选型/与任务线交互）作废。切分相关的回灌定案为 **sqlite 尾部 SELECT**（零 LLM 调用、无性能成本，不受该反例影响）。ADR-0031 全部问题（Q1-Q4 + 无参/move/WebUI/回灌）逐项拍板完毕，状态 Proposed → **Accepted（待实现）**，定案全文见 [ADR-0031](adr/0031-task-session-model.md) 「grill 定案记录」。
-  - ~~新增未决：切回是否回灌~~（**已拍板 2026-09-01·3**：回灌目标线 sqlite 尾部——进任务线带通用线尾部、切回任务线带该线尾部、退出回通用线反向回灌；archived 不回灌只提示；按字符预算封顶 + 游标防同进程重复回灌。全文见 ADR-0031 定案记录）。
-- 已实现（2026-09-01，详见 [ADR-0031](adr/0031-task-session-model.md) 实现记录）：`sessions` 幂等补 `kind`/`bound_path` + 任务查询族（`memory/sqlite.rs`）；`/task <名>` / `/task`（回通用线）/ `/task close`（归档）/ `/tasks` 四命令 + 切线回灌（`commands/slash.rs::backfill_context`——只回灌 user/assistant 正文防孤儿 tool 消息；切换必 clear → 天然幂等，实际未引入游标）；`Context.task_state` Runtime Context 注入任务名/绑定目录（turn 起点刷新）；`/move` 批准后提示开任务线（不自动建）；WebUI 会话列表 `[task]`/`[archived]` 徽标；`latest_session` 排除归档线。回归测试五组全绿。
-
-### ⭐ 新增设计与待实施（2026-08-27），两项一起落地
-
-**#E `/provider` 切换默认持久化 + `--temp` 临时切换（已交付，2026-08-28 核实）**
-
-- 现状：`switch_provider`（`slash.rs:697`）只 `reload_provider` 内存替换，**不写 config.toml** → 进程内生效、重启/WebUI 保存配置即回落到 config 值；`context_size` 冻结在 Agent 构建期，切换后压缩阈值不跟随新模型。
-- 定案（用户倾向，2026-08-27）：
-  - `/provider <n|id.alias>` → **默认持久化**：把新模型写进 `[agent.<alias>].model`，同步更新内存 `live_config.agent.<alias>.model`，再 `reload_provider`。
-  - `/provider --temp <n|id.alias>` → 维持纯内存临时切换（试跑不落地）。
-  - 写盘用 `toml_edit` 定点改 `[agent.<alias>].model` 单 key（保住注释，不 `toml::to_string_pretty` 全量覆盖）；`switch` 从 live_config 分离 `persist` 标志。
-- 已实现：`slash.rs:697-765` 解析 `--temp` 前缀（`parse_provider_arg`）→ `switch_provider(persist)` 双分支；默认分支用 `toml_edit` 定点写 `[agent.<alias>].model`（保注释）+ 同步内存 `live_config` → `reload_provider`；临时分支仅内存替换，输出追加 `(temporary)`。含两个回归测试（`test_provider_switch_temp_does_not_persist` / 持久化用例写真实 `config.toml`）。
-
-**#F `context_size` 与 Agent 解耦：懒解析 + 缓存 + reload 失效（已交付，2026-08-28 核实；残留一处见末条）**
-
-- 现状：`Agent.context_size: usize` 字段在 `Agent::new`（`cli.rs:562`）同步解析并冻结；`reload_provider`（`mod.rs:244`）与 WebUI `hot_reload_providers` 只换 provider **不重算 context_size** → 进程内切到大/小窗模型后压缩阈值仍是旧值（`needs_compaction` 与 `compact` 的 token 预算都读它，`mod.rs:615/625`）。且构建期同步 `detect_context_size()` 是启动阻塞大头（见 #11 实测 ~200ms/次、main 探多次）。
-- 定案：`context_size` 不再冻结，改为**按活动 provider 懒解析 + 缓存**，窗口随模型跟随：
-  - 新增 `Agent.resolved_context_size: RwLock<Option<usize>>` 作为结果缓存；
-  - 新增方法 `context_size_now()`：缓存命中直接返回；未命中 → 从 live_config 取当前 alias 的 `model_cfg.context_size`（`configured`）+ 活动 provider `detect_context_size()`，`min(configured,detected)`（探测不到用 configured、都没有 8192）→ 缓存；
-  - `reload_provider` / `reload_compact_provider` 命中时清空缓存 → `/provider` 切换、WebUI 热保存后窗口立即跟随新模型；
-  - 使用点全部改 `context_size_now()`：`maybe_auto_compact`（`mod.rs:615`）、`spawn_continuation` 克隆（`mod.rs:450`）、`/config` 展示与 `/compact`（`slash.rs:204/337`）。
-  - 顺带：`cli.rs::build_agent` **不再同步探测**（去掉对 `provider.detect_context_size()` 与 `provider_ref` 的依赖），把探测挪到首个 turn 懒执行 → 启动不再被 /props 阻塞；构建期仅按 `configured.unwrap_or(8192)` 传入基线。
-- 已实现（2026-08-28 核实）：`Agent.resolved_context_size` 缓存 + `context_size_now()`（`mod.rs:286`，`min(configured,detected)` / 全无 8192）；`reload_provider` 清缓存（`mod.rs:277`）；`fork_for_isolated` 共享父级缓存（`mod.rs:528`）；构建期不再同步探测（`cli.rs:567` 仅传 `configured.unwrap_or(8192)` 作降级基线）；使用点已迁移 `maybe_auto_compact`（`mod.rs:677`）、`/compact`（`slash.rs:205`）、`/config`（`slash.rs:336`）；含回归测试 `test_context_size_now_follows_provider_switch`。
-- **残留已清（2026-08-29）**：`/stats`（`slash.rs`）原直读冻结基线 `agent.context_size`，已迁移 `context_size_now()`（与 `/config` 一致），展示的 context_size/阈值/占比跟随当前模型。
-- ~~待决（本项不实现）：探测结果磁盘缓存~~（**关闭不做，grill 2026-09-01·3**：懒解析已把它移出启动关键路径，每进程至多一次 ~200ms 探测；单用户重启场景磁盘缓存省不下可感知成本，反而引入 base_url+model 键的失效管理面。不再挂起）。
-- 附带影响：`context_size_now` 是 async，`/config`/`/compact` 路径随之 async（本就 async 上下文，无碍）；`--temp` 切换时 live_config 模型未更新，`configured` 取到旧模型值作为 min 上限，属可接受的临时实验边界。
-
-### ⭐ 新增发现（2026-09-01）
-
-**#G llama.cpp / Ollama 思考模型的思考内容被原样吐给用户（已交付）**
-
-- 现象：QQ 频道对话里出现大段模型思考文本；显式写 `[provider.llamacpp.compat] reasoning_to_content = false` 后消失。
-- 根因：`Compat::ollama()` / `Compat::llamacpp()` 预设把 `reasoning_to_content` 默认置 `true`（ADR-0026 原意图是「避免某些端点丢思考」），
-  而 `openai_compat.rs:386-397` 会把流式 `delta.reasoning_content` / `delta.thinking` 折成 `TextDelta` 上抛。
-  但这两个端点的 OpenAI 兼容层在思考模型下 `content` **照常返回正式回答**，`reasoning_content` 只是额外思考流
-  → 折回等于把思考混进可见文本、context 与 sqlite（进而污染压缩素材）。
-- 附带反直觉点：模型把思考内联成带 `<think>` 标签的文本时，本就被 `ToolCallStreamParser`（`tool_call/stream_parser.rs:52`）剥掉；
-  拆到 `reasoning_content` 字段的反而被折回显示 —— 「带标签的隐藏、分字段的显示」，两层行为相反。
-- 修复：两个预设默认值改 `false`（`compat.rs`），字段与预设注释写明依据；`Compat::default()` 本就 `false`，
-  故 bare / LMStudio / 线上端点零回归；确实需要折回的端点仍可 `[provider.<id>.compat] reasoning_to_content = true` 显式开启。
-  新增两组回归测试（默认丢弃 / 显式开启才折回），原有折回测试改为覆盖显式路径。详见 [ADR-0026 修订记录](adr/0026-provider-compat.md)。
-- **连带收敛（同批交付）**：per-model 表 `model_folds_reasoning` 已删除——它对 `deepseek-reasoner` / `deepseek-r1` /
-  `deepseek-reasoning` / `kimi-k` 强制开启该字段，属同类问题。该规则移植自 nanobot `_MODEL_THINKING_STYLES`，
-  但 nanobot 原意是「R1 走 `reasoning_content` 字段名而非 `reasoning`」（字段选择），而 llaia 流解析
-  本就同时读 `reasoning_content` 与 `thinking`、从不读 `reasoning`，故这条规则在 llaia 内唯一效果就是强制折回
-  可见文本。删除后 per-model 表只剩 `max_tokens_field`；`detect_per_model_overrides` 测试已改为断言推理模型不再被折回。
-
-### ⭐ 新增设计与已交付（2026-09-01·2，grill 定案并实现）
-
-**#H `/btw` 侧问命令：临时话题不污染上下文（已交付，2026-09-01）**
-
-- 参考实现（2026-09-01 搜索核实）：
-  - **Claude Code /btw**：侧问可读当前完整会话上下文但**不写入**历史，无工具、单轮、不打断运行中的主 turn，答案进可关闭浮层；定位是「子代理的反面」——子代理有工具无上下文，/btw 有上下文无工具。
-  - **praisonai /btw**：一次性抛弃型 agent（fresh context、无工具），可选 `--keep` 在主历史留一行面包屑；与 /queue 的分界清晰——/btw 答案只给用户看，要影响主任务就走 /queue 进主历史。
-  - **pi-btw 社区扩展**（两个实现）：临时侧线程、可在侧线内追问、可手动把侧线内容（最新问答/行区间/整段）带回主编辑器，从不自动合流。
-  - 共同不变量：主历史零污染（或仅一行面包屑）、不中断主 turn、用能力受限（无工具/无写入）换零上下文代价。
-- LLAIA 落地评估：
-  - **锁约束是硬边界**：`run_turn` 在整个 turn 期间持有 Agent 锁（`sink.rs:47`），turn 进行中外部无法读 context。Claude Code 式「读当前会话答侧问」仅 **idle 时可行**：短暂锁住 → clone context 消息快照 → 释放锁 → 用 provider 直接单轮调用（不经 `handle_message_streaming`、不写 context）。turn 运行中：回 Busy 提示（与现有 web Busy 事件一致），**不做**共享上下文快照广播等结构性改造。
-  - 执行面：侧问走独立 provider 调用（可配独立模型，缺省 compact_provider 回退主模型），无工具、单轮。
-  - 持久化（**定案**）：问答默认不进 context，落 sqlite **独立表 `side_messages`**（不给 messages 加 kind 列——那要连改动 INSERT/DELETE 触发器与 memory_research 查询面，核心链路为零成本功能不值；不进 FTS，侧问短小检索价值低，确有留存需求再扩）。
-  - 呈现：WebUI 用独立样式的消息块（不做浮层）；CLI 直接打印。
-- ~~待 grill~~（**全部拍板，grill 2026-09-01·3**）：① busy 时回 **Busy 提示**——`run_turn` 全程持 Agent 锁（`sink.rs:47`）读不到 context，裸问降级=静默降质的差体验，明确拒绝最诚实；② 落库=上述独立表方案；③ 追问=**无状态单轮但自动连上下文**——prompt 拼入同进程内最近 1-2 次侧问 Q&A，追问体验连贯而不引入侧会话生命周期管理（pi-btw 式多轮的复杂度不值），历史仍零污染。
-- 已实现（2026-09-01）：`slash.rs::run_btw`（锁内快照 context 尾部 6000 字符 + summary，compact_provider 回退主 provider 单轮调用、无工具、不写 context）+ `side_messages` 独立表（`sqlite.rs`，不进 messages/FTS）+ 自连上下文（`Agent.btw_recent` 进程内 cap 2，优先读 sqlite 同 session 最近 2 组）+ `/btw` 斜杠命令（CLI/QQ 文本回显）+ web 频道 `WebEvent::Side` 独立样式消息块（不发 Done、不解除 busy）+ CLI/QQ busy 拦截（「a turn is running; ask again when idle」）。回归测试：零污染（context 长度不变）、side_messages 往返、自连 prompt 含前问与快照。
-
-**#I `/steer` 运行中插话：不打断当前任务的途中提示（已交付，2026-09-01）**
-
-- 参考实现（2026-09-01 搜索核实）：
-  - **Hermes CLI /steer**：提示暂存，agent **下一次工具调用结束后**注入「User added: ...」系统式便签，模型下一推理步自然吸收；不打断不重置。与 /queue（等整 turn 结束再作为下一条用户消息）和 interrupt（Ctrl+C 重置）构成三档；另有 `busy_input_mode` 配置把运行中输入的默认行为设为 interrupt/queue/steer。
-  - **OpenClaw /steer**：注入活动 run 的 steering buffer，在下一个 runtime 边界生效；session idle 时降级为普通 prompt。其默认 queue 模式即 steer——运行中普通消息自动 drain 进当前 run，/steer 只是显式形式；500ms debounce 把连发多条合并为一注。
-  - 共同点：注入点都在工具调用边界，不抢占进行中的工具/模型调用；具体、增量式的提示（「加上 X，其余不动」）远比模糊提示可靠。
-- LLAIA 落地评估：
-  - 注入点现成：`handle_message_streaming` 工具循环每迭代顶部（`agent/mod.rs:940`）——每迭代组装请求前 drain steer buffer → push 一条带标记的 user 消息（如 `[steer] User added: ...`）→ 落 sqlite；`context.to_messages` 本就每迭代重组，模型下一迭代自然看到。
-  - 通道机制：`Agent.steer_buffer: Arc<Mutex<VecDeque<String>>>`，channel 持有克隆，**不经过 Agent 锁**——turn 持锁期间 channel 仍可投递。web.rs「turn 运行中 chat → Busy」（`web.rs:215`）处拦截 `/steer <msg>` 前缀：投递 buffer + ack 回显；普通消息行为不变。QQ/CLI 同构。
-  - 边界：空闲时 /steer = 直接当普通消息跑（对齐 OpenClaw 降级）；长工具执行期间消息等待至下一边界，与 Hermes/OpenClaw 一致。
-  - 与 ask_user 关系：ask_user 是阻塞式提问软暂停，/steer 是非阻塞旁路插话，互补不冲突。
-- ~~待 grill~~（**全部拍板，grill 2026-09-01·3**）：① **仅显式 `/steer`**——运行中普通消息维持 Busy 现状，不改全频道默认语义（插话/新题/取消的意图无法可靠判断）；`busy_input_mode`（interrupt/queue/steer）留到有真实使用反馈再议，届时也只是 Busy 分支一处路由改动。② 注入形态 = **user 消息带 `[steer]` 前缀**——兼容性下限最高（标签协议降级端点按纯文本拼接、无法区分中途 system；部分 OpenAI 兼容端点亦不收会话中途 system），且自然进 history/sqlite，WebUI 透明可见。③ **drain 仅在非 force_summary 迭代顶部**（`mod.rs:940` 循环内 `to_messages` 组装前）——末轮使命是收敛出最终回答，注入新指令会让总结分叉且大概率无后续迭代落实；末轮残留直接丢弃并在输出尾部提示「steer 未生效」，比静默吞掉诚实。
-- 已实现（2026-09-01）：`Agent.steer_buffer`（独立 `Arc<Mutex<VecDeque>>` 不经 Agent 锁；registry 持同一 Arc 供频道投递，`fork_for_isolated` 派生独立空缓冲——cron/委派 turn 不消费主线插话）+ 注入点在 `handle_message_streaming` 非末轮迭代顶部（drain → `[steer] User added: ...` user 消息进 context/sqlite）+ 末轮/turn 结束残留丢弃并附「[steer not applied]」提示 + 三频道拦截（web：运行中投递+Side 回执、空闲降级为普通消息；CLI：运行中投递不排队、空闲剥前缀；QQ：`running_stops` 判运行态，同构）。回归测试：注入进 context/sqlite、fork 缓冲隔离、`split_steer` 解析。
-
-### ⭐ 新增发现（2026-09-01·3）
-
-**#J send_media 作用域滞后 /move + QQ 大文件上传 500/850012（已交付，2026-09-01）**
-
-- 现象：/move 到 home 外目录做完 PPT 任务，`send_file` 发 moved 目录里的成品被拒 `outside workspace`（workspace_root 已是 E:\，send_file 却只认静态家目录）；agent 自救把文件拷回 home 重发后，QQ 上传 5.24MB pptx 返回 500/850012 "call inner proxy error"，用户没收到文件（sessions.db sess18 + llaia.log 完整证据链）。
-- 根因 1（工具层）：`SendImage/SendFile` 构造时（`cli.rs`）持有**静态家目录 PathBuf**，走 `resolve_within` 只认 home，未共享文件三件套与 terminal 的 `workspace_root`/`trusted_dirs` Arc → /move 后作用域分叉：绝对路径被拒、相对路径解析回旧家目录。
-- 根因 2（QQ 侧）：日志证据——历史上传**全部是图片且全部成功**（最大 2.77MB，base64 body ≈3.7MB）；本次是**第一次 file_type=4 文件类上传**（base64 body ≈7.3MB），被 QQ 内部代理拒绝。850012 不在官方错误码表（超限是 850031）；官方对本地文件/大文件的正路是分片上传（上限 200MB）。
-- 修复：
-  1. **send_image/send_file 作用域对齐**：改持与文件工具同一对 `workspace_root` + `trusted_dirs` Arc，走 `validate_path_in_scope`；家目录作为固定额外可发送范围（同 `file_read` extra_readable 语义）——/move 后 tts/、uploads/ 产物不断联。回归 `test_send_media_follows_moved_workspace`（moved 绝对/相对路径、家目录可达、作用域外拒绝）。
-  2. **QQ 上传双路径**（`channels/qq.rs`）：图片续走 base64 直传（补 `file_name` 字段——缺它在 QQ 端显示未命名文件），失败自动降级分片；**文件类走官方分片上传**——`upload_prepare`（file_type/file_size/file_name/md5/sha1/md5_10m，md5_10m 口径按文档为前 **10002432** 字节）→ 预签名地址 PUT 分片（失败重试一次）→ 逐片 `upload_part_finish` → `/files` 带 `upload_id` 合并换 `file_info` → msg_type=7 发送不变。新增 `post_json_authed`（11244 token 刷新重试）、`qq_file_checksums`/`qq_md5_hex` 校验值助手；依赖新增 `sha1 = "0.10"`。
-  3. **WebUI `/file` 同源残留（复查发现，同日修）**：`serve_file` 原用静态家目录 + 拒绝绝对路径的 `resolve_within`——`/move` 后媒体事件携带的绝对路径拉不到文件。抽出 `resolve_file_in_scope`（同一套 `validate_path_in_scope`，家目录为额外范围；相对路径新根下不存在时回退家目录，保 `/upload` 产物）；实时作用域经 `AgentRegistry::attach_main_scope` 缓存 workspace_root/trusted_dirs Arc（与 `main_workspace` 缓存同一防死锁动机：**请求时锁 main 会被运行中的 turn 阻塞到回合结束，恰好卡住媒体回显拉取**）。回归 `test_resolve_file_in_scope_after_move`。
-  4. 回归：`tests/qq_http.rs` 三条（分片全流程含请求体字段断言 / 图片 base64 带 file_name / base64 500 后图片降级分片）+ `qq.rs` 校验值单测三条（含 10002432 边界）。518 lib tests + 全部集成测试绿。
+- 生产路径 `lock().unwrap()`：`slash.rs`（background_tasks）与 `sqlite.rs` 全文件（conn，约 20 处）。锁内均同步调用、无 await，正确性无问题，仅 poisoning-panic 与编码约定冲突。机械替换 `unwrap_or_else(|e| e.into_inner())` 可解，diff 大。
+- `TRIM_CACHE` 无上限增长（`memory/trim.rs`）：单用户 MEMORY 变更频率低，实际影响极小。
+- 图片逐张串行 vision 描述（`agent/mod.rs::maybe_describe_images`）：可 `join_all`，但通常单图。
+- tools schema 每次请求重建序列化（`openai_compat.rs`）：~20 工具 × 每迭代，微小。
+- 常量正则 `unwrap()`（`secrets.rs` / `config.rs` / `approval.rs`）：逻辑上不可 panic，按约定补注释即可。
+- **定期主干代码体检**为**例行项**而非一次性交付：需要时手动触发（用户定，2026-08-25），主干模块（agent loop / provider / memory / web）逐次过一遍，产出为检查记录（发现项 → 直接修 / 单独立项 / 搁置留档）。历轮已交付修复见 CHANGELOG §v0.3.1 / §v0.3.2。
 
 ---
 
