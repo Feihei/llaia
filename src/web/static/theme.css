@@ -333,11 +333,30 @@ option { background: var(--bg-input); color: var(--text); }
 #config-pane .inline-add { padding: 2px 10px; font-size: 12px; }
 
 #config-pane .model-row {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: nowrap;
   margin: 6px 0; padding: 6px 8px;
   border: 1px solid var(--border); background: var(--bg-input);
 }
-#config-pane .model-row label { width: auto; min-width: 90px; color: var(--text-dim); }
+#config-pane .model-row label {
+  width: auto; min-width: 64px; max-width: 130px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-dim); flex: 0 1 auto;
+}
+
+/* 单模型可用性探测按钮：默认（复用 inline-add 绿），成功✓保持绿，失败✗转红 */
+#config-pane .probebtn {
+  padding: 2px 5px; font-size: 11px;
+  width: 46px; text-align: center; flex: 0 0 auto;
+}
+#config-pane .probebtn--ok {
+  color: var(--green); border-color: var(--green-deep);
+  background: rgba(56, 224, 123, .10);
+}
+#config-pane .probebtn--err {
+  color: var(--red); border-color: var(--red);
+  background: rgba(255, 90, 90, .10);
+}
 
 /* ---------- 标签列表（fallback 可增删） ---------- */
 #config-pane .tag-list {

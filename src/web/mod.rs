@@ -2239,6 +2239,15 @@ pub struct ProbeModelsBody {
     pub api_key: Option<String>,
 }
 
+/// POST /api/providers/:id/models/:alias/probe 的请求体：可覆盖 base_url / api_key / model
+///（默认用当前已保存配置）。全部可选，便于前端用「编辑器当前值」探测未保存的修改。
+#[derive(Deserialize)]
+pub struct ProbeModelBody {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+}
+
 /// POST /api/providers/:id/models → 探测该 provider 的可用模型列表。
 /// v1 仅 OpenAI 兼容端点（GET /models）。成功 `{ok:true, models:[{id,name}]}`，
 /// 失败 `{ok:false, error}`（HTTP 200，便于前端统一渲染错误文本）。
@@ -2287,6 +2296,131 @@ pub async fn probe_models(
             )
                 .into_response()
         }
+    }
+}
+
+/// POST /api/providers/:id/models/:alias/probe → 探测单个 model 的真实可用性。
+///
+/// 与 `probe_models`（测 GET /models 端点可达）不同，这里对具体 model 发一次
+/// 最小 chat 请求，能正常返回才视为可用——覆盖「/models 列表可见但实际不可用」的场景
+/// （key 权限不足、模型下架、配额耗尽等）。仅支持 OpenAI 兼容 endpoint。
+///
+/// 请求体可覆盖 base_url / api_key / model（前端传「编辑器当前值」探测未保存的修改）；
+/// 缺省用服务端已保存配置；api_key 为掩码 `••••` 时回退服务端真实 key。
+/// 成功 `{ok:true}`，失败 `{ok:false, error}`（HTTP 200，便于前端统一渲染）。
+pub async fn probe_model(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path((id, alias)): axum::extract::Path<(String, String)>,
+    axum::Json(body): axum::Json<ProbeModelBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let cfg = state.config.read().await;
+    let Some(provider) = cfg.provider.get(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "provider not found" })),
+        )
+            .into_response();
+    };
+    // 仅 OpenAI 兼容（含未显式设置 type 的存量配置，probe 沿用 openai_compat 语义）。
+    let is_openai =
+        provider.provider_type.is_empty() || provider.provider_type == "openai_compatible";
+    if !is_openai {
+        return (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error": format!("probe single model only supports openai_compatible, got '{}'", provider.provider_type)
+            })),
+        )
+            .into_response();
+    }
+    // model id：请求体覆盖优先，否则取该 alias 的已保存配置；alias 缺失时用 provider 首个 model。
+    let model_cfg = provider.model.get(&alias).map(|m| m.model.clone());
+    let model = body
+        .model
+        .clone()
+        .or(model_cfg)
+        .ok_or_else(|| anyhow::anyhow!("no model configured for alias '{}'", alias));
+    let model = match model {
+        Ok(m) if !m.is_empty() => m,
+        _ => {
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("empty model id for alias '{}'", alias)
+                })),
+            )
+                .into_response()
+        }
+    };
+    let base_url = body
+        .base_url
+        .clone()
+        .unwrap_or_else(|| provider.base_url.clone());
+    let api_key = body
+        .api_key
+        .clone()
+        .unwrap_or_else(|| provider.api_key.clone());
+    let api_key = if api_key == MASK {
+        provider.api_key.clone()
+    } else {
+        api_key
+    };
+
+    // 构造 OpenAI 兼容 provider，发最小请求（max_tokens=1）验证真实可用性。
+    let p = match crate::provider::openai_compat::OpenAiCompatibleProvider::new(
+        base_url,
+        api_key,
+        model,
+        false, // 探测不发 tools
+        Some(1),
+        crate::provider::compat::Compat {
+            max_tokens_field: crate::provider::compat::MaxTokensField::MaxTokens,
+            streaming_usage: false,
+            ..Default::default()
+        },
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let msgs = vec![crate::provider::ChatMessage::user("hi")];
+    let req = crate::provider::ChatRequest {
+        messages: &msgs,
+        tools: None,
+        disable_thinking: false,
+    };
+    // 外层超时兜底：OpenAiCompatibleProvider 单个 chunk 空闲超时 120s 对探测太长。
+    match tokio::time::timeout(std::time::Duration::from_secs(30), p.chat(&req)).await {
+        Ok(Ok(_resp)) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": true })),
+        )
+            .into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!(provider = %id, alias = %alias, error = %e, "single-model probe failed");
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            )
+                .into_response()
+        }
+        Err(_) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": false, "error": "probe timed out after 30s" })),
+        )
+            .into_response(),
     }
 }
 
@@ -2357,6 +2491,11 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route(
             "/api/providers/:id/models",
             axum::routing::post(probe_models),
+        )
+        // 单个 model 可用性探测：POST /api/providers/:id/models/:alias/probe
+        .route(
+            "/api/providers/:id/models/:alias/probe",
+            axum::routing::post(probe_model),
         )
         .route("/api/skills/:name", axum::routing::delete(delete_skill))
         .route(

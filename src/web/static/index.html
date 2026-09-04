@@ -326,9 +326,16 @@
                 <template x-for="(m, alias) in p.model" :key="alias">
                   <div class="model-row">
                     <label x-text="alias"></label>
-                    <input x-model="m.model" style="width:200px" placeholder="model id">
-                    <input type="number" placeholder="ctx" title="context window (tokens)" x-model.number="m.context_size" style="width:80px">
-                    <input type="number" placeholder="max_tokens" title="single-response token cap (per-model)" x-model.number="m.max_tokens" style="width:100px">
+                    <input x-model="m.model" style="width:150px" placeholder="model id">
+                    <input type="number" placeholder="ctx" title="context window (tokens)" x-model.number="m.context_size" style="width:64px">
+                    <input type="number" placeholder="max_tokens" title="single-response token cap (per-model)" x-model.number="m.max_tokens" style="width:84px">
+                    <button type="button" class="inline-add probebtn"
+                      :class="{ 'probebtn--ok': probeStatus[pid + '.' + alias] === 'ok', 'probebtn--err': probeStatus[pid + '.' + alias] && probeStatus[pid + '.' + alias] !== 'ok' }"
+                      :title="probeModelBtnTitle(pid, alias)"
+                      @click="probeModel(pid, alias)"
+                      :disabled="probeBusy(pid, alias)">
+                      <span x-text="probeModelBtnText(pid, alias)"></span>
+                    </button>
                     <button class="btn-delete" @click="deleteModel(pid, alias)">×</button>
                   </div>
                 </template>

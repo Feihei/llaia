@@ -146,6 +146,11 @@ function llaiaApp() {
     probeMsg: {},
     probeModels: {},
     probeChecked: {},
+    // 单模型可用性探测：key = "pid.alias"，值 ''=未测 / 'ok'=可用 / 'error: <msg>'=不可用。
+    // 注意：状态 map 用 probeStatus，不能叫 probeModel——与方法 probeModel() 同名会互相覆盖
+    //（同 runProbe/probeModels 的冲突，见上）。
+    probeStatus: {},
+    probeModelBusy: {},
     // 会话历史（P5 W1）
     sessions: [],
     selectedSession: null,
@@ -645,6 +650,57 @@ function llaiaApp() {
       this.probeChecked[pid] = {};
       this.probeMsg[pid] = picked.length + ' model(s) added — click Save to persist.';
     },
+
+    // ---- 单模型可用性探测（每个已配置 model 的 Probe 按钮） ----
+    // 用「编辑器当前值」探测：后端按 base_url/key/model 发一次最小 chat 请求，
+    // 能返回即代表该模型真实可用（不只是 GET /models 列表可见）。key 掩码 '••••' 由后端回退真值。
+    async probeModel(pid, alias) {
+      const key = pid + '.' + alias;
+      if (this.probeModelBusy[key]) return;
+      const p = this.cfg.provider[pid];
+      const m = p.model[alias];
+      if (!m || !m.model) { this.probeStatus[key] = 'error: empty model id'; return; }
+      this.probeModelBusy = { ...this.probeModelBusy, [key]: true };
+      this.probeStatus = { ...this.probeStatus, [key]: '' };
+      try {
+        const r = await this.apiFetch(
+          '/api/providers/' + encodeURIComponent(pid) +
+          '/models/' + encodeURIComponent(alias) + '/probe',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ base_url: p.base_url, api_key: p.api_key, model: m.model })
+          }
+        );
+        const j = await r.json();
+        const v = j.ok
+          ? 'ok'
+          : 'error: ' + (j.error || ('HTTP ' + r.status));
+        this.probeStatus = { ...this.probeStatus, [key]: v };
+      } catch (e) {
+        this.probeStatus = { ...this.probeStatus, [key]: 'error: ' + e.message };
+      } finally {
+        this.probeModelBusy = { ...this.probeModelBusy, [key]: false };
+      }
+    },
+    probeModelBtnText(pid, alias) {
+      const v = this.probeStatus[pid + '.' + alias];
+      if (this.probeModelBusy[pid + '.' + alias]) return 'Probing…';
+      if (v === 'ok') return '✓ ok';
+      if (v) return '✗';
+      return 'Probe';
+    },
+    probeModelBtnTitle(pid, alias) {
+      const v = this.probeStatus[pid + '.' + alias] || '';
+      return v && v !== 'ok' ? v : 'Probe this model';
+    },
+    // 必须返回布尔 true/false：Alpine 对表达式含 '.' 且值为 undefined 时会转成 ''，
+    // 而 '' 不在其 [null,undefined,false] 移除列表里，会把 disabled 设置上。
+    //（见 vendor/alpine.min.js 的 bind 处理器 dot 规则）。用 helper 规避。
+    probeBusy(pid, alias) {
+      return !!this.probeModelBusy[pid + '.' + alias];
+    },
+
     addAgent() {
       const alias = prompt('Enter new agent alias (e.g., coder, translator):');
       if (!alias || !alias.trim()) return;
