@@ -51,20 +51,27 @@ pub fn bootstrap_note(soul: &str, user: &str) -> Option<String> {
         );
     }
     if files.contains(&"SOUL.md") {
-        asks.push("what personality and speaking style you should have");
+        asks.push(
+            "what personality and speaking style you should have, and whether to keep the default name LLAIA",
+        );
     }
     let targets = files.join(" and ");
     let question_hint = asks.join("; and ");
 
     Some(format!(
         "[bootstrap] Your own setup is incomplete: {targets} still hold the untouched init \
-         template, so you do not know who this user is or how to behave. Finish answering the \
-         user's actual request first, then append your own questions for: {question_hint}. Ask \
-         at most 5 short questions, in the language the user writes in. When the answers come, \
-         record them with file_edit on the relative path(s) {targets}, keeping the existing \
-         headings. Never re-ask what you already asked in this conversation, and if the user \
-         declines to answer, write one line in USER.md saying so instead of pressing them. If a \
-         write is refused as outside your scope, tell the user to run /move home."
+         template, so you do not know who this user is or how to behave. Do these in order:\n\
+         1. Answer the user's actual request first.\n\
+         2. Then append your own questions for: {question_hint}. At most 5 short questions, in \
+         the language the user writes in. Ask them once — holding a second interview round \
+         instead of writing is a mistake.\n\
+         3. As soon as any answer arrives, your FIRST action in that turn is file_edit on \
+         {targets}, recording what you have been told so far: keep the existing headings, add \
+         the ones the template lacks. Never wait to be told to write, and never gather more \
+         answers before recording the ones already given.\n\
+         4. If the user declines or ignores the questions, write one line in USER.md saying so \
+         and get on with the work — that ends this bootstrap.\n\
+         If a write is refused as outside your scope, tell the user to run /move home."
     ))
 }
 
@@ -108,8 +115,10 @@ mod tests {
         assert!(note.starts_with("[bootstrap] "), "前缀约定：{}", note);
         assert!(note.contains("SOUL.md") && note.contains("USER.md"));
         assert!(note.contains("file_edit"));
-        // 反唠叨：只问一次 / 拒答即终止 / 越界降级指引
-        assert!(note.contains("Never re-ask"));
+        // 反唠叨：只问一次 / 答案到手即写盘 / 拒答即终止 / 越界降级指引
+        assert!(note.contains("Ask them once"));
+        assert!(note.contains("second interview round"));
+        assert!(note.contains("FIRST action"));
         assert!(note.contains("declines"));
         assert!(note.contains("/move home"));
         // 只缺 USER.md 时不应把 SOUL.md 也扯进来

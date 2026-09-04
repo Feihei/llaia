@@ -3,7 +3,8 @@ pub mod sqlite;
 pub mod trim;
 
 pub use markdown::{
-    ensure_template, is_unfilled, load_md, MEMORY_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE,
+    ensure_template, is_unfilled, load_md, MEMORY_TEMPLATE, SOUL_TEMPLATE, SOUL_TEMPLATE_LEGACY,
+    USER_TEMPLATE, USER_TEMPLATE_LEGACY,
 };
 
 use anyhow::{Context, Result};

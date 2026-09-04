@@ -1,6 +1,50 @@
 use anyhow::Result;
 use std::path::Path;
 
+use crate::memory::{SOUL_TEMPLATE, SOUL_TEMPLATE_LEGACY, USER_TEMPLATE, USER_TEMPLATE_LEGACY};
+
+/// 画像模板升级（v0.4.1：SOUL 加 `# Name`、USER 的 `language` 改为留空）。
+///
+/// 为什么改文件而不是让 `is_unfilled` 认多个版本：模板常量是"用户从未填写"的**指纹**，
+/// 文案一改，存量仍是旧占位符的文件就被判成已填写——first-run bootstrap 从此哑火，
+/// tail reminder 门禁（两份画像都仍是模板才不生成）反向失效，会为
+/// `<Describe LLAIA's personality>` 白烧一个隔离 turn。
+///
+/// 只有**逐字节等于旧模板**的文件才被覆写，用户填过哪怕一行都不命中比较。返回是否有改动。
+pub fn refresh_placeholder_templates(config_dir: &Path) -> Result<bool> {
+    let workspace = config_dir.join("workspace");
+    let mut dirs = vec![workspace];
+    let subagents = config_dir.join("workspace").join("subagent");
+    if subagents.is_dir() {
+        for entry in std::fs::read_dir(&subagents)? {
+            let dir = entry?.path();
+            if dir.is_dir() {
+                dirs.push(dir);
+            }
+        }
+    }
+
+    let mut changed = false;
+    for dir in dirs {
+        changed |= refresh_one(&dir.join("SOUL.md"), SOUL_TEMPLATE_LEGACY, SOUL_TEMPLATE)?;
+        changed |= refresh_one(&dir.join("USER.md"), USER_TEMPLATE_LEGACY, USER_TEMPLATE)?;
+    }
+    Ok(changed)
+}
+
+/// 单个画像文件：内容（忽略首尾空白）仍是 `legacy` 原文时覆写为 `current`。
+fn refresh_one(path: &Path, legacy: &str, current: &str) -> Result<bool> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    if content.trim() != legacy.trim() {
+        return Ok(false);
+    }
+    std::fs::write(path, current)?;
+    tracing::info!(file = ?path.file_name(), "profile placeholder upgraded to current template");
+    Ok(true)
+}
+
 /// 检测并执行 v0.1 → v0.2 目录结构迁移
 ///
 /// 旧结构：~/.llaia/ 下直接放 SOUL.md / USER.md / MEMORY.md / sessions.db / uploads/
@@ -135,6 +179,51 @@ mod tests {
         std::fs::write(dir.path().join(".migrated_v0.2"), "").unwrap();
         let migrated = migrate_if_needed(dir.path()).unwrap();
         assert!(!migrated);
+    }
+
+    /// 纯占位符画像（含 subagent 目录）升级到当前模板，且幂等；
+    /// 空文件不改写（`is_unfilled` 已把空判为待填，bootstrap 照常引导）。
+    #[test]
+    fn test_refresh_upgrades_pure_placeholders() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("workspace");
+        let sub = ws.join("subagent").join("coder");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(ws.join("SOUL.md"), SOUL_TEMPLATE_LEGACY).unwrap();
+        std::fs::write(sub.join("SOUL.md"), SOUL_TEMPLATE_LEGACY).unwrap();
+        std::fs::write(ws.join("USER.md"), "  \n").unwrap();
+
+        assert!(refresh_placeholder_templates(dir.path()).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(ws.join("SOUL.md")).unwrap(),
+            SOUL_TEMPLATE
+        );
+        assert_eq!(
+            std::fs::read_to_string(sub.join("SOUL.md")).unwrap(),
+            SOUL_TEMPLATE
+        );
+        assert_eq!(std::fs::read_to_string(ws.join("USER.md")).unwrap(), "  \n");
+        // 幂等：已是当前模板，再跑无改动
+        assert!(!refresh_placeholder_templates(dir.path()).unwrap());
+    }
+
+    /// 指纹根因：旧模板文本改常量后不再命中 is_unfilled（会被判"已填写"），
+    /// 所以必须先升级文件；而用户填过哪怕一行的画像绝不能被改写。
+    #[test]
+    fn test_refresh_leaves_filled_profiles_alone() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let edited = format!("{}\n- name: feihei\n", USER_TEMPLATE_LEGACY);
+        std::fs::write(ws.join("USER.md"), &edited).unwrap();
+
+        assert!(!refresh_placeholder_templates(dir.path()).unwrap());
+        assert_eq!(std::fs::read_to_string(ws.join("USER.md")).unwrap(), edited);
+        assert!(crate::memory::is_unfilled(SOUL_TEMPLATE, SOUL_TEMPLATE));
+        assert!(
+            !crate::memory::is_unfilled(SOUL_TEMPLATE_LEGACY, SOUL_TEMPLATE),
+            "旧模板文本必须不再命中新指纹，否则升级步骤失去依据"
+        );
     }
 
     #[test]

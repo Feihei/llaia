@@ -194,9 +194,9 @@ const CRON_TEMPLATE: &str = r#"# LLAIA cron schedule configuration
 # Fetch at most 3 sources, never fetch the same URL twice,
 # then summarize immediately.
 # """
-# 提示：agent 模式任务抓网页时，建议把 config.toml 中 [tools.web_fetch] 的
-# max_chars 调小（如 4000~5000），避免大段网页文本撑爆上下文导致 agent
-# 陷入"重复抓取同一 URL"死循环直至超时。
+# Tip: when an agent-mode task fetches web pages, consider lowering [tools.web_fetch]
+# max_chars in config.toml (e.g. 4000~5000) — large page dumps blow up the context
+# and can trap the agent in a "re-fetch the same URL" loop until it times out.
 
 # Example: run a tool chain every 30 minutes (no LLM token cost)
 # [[task]]
@@ -327,13 +327,17 @@ fn write_file_if_needed(path: &Path, content: &str, force: bool) -> Result<bool>
     Ok(true)
 }
 
-/// 启动路径共享的目录准备：先迁移旧结构，再幂等补齐 init 模板，之后才加载配置。
+/// 启动路径共享的目录准备：先迁移旧结构，再幂等补齐 init 模板，升级占位符画像，之后才加载配置。
 /// 顺序约束：迁移必须先于模板补齐（否则模板会遮蔽待迁移的旧版散落文件），
 /// 补齐必须先于配置加载（否则新生成的 config.toml 模板不会被本次加载，走了内存默认值）。
+/// 画像升级排在补齐之后：本次刚生成的模板已是当前版本，比对不命中即零成本。
 fn prepare_startup_dir(config_dir: &Path) -> Result<()> {
     crate::migrate::migrate_if_needed(config_dir)?;
     if init_scaffold(config_dir, false)? {
         tracing::info!(dir = %config_dir.display(), "scaffolded missing init templates");
+    }
+    if crate::migrate::refresh_placeholder_templates(config_dir)? {
+        tracing::info!("profile placeholders upgraded to the current SOUL/USER template");
     }
     Ok(())
 }
@@ -675,7 +679,7 @@ fn template_file_checks(config_dir: &Path, parse_err: Option<&str>) -> Vec<Docto
         Some(e) => DoctorCheck::error(
             "config.toml",
             format!(
-                "{}: {} — 手工修正语法后重跑；确认救不回再备份并 `llaia init --force` 重置模板",
+                "{}: {} — fix the syntax by hand and re-run; if it is unrecoverable, back this file up and reset the template with `llaia init --force`",
                 config_path.display(),
                 // detail 保持单行（WebUI 表格内展示）；完整多行错误由 CLI 头部打印
                 e.lines().next().unwrap_or(e)
@@ -686,7 +690,7 @@ fn template_file_checks(config_dir: &Path, parse_err: Option<&str>) -> Vec<Docto
         }
         None => DoctorCheck::warn(
             "config.toml",
-            "not found（下次 `llaia serve` / `llaia chat` 会自动生成模板，或显式 `llaia init`）",
+            "not found (the next `llaia serve` / `llaia chat` generates templates automatically, or run `llaia init`)",
         ),
     });
 
@@ -705,7 +709,7 @@ fn template_file_checks(config_dir: &Path, parse_err: Option<&str>) -> Vec<Docto
     } else {
         checks.push(DoctorCheck::warn(
             "cron.toml",
-            "not found（`llaia init` 可补齐模板，或等下次 serve/chat 自动生成）",
+            "not found (`llaia init` adds the template, or the next serve/chat generates it automatically)",
         ));
     }
 
@@ -724,7 +728,7 @@ fn template_file_checks(config_dir: &Path, parse_err: Option<&str>) -> Vec<Docto
     } else {
         checks.push(DoctorCheck::warn(
             "mcp.toml",
-            "not found（`llaia init` 可补齐模板，或等下次 serve/chat 自动生成）",
+            "not found (`llaia init` adds the template, or the next serve/chat generates it automatically)",
         ));
     }
 
@@ -768,11 +772,13 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
     // 配置解析失败：provider / agent / context_size 检查全部失去依据（内存默认值不是用户本意），
     // 报完文件层检查即退出——但绝不 panic、绝不吞掉诊断。
     if let Some(e) = &parse_err {
-        println!("\n[error] config.toml 解析失败: {}", e);
+        println!("\n[error] failed to parse config.toml: {}", e);
         println!(
-            "        修复：手工改正语法后重跑 `llaia doctor`；确认救不回时备份该文件再 `llaia init --force` 重置模板"
+            "        fix: correct the syntax by hand and re-run `llaia doctor`; if it is unrecoverable, back this file up, then `llaia init --force` to reset the template"
         );
-        println!("\n其余文件层检查（provider / agent 检查依赖有效配置，已跳过）:");
+        println!(
+            "\nremaining file-level checks (provider / agent checks need a valid config, skipped):"
+        );
         for c in template_file_checks(config_dir, Some(e)) {
             if c.name == "config.toml" {
                 continue; // 已在上方展开
@@ -788,7 +794,7 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         println!("config.toml: {}", config_path.display());
     } else {
         println!(
-            "\n[warn] config.toml not found —— 下次 `llaia serve` / `llaia chat` 会自动生成模板（也可 `llaia init`）；以下按内置默认值诊断"
+            "\n[warn] config.toml not found - the next `llaia serve` / `llaia chat` generates templates automatically (or run `llaia init`); diagnosing against built-in defaults below"
         );
     }
 
@@ -797,7 +803,7 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         println!(".env: {}", env_path.display());
     } else {
         println!(
-            "\n[warn] .env not found —— 敏感字段将以明文留在 config.toml；在 WebUI 保存配置会自动改为 ${{VAR}} 引用，或跑 /migrate-secrets 迁移存量"
+            "\n[warn] .env not found - sensitive fields stay in config.toml as plaintext; saving from the WebUI Config page moves them into ${{VAR}} references automatically, or run /migrate-secrets for existing ones"
         );
     }
 
@@ -837,7 +843,7 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
     if cfg.provider.is_empty() {
         println!("\n[warn] No provider configured; llaia serve will start in degraded mode (chat unavailable, WebUI config usable)");
         println!(
-            "       suggestion: 启动 `llaia serve` 后在 WebUI Config 页填写 provider，或编辑 {}/config.toml 取消注释 [provider.default]",
+            "       suggestion: run `llaia serve` and fill in a provider on the WebUI Config page, or edit {}/config.toml and uncomment [provider.default]",
             config_dir.display()
         );
     } else {

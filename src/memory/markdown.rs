@@ -25,7 +25,11 @@ pub async fn ensure_template(path: &PathBuf, template: &str) -> Result<()> {
     Ok(())
 }
 
-pub const SOUL_TEMPLATE: &str = r#"# Personality
+pub const SOUL_TEMPLATE: &str = r#"# Name
+
+LLAIA
+
+# Personality
 
 <Describe LLAIA's personality>
 
@@ -41,6 +45,42 @@ pub const SOUL_TEMPLATE: &str = r#"# Personality
 "#;
 
 pub const USER_TEMPLATE: &str = r#"# Basic Info
+
+- name:
+
+# Identity Binding
+
+- qq:
+- email:
+- web:
+
+# Preferences
+
+- language:
+"#;
+
+/// v0.4.1 之前的 SOUL / USER 模板原文。
+///
+/// 模板常量同时是 `is_unfilled` 的**指纹**：文案一改，存量仍是旧占位符的画像就被判成
+/// "已填写"，first-run bootstrap 哑火、tail reminder 门禁反向误烧一个隔离 turn。
+/// 只保留这两份历史文本，启动时由 `crate::migrate::refresh_placeholder_templates`
+/// 把逐字节命中旧模板的文件升级成当前模板，`is_unfilled` 因此继续只认一个常量。
+pub const SOUL_TEMPLATE_LEGACY: &str = r#"# Personality
+
+<Describe LLAIA's personality>
+
+# Behavior Guidelines
+
+- Be concise and direct, no fluff
+- Ask proactively when unsure
+- Use relative paths when working; files land under WORKSPACE. Use absolute paths only when writing elsewhere
+
+# Tone
+
+<conversation style>
+"#;
+
+pub const USER_TEMPLATE_LEGACY: &str = r#"# Basic Info
 
 - name:
 
