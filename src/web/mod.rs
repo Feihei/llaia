@@ -1150,7 +1150,10 @@ async fn fetch_latest_release() -> Result<UpdateCheck, String> {
         .map_err(|e| format!("query GitHub releases: {e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
-        return Err(format!("GitHub API {} (离线或限流，稍后再试)", status));
+        return Err(format!(
+            "GitHub API {} (offline or rate-limited, try again later)",
+            status
+        ));
     }
     let json: serde_json::Value = resp
         .json()

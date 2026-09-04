@@ -49,8 +49,9 @@ impl GuardConfig {
 pub const RETRY_HINT: &str = "[guard] Your previous response was discarded because it degenerated into repetition or produced no answer. Reply again, directly and concisely. Do not repeat what you already wrote.";
 
 /// 首次重试前发给用户的可见通知（退化产物不落库，用户需要知道刚才看到的
-/// 部分输出已被丢弃）。
-pub const RETRY_NOTICE: &str = "\n\n[检测到输出退化（重复/思考失控/空回复），已中止并重新生成…]\n";
+/// 部分输出已被丢弃）。语言同 RETRY_HINT：框架串一律英文。
+pub const RETRY_NOTICE: &str =
+    "\n\n[guard] Output degenerated (repetition / runaway thinking / empty reply) — aborted, regenerating…\n";
 
 /// 滑动窗口字符 n-gram 重复检测器（Generation Guard P1）。
 ///

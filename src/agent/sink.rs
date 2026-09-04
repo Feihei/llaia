@@ -87,7 +87,7 @@ pub async fn run_turn(
         if turn_elapsed >= max_turn_duration {
             auto_stopped = true;
             sink.on_auto_stopped(&format!(
-                "任务运行超过 {} 分钟仍无结果，已自动停止（可重发消息继续）",
+                "Task exceeded the {} min turn limit and was stopped — resend to continue",
                 max_turn_duration.as_secs() / 60
             ))
             .await;

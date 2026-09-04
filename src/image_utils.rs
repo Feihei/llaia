@@ -75,7 +75,7 @@ fn is_b64_char(c: char) -> bool {
 
 /// 从工具结果文本中提取所有 `data:image/<fmt>;base64,...` 图片 data URL。
 ///
-/// 返回 `(占位文本, 图片 data URL 列表)`：图片从原文中剥离并替换为 `[图片]`，
+/// 返回 `(占位文本, 图片 data URL 列表)`：图片从原文中剥离并替换为 `[image]`，
 /// 其余文本原样保留。用于把 MCP 截图这类超大 base64 从文本上下文里摘出来，
 /// 改走多模态图片通道（模型读图）或 vision 描述，避免撑爆上下文。
 pub fn extract_data_url_images(text: &str) -> (String, Vec<String>) {

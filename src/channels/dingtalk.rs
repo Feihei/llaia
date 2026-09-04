@@ -339,10 +339,7 @@ impl OutputSink for DingtalkSink {
         let mins = elapsed.as_secs() / 60;
         let _ = self
             .dt
-            .send_markdown(
-                &self.webhook,
-                &format!("⏳ 已运行 {mins} 分钟，仍在处理中，请稍候..."),
-            )
+            .send_markdown(&self.webhook, &crate::channels::keepalive_notice(mins))
             .await;
     }
     // 单轮超时自动中断：向用户说明原因，避免静默卡死

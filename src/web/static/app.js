@@ -29,7 +29,7 @@ function llaiaApp() {
     channelCards: [
       {
         key: 'qq', icon: '💬', title: 'QQ',
-        desc: 'QQ 开放平台机器人（扫码/手动登录），长轮询免公网回调。',
+        desc: 'QQ Open Platform bot (QR or manual login), long polling, no public callback needed.',
         fields: [
           { name: 'app_id', label: 'app_id' },
           { name: 'app_secret', label: 'app_secret', password: true },
@@ -39,29 +39,29 @@ function llaiaApp() {
       },
       {
         key: 'telegram', icon: '✈️', title: 'Telegram',
-        desc: 'BotFather 机器人 + long polling，免公网回调。',
+        desc: 'BotFather bot + long polling, no public callback needed.',
         fields: [
           { name: 'bot_token', label: 'bot_token', password: true },
-          { name: 'allow_chat_id', label: 'allow_chat_id', type: 'number', placeholder: '0 = 不限制' },
-          { name: 'owner_chat_id', label: 'owner_chat_id', type: 'number', placeholder: '0 = 回退 allow_chat_id' },
+          { name: 'allow_chat_id', label: 'allow_chat_id', type: 'number', placeholder: '0 = no restriction' },
+          { name: 'owner_chat_id', label: 'owner_chat_id', type: 'number', placeholder: '0 = fall back to allow_chat_id' },
           { name: 'api_base', label: 'api_base', placeholder: 'https://api.telegram.org' },
         ],
       },
       {
         key: 'dingtalk', icon: '📌', title: 'DingTalk',
-        desc: '钉钉开放平台机器人 + Stream Mode WebSocket，免公网回调。',
+        desc: 'DingTalk Open Platform bot + Stream Mode WebSocket, no public callback needed.',
         fields: [
           { name: 'client_id', label: 'client_id' },
           { name: 'client_secret', label: 'client_secret' },
-          { name: 'allow_staff_id', label: 'allow_staff_id', placeholder: '空 = 不限制' },
+          { name: 'allow_staff_id', label: 'allow_staff_id', placeholder: 'empty = no restriction' },
           { name: 'api_base', label: 'api_base', placeholder: 'https://api.dingtalk.com' },
         ],
       },
       {
         key: 'wechat', icon: '🟢', title: 'WeChat',
-        desc: '微信 ClawBot（ilink bot），扫码登录 + 长轮询免公网回调。',
+        desc: 'WeChat ClawBot (ilink bot), QR login + long polling, no public callback needed.',
         fields: [
-          { name: 'allow_user_id', label: 'allow_user_id', placeholder: '空 = 不限制' },
+          { name: 'allow_user_id', label: 'allow_user_id', placeholder: 'empty = no restriction' },
           { name: 'owner_user_id', label: 'owner_user_id', placeholder: 'optional cron push target' },
           { name: 'base_url', label: 'base_url', placeholder: 'https://ilinkai.weixin.qq.com' },
           { name: 'cdn_base_url', label: 'cdn_base_url', placeholder: 'https://novac2c.cdn.weixin.qq.com/c2c' },
@@ -69,19 +69,19 @@ function llaiaApp() {
       },
       {
         key: 'feishu', icon: '🚀', title: 'Feishu / Lark',
-        desc: '飞书开放平台事件订阅「长连接」模式（WebSocket 免公网回调）。',
+        desc: 'Feishu / Lark event subscription over a long connection (WebSocket, no public callback).',
         fields: [
           { name: 'app_id', label: 'app_id' },
           { name: 'app_secret', label: 'app_secret', password: true },
-          { name: 'allow_open_id', label: 'allow_open_id', placeholder: '空 = 不限制' },
-          { name: 'mention_only', label: 'mention_only（群内仅 @ 时回复）', type: 'checkbox' },
+          { name: 'allow_open_id', label: 'allow_open_id', placeholder: 'empty = no restriction' },
+          { name: 'mention_only', label: 'mention_only (in groups, reply only when @-mentioned)', type: 'checkbox' },
           { name: 'api_base', label: 'api_base', placeholder: 'https://open.feishu.cn/open-apis' },
           { name: 'ws_base', label: 'ws_base', placeholder: 'https://open.feishu.cn' },
         ],
       },
       {
         key: 'mail', icon: '✉️', title: 'Mail',
-        desc: 'IMAP 收件 + SMTP 发信（个人助理入口，单用户安全锁）。',
+        desc: 'IMAP inbox + SMTP sender (personal assistant entry, single-user lock).',
         fields: [
           { name: 'imap_server', label: 'imap_server', placeholder: 'imap.gmail.com' },
           { name: 'imap_port', label: 'imap_port', type: 'number', placeholder: '993' },
@@ -89,13 +89,13 @@ function llaiaApp() {
           { name: 'imap_pass', label: 'imap_pass', password: true },
           { name: 'smtp_server', label: 'smtp_server', placeholder: 'smtp.gmail.com' },
           { name: 'smtp_port', label: 'smtp_port', type: 'number', placeholder: '465' },
-          { name: 'smtp_user', label: 'smtp_user', placeholder: '留空复用 imap_user' },
-          { name: 'smtp_pass', label: 'smtp_pass', password: true, placeholder: '留空复用 imap_pass' },
+          { name: 'smtp_user', label: 'smtp_user', placeholder: 'empty = reuse imap_user' },
+          { name: 'smtp_pass', label: 'smtp_pass', password: true, placeholder: 'empty = reuse imap_pass' },
           { name: 'poll_interval_secs', label: 'poll_interval_secs', type: 'number', placeholder: '30' },
           { name: 'mailbox', label: 'mailbox', placeholder: 'INBOX' },
-          { name: 'owner_email', label: 'owner_email', placeholder: '只响应此地址（谨慎留空）' },
+          { name: 'owner_email', label: 'owner_email', placeholder: 'respond to this address only (empty is risky)' },
           { name: 'from_name', label: 'from_name', placeholder: 'LLAIA' },
-          { name: 'mark_seen', label: 'mark_seen（处理后标记已读）', type: 'checkbox' },
+          { name: 'mark_seen', label: 'mark_seen (mark as read after processing)', type: 'checkbox' },
           { name: 'max_attachment_mb', label: 'max_attachment_mb', type: 'number', placeholder: '10' },
         ],
       },
@@ -904,7 +904,7 @@ function llaiaApp() {
     async toggleSkill(name, active) {
       const r = await this.apiFetch(`/api/skills/${encodeURIComponent(name)}/active`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ active }) });
       if (!this.authed) return;
-      if (r.ok) { this.skillMsg = `✓ ${name} ${active ? 'enabled' : 'disabled'}（保存配置或重启后生效）`; }
+      if (r.ok) { this.skillMsg = `✓ ${name} ${active ? 'enabled' : 'disabled'} (takes effect after saving the config or restarting)`; }
       else { let j; try { j = await r.json(); } catch { j = {}; } this.skillMsg = '✗ ' + (j.error || r.status); await this.loadSkills(); }
     },
     async editSkill(name) {
@@ -924,7 +924,7 @@ function llaiaApp() {
       if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
-      if (r.ok) { this.skillContentMsg = '✓ Saved（保存配置或重启后生效）'; }
+      if (r.ok) { this.skillContentMsg = '✓ Saved (takes effect after saving the config or restarting)'; }
       else { this.skillContentMsg = '✗ ' + (j.error || r.status); }
     },
     async newSkill() {

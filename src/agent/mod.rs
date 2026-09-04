@@ -1190,11 +1190,12 @@ impl Agent {
                     reason = %reason,
                     "generation degenerated, gave up after retries"
                 );
-                let mut diag =
-                    format!("[guard] 生成退化（{reason}），已中止并放弃重试，本轮到此为止。");
+                let mut diag = format!(
+                    "[guard] Output degenerated ({reason}) — aborted, retries exhausted, this turn ends here."
+                );
                 if self.guard_streak >= guard.breaker_threshold {
                     diag.push_str(&format!(
-                        "\n[guard] 已连续 {} 轮生成退化：怀疑当前模型/量化/推理参数撑不住当前上下文，建议调整推理端采样参数（repetition penalty、context 等）或用 /provider 切换模型。",
+                        "\n[guard] {} degenerated turns in a row: the current model / quantization / inference params probably cannot carry this context. Tune sampling on the inference side (repetition penalty, context length, …) or switch model with /provider.",
                         self.guard_streak
                     ));
                 }
@@ -1325,7 +1326,7 @@ impl Agent {
                     .unwrap_or("tool");
                 let text = msg.content.as_text();
 
-                // 1) 提取工具返回的图片 data URL，文本中剥离为 [图片] 占位
+                // 1) 提取工具返回的图片 data URL，文本中剥离为 [image] 占位
                 let (placeholder, images) = crate::image_utils::extract_data_url_images(&text);
 
                 // 2) 非图片内容超长截断兜底（完整内容由下方 append_message 写入 sqlite 留底）
@@ -1932,7 +1933,10 @@ mod tests {
             .await
             .unwrap();
         assert!(t1.contains("[guard]"));
-        assert!(!t1.contains("已连续"), "first failure should not warn yet");
+        assert!(
+            !t1.contains("turns in a row"),
+            "first failure should not warn yet"
+        );
         assert_eq!(agent.guard_streak, 1);
 
         let t2 = agent
@@ -1940,7 +1944,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            t2.contains("已连续 2 轮"),
+            t2.contains("2 degenerated turns in a row"),
             "second consecutive failure warns: {t2}"
         );
         assert_eq!(agent.guard_streak, 2);
@@ -2243,7 +2247,7 @@ mod tests {
     }
 
     /// 回归：工具返回 base64 图片（如 blender-mcp get_viewport_screenshot）时——
-    /// 1) 图片从工具文本剥离为 [图片] 占位，base64 不进文本上下文；
+    /// 1) 图片从工具文本剥离为 [image] 占位，base64 不进文本上下文；
     /// 2) 无 vision_provider → 桥接 user 多模态消息，让（多模态）主模型真正看到图；
     /// 3) 图片落盘 workspace/tmp/ 并发 MediaOutput 事件回显给用户；
     /// 4) 非图片超长文本按 tool_result_cap 截断兜底。
@@ -2317,7 +2321,7 @@ mod tests {
             .unwrap();
         assert_eq!(result, "done");
 
-        // 1) 工具消息：图片剥离为 [图片] 占位，base64 不进文本上下文
+        // 1) 工具消息：图片剥离为 [image] 占位，base64 不进文本上下文
         let tool_msgs: Vec<_> = agent
             .context
             .history

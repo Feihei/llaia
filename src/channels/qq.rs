@@ -1194,7 +1194,7 @@ impl OutputSink for QqSink {
             .qq
             .send_c2c_message(
                 &self.user_openid,
-                &format!("⏳ 已运行 {mins} 分钟，仍在处理中，请稍候..."),
+                &crate::channels::keepalive_notice(mins),
                 Some(&self.msg_id),
             )
             .await;

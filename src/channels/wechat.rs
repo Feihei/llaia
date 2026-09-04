@@ -386,9 +386,9 @@ impl WechatChannel {
                         }
                     }
                 }
-                2 => parts.push("[图片]".into()),
-                4 => parts.push("[文件]".into()),
-                5 => parts.push("[视频]".into()),
+                2 => parts.push("[image]".into()),
+                4 => parts.push("[file]".into()),
+                5 => parts.push("[video]".into()),
                 _ => {}
             }
         }
@@ -769,10 +769,7 @@ impl OutputSink for WechatSink {
         let mins = elapsed.as_secs() / 60;
         let _ = self
             .wx
-            .send_text(
-                &self.user_id,
-                &format!("⏳ 已运行 {mins} 分钟，仍在处理中，请稍候..."),
-            )
+            .send_text(&self.user_id, &crate::channels::keepalive_notice(mins))
             .await;
     }
     // 单轮超时自动中断：向用户说明原因，避免静默卡死
@@ -958,7 +955,7 @@ mod tests {
                 { "type": 2, "image_item": {} }
             ]
         });
-        assert_eq!(WechatChannel::extract_text(&msg), "你好\n语音转录\n[图片]");
+        assert_eq!(WechatChannel::extract_text(&msg), "你好\n语音转录\n[image]");
     }
 
     #[test]

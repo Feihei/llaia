@@ -37,3 +37,9 @@ pub trait Channel: Send + Sync + 'static {
         None
     }
 }
+
+/// 长任务心跳文案（各 IM 频道共用）。框架串统一英文，与 `[guard]` / `[steer]` 一致；
+/// 集中一处也避免 5 个频道各写一份。
+pub fn keepalive_notice(mins: u64) -> String {
+    format!("⏳ Still working — {mins} min elapsed.")
+}
