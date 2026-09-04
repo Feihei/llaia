@@ -745,15 +745,30 @@ impl Agent {
         }
     }
 
+    /// tool definitions（实际随 messages 一并发送的 tools JSON schema）的 token 估算，
+    /// 口径与 `/stats` 一致：序列化字符数 / 4。空工具集返回 0。
+    ///
+    /// `estimate_tokens` 不含 tools（它只数 messages），故压缩判定与硬截断须自行扣除这部分
+    /// 真实占用——否则小窗口模型上会出现「估算未超、实发被拒」的错配。
+    pub fn tool_def_tokens(&self) -> usize {
+        serde_json::to_string(&self.tools.specs())
+            .unwrap_or_default()
+            .chars()
+            .count()
+            / 4
+    }
+
     /// 上下文超阈值则自动压缩（优先 compact_provider，未配置回退主 provider）。
     /// 抽成方法，供「回合开头」与「工具循环内每次迭代」复用同一套逻辑，
     /// 避免单回合内工具链把上下文撑爆却只在回合边界才检查的问题。
     async fn maybe_auto_compact(&mut self) {
         // 窗口按活动 provider 懒解析：/provider 切换后压缩阈值跟随新模型（而非启动快照）
         let context_size = self.context_size_now().await;
+        // B：判定口径与实际请求一致——messages(estimate) + tools 一并占用窗口。
+        let tool_tokens = self.tool_def_tokens();
         if !self
             .context
-            .needs_compaction(context_size, self.context_threshold)
+            .needs_compaction(context_size, self.context_threshold, tool_tokens)
         {
             return;
         }
@@ -767,6 +782,11 @@ impl Agent {
             },
             None => tracing::warn!("skip auto-compact: no provider available"),
         }
+        // A：LLM 压缩只收敛到 keep_recent + 锚点，不保证这截近期尾部本身塞得下。极小窗口下
+        // 再做一次廉价硬截断（成对丢最旧回合单元 + 兜底截断超长单条），预算 = 窗口 − tools。
+        // 纯防御，正常大窗口 estimate 已 ≤ budget、直接短路，零开销零回归。
+        let fit_budget = context_size.saturating_sub(tool_tokens);
+        self.context.hard_truncate_to_fit(fit_budget);
     }
 
     /// 压缩顺带生成会话标题（plan.md 会话主题自动总结）。

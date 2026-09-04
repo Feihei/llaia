@@ -120,9 +120,96 @@ impl Context {
         self.history.clear();
     }
 
-    pub fn needs_compaction(&self, context_size: usize, threshold: f64) -> bool {
-        let current = self.estimate_tokens();
+    /// 是否需要压缩。`extra_tokens` 为 estimate 未计入但同样占用窗口的部分（tool definitions
+    /// 序列化估算，见 `Agent::tool_def_tokens`），无工具时传 0。加入它才能让「是否触发压缩」
+    /// 的判断口径与实际请求（messages + tools）一致，消除小窗口模型上的低估错配。
+    pub fn needs_compaction(
+        &self,
+        context_size: usize,
+        threshold: f64,
+        extra_tokens: usize,
+    ) -> bool {
+        let current = self.estimate_tokens() + extra_tokens;
         (current as f64 / context_size as f64) > threshold
+    }
+
+    /// 丢掉 `history` 最前面的一个「回合单元」，保证不产生孤儿 tool 消息。
+    ///
+    /// 单元定义：若首条为带 `tool_calls` 的 assistant，则连同其后连续的 tool 结果
+    /// 一起丢（原生工具调用必须成对，否则严格端点直接 400）；否则只丢首条。丢完若
+    /// 头部露出孤儿 tool 消息，一并剔除。返回 `true` 表示确实丢了内容且仍留有消息；
+    /// 返回 `false` 表示无法再丢（只剩一个单元、丢了就空，或本就为空）。
+    fn drop_oldest_unit(&mut self) -> bool {
+        if self.history.len() <= 1 {
+            return false;
+        }
+        let mut unit = 1;
+        if self.history[0].tool_calls.is_some() {
+            while unit < self.history.len() && self.history[unit].role == Role::Tool {
+                unit += 1;
+            }
+        }
+        // 首单元即整个 history：丢了就空，保留它交给上层截断兜底。
+        if unit >= self.history.len() {
+            return false;
+        }
+        self.history.drain(..unit);
+        while self
+            .history
+            .first()
+            .map(|m| m.role == Role::Tool)
+            .unwrap_or(false)
+        {
+            self.history.remove(0);
+        }
+        !self.history.is_empty()
+    }
+
+    /// 廉价硬截断：把上下文（system + summary + history + 尾部注入）压进 `budget` 以内。
+    ///
+    /// 防御性末级手段——LLM 压缩（`compact`）只保证收敛到 `keep_recent` 条，不保证这截
+    /// 近期尾部本身塞得下极小窗口（例如 /provider 切到小 context_size 模型）。两步：
+    /// (1) 从最旧开始成对丢回合单元，绝不留孤儿 tool 消息，至少保留最新一个单元；
+    /// (2) 若单个超长消息仍超预算，截断最长的那条正文补足。均为纯字符串操作，不调 LLM。
+    ///
+    /// `budget` 应为「模型窗口 − tool definitions」的实际 messages 额度（由调用方扣除，
+    /// 见 `Agent::maybe_auto_compact`）。当 system 前缀 + summary 自身即超预算（固定地板，
+    /// 非本方法职责）时就此收手，不会清空历史。
+    pub fn hard_truncate_to_fit(&mut self, budget: usize) {
+        while self.estimate_tokens() > budget {
+            if !self.drop_oldest_unit() {
+                break;
+            }
+        }
+        if self.estimate_tokens() <= budget {
+            return;
+        }
+        // 兜底：截断最长的单条文本消息。estimate 用 chars/4，故每减 1 token ≈ 砍 4 字符。
+        const MIN_KEEP_CHARS: usize = 40;
+        let total = self.estimate_tokens();
+        let longest = self
+            .history
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, m)| m.content.as_text().chars().count())
+            .map(|(i, _)| i);
+        if let Some(i) = longest {
+            let text = self.history[i].content.as_text();
+            let cur = text.chars().count();
+            // 仅当「去掉这条正文后其余能塞进预算」时才动手——否则是固定地板（system + tools
+            // + summary 独占窗口），截历史无济于事，反而毁掉最后的信息，故保留原文。
+            if total.saturating_sub(cur / 4) >= budget {
+                return;
+            }
+            let over = total - budget;
+            let remove = over.saturating_mul(4).saturating_add(64);
+            let keep = cur.saturating_sub(remove).max(MIN_KEEP_CHARS);
+            if keep < cur {
+                let head: String = text.chars().take(keep).collect();
+                self.history[i].content =
+                    MessageContent::Text(format!("{}…[truncated to fit context window]", head));
+            }
+        }
     }
 
     /// 压缩上下文：先跑廉价抽取式归一化（不调 LLM），若仍在预算内则跳过 LLM 摘要；
@@ -442,8 +529,8 @@ mod tests {
         ctx.push(ChatMessage::user("b".repeat(80)));
         // 估算含尾部状态栏 + 结构开销，用相对值断言避免依赖具体文本长度
         let est = ctx.estimate_tokens();
-        assert!(ctx.needs_compaction(est * 2, 0.3));
-        assert!(!ctx.needs_compaction(est * 2, 0.9));
+        assert!(ctx.needs_compaction(est * 2, 0.3, 0));
+        assert!(!ctx.needs_compaction(est * 2, 0.9, 0));
     }
 }
 
@@ -590,5 +677,94 @@ mod compact_tests {
         assert_eq!(users.len(), 2);
         assert_eq!(users[0].content.as_text(), "same");
         assert_eq!(users[1].content.as_text(), "different");
+    }
+
+    /// A：极小预算下从最旧开始丢回合单元，保留最新一条，且绝不产生孤儿 tool 消息。
+    #[test]
+    fn test_hard_truncate_bounds_keeps_newest_and_no_orphan_tool() {
+        let mut ctx = Context::new("S".into());
+        ctx.push(ChatMessage::user("u0 ".repeat(120)));
+        ctx.push(ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "t".into(),
+                arguments: json!({}),
+            }],
+        ));
+        ctx.push(ChatMessage::tool("tr ".repeat(200), "c1"));
+        ctx.push(ChatMessage::user("keep me"));
+
+        ctx.hard_truncate_to_fit(40);
+
+        assert!(!ctx.history.is_empty());
+        assert_eq!(ctx.history.last().unwrap().content.as_text(), "keep me");
+        if let Some(first) = ctx.history.first() {
+            assert_ne!(
+                first.role,
+                Role::Tool,
+                "head must not be an orphan tool msg"
+            );
+        }
+        // 每条 tool 消息前必有携带其 id 的 assistant —— 无孤儿
+        for (i, m) in ctx.history.iter().enumerate() {
+            if m.role == Role::Tool {
+                let id = m.tool_call_id.clone().unwrap();
+                let parent_ok = ctx.history[..i].iter().any(|p| {
+                    p.role == Role::Assistant
+                        && p.tool_calls
+                            .as_ref()
+                            .map(|v| v.iter().any(|c| c.id == id))
+                            .unwrap_or(false)
+                });
+                assert!(parent_ok, "orphan tool message at index {i}");
+            }
+        }
+    }
+
+    /// A：只剩一个单元、且该单元正文超长（预算高于固定地板）时，走兜底截断（丢不掉了才砍内容）。
+    #[test]
+    fn test_hard_truncate_truncates_lone_oversized_message() {
+        let mut ctx = Context::new("S".into());
+        ctx.push(ChatMessage::user("x".repeat(5000)));
+        ctx.hard_truncate_to_fit(600);
+        assert_eq!(ctx.history.len(), 1, "唯一单元不应被丢空");
+        assert!(
+            ctx.history[0]
+                .content
+                .as_text()
+                .contains("truncated to fit"),
+            "超长单条应被兜底截断"
+        );
+        assert!(
+            ctx.estimate_tokens() <= 600,
+            "截断后应落回预算内，实为 {}",
+            ctx.estimate_tokens()
+        );
+    }
+
+    /// A：预算充裕时是 no-op，不动 history。
+    #[test]
+    fn test_hard_truncate_noop_when_within_budget() {
+        let mut ctx = Context::new("S".into());
+        ctx.push(ChatMessage::user("hello"));
+        ctx.push(ChatMessage::assistant("hi there"));
+        ctx.hard_truncate_to_fit(10_000);
+        assert_eq!(ctx.history.len(), 2);
+        assert_eq!(ctx.history[0].content.as_text(), "hello");
+    }
+
+    /// A：固定地板（system 自身即超预算）时就此收手，不清空历史、不 panic。
+    #[test]
+    fn test_hard_truncate_respects_fixed_floor() {
+        let mut ctx = Context::new("S".repeat(4000)); // system 地板远超预算
+        ctx.push(ChatMessage::user("a".repeat(500)));
+        ctx.push(ChatMessage::user("b".repeat(500)));
+        ctx.hard_truncate_to_fit(10);
+        assert!(!ctx.history.is_empty(), "固定地板下不得清空近期尾部");
+        assert_eq!(
+            ctx.history.last().unwrap().content.as_text(),
+            "b".repeat(500)
+        );
     }
 }

@@ -388,8 +388,7 @@ pub async fn try_handle(
             // 文本部分（system/summary/history/状态栏/todo/env）+ tool definitions
             // （实际发送给 provider 的 tools JSON schema）合并估算，避免低估真实发送量。
             let tokens = agent.context.estimate_tokens();
-            let tools_json = serde_json::to_string(&agent.tools.specs()).unwrap_or_default();
-            let tools_tokens = tools_json.chars().count() / 4;
+            let tools_tokens = agent.tool_def_tokens();
             let total = tokens + tools_tokens;
             // 懒解析窗口（跟随活动 provider），不读构建期冻结基线（plan.md #F 残留）
             let context_size = agent.context_size_now().await;
