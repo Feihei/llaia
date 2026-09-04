@@ -100,34 +100,53 @@ fn parse_usage(v: Option<&serde_json::Value>) -> Option<Usage> {
 
 /// 构造发送给 OpenAI 兼容端点的 messages，并按 compat 应用：
 /// - `requires_assistant_after_tool`：多轮 tool 结果后补一条空 assistant 占位。
+///
+/// 防御性清洗（对空 name/id 的 tool 消息、空 tool_call_id 的 tool 消息）：
+/// 当上游 tool_call 解析出空 name/id（历史 bug 残留或异常 provider）时，
+/// 对应 tool 消息的 tool_call_id 为空；严格端点（sensenova/tokenrouter/agnes）
+/// 会以 400 拒绝这类消息 → 触发 fallback 级联。这里在发送前就地丢弃坏消息，
+/// 避免把错误传进请求历史。
 fn build_openai_messages<'a>(req: &'a ChatRequest<'a>, compat: &Compat) -> Vec<OpenAiMessage<'a>> {
     let mut messages: Vec<OpenAiMessage<'_>> = req
         .messages
         .iter()
-        .map(|m| {
+        .filter_map(|m| {
             let role = match m.role {
                 Role::System => "system",
                 Role::User => "user",
                 Role::Assistant => "assistant",
                 Role::Tool => "tool",
             };
-            OpenAiMessage {
+            // tool 消息必须有有效的 tool_call_id，否则严格端点 400 拒绝
+            if m.role == Role::Tool {
+                let id = m.tool_call_id.as_deref().unwrap_or("");
+                if id.is_empty() {
+                    tracing::warn!("dropping tool message with empty tool_call_id");
+                    return None;
+                }
+            }
+            // assistant 消息的 tool_calls：丢弃空 name 或空 id 的畸形调用
+            let tool_calls = m.tool_calls.as_ref().map(|tcs| {
+                tcs.iter()
+                    .filter(|tc| !tc.name.is_empty() && !tc.id.is_empty())
+                    .map(|tc| OpenAiToolCallSer {
+                        id: &tc.id,
+                        tool_type: "function",
+                        function: OpenAiFunctionSer {
+                            name: &tc.name,
+                            arguments: tc.arguments.to_string(),
+                        },
+                    })
+                    .collect::<Vec<_>>()
+            });
+            // 过滤后无有效 tool_calls → 视为普通 assistant 消息
+            let tool_calls = tool_calls.filter(|tcs| !tcs.is_empty());
+            Some(OpenAiMessage {
                 role,
                 content: content_to_json(&m.content),
-                tool_calls: m.tool_calls.as_ref().map(|tcs| {
-                    tcs.iter()
-                        .map(|tc| OpenAiToolCallSer {
-                            id: &tc.id,
-                            tool_type: "function",
-                            function: OpenAiFunctionSer {
-                                name: &tc.name,
-                                arguments: tc.arguments.to_string(),
-                            },
-                        })
-                        .collect()
-                }),
+                tool_calls,
                 tool_call_id: m.tool_call_id.as_deref(),
-            }
+            })
         })
         .collect();
     if compat.requires_assistant_after_tool {
@@ -446,12 +465,19 @@ impl Provider for OpenAiCompatibleProvider {
                                                         tc_order.push(idx);
                                                     }
                                                     let acc = tc_accum.entry(idx).or_default();
+                                                    // 部分 provider 分多次 chunk 增量更新 tool_call（首 chunk 带 id/name，
+                                                    // 后续 chunk 用空串覆盖，例如 modelscope / siliconflow）。空值必须忽略，
+                                                    // 否则首 chunk 的有效信息被清空 → 解析出空工具名触发 unknown tool。
                                                     if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                                                        acc.id = id.to_string();
+                                                        if !id.is_empty() {
+                                                            acc.id = id.to_string();
+                                                        }
                                                     }
                                                     if let Some(func) = tc.get("function") {
                                                         if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                                                            acc.name = name.to_string();
+                                                            if !name.is_empty() {
+                                                                acc.name = name.to_string();
+                                                            }
                                                         }
                                                         if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
                                                             acc.arguments.push_str(args);
@@ -932,6 +958,79 @@ mod tests {
             disable_thinking: false,
         };
         assert_eq!(build_openai_messages(&req2, &Compat::ollama()).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_calls_empty_name_delta_does_not_overwrite() {
+        // 复现 modelscope / siliconflow 的增量更新：首 chunk 带 id/name，
+        // 后续 chunk 用空串覆盖 name/id。必须忽略空值保留首 chunk 信息
+        //（unknown tool 空工具名根因回归，见 ~/.llaia/logs/llaia.log）。
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(format!(
+                "{}{}{}{}",
+                sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"terminal","arguments":""}}]}}]})),
+                sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":"{\"command\":"}}]}}]})),
+                sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"arguments":"\"ls\"}"}}]}}]})),
+                done()
+            ))
+            .create();
+        let p = OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::default())
+            .unwrap();
+        let msgs = vec![ChatMessage::user("hi")];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+            disable_thinking: false,
+        };
+        let resp = p.chat(&req).await.unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "terminal");
+        assert_eq!(resp.tool_calls[0].id, "call_abc");
+        assert_eq!(resp.tool_calls[0].arguments, json!({"command": "ls"}));
+        m.assert();
+    }
+
+    #[test]
+    fn build_messages_drops_empty_tool_call_id_and_empty_name() {
+        // 防御性清洗：空 tool_call_id 的 tool 消息整体丢弃；assistant 消息里
+        // 空 name/id 的畸形 tool_call 过滤掉，避免严格端点 400 → fallback 级联。
+        let msgs = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant_with_tools(
+                "",
+                vec![
+                    ToolCall {
+                        id: "".into(),
+                        name: "".into(),
+                        arguments: json!({}),
+                    },
+                    ToolCall {
+                        id: "1".into(),
+                        name: "file_read".into(),
+                        arguments: json!({}),
+                    },
+                ],
+            ),
+            ChatMessage::tool("ok", "1"),
+            ChatMessage::tool("err", ""), // 空 tool_call_id → 丢弃
+        ];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+            disable_thinking: false,
+        };
+        let out = build_openai_messages(&req, &Compat::default());
+        // user + assistant(仅 file_read) + tool(1)，共 3 条
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1].role, "assistant");
+        let tcs = out[1].tool_calls.as_ref().unwrap();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].function.name, "file_read");
+        assert_eq!(out[2].role, "tool");
+        assert_eq!(out[2].tool_call_id, Some("1"));
     }
 
     #[test]

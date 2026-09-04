@@ -62,9 +62,14 @@ impl Provider for FallbackProvider {
             // 首个事件即 Error 且还有备用 → 换下一个 provider 重建流
             let first_is_error = matches!(&first, Some(Ok(StreamEvent::Error(_))));
             if first_is_error && idx + 1 < self.chain.len() {
+                let err_msg = match &first {
+                    Some(Ok(StreamEvent::Error(m))) => m.clone(),
+                    _ => String::new(),
+                };
                 tracing::warn!(
                     index = idx,
                     model = %self.chain[idx].label(),
+                    error = %err_msg,
                     "stream failed before first token, falling back"
                 );
                 idx += 1;
