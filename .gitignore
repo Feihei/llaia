@@ -6,6 +6,7 @@
 
 # 本助手的项目记忆目录
 .workbuddy/
+.trae/
 
 # 运行时产物
 *.log
