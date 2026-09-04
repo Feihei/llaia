@@ -21,9 +21,14 @@ pub struct Context {
     /// 让模型知道自己身在哪个任务；通用线为 None。与 todo 同区（KV 缓存友好）。
     pub task_state: Option<String>,
     /// 自动生成的 Tail Reminder（P6）：LLM 从 SOUL+USER 提炼的抗漂移要点，
-    /// 存 `workspace/reminder.md`，hash 失配时后台重生成。排在所有尾部消息
-    /// 之后（离生成点最近，注意力最强）。
+    /// 存 `workspace/reminder.md`，hash 失配时后台重生成。排在 todo/env/task 尾部
+    /// 消息之后，仅 bootstrap 指令在其后（离生成点最近，注意力最强）。
     pub reminder: Option<String>,
+    /// First-run Bootstrap：画像文件仍是 init 模板时的一次性引导指令（问用户要信息并写回
+    /// SOUL.md / USER.md）。排在 reminder 之后成为最后一条消息——t=0 的关键行为指令要离
+    /// 生成点最近。逐轮现算、不进 history/sqlite，agent 写盘后指纹改变即自动消失；
+    /// 绝不进 system 前缀（KV 缓存友好）。
+    pub bootstrap: Option<String>,
 }
 
 impl Context {
@@ -36,6 +41,7 @@ impl Context {
             env_state: None,
             task_state: None,
             reminder: None,
+            bootstrap: None,
         }
     }
 
@@ -78,10 +84,17 @@ impl Context {
                 msgs.push(ChatMessage::user(task.clone()));
             }
         }
-        // Tail Reminder（P6）：抗风格/身份漂移的要点重申，放最后（离生成点最近）。
+        // Tail Reminder（P6）：抗风格/身份漂移的要点重申。
         if let Some(rem) = &self.reminder {
             if !rem.is_empty() {
                 msgs.push(ChatMessage::user(rem.clone()));
+            }
+        }
+        // First-run Bootstrap：画像仍是 init 模板时的引导指令，放最末——t=0 的行为指令
+        // 优先级最高，要离生成点最近。仅在 agent 写盘 SOUL.md / USER.md 后消失。
+        if let Some(bs) = &self.bootstrap {
+            if !bs.is_empty() {
+                msgs.push(ChatMessage::user(bs.clone()));
             }
         }
         msgs
@@ -294,6 +307,52 @@ mod tests {
             msgs.last().unwrap().content.as_text(),
             "简洁口语化",
             "reminder should be placed after status bar/todo/env"
+        );
+    }
+
+    /// 尾部注入次序：状态栏 → todo → env → task → reminder → bootstrap（t=0 指令最末）
+    #[test]
+    fn test_bootstrap_injected_after_reminder() {
+        let mut ctx = Context::new("SOUL".into());
+        ctx.push(ChatMessage::user("hi"));
+        ctx.todo_state = Some("[todo]".into());
+        ctx.env_state = Some("[env]".into());
+        ctx.task_state = Some("[task]".into());
+        ctx.reminder = Some("[reminder] 简洁".into());
+        ctx.bootstrap = Some("[bootstrap] 填写画像".into());
+        let msgs = ctx.to_messages(&None);
+        let tail: Vec<String> = msgs[msgs.len() - 5..]
+            .iter()
+            .map(|m| m.content.as_text())
+            .collect();
+        assert_eq!(
+            tail,
+            vec![
+                "[todo]",
+                "[env]",
+                "[task]",
+                "[reminder] 简洁",
+                "[bootstrap] 填写画像"
+            ],
+            "bootstrap 必须排在 reminder 之后（末 5 条之前的那条是状态栏）"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_skipped_when_none_or_empty() {
+        let mut ctx = Context::new("SOUL".into());
+        ctx.push(ChatMessage::user("hi"));
+        ctx.reminder = Some("[reminder] 简洁".into());
+        ctx.bootstrap = None;
+        assert_eq!(
+            ctx.to_messages(&None).last().unwrap().content.as_text(),
+            "[reminder] 简洁",
+            "无 bootstrap 时 reminder 回到末位"
+        );
+        ctx.bootstrap = Some(String::new());
+        assert_eq!(
+            ctx.to_messages(&None).last().unwrap().content.as_text(),
+            "[reminder] 简洁"
         );
     }
 

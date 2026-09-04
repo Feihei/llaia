@@ -60,6 +60,16 @@ pub const MEMORY_TEMPLATE: &str = r#"# MEMORY
 <!-- format: - [YYYY-MM-DD] <entry> -->
 "#;
 
+/// 画像文件（SOUL.md / USER.md）是否**尚未填写**：内容为空，或仍是 init 模板原文。
+///
+/// 忽略首尾空白——模板常量与落盘内容可能只差一个尾换行。用字符串比较而非 md5
+/// （reminder 用 md5 是要比任意两次内容差异并当缓存键），这里只与一个已知常量比对。
+/// 供 first-run bootstrap 注入判定与 Tail Reminder 门禁共用。
+pub fn is_unfilled(content: &str, template: &str) -> bool {
+    let c = content.trim();
+    c.is_empty() || c == template.trim()
+}
+
 /// MEMORY.md 压缩：先备份，再调 LLM 去重压缩，覆写。
 pub async fn compress_memory(
     memory_path: &PathBuf,
@@ -135,5 +145,32 @@ mod tests {
         ensure_template(&path, SOUL_TEMPLATE).await.unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "existing");
+    }
+
+    #[test]
+    fn test_is_unfilled_covers_template_blank_and_empty() {
+        // 模板原文（init 落盘形态）→ 未填写
+        assert!(is_unfilled(SOUL_TEMPLATE, SOUL_TEMPLATE));
+        // 差一个尾换行/缩进 → 仍判未填写（模板常量与落盘内容可能不逐字节相同）
+        assert!(is_unfilled(
+            &format!("\n\n{}\n   ", SOUL_TEMPLATE),
+            SOUL_TEMPLATE
+        ));
+        // 空内容（文件缺失时 read_to_string 降级为空串）→ 未填写
+        assert!(is_unfilled("", SOUL_TEMPLATE));
+        assert!(is_unfilled("   \n ", SOUL_TEMPLATE));
+        // 填过任何一处 → 已填写
+        assert!(!is_unfilled(
+            "# Personality\n\n干活利落的私人助理\n",
+            SOUL_TEMPLATE
+        ));
+    }
+
+    /// 两份画像文件各用各的模板比对，不串台
+    #[test]
+    fn test_is_unfilled_uses_matching_template() {
+        assert!(is_unfilled(USER_TEMPLATE, USER_TEMPLATE));
+        assert!(!is_unfilled(USER_TEMPLATE, SOUL_TEMPLATE));
+        assert!(!is_unfilled(SOUL_TEMPLATE, USER_TEMPLATE));
     }
 }

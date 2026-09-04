@@ -2,7 +2,9 @@ pub mod markdown;
 pub mod sqlite;
 pub mod trim;
 
-pub use markdown::{ensure_template, load_md, MEMORY_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE};
+pub use markdown::{
+    ensure_template, is_unfilled, load_md, MEMORY_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE,
+};
 
 use anyhow::{Context, Result};
 use std::path::Path;

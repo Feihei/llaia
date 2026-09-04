@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod bootstrap;
 pub mod context;
 pub mod guard;
 pub mod registry;
@@ -1005,12 +1006,20 @@ impl Agent {
         // 回合开头：先按阈值做一次自动压缩
         self.maybe_auto_compact().await;
 
-        // Tail Reminder（P6）：SOUL+USER hash 校验，缺失/失配时后台重生成
-        // （写盘后下一轮生效）。生成走 compact_provider（省主模型），回退主模型。
+        // Tail Reminder（P6）+ First-run Bootstrap：SOUL/USER 每回合起点只读一次，喂两个
+        // 消费者。reminder 按 hash 校验缺失/失配时后台重生成（写盘后下一轮生效，生成走
+        // compact_provider 回退主模型）；画像仍是 init 模板时注入 [bootstrap] 指令，引导
+        // agent 主动向用户采集信息并写回（填好后指纹改变即自动消失）。
         {
             let soul = std::fs::read_to_string(self.workspace.join("SOUL.md")).unwrap_or_default();
             let user = std::fs::read_to_string(self.workspace.join("USER.md")).unwrap_or_default();
-            if !soul.is_empty() || !user.is_empty() {
+            // 仅主 agent：子 agent 的 USER.md 由主 agent 复制而来，且它不该脱离主会话问用户
+            self.context.bootstrap = if self.is_main {
+                crate::agent::bootstrap::bootstrap_note(&soul, &user)
+            } else {
+                None
+            };
+            if crate::agent::bootstrap::should_generate_reminder(&soul, &user) {
                 let gen_provider = match self.compact_provider_snapshot().await {
                     Some(p) => p,
                     None => provider.clone(),
@@ -3275,5 +3284,77 @@ mod tests {
         agent.refresh_task_state();
         assert!(agent.active_task.is_none());
         assert!(agent.context.task_state.is_none());
+    }
+
+    // --- First-run Bootstrap（docs/plans/2026-09-04-first-run-bootstrap.md）---
+
+    /// 全新安装（SOUL/USER 仍是 init 模板）：回合起点在请求**尾部**注入 `[bootstrap]`，
+    /// 且不进 system 前缀、不触发 Tail Reminder 生成（存量空转 bug 的回归位）。
+    #[tokio::test]
+    async fn test_bootstrap_injected_on_fresh_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("SOUL.md"), crate::memory::SOUL_TEMPLATE).unwrap();
+        std::fs::write(ws.join("USER.md"), crate::memory::USER_TEMPLATE).unwrap();
+
+        let rounds = vec![vec![
+            StreamEvent::TextDelta("好的".into()),
+            StreamEvent::Done,
+        ]];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        agent.workspace = ws.clone();
+        let (tx, mut rx) = mpsc::channel(64);
+        let _ = agent
+            .handle_input_streaming("帮我列个计划", "cli", tx)
+            .await;
+        while rx.recv().await.is_some() {}
+
+        let note = agent
+            .context
+            .bootstrap
+            .clone()
+            .expect("画像仍是模板时应注入 bootstrap 指令");
+        assert!(note.starts_with("[bootstrap] "), "前缀约定：{}", note);
+        assert!(note.contains("SOUL.md") && note.contains("USER.md"));
+        // system 前缀逐轮字节一致是 KV 缓存命中的前提：bootstrap 只挂尾部
+        assert!(!agent.context.system.contains("[bootstrap]"));
+        let msgs = agent.context.to_messages(&None);
+        assert!(msgs
+            .last()
+            .unwrap()
+            .content
+            .as_text()
+            .starts_with("[bootstrap] "));
+        // 双模板时不得启动 reminder 生成（否则白烧一个隔离 LLM turn）
+        assert!(!ws.join("reminder.md").exists());
+    }
+
+    /// 画像已填写：不再注入（写盘即改指纹，自我终止，无需任何状态位）
+    #[tokio::test]
+    async fn test_bootstrap_absent_once_profiles_filled() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("SOUL.md"), "# Personality\n\n简洁利落\n").unwrap();
+        std::fs::write(ws.join("USER.md"), "# Basic Info\n\n- name: feihei\n").unwrap();
+
+        // 门禁放行后会 spawn 后台 reminder 生成，与主回合抢占 MockProvider 的轮次；
+        // 各轮内容相同，谁先取到都不影响本测试断言。
+        let one = vec![StreamEvent::TextDelta("好的".into()), StreamEvent::Done];
+        let rounds = vec![one.clone(), one.clone(), one];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        agent.workspace = ws.clone();
+        let (tx, mut rx) = mpsc::channel(64);
+        let _ = agent
+            .handle_input_streaming("帮我列个计划", "cli", tx)
+            .await;
+        while rx.recv().await.is_some() {}
+
+        assert!(
+            agent.context.bootstrap.is_none(),
+            "已填写的画像不该再催：{:?}",
+            agent.context.bootstrap
+        );
     }
 }
