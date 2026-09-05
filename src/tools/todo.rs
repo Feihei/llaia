@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -72,7 +72,16 @@ pub struct TodoStore {
     inner: RwLock<Inner>,
     /// agent 家目录（固定）；为 None 时禁用落盘（测试/降级）。
     workspace: Option<PathBuf>,
+    /// 存活会话 uuid 提供者，由装配层用 `with_session_uuids` 注入（见 `gc_orphans`）。
+    /// `Arc` 而非 `Box`：`Box<dyn Fn>` 会让 `TodoStore` 丢掉 `Send + Sync`。
+    session_uuids: OnceLock<SessionUuids>,
 }
+
+/// 存活会话 uuid 查询通路（`TodoStore` 靠它判断哪些 `todos/<uuid>.json` 是孤儿）。
+///
+/// `None` = 查询失败，**不是**"没有存活会话"。两者必须可区分：把失败压成空列表会让
+/// GC 一次删光所有清单，而清单文本是唯一份（不像 sessions.db 有历史可回放）。
+type SessionUuids = Arc<dyn Fn() -> Option<Vec<String>> + Send + Sync>;
 
 impl TodoStore {
     /// 启用落盘：清单写入 `workspace/todos/<uuid>.json`。
@@ -84,7 +93,70 @@ impl TodoStore {
                 loaded: HashSet::new(),
             }),
             workspace: Some(workspace),
+            session_uuids: OnceLock::new(),
         }
+    }
+
+    /// 装配层注入存活会话查询通路（须在注册进 `ToolRegistry` 前调用，否则会存在两份实例）。
+    pub fn with_session_uuids(self, f: SessionUuids) -> Self {
+        // 只塞一次；重复调用静默忽略——装配顺序错了顶多是不 GC，不该 panic。
+        let _ = self.session_uuids.set(f);
+        self
+    }
+
+    /// 清理 `todos/` 下已经没有对应会话的清单文件，返回删除数量。
+    ///
+    /// 存在的理由：清单按会话落盘，但删会话（WebUI）与归档任务线（`/task close`）都只动
+    /// sqlite，没人删这个 json——磁盘垃圾只增不减。放在**启动期**跑一次而不是在两条删除通路
+    /// 各插一刀：将来新增删除通路也不会漏，且不用与运行中的清单写入抢锁。
+    ///
+    /// 只在 `build_agent` 里、任何 `set_current_session` 之前调用；未注入查询通路
+    /// （`disabled()` / 测试）时静默跳过。
+    pub fn gc_orphans(&self) -> usize {
+        let Some(workspace) = &self.workspace else {
+            return 0;
+        };
+        let provider = match self.session_uuids.get() {
+            Some(f) => f,
+            None => return 0,
+        };
+        let alive = match provider() {
+            Some(uuids) => uuids,
+            // 查询失败 ≠ 没有存活会话：按空集处理会删光清单，这里整轮跳过
+            None => return 0,
+        };
+        let alive: HashSet<String> = alive.into_iter().collect();
+
+        let dir = workspace.join("todos");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            // 目录不存在 = 这个实例从没写过清单
+            Err(_) => return 0,
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let uuid = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(u) => u,
+                None => continue,
+            };
+            if alive.contains(uuid) {
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    removed += 1;
+                    tracing::debug!(session = uuid, "removed orphan todo list");
+                }
+                Err(e) => {
+                    tracing::warn!(session = uuid, error = %e, "failed to remove orphan todo list")
+                }
+            }
+        }
+        removed
     }
 
     /// 禁用落盘（测试 / 无 workspace 场景）。
@@ -96,6 +168,7 @@ impl TodoStore {
                 loaded: HashSet::new(),
             }),
             workspace: None,
+            session_uuids: OnceLock::new(),
         }
     }
 
@@ -350,6 +423,7 @@ impl Tool for TodoTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     fn store() -> TodoStore {
         TodoStore::disabled()
@@ -461,5 +535,50 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown action"));
+    }
+
+    /// 孤儿清单（会话已删）被清掉；存活会话的清单与非 json 文件不动。
+    #[test]
+    fn gc_removes_orphan_todo_files() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let todos = ws.join("todos");
+        std::fs::create_dir_all(&todos).unwrap();
+        std::fs::write(todos.join("live.json"), "[]").unwrap();
+        std::fs::write(todos.join("dead.json"), "[]").unwrap();
+        std::fs::write(todos.join("notes.txt"), "keep me").unwrap();
+
+        let s = TodoStore::new(ws).with_session_uuids(Arc::new(|| Some(vec!["live".to_string()])));
+        assert_eq!(s.gc_orphans(), 1);
+        assert!(todos.join("live.json").exists());
+        assert!(!todos.join("dead.json").exists());
+        assert!(todos.join("notes.txt").exists(), "非清单文件不该被扫");
+    }
+
+    /// 查询失败必须是"整轮跳过"，不能退化成"存活集合为空"——后者会一次删光所有清单，
+    /// 而清单文本没有第二份拷贝可回放。
+    #[test]
+    fn gc_skips_when_session_lookup_fails() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let todos = ws.join("todos");
+        std::fs::create_dir_all(&todos).unwrap();
+        std::fs::write(todos.join("a.json"), "[]").unwrap();
+
+        let s = TodoStore::new(ws).with_session_uuids(Arc::new(|| None));
+        assert_eq!(s.gc_orphans(), 0);
+        assert!(todos.join("a.json").exists());
+    }
+
+    /// 没装配查询通路 / 没有 workspace / 从没写过清单：一律惰性返回 0，绝不 panic。
+    #[test]
+    fn gc_is_inert_without_wiring() {
+        let dir = tempdir().unwrap();
+        assert_eq!(
+            TodoStore::new(dir.path().to_path_buf()).gc_orphans(),
+            0,
+            "未注入通路时不该删任何东西"
+        );
+        assert_eq!(TodoStore::disabled().gc_orphans(), 0);
     }
 }

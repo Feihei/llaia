@@ -71,6 +71,12 @@
 - 图片逐张串行 vision 描述（`agent/mod.rs::maybe_describe_images`）：可 `join_all`，但通常单图。
 - tools schema 每次请求重建序列化（`openai_compat.rs`）：~20 工具 × 每迭代，微小。
 - 常量正则 `unwrap()`（`secrets.rs` / `config.rs` / `approval.rs`）：逻辑上不可 panic，按约定补注释即可。
+
+### 2026-09-05（排查留档：残留数据清理 / 未开工项）
+
+- **`todos/` 目录清理通路（2026-09-05 已实现）**：清单按会话落盘 `workspace/todos/<session_uuid>.json`，但删会话（`web/mod.rs::delete_session_api` → `sqlite.rs::delete_session`）与归档任务线（`/task close` → `archive_session`）都只动 sqlite，没人删这个 json——全仓库除 `todo.rs` 自身没有任何地方引用 `todos/`，零功能影响但只增不减（单文件 <2KB）。修法为**启动期 GC**：`TodoStore::gc_orphans()` 扫 `todos/*.json`，文件名 uuid 不在 `sessions` 表里的直接 `remove_file`（查询走新增的 `sqlite.rs::all_session_uuids`），比在 delete / archive 两条通路各插一刀更稳——将来新增删除通路也不会漏。接线在 `channels/cli.rs::build_agent`：`TodoStore` 创建移到 `session_store` 之后，注入查询通路并当场 GC 一次。四个坑的表态：① 归档线（`state='archived'`）uuid **仍在** `sessions` 表内，GC 只按「表里有没有」判定，**归档任务线的清单明确保留**——清单与线同生命周期，且删了没有任何回放途径，宁留垃圾；② 子 agent 不会漏：`build_agent` 按 alias 各跑一遍，每个 agent 用自己的 `<workspace>/sessions.db` 与 `<workspace>/todos/`，天然同域，无须特判；③ GC 只在启动期跑一次，运行期清单会被工具随时重写，边跑边扫会抢；④ 实现时新发现的坑：sqlite 查询失败**不能**压成空列表——那等于"没有任何存活会话"，一次报错删光全部清单，而清单文本是唯一份，故 `SessionUuids` 通路返回 `Option<Vec<String>>`，查询失败时整轮跳过。验证：三条单测绿（孤儿被删且非 json 与活会话文件不动 / 查询失败整轮跳过 / 未装配通路时惰性返回 0）；e2e 已过——复制一份状态目录、放入假 uuid 的孤儿清单与活会话清单各一份，重启 serve 后孤儿被删、活会话清单保留，日志留痕 `removed todo lists of deleted sessions agent="main" orphans=1`。只读复查本机 `~/.llaia`：5 个清单文件对 12 个会话，当前 0 孤儿——属运气不是设计。**⚠️ 提需求方（阿来）无法自测**：agent 进程锁着自己的 `sessions.db` 与 workspace，本项已由外部进程（另一 agent 起独立实例）验证。
+- **P7 的 T1 还没 grill 出计划文档**：`docs/plans/` 下无 terminal 解释器绕过的对应文件，「待 grill」只是决策状态、代码零改动（`git log` 里 `c647c9d` 的 8 条 path 规则已是全部现状，`python -c "open(...).write(...)"` 实测过防线）。建议顺序——先 grill T1（命令拆分 + flag 级路径检查，含 `--interpreter / -e / -c` 与裸执行），T2（`sh -c` 载荷递归解析）依赖它，T3（解释器白名单）不阻塞发版可最后。
+
 - **定期主干代码体检**为**例行项**而非一次性交付：需要时手动触发（用户定，2026-08-25），主干模块（agent loop / provider / memory / web）逐次过一遍，产出为检查记录（发现项 → 直接修 / 单独立项 / 搁置留档）。历轮已交付修复见 CHANGELOG §v0.3.1 / §v0.3.2。
 
 ---

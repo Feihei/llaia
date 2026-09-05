@@ -897,6 +897,16 @@ END;
         }
     }
 
+    /// 全部存活会话的 uuid（含 `state='archived'` 的任务线：归档只是不可续写，行仍在）。
+    /// `todos/` 目录的孤儿 GC 以"表里还有没有"为准——比在 delete / archive 两条通路各插一刀更稳，
+    /// 将来新增删除通路也不会漏。
+    pub fn all_session_uuids(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT session_uuid FROM sessions")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// 单会话完整消息（含 tool_calls），按 id 升序（P5 W1 会话详情）。
     /// 单个 Mutex 作用域内完成，避免嵌套 lock 死锁。
     pub fn messages_with_tool_calls(&self, session_id: i64) -> Result<Vec<MessageDetail>> {

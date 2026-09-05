@@ -464,11 +464,25 @@ pub async fn build_single_agent(
 
     // 构建完整工具集（用新字段）
     let skills_dir = config_dir.join("skills");
-    // 规划后执行（ADR-0024）：每会话一份 todo 清单，agent 与工具共享同一 TodoStore。
-    let todo_store = Arc::new(crate::tools::todo::TodoStore::new(workspace.clone()));
     // sqlite 会话存储：memory_research 工具跨会话搜索历史用（FTS5），需在工具集构建前就位。
     let db_path = workspace.join("sessions.db");
     let session_store = Arc::new(SessionStore::open(&db_path)?);
+    // 规划后执行（ADR-0024）：每会话一份 todo 清单，agent 与工具共享同一 TodoStore。
+    // 清单落盘后没有删除通路（删会话 / 归档任务线都只动 sqlite），故启动期按存活会话 GC 一次。
+    // 子 agent 走同一段代码：各自的 workspace 下有自己的 sessions.db 与 todos/。
+    let gc_store = session_store.clone();
+    let todo_store = Arc::new(
+        crate::tools::todo::TodoStore::new(workspace.clone())
+            .with_session_uuids(Arc::new(move || gc_store.all_session_uuids().ok())),
+    );
+    let orphans = todo_store.gc_orphans();
+    if orphans > 0 {
+        tracing::info!(
+            agent = alias,
+            orphans,
+            "removed todo lists of deleted sessions"
+        );
+    }
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(FileRead::new(
             workspace_root.clone(),
