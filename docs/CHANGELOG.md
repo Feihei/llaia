@@ -6,6 +6,17 @@
 
 ---
 
+## v0.4.1 (未发布)
+
+**Bug fixes / 稳定性**
+- **todo**：`workspace/todos/<session_uuid>.json` 只增不减——清单按会话落盘，但删会话（`web/mod.rs::delete_session_api` → `sqlite.rs::delete_session`）与归档任务线（`/task close` → `archive_session`）都只动 sqlite，全仓库除 `todo.rs` 自身没有任何地方引用 `todos/`。改为**启动期垃圾回收**：`TodoStore::gc_orphans()` 扫 `todos/*.json`，文件名 uuid 不在 `sessions` 表里的直接删（查询走新增的 `sqlite.rs::all_session_uuids`），接线在 `channels/cli.rs::build_agent`（store 创建移到 `session_store` 之后并当场 GC 一次）——比在两条删除通路各插一刀更稳，将来新增删除通路也不会漏。三个刻意决定：① 归档线 `state='archived'` 的 uuid 仍在表内，故其清单**明确保留**（清单与线同生命周期，删了没有任何回放途径，宁留垃圾）；② sqlite 查询失败**不**压成空列表——那等于「没有任何存活会话」，一次报错就删光唯一份的清单，故 `SessionUuids` 通路返回 `Option<Vec<String>>`，失败时整轮跳过；③ 只在启动跑一次，运行期清单被工具随时重写，边跑边扫会抢。子 agent 无须特判：`build_agent` 按 alias 各跑一遍，每个 agent 用自己的 `sessions.db` 与 `todos/`，天然同域。三条单测 + e2e（放一份假 uuid 孤儿与一份活会话清单，重启 serve 后只删孤儿，日志 `removed todo lists of deleted sessions agent="main" orphans=1`）
+
+**Features**
+- **memory**：全新 agent 既不知道自己叫什么、也不该替用户预设语言——SOUL 模板首段补 `# Name` = LLAIA，USER 模板里预先填好的 `- language: Chinese` 改为留空，交给 first-run bootstrap 去问。改模板常量会连带打断首运行引导：模板本身就是 `memory::is_unfilled` 的比较指纹，旧版未填占位文件会突然被读成「已填写」，指令不再注入、reminder 门禁反向误触发白烧一个隔离 turn。故旧文本保留为 `SOUL_TEMPLATE_LEGACY` / `USER_TEMPLATE_LEGACY`，由 `migrate::refresh_placeholder_templates()` 在启动时升级**逐字节等于旧模板**的文件（主 workspace 与 subagent 目录都过），用户哪怕只改过一行也不动。同批把 `bootstrap_note` 重写为编号指令——实测旧写法会让模型在用户答完后追问第二轮五问，且它唯一一次写盘尝试把工具调用包在 `` ```json `` 围栏里没被解析（该缺口独立立项，见 [plan.md](plan.md) H2）
+- **i18n**：框架消息统一英文，承接 v0.4.0 的用户可见输出与 init 模板英文化、本轮扫尾——`guard` 的重试提示与两条 `[guard]` 诊断（诊断会作为 assistant 消息进 context，中文文本是模型可以原样模仿回来的素材）、五份重复的 keepalive 通知收敛为 `channels::keepalive_notice()`、微信入站媒体占位改 `[image]/[file]/[video]`（与 `image_utils` 对齐）、turn 超时通知、WebUI 更新检查报错、doctor/init CLI 提示、WebUI 频道卡片与表单占位文案。**保留中文**：`qq.rs` 需按字面匹配 QQ API 返回的中文 token 过期提示体，翻译会破坏检测
+
+---
+
 ## v0.4.0 (2026-09-04)
 
 **Bug fixes / 稳定性**
