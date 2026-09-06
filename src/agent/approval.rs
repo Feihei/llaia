@@ -160,6 +160,7 @@ impl ApprovalGate {
     pub async fn single_question(&self) -> Option<PendingApproval> {
         let qs = self.questions().await;
         if qs.len() == 1 {
+            // 上一行已判定 len==1，next() 必有值
             Some(qs.into_iter().next().unwrap())
         } else {
             None

@@ -304,7 +304,7 @@ END;
 
     pub fn create_session(&self, session_uuid: &str, channel: &str) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO sessions (session_uuid, channel, created_at, last_activity, state) VALUES (?1, ?2, ?3, ?3, 'idle')",
             rusqlite::params![session_uuid, channel, now],
@@ -314,7 +314,7 @@ END;
 
     /// 读会话标题（未生成过为 None；plan.md 会话主题自动总结）。
     pub fn session_title(&self, session_id: i64) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT title FROM sessions WHERE id = ?1")?;
         let mut rows = stmt.query(rusqlite::params![session_id])?;
         match rows.next()? {
@@ -325,7 +325,7 @@ END;
 
     /// 写会话标题（压缩时由 compact provider 生成；幂等覆盖）。
     pub fn set_session_title(&self, session_id: i64, title: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE sessions SET title = ?2 WHERE id = ?1",
             rusqlite::params![session_id, title],
@@ -334,7 +334,7 @@ END;
     }
 
     pub fn latest_session(&self) -> Result<Option<(i64, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // 排除 cron 自动会话：主对话 session 的 source 为 main/web/cli 等，
         // 而复活的 cron 会话会把 last_activity 刷到最新，若不加过滤会把主对话路由进
         // cron 会话（ADR-0013 会话隔离）。详见 cron 任务诊断。
@@ -364,7 +364,7 @@ END;
         bound_path: Option<&str>,
     ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO sessions (session_uuid, channel, created_at, last_activity, state, title, kind, bound_path)
              VALUES (?1, ?2, ?3, ?3, 'idle', ?4, 'task', ?5)",
@@ -375,7 +375,7 @@ END;
 
     /// 按任务名查找未归档任务线（`/task <名>` 的切换键；同名取最近活跃）。
     pub fn find_open_task(&self, title: &str) -> Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id FROM sessions
              WHERE kind = 'task' AND state != 'archived' AND title = ?1
@@ -387,7 +387,7 @@ END;
 
     /// 列出所有未归档任务线（/tasks）。
     pub fn list_open_tasks(&self) -> Result<Vec<TaskSessionRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, session_uuid, COALESCE(title, ''), bound_path, channel, last_activity
              FROM sessions WHERE kind = 'task' AND state != 'archived'
@@ -412,7 +412,7 @@ END;
 
     /// 归档会话（`/task close`）：state='archived' 后不可续写，消息仍可被检索。
     pub fn archive_session(&self, session_id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE sessions SET state = 'archived' WHERE id = ?1",
             rusqlite::params![session_id],
@@ -422,7 +422,7 @@ END;
 
     /// 读会话类型信息（ADR-0031）；不存在返回 None。
     pub fn session_kind(&self, session_id: i64) -> Result<Option<SessionKindInfo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt =
             conn.prepare("SELECT kind, title, bound_path FROM sessions WHERE id = ?1")?;
         let mut rows = stmt.query(rusqlite::params![session_id])?;
@@ -438,7 +438,7 @@ END;
 
     /// 最近的通用线（kind='main'，排除 cron 与归档）——`/task` 无参 / close 的回归目标。
     pub fn latest_main_session(&self) -> Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id FROM sessions
              WHERE kind = 'main' AND channel NOT LIKE 'cron:%' AND state != 'archived'
@@ -456,7 +456,7 @@ END;
         session_id: i64,
         char_budget: usize,
     ) -> Result<Vec<MessageRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, session_id, role, content, reasoning_content, created_at
              FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT 500",
@@ -495,7 +495,7 @@ END;
     /// 落一条侧问问答（独立表，不进 messages/FTS）。
     pub fn add_side_message(&self, session_id: i64, question: &str, answer: &str) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO side_messages (session_id, question, answer, created_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![session_id, question, answer, now],
@@ -505,7 +505,7 @@ END;
 
     /// 最近的侧问问答（自连上下文用，倒序取最新 N 条）。
     pub fn recent_side_messages(&self, session_id: i64, limit: i64) -> Result<Vec<SideMessageRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT question, answer, created_at FROM side_messages
              WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
@@ -526,7 +526,7 @@ END;
     /// cron 复用同一任务会话时用：同一 `cron:<id>` 只应有一个活跃会话，
     /// 历史重复的孤儿会话取最新者复用，避免每次触发都新建会话。
     pub fn session_by_channel(&self, channel: &str) -> Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id FROM sessions WHERE channel = ?1 ORDER BY last_activity DESC LIMIT 1",
         )?;
@@ -536,7 +536,7 @@ END;
 
     /// 反查某会话的 channel（/new 新建会话时沿用当前会话的 channel）。
     pub fn channel_of(&self, session_id: i64) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT channel FROM sessions WHERE id = ?1")?;
         let mut rows = stmt.query(rusqlite::params![session_id])?;
         Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
@@ -544,7 +544,7 @@ END;
 
     /// 由 session_id 反查 session_uuid（ADR-0024 todo 按 session_uuid 分桶落盘用）。
     pub fn session_uuid(&self, session_id: i64) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT session_uuid FROM sessions WHERE id = ?1")?;
         let mut rows = stmt.query(rusqlite::params![session_id])?;
         Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
@@ -558,7 +558,7 @@ END;
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![session_id, role_str, content, now],
@@ -580,7 +580,7 @@ END;
         outcome: Option<&str>,
     ) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO tool_calls (message_id, tool_call_id, tool_name, payload, outcome, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![message_id, tool_call_id, tool_name, payload, outcome, now],
@@ -589,7 +589,7 @@ END;
     }
 
     pub fn recent_messages(&self, session_id: i64, limit: i64) -> Result<Vec<MessageRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, session_id, role, content, reasoning_content, created_at
              FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
@@ -615,7 +615,7 @@ END;
     /// `limit` 由调用方 clamp（工具侧硬上限 20）。返回按相关性排序的命中，
     /// 含所属 session 短 id、channel 与时间；content 由调用方截断展示。
     pub fn search_messages(&self, query: &str, limit: i64) -> Result<Vec<MessageFtsHit>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT m.id, s.session_uuid, s.channel, m.role, m.content, m.created_at
              FROM message_fts f
@@ -642,7 +642,7 @@ END;
     }
 
     pub fn update_token_count(&self, session_id: i64, delta: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE sessions SET token_count = token_count + ?1 WHERE id = ?2",
             rusqlite::params![delta, session_id],
@@ -653,7 +653,7 @@ END;
     /// 记录一次模型调用（一次 chat_stream）的 token 用量（plan.md W3）。
     pub fn add_turn_usage(&self, u: &TurnUsage) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO turn_usage (session_id, ts, model_ref, prompt_tokens, completion_tokens, kind) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -673,7 +673,7 @@ END;
     /// 仅统计主对话（kind='chat'），供 `GET /api/stats/tokens?days=N` 使用。
     pub fn token_stats(&self, days: u32) -> Result<TokenStats> {
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         // 总计
         let (total_prompt, total_completion, total_requests) = conn.query_row(
@@ -797,7 +797,7 @@ END;
 
     /// 读取 kv 值；key 不存在返回 None。
     pub fn get_kv(&self, key: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT value FROM kv WHERE key = ?1")?;
         let mut rows = stmt.query(rusqlite::params![key])?;
         Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
@@ -805,7 +805,7 @@ END;
 
     /// 写入 kv 值（upsert）。
     pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO kv (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -819,7 +819,7 @@ END;
     /// 按 channel 前缀查询会话（用于 cron 历史过滤，channel LIKE 'cron:%'）。
     /// 按 last_activity 降序，最多 200 条。
     pub fn list_sessions_by_channel_prefix(&self, prefix: &str) -> Result<Vec<SessionRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT session_uuid, channel, created_at, last_activity, token_count, state
              FROM sessions WHERE channel LIKE ?1 ORDER BY last_activity DESC LIMIT 200",
@@ -844,7 +844,7 @@ END;
 
     /// 会话列表（含消息数），按 last_activity 降序，分页（P5 W1 WebUI 会话历史）。
     pub fn list_sessions(&self, limit: i64, offset: i64) -> Result<Vec<SessionListItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT s.session_uuid, s.channel, s.created_at, s.last_activity, s.token_count, s.state,
                     (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
@@ -874,7 +874,7 @@ END;
 
     /// 按 session_uuid 查会话，返回 (内部 id, 行)；不存在返回 None（P5 W1）。
     pub fn session_by_uuid(&self, uuid: &str) -> Result<Option<(i64, SessionRow)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, session_uuid, channel, created_at, last_activity, token_count, state
              FROM sessions WHERE session_uuid = ?1",
@@ -901,7 +901,7 @@ END;
     /// `todos/` 目录的孤儿 GC 以"表里还有没有"为准——比在 delete / archive 两条通路各插一刀更稳，
     /// 将来新增删除通路也不会漏。
     pub fn all_session_uuids(&self) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT session_uuid FROM sessions")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -910,7 +910,7 @@ END;
     /// 单会话完整消息（含 tool_calls），按 id 升序（P5 W1 会话详情）。
     /// 单个 Mutex 作用域内完成，避免嵌套 lock 死锁。
     pub fn messages_with_tool_calls(&self, session_id: i64) -> Result<Vec<MessageDetail>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, role, content, reasoning_content, created_at
              FROM messages WHERE session_id = ?1 ORDER BY id ASC",
@@ -959,7 +959,7 @@ END;
 
     /// 删除会话（cascade 删 messages/tool_calls）。返回是否真的删了（P5 W1）。
     pub fn delete_session(&self, uuid: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let n = conn.execute(
             "DELETE FROM sessions WHERE session_uuid = ?1",
             rusqlite::params![uuid],
@@ -973,7 +973,7 @@ END;
         if ids.is_empty() {
             return Ok(0);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let placeholders: Vec<_> = std::iter::repeat_n("?", ids.len()).collect();
         let sql = format!(
             "DELETE FROM messages WHERE session_id = ?1 AND id IN ({})",
@@ -990,7 +990,7 @@ END;
 
     /// 该 message id 是否属于指定会话（用于删除前校验）。
     pub fn message_in_session(&self, session_id: i64, msg_id: i64) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND id = ?2",
             rusqlite::params![session_id, msg_id],
@@ -1055,7 +1055,7 @@ mod tests {
                 Some("content"),
             )
             .unwrap();
-        let conn = store.conn.lock().unwrap();
+        let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM tool_calls WHERE message_id = ?1",
@@ -1231,7 +1231,7 @@ mod tests {
 
         assert!(store.delete_session("uuid-z").unwrap());
         // cascade：messages/tool_calls 一并删除
-        let conn = store.conn.lock().unwrap();
+        let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
         let msg_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
@@ -1270,7 +1270,7 @@ mod tests {
         assert_eq!(left[0].id, m1);
 
         // 级联：m2 的工具调用一并删除
-        let conn = store.conn.lock().unwrap();
+        let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tc_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM tool_calls", [], |r| r.get(0))
             .unwrap();

@@ -49,6 +49,7 @@ fn is_plaintext(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
+    // 常量正则：模式串编译期写死且合法，构造不可能失败
     let re = regex::Regex::new(r"^\$\{[A-Z_][A-Z0-9_]*\}$").unwrap();
     !re.is_match(s)
 }

@@ -574,7 +574,7 @@ tools: {}
         "/delegate-list" => {
             match &registry {
                 Some(reg) => {
-                    let tasks = reg.background_tasks.lock().unwrap();
+                    let tasks = reg.background_tasks.lock().unwrap_or_else(|e| e.into_inner());
                     if tasks.is_empty() {
                         Ok(SlashOutcome::Handled("[no background delegate tasks]".into()))
                     } else {
@@ -602,7 +602,7 @@ tools: {}
             } else {
                 match &registry {
                     Some(reg) => {
-                        let mut tasks = reg.background_tasks.lock().unwrap();
+                        let mut tasks = reg.background_tasks.lock().unwrap_or_else(|e| e.into_inner());
                         match tasks.remove(args) {
                             Some(t) => {
                                 drop(tasks);
@@ -1536,7 +1536,10 @@ mod tests {
                     .map(|m| m.content.as_text())
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.seen.lock().unwrap().push(dump);
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(dump);
                 Ok(ChatResponse {
                     text: Some("答".into()),
                     tool_calls: vec![],
@@ -1561,7 +1564,7 @@ mod tests {
         agent.context.push(ChatMessage::user("主线话题"));
         run_btw(&mut agent, "第一问").await.unwrap();
         run_btw(&mut agent, "第二问").await.unwrap();
-        let calls = seen.seen.lock().unwrap().clone();
+        let calls = seen.seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
         assert_eq!(calls.len(), 2);
         // 第二次调用包含第一问的问答 + 主线快照 + 第二问本身
         assert!(calls[1].contains("Q: 第一问"));

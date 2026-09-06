@@ -1057,6 +1057,7 @@ impl Config {
 pub(crate) fn expand_string(s: &str) -> Result<String> {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
+    // 常量正则：模式串编译期写死且合法，构造不可能失败
     let re = RE.get_or_init(|| regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}").unwrap());
 
     let expanded = re.replace_all(s, |caps: &regex::Captures| match std::env::var(&caps[1]) {

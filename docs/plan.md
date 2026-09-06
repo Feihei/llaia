@@ -41,7 +41,7 @@
 
 ## 近期小修（H 系列，v0.4.1 → v0.4.2 窗口）
 
-**状态**：🚧 进行中（起点 2026-09-05）｜H1–H3 已交付，H4–H6 待拍板｜每项独立可提交、不阻塞发版
+**状态**：🚧 进行中（起点 2026-09-05）｜H1–H4 已交付，H5–H6 待拍板｜每项独立可提交、不阻塞发版
 
 抽出来的理由：这些都不是「阶段性工程」，而是散在 P7 / 主干体检 backlog 里的低成本止血项——原混在前瞻计划里，既不会被顺手做掉，也看不清发版窗口里还剩什么。
 
@@ -58,9 +58,9 @@
       - ~~AGENTS.md 仍写「chat 主路径当前仍整块返回，未启用流式」~~ 已改：主路径流式（`chat_stream` + Generation Guard 消费框架），非流式 `chat()` 只剩不带工具的 sidecar 单发调用（压缩摘要 / reminder 提炼 / 会话标题 / vision 描述 / `/btw` / 记忆压缩）。
       - ~~用户文档没跟上 v0.4.1 的画像模板改动（`88e96b7` 只动了 `src/`）~~ 已补进 `guide/memory-and-context.md` 的 Bootstrap 节：SOUL 默认 `# Name` = LLAIA、USER 的 `language` 留空由引导去问（旧模板预填值会替英文用户做主）、启动时自动升级逐字节未改动的旧占位文件（`refresh_placeholder_templates`，改过一行就不动）。
       - 本文件自身的编号冲突（**已修**，随 H 系列立项那笔提交落地）：P7 的 T1–T4 与当日笔记里另套 T1/T2/T3 含义互相矛盾，已把「静态分析层」改称 S1/S2，见 P7 节末。
-- [ ] **H4 · 主干体检 backlog 里的机械项提升**（从下方「遗留 backlog」上提，改动面小、零设计）
-      - 常量正则 `unwrap()`（`secrets.rs` / `config.rs` / `approval.rs`）：逻辑上不可 panic，按约定补注释即可。
-      - `slash.rs`（background_tasks）与 `sqlite.rs` 全文件约 20 处 `lock().unwrap()`：锁内均同步调用、无 await，正确性无问题，仅与「生产路径不用 unwrap」的约定冲突，机械替换 `unwrap_or_else(|e| e.into_inner())`，diff 大但零风险。
+- [x] **H4 · 主干体检 backlog 里的机械项提升**（2026-09-06 交付）
+      - 常量正则 `unwrap()`：`secrets.rs::is_plaintext` 与 `config.rs::expand_string` 两处补「模式串编译期写死且合法，构造不可能失败」注释；**`approval.rs` 实为笔误**——该文件没有常量正则，实际处理的是 `single_question` 里受 `len()==1` 保护的 `into_iter().next().unwrap()`（同样补注释）。
+      - `lock().unwrap()` 毒锁恢复：`slash.rs` 4 处 + `sqlite.rs` 36 处（plan 立项时估的「约 20 处」偏少，实数 40），全部机械替换为 `lock().unwrap_or_else(|e| e.into_inner())`——锁内均同步调用、无 await，`Mutex` 毒化后恢复守卫不丢正确性，与「生产路径不用 unwrap」约定对齐。
 - [ ] **H5 · 入站附件 `uploads/` 无回收通路**（todo GC 的同类项，2026-09-05 顺带查得）：QQ 附件（`channels/qq.rs:872`）与邮件附件（`channels/mail.rs:190`）都落 `<家目录>/uploads/`，全仓库没有任何删除/回收代码，只增不减（本机现 2 个文件 / 220 KB，属还没长起来而不是没问题）。**两条现成通路都不能照搬**：`todos/` 的按会话 uuid GC 在这里无意义（附件不属于会话生命周期，且文件名是 `<msg_id>_<filename>` 不带 uuid），`workspace/tmp/` 的启动期 3 天 mtime 清理又太危险——用户半年前发来的图片可能仍被引用。要先拍板策略（例如「保留全部，只加容量上限 + WebUI 手动清理」或「N 天后移到 `backups/` 而非删除」），再动手。必要性：**低–中**（单用户场景增长慢，但发版前把它记下来比忘掉便宜）。
 - [ ] **H6 · v0.4.1 发版动作**：写好 `docs/release-notes/v0.4.1.md`（简短英文 changelog，`release.yml` 的 release-notes job 会据此填 GitHub release body）→ `git tag -a v0.4.1` → push 分支与 tag。发版节奏与「跨版本号需先改 `Cargo.toml` 再打 tag」的既有约定见 AGENTS.md「发版」。
 
