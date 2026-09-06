@@ -7,6 +7,9 @@ use serde_json::Value;
 /// 完整的工具调用标签被解析为 ToolCall，不输出。
 /// 同时剥离 think 标签，丢弃其中的推理内容，避免泄漏给用户。
 /// 支持标签跨 chunk 边界，以及多种标签别名。
+///
+/// 工具调用有两条载荷通路：标签（`OPEN_TAGS`）与 markdown 围栏（`FENCE_LANGS`
+/// 专用语言名 + `GENERIC_FENCE_LANGS` 通用语言名，后者判定更严）。
 pub struct ToolCallStreamParser {
     state: State,
     /// InToolCall / InThink 状态下累积的标签内容
@@ -17,6 +20,10 @@ pub struct ToolCallStreamParser {
     completed: Vec<ToolCall>,
     /// 进入 InToolCall 时匹配到的开标签，finish() 还原用
     open_tag: &'static str,
+    /// 进入 InFence 时匹配到的开栏原文（```lang\n），解析失败 / 未闭合时按原样还原用
+    fence_open: String,
+    /// 当前 fence 是否为通用语言名（```json）：判定更严，且未闭合时还原而非丢弃
+    fence_generic: bool,
     /// 思考流累计字符数：InThink 状态被丢弃的内容也逐字符计数（只计数不保存）。
     /// Generation Guard 用它做思考长度上限判定；guard 关闭时无人调用，纯计数开销。
     think_chars: usize,
@@ -61,32 +68,40 @@ const THINK_CLOSE_TAGS: &[&str] = &[concat!("<", "/think>"), concat!("<", "/thin
 /// Markdown fence 开头：``` + 已知语言标识 + 换行。
 /// 支持已知语言别名（同标签别名）和 \n / \r\n 换行。
 const FENCE_LANGS: &[&str] = &["tool_call", "toolcall", "tool-call", "invoke"];
+/// **通用**语言名：不是为工具调用发明的，但小参数模型常把调用包在这里面（实测于
+/// first-run bootstrap，见 docs/plans/2026-09-04-first-run-bootstrap.md）。命中后
+/// ①判定更严（见 `value_to_fenced_call`）、②未闭合时还原原文而非丢弃。
+/// 代价：这类块的内容要缓冲到闭栏才输出，```` ```json ```` 代码块不再逐字流式。
+const GENERIC_FENCE_LANGS: &[&str] = &["json"];
 /// Fence 闭合标记
 const FENCE_CLOSE: &str = "```";
 
 /// 检查 `s` 是否是某个 fence open（```lang\n 或 ```lang\r\n）的完整匹配。
-fn fence_open_exact(s: &str) -> bool {
+/// 命中返回 `Some(generic)`，`generic` 标记它是否为通用语言名；不匹配返回 `None`。
+fn fence_open_match(s: &str) -> Option<bool> {
     for lang in FENCE_LANGS {
         if s == format!("```{}\n", lang) || s == format!("```{}\r\n", lang) {
-            return true;
+            return Some(false);
         }
     }
-    false
+    for lang in GENERIC_FENCE_LANGS {
+        if s == format!("```{}\n", lang) || s == format!("```{}\r\n", lang) {
+            return Some(true);
+        }
+    }
+    None
 }
 
 /// 检查 `s` 是否是某个 fence open 的前缀（即继续累积有可能匹配）。
 fn fence_open_prefix(s: &str) -> bool {
-    for lang in FENCE_LANGS {
+    FENCE_LANGS.iter().chain(GENERIC_FENCE_LANGS).any(|lang| {
         let open = format!("```{}\n", lang);
         if open.starts_with(s) {
             return true;
         }
         let open_crlf = format!("```{}\r\n", lang);
-        if open_crlf.starts_with(s) {
-            return true;
-        }
-    }
-    false
+        open_crlf.starts_with(s)
+    })
 }
 
 impl Default for ToolCallStreamParser {
@@ -103,6 +118,8 @@ impl ToolCallStreamParser {
             pending: String::new(),
             completed: Vec::new(),
             open_tag: "",
+            fence_open: String::new(),
+            fence_generic: false,
             think_chars: 0,
             think_monitor: None,
         }
@@ -218,10 +235,11 @@ impl ToolCallStreamParser {
                 }
                 State::MaybeFence => {
                     self.pending.push(ch);
-                    if fence_open_exact(&self.pending) {
+                    if let Some(generic) = fence_open_match(&self.pending) {
                         // 完整匹配 fence 开头（```lang\n），进入 InFence
+                        self.fence_generic = generic;
+                        self.fence_open = std::mem::take(&mut self.pending);
                         self.state = State::InFence;
-                        self.pending.clear();
                         self.buffer.clear();
                     } else if fence_open_prefix(&self.pending) {
                         // 仍是 fence 开头前缀，继续累积
@@ -237,20 +255,26 @@ impl ToolCallStreamParser {
                     if self.buffer.ends_with(FENCE_CLOSE) {
                         let body = &self.buffer[..self.buffer.len() - FENCE_CLOSE.len()];
                         let body_trimmed = body.trim();
+                        let generic = self.fence_generic;
                         let call = serde_json::from_str::<Value>(body_trimmed)
                             .ok()
-                            .and_then(|v| value_to_tool_call(&v))
+                            .and_then(|v| value_to_fenced_call(&v, generic))
                             .or_else(|| {
                                 extract_json_with_brace_counting(body_trimmed)
                                     .and_then(|sub| serde_json::from_str::<Value>(sub).ok())
-                                    .and_then(|v| value_to_tool_call(&v))
+                                    .and_then(|v| value_to_fenced_call(&v, generic))
                             });
                         if let Some(call) = call {
                             self.completed.push(call);
                         } else {
+                            // 不是工具调用：按模型原文还原（含开栏），否则用户看到的是
+                            // 丢了代码块格式的正文 + 一个孤儿闭栏。
+                            out.push_str(&self.fence_open);
                             out.push_str(&self.buffer);
                         }
                         self.buffer.clear();
+                        self.fence_open.clear();
+                        self.fence_generic = false;
                         self.state = State::Outside;
                     }
                 }
@@ -271,12 +295,18 @@ impl ToolCallStreamParser {
     }
 
     /// 流结束时调用，返回残留内容作为普通文本。
-    /// InThink / InFence 状态丢弃未闭合的内容（防泄漏）；InToolCall 还原开标签+buffer。
+    /// InThink 与未闭合的**工具调用专用** fence 丢弃内容（防泄漏）；InToolCall 还原开标签+buffer；
+    /// 未闭合的通用 fence（```json）还原原文——那是用户可见内容，不是调用载荷。
     pub fn finish(self) -> String {
         let mut out = String::new();
         match self.state {
             State::InThink => {}
-            State::InFence => {}
+            State::InFence => {
+                if self.fence_generic {
+                    out.push_str(&self.fence_open);
+                    out.push_str(&self.buffer);
+                }
+            }
             State::InToolCall => {
                 out.push_str(self.open_tag);
                 out.push_str(&self.buffer);
@@ -349,6 +379,17 @@ fn extract_json_with_brace_counting(text: &str) -> Option<&str> {
         i += 1;
     }
     None
+}
+
+/// fence 体的判定。通用语言名（```` ```json ````）比标签路径**更严**：必须同时带
+/// `arguments` 键。理由是小模型写出的 `{"name": "张三", "age": 3}` 这类展示给用户的
+/// JSON 示例，在只认 `name` 的宽松判定下会被凭空执行成一次 unknown tool 调用。
+/// 工具调用专用围栏（```` ```tool_call ```` 等）沿用宽松判定，避免行为回归。
+fn value_to_fenced_call(value: &Value, generic: bool) -> Option<ToolCall> {
+    if generic && value.get("arguments").is_none() {
+        return None;
+    }
+    value_to_tool_call(value)
 }
 
 fn value_to_tool_call(value: &Value) -> Option<ToolCall> {
@@ -592,5 +633,84 @@ mod tests {
         let out = p.feed("```tool_call\n{\"name\":\"x\"");
         assert_eq!(out, "");
         assert_eq!(p.finish(), "");
+    }
+
+    // --- ```json 通用围栏（H2：小模型把调用包在这里面，此前静默不执行） ---
+
+    #[test]
+    fn test_json_fence_parsed_as_tool_call() {
+        let mut p = ToolCallStreamParser::new();
+        let input = "```json\n{\"name\":\"file_edit\",\"arguments\":{\"path\":\"a.txt\"}}\n```";
+        assert_eq!(p.feed(input), "");
+        let calls = p.take_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_edit");
+        assert_eq!(calls[0].arguments, json!({"path": "a.txt"}));
+    }
+
+    #[test]
+    fn test_json_fence_pretty_multiline_parsed() {
+        // 实测形态：模型爱把 JSON 展开成多行缩进版本
+        let mut p = ToolCallStreamParser::new();
+        let input = "```json\n{\n  \"name\": \"file_edit\",\n  \"arguments\": {\n    \"path\": \"SOUL.md\"\n  }\n}\n```";
+        assert_eq!(p.feed(input), "");
+        let calls = p.take_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_edit");
+        assert_eq!(calls[0].arguments, json!({"path": "SOUL.md"}));
+    }
+
+    #[test]
+    fn test_json_fence_cross_chunk() {
+        // 前缀判定要能跨 chunk 撑住："```j" 仍是 json 的可能前缀
+        let mut p = ToolCallStreamParser::new();
+        assert_eq!(p.feed("```j"), "");
+        assert_eq!(p.feed("son\n"), "");
+        assert_eq!(p.feed("{\"name\":\"x\",\"arguments\":{}}\n```"), "");
+        let calls = p.take_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "x");
+    }
+
+    #[test]
+    fn test_json_fence_without_arguments_stays_text() {
+        // 严格判定：只有 name 的 JSON 是展示给用户的数据，不是调用——
+        // 宽松判定会凭空造出一个 unknown tool 调用。
+        let mut p = ToolCallStreamParser::new();
+        let input = "```json\n{\"name\": \"张三\", \"age\": 3}\n```";
+        let mut out = p.feed(input);
+        assert!(p.take_tool_calls().is_empty());
+        out.push_str(&p.finish());
+        assert_eq!(out, input, "原文（含开栏）应完整还原");
+    }
+
+    #[test]
+    fn test_json_fence_non_object_stays_text() {
+        let mut p = ToolCallStreamParser::new();
+        let input = "```json\n[1, 2, 3]\n```";
+        let mut out = p.feed(input);
+        assert!(p.take_tool_calls().is_empty());
+        out.push_str(&p.finish());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn test_unclosed_json_fence_restored_as_text() {
+        // 截断的 ```json 是用户可见内容，还原原文而非静默吞掉（与专用围栏相反）。
+        let mut p = ToolCallStreamParser::new();
+        assert_eq!(p.feed("```json\n{\"a\": 1"), "");
+        assert!(p.take_tool_calls().is_empty());
+        assert_eq!(p.finish(), "```json\n{\"a\": 1");
+    }
+
+    #[test]
+    fn test_java_fence_not_hijacked_by_json_prefix() {
+        // "```j" 是 json 的前缀，但 "```ja" 之后必须立刻放弃、整段原样透传
+        let mut p = ToolCallStreamParser::new();
+        let input = "```java\nSystem.out.println(1);\n```";
+        let mut out = p.feed(input);
+        assert!(p.take_tool_calls().is_empty());
+        out.push_str(&p.finish());
+        assert_eq!(out, input);
     }
 }

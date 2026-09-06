@@ -98,6 +98,8 @@ MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消�
 
   - `native_tool_calling = false` → system prompt 注入 `<tool_call>...</tool_call>` 协议
 
+  - 两条通路都由流式状态机 `tool_call/stream_parser.rs` 解析（唯一生产解析点；同一套规则的正则版 `tag_parser.rs` 因零生产调用点已删除）。除标签外还接受 **markdown 围栏**形式的调用：专用语言名（```` ```tool_call ```` / ```` ```invoke ```` 等，宽松判定）与**通用**语言名 ```` ```json ````（严格判定，须同时带 `name` 与 `arguments`，否则按展示给用户的数据处理）。代价：通用围栏要缓冲到闭栏才输出，这类 JSON 块不再逐字流式。
+
 - 流式输出：`Provider` trait 已定义 `chat_stream`（SSE）接口，但 chat 主路径当前仍整块返回，未启用流式。
 
 ### Provider Compat 层（ADR-0026）

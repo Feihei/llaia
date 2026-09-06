@@ -2602,6 +2602,32 @@ mod tests {
         assert_eq!(tool_starts, vec!["echo"]);
     }
 
+    /// 标签降级模式下模型把调用包在 ```json 围栏里（实测于 first-run bootstrap）：
+    /// 端到端也应被提取执行，而不是当普通文本回给用户（H2）。
+    #[tokio::test]
+    async fn test_json_fence_tool_call_executed_through_loop() {
+        let text = "```json\n{\"name\":\"echo\",\"arguments\":{}}\n```";
+        let rounds = vec![
+            vec![StreamEvent::TextDelta(text.into()), StreamEvent::Done],
+            vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done],
+        ];
+        let mut agent = make_agent_with_rounds(false, rounds).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let _ = agent.handle_input_streaming("read", "cli", tx).await;
+
+        let mut chunks = Vec::new();
+        let mut tool_starts = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                TurnEvent::Chunk { delta } => chunks.push(delta),
+                TurnEvent::ToolStart { name, .. } => tool_starts.push(name),
+                _ => {}
+            }
+        }
+        assert_eq!(tool_starts, vec!["echo"], "json 围栏内的调用应被执行");
+        assert_eq!(chunks.concat(), "done", "围栏载荷不该泄漏成用户可见文本");
+    }
+
     /// Mock vision provider：chat 返回固定描述文本
     struct VisionMockProvider {
         description: String,

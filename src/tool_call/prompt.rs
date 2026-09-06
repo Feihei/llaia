@@ -18,7 +18,11 @@ pub fn build_tool_instructions(tools: &[ToolSpec]) -> String {
     ));
     s.push_str("Rules:\n");
     s.push_str("- Do NOT output think tags — keep reasoning internal.\n");
-    s.push_str("- Do NOT wrap tool calls in markdown code blocks.\n");
+    s.push_str(
+        "- If you wrap a call in a markdown code block, use ```tool_call or ```json as the \
+         language and keep the same JSON object; a block without an \"arguments\" key is \
+         treated as plain text, not as a call.\n",
+    );
     s.push_str("- Tool name must be from the Available tools list below.\n");
     s.push_str(
         "- Multiple tool calls can be made in one response, each in its own tool_call tag.\n\n",

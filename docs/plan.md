@@ -49,12 +49,11 @@
       - **先说结论：判定逻辑没坏，四次失败全是模型侧文本不符**。对照 `22302d8^` 的原文逐行验过：阿来改 `todo.rs` 的两次（`tool_calls` 1260/1265）把 `/// 禁用落盘（测试 / 无 workspace 场景）。` 记成了 `/// 禁用落盘的降级实例（测试用）。`；改 `plan.md` 的两次（09-04，calls 1088/1091）引用了一条从没进过仓库正文的行（`git log -S "N+1"` 全历史无命中）。
       - **但工具确实在帮倒忙**：`tools/file.rs:239` 只回 `old_string not found in <path>`，不提示「先 `file_read` 拿准原文再重试」，模型于是拿同一份脑内快照连撞四五次，一次编辑烧掉五个回合。改法：0 命中的错误文本追加一句可执行指引，并回显文件里最接近的一行帮助定位。
       - **潜在坑（本机未复现，Windows 用户会踩）**：匹配是字节级 `content.matches(old)`，零归一化。本仓库工作树恰好纯 LF，但 `core.autocrlf = true` 且**无 `.gitattributes`** → 新克隆到 Windows 得到 CRLF 工作树，模型按 LF 给 `old_string` 必然 0 命中，`file_edit` 直接废掉。改法：0 命中且文件含 `\r\n` 时，把 `old`/`new` 的 `\n` 归一为 `\r\n` 重试一次（命中则按原样写回，不混行尾）。约 20 行 + 2 单测。
-- [ ] **H2 · 标签模式下 `` ```json `` 围栏的工具调用不被解析**（`88e96b7` commit message 里记的 follow-up issue，至今未立案）
-      - 现象：首运行引导实测中，模型唯一一次尝试写 SOUL/USER 是把工具调用包在 `` ```json … ``` `` 里，静默不执行，用户侧什么都没发生。
-      - 根因（生产路径）：`tool_call/stream_parser.rs:63` 的 `FENCE_LANGS = ["tool_call","toolcall","tool-call","invoke"]` 不含 `json` → 不进入 `InFence`，整块按普通文本透传。仅影响 `native_tool_calling = false` 的标签降级模式（本地小模型主路径）。
-      - **陷阱（本项最大的坑）**：`tool_call/tag_parser.rs::parse_tool_calls` 里有同一套 tag + fence 规则、还带完整单测，但**全仓库没有任何生产调用点**（`grep` 实锤：只有自身 tests 与 `tool_call/mod.rs:7` 的 re-export）。改它零效果，且两份规则会持续漂移——违反本仓库「不留 `dead_code`，要么接入要么删」的约定。处理方向二选一：非流式路径接入它，或删掉、把有用的用例迁到 `stream_parser.rs`。
-      - 改法：`FENCE_LANGS` 加 `"json"`。风险比看上去低——`value_to_tool_call` 本来就要求同时含 `name`(string) 与 `arguments` 才成调用，且 `InFence` 收口时解析失败会把原块当文本吐回（`stream_parser.rs:235-255`），给用户看的 JSON 示例不会被吞。真要再收紧一层，可把已注册工具名集合传进 parser 做白名单校验（签名要动，代价明显）。补两条单测：`` ```json `` 被识别为调用；`` ```json `` 里是普通配置示例时原文保留。
-      - 顺手（可选）：`tool_call/prompt.rs` 明确写「工具调用只能用 `<tool_call>` 标签或 `` ```tool_call `` 围栏，不要包在 `` ```json `` 里」。
+- [x] **H2 · 标签模式下 `` ```json `` 围栏的工具调用不被解析**（2026-09-05 交付：`tool_call/stream_parser.rs` + `tool_call/prompt.rs`，端到端用例在 `agent/mod.rs`；明细见 CHANGELOG §v0.4.1）
+      - 原现象：首运行引导实测中，模型唯一一次尝试写 SOUL/USER 是把工具调用包在 `` ```json … ``` `` 里，静默不执行。原根因：`FENCE_LANGS` 只含 `tool_call|toolcall|tool-call|invoke`，`json` 不匹配 → 不进 `InFence`，整块按普通文本透传。仅影响标签降级模式（本地小模型主路径）。
+      - **实现与原提案有两处偏差**（都朝更简单的方向）：① 没用「已注册工具名白名单」（要改 parser 签名并穿线），改为**通用语言名走严格判定**——`value_to_fenced_call` 要求同时带 `arguments` 键，`{"name":"张三","age":3}` 这类展示数据因此不会被凭空执行成 unknown tool 调用，专用围栏 ```` ```tool_call ```` 维持原宽松判定零回归；② 补了原提案没想到的两处还原：解析失败时连开栏原文一起吐（否则用户看到丢格式的正文 + 孤儿闭栏），未闭合的通用围栏在 `finish()` 还原而非静默丢弃（截断时宁可看到半截 JSON；专用围栏仍按原语义丢弃，防泄漏）。
+      - 死码已清：`tool_call/tag_parser.rs`（同一套规则的正则版、334 行、零生产调用点）删除，等价覆盖落在 `stream_parser.rs` 的 7 条新单测；`agent/mod.rs` 另加一条端到端用例证明围栏调用真被执行——只在 parser 层测绿保证不了接线。
+      - **已知代价**：```` ```json ```` 块要缓冲到闭栏才输出，这类代码块不再逐字流式（```` ```python ```` 等不受影响，`test_java_fence_not_hijacked_by_json_prefix` 钉住同前缀不被劫持）。单用户场景可接受，先记录不优化。
 - [ ] **H3 · 文档一致性欠账**
       - `AGENTS.md:101` 仍写「chat 主路径当前仍整块返回，未启用流式」——过时，主路径早已 `chat_stream` 流式（`agent/mod.rs` 消费侧）；同节其余 v0.4.x 增补（guard/bootstrap）都已同步。
       - 用户文档没跟上 v0.4.1 的画像模板改动（`88e96b7` 只动了 `src/`）：`docs/guide/` 未提 SOUL 默认 `# Name` = LLAIA、USER 的 `language` 改为留空由引导去问、以及启动时自动升级逐字节未改动的旧占位文件（`migrate::refresh_placeholder_templates`）。
