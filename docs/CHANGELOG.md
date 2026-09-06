@@ -16,6 +16,7 @@
 **Features**
 - **memory**：全新 agent 既不知道自己叫什么、也不该替用户预设语言——SOUL 模板首段补 `# Name` = LLAIA，USER 模板里预先填好的 `- language: Chinese` 改为留空，交给 first-run bootstrap 去问。改模板常量会连带打断首运行引导：模板本身就是 `memory::is_unfilled` 的比较指纹，旧版未填占位文件会突然被读成「已填写」，指令不再注入、reminder 门禁反向误触发白烧一个隔离 turn。故旧文本保留为 `SOUL_TEMPLATE_LEGACY` / `USER_TEMPLATE_LEGACY`，由 `migrate::refresh_placeholder_templates()` 在启动时升级**逐字节等于旧模板**的文件（主 workspace 与 subagent 目录都过），用户哪怕只改过一行也不动。同批把 `bootstrap_note` 重写为编号指令——实测旧写法会让模型在用户答完后追问第二轮五问，且它唯一一次写盘尝试把工具调用包在 `` ```json `` 围栏里没被解析（该缺口同日修复，见本节 **tool_call** 条目）
 - **i18n**：框架消息统一英文，承接 v0.4.0 的用户可见输出与 init 模板英文化、本轮扫尾——`guard` 的重试提示与两条 `[guard]` 诊断（诊断会作为 assistant 消息进 context，中文文本是模型可以原样模仿回来的素材）、五份重复的 keepalive 通知收敛为 `channels::keepalive_notice()`、微信入站媒体占位改 `[image]/[file]/[video]`（与 `image_utils` 对齐）、turn 超时通知、WebUI 更新检查报错、doctor/init CLI 提示、WebUI 频道卡片与表单占位文案。**保留中文**：`qq.rs` 需按字面匹配 QQ API 返回的中文 token 过期提示体，翻译会破坏检测
+- **docs**：一致性扫尾（plan.md H3）——AGENTS.md 的「chat 主路径仍整块返回、未启用流式」改为实况（主路径 `chat_stream` + Generation Guard 消费框架，非流式 `chat()` 只剩不带工具的 sidecar 单发：压缩摘要 / reminder 提炼 / 会话标题 / vision 描述 / `/btw` / 记忆压缩）；guide「记忆与上下文」补画像模板约定（SOUL 默认 `# Name` = LLAIA、USER 的 `language` 留空交引导去问、启动时自动升级逐字节未改动的旧占位文件）；plan.md 修掉 T1–T4 编号在 OS 防线与静态分析层两套语义间的撞车（后者改用 S 前缀），并在状态图例新增编号约定总则
 
 ---
 

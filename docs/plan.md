@@ -41,7 +41,7 @@
 
 ## 近期小修（H 系列，v0.4.1 → v0.4.2 窗口）
 
-**状态**：🚧 进行中（起点 2026-09-05）｜H1、H2 已交付，H3–H6 待拍板｜每项独立可提交、不阻塞发版
+**状态**：🚧 进行中（起点 2026-09-05）｜H1–H3 已交付，H4–H6 待拍板｜每项独立可提交、不阻塞发版
 
 抽出来的理由：这些都不是「阶段性工程」，而是散在 P7 / 主干体检 backlog 里的低成本止血项——原混在前瞻计划里，既不会被顺手做掉，也看不清发版窗口里还剩什么。
 
@@ -54,10 +54,10 @@
       - **实现与原提案有两处偏差**（都朝更简单的方向）：① 没用「已注册工具名白名单」（要改 parser 签名并穿线），改为**通用语言名走严格判定**——`value_to_fenced_call` 要求同时带 `arguments` 键，`{"name":"张三","age":3}` 这类展示数据因此不会被凭空执行成 unknown tool 调用，专用围栏 ```` ```tool_call ```` 维持原宽松判定零回归；② 补了原提案没想到的两处还原：解析失败时连开栏原文一起吐（否则用户看到丢格式的正文 + 孤儿闭栏），未闭合的通用围栏在 `finish()` 还原而非静默丢弃（截断时宁可看到半截 JSON；专用围栏仍按原语义丢弃，防泄漏）。
       - 死码已清：`tool_call/tag_parser.rs`（同一套规则的正则版、334 行、零生产调用点）删除，等价覆盖落在 `stream_parser.rs` 的 7 条新单测；`agent/mod.rs` 另加一条端到端用例证明围栏调用真被执行——只在 parser 层测绿保证不了接线。
       - **已知代价**：```` ```json ```` 块要缓冲到闭栏才输出，这类代码块不再逐字流式（```` ```python ```` 等不受影响，`test_java_fence_not_hijacked_by_json_prefix` 钉住同前缀不被劫持）。单用户场景可接受，先记录不优化。
-- [ ] **H3 · 文档一致性欠账**
-      - `AGENTS.md:101` 仍写「chat 主路径当前仍整块返回，未启用流式」——过时，主路径早已 `chat_stream` 流式（`agent/mod.rs` 消费侧）；同节其余 v0.4.x 增补（guard/bootstrap）都已同步。
-      - 用户文档没跟上 v0.4.1 的画像模板改动（`88e96b7` 只动了 `src/`）：`docs/guide/` 未提 SOUL 默认 `# Name` = LLAIA、USER 的 `language` 改为留空由引导去问、以及启动时自动升级逐字节未改动的旧占位文件（`migrate::refresh_placeholder_templates`）。
-      - 本文件自身的编号冲突（**本轮已修**）：P7 的 T1–T4 与 2026-09-05 那条笔记里另套 T1/T2/T3 含义互相矛盾，现已把「静态分析层」改称 S1/S2，见 P7 节末。
+- [x] **H3 · 文档一致性欠账**（2026-09-06 交付：`AGENTS.md` + `docs/guide/memory-and-context.md`）
+      - ~~AGENTS.md 仍写「chat 主路径当前仍整块返回，未启用流式」~~ 已改：主路径流式（`chat_stream` + Generation Guard 消费框架），非流式 `chat()` 只剩不带工具的 sidecar 单发调用（压缩摘要 / reminder 提炼 / 会话标题 / vision 描述 / `/btw` / 记忆压缩）。
+      - ~~用户文档没跟上 v0.4.1 的画像模板改动（`88e96b7` 只动了 `src/`）~~ 已补进 `guide/memory-and-context.md` 的 Bootstrap 节：SOUL 默认 `# Name` = LLAIA、USER 的 `language` 留空由引导去问（旧模板预填值会替英文用户做主）、启动时自动升级逐字节未改动的旧占位文件（`refresh_placeholder_templates`，改过一行就不动）。
+      - 本文件自身的编号冲突（**已修**，随 H 系列立项那笔提交落地）：P7 的 T1–T4 与当日笔记里另套 T1/T2/T3 含义互相矛盾，已把「静态分析层」改称 S1/S2，见 P7 节末。
 - [ ] **H4 · 主干体检 backlog 里的机械项提升**（从下方「遗留 backlog」上提，改动面小、零设计）
       - 常量正则 `unwrap()`（`secrets.rs` / `config.rs` / `approval.rs`）：逻辑上不可 panic，按约定补注释即可。
       - `slash.rs`（background_tasks）与 `sqlite.rs` 全文件约 20 处 `lock().unwrap()`：锁内均同步调用、无 await，正确性无问题，仅与「生产路径不用 unwrap」的约定冲突，机械替换 `unwrap_or_else(|e| e.into_inner())`，diff 大但零风险。
