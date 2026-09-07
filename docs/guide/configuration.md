@@ -102,6 +102,7 @@ max_tokens = 8192                     # Anthropic 必传，未配默认 4096
 | `command_policy` | `blacklist` | `blacklist` / `whitelist` / `none`。 |
 | `command_whitelist` | `[]` | 仅 `policy=whitelist` 时生效。 |
 | `whitelist` | `[ls, cat, grep, pwd, dir]` | 旧字段，兼容保留。 |
+| `interpret_inline` | `approval` | 解释器内联载荷闸门：`approval`（默认）时，`python -c` / `node -e` / `php -r` / `curl … \| bash` 等内联执行即使落在 workspace 内也强制 `/ok` 人审；`off` 关闭。跑脚本文件（`python script.py`）不拦。yolo 档整体弃权审批，不受此闸门约束。 |
 
 ## `[tools.search]`
 
@@ -111,6 +112,8 @@ max_tokens = 8192                     # Anthropic 必传，未配默认 4096
 | `top_k` | `8` | 默认返回条数。 |
 
 统一 `search` 工具：对外只暴露一个 `search`，内部按 `provider` 路由到对应源，不串试、不聚合。所选 provider 的 key 缺失则不注册该工具。
+
+> **解释器内联载荷为什么单独设闸**：terminal 的命令黑名单与路径校验都作用于命令行字符串本身，而 `python -c "…"` / `node -e "…"` 的真正文件操作发生在解释器内部，框架无法感知——静态分析载荷内容也不可靠。因此内联执行一律升级到人审（T3，2026-09-07 定案）：这是当下唯一能覆盖未知载荷的闸门；跑脚本文件不拦（脚本路径仍走路径校验，且写入动作在会话记录中可审计）。彻底封堵（进程级约束）见[安全加固指南](security-hardening.md)（T2 无特权账户）。
 
 ## `[tools.tavily]` / `[tools.baidu]` / `[tools.brave]`
 

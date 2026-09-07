@@ -136,6 +136,7 @@ token = ""                   # empty => random token generated at startup and pr
 confirm = "none"
 command_policy = "blacklist"
 command_whitelist = []
+interpret_inline = "approval"   # approval (default): force /ok approval for interpreter inline code like `python -c`, even inside workspace; off disables the gate
 
 [tools.search]
 provider = "tavily"            # search provider: tavily / baidu / brave

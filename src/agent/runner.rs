@@ -169,6 +169,7 @@ pub async fn execute_tool_calls(
             trusted,
             profile,
             channel,
+            ctx.terminal_inline_gate,
         ) {
             // 直接执行
             ApprovalAction::Approved => {}
@@ -332,6 +333,7 @@ mod tests {
                 agent_alias: "main".into(),
                 audit: None,
                 ask_user_timeout_secs: 0,
+                terminal_inline_gate: false,
             },
             None,
         )
@@ -364,6 +366,7 @@ mod tests {
                 agent_alias: "main".into(),
                 audit: None,
                 ask_user_timeout_secs: 0,
+                terminal_inline_gate: false,
             },
             None,
         )
@@ -418,6 +421,7 @@ mod tests {
                 agent_alias: "main".into(),
                 audit: None,
                 ask_user_timeout_secs: 0,
+                terminal_inline_gate: false,
             },
             None,
         )
@@ -440,6 +444,7 @@ mod tests {
                 agent_alias: "main".into(),
                 audit: None,
                 ask_user_timeout_secs: 0,
+                terminal_inline_gate: false,
             },
             None,
         )
@@ -461,6 +466,7 @@ mod tests {
                 agent_alias: "main".into(),
                 audit: None,
                 ask_user_timeout_secs: 0,
+                terminal_inline_gate: false,
             },
             None,
         )

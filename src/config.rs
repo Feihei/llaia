@@ -663,6 +663,10 @@ pub struct TerminalToolConfig {
     /// 仅 policy=whitelist 时生效
     #[serde(default = "default_command_whitelist")]
     pub command_whitelist: Vec<String>,
+    /// 解释器内联载荷策略（T3）：approval（默认，`python -c` / `node -e` 等内联执行
+    /// 命中即强制人审，即使落在 workspace 内）/ off（关闭该闸门）
+    #[serde(default = "default_interpret_inline")]
+    pub interpret_inline: String,
 }
 
 impl Default for TerminalToolConfig {
@@ -672,6 +676,7 @@ impl Default for TerminalToolConfig {
             whitelist: default_whitelist(),
             command_policy: default_command_policy(),
             command_whitelist: default_command_whitelist(),
+            interpret_inline: default_interpret_inline(),
         }
     }
 }
@@ -692,6 +697,10 @@ fn default_whitelist() -> Vec<String> {
 
 fn default_command_policy() -> String {
     "blacklist".into()
+}
+
+fn default_interpret_inline() -> String {
+    "approval".into()
 }
 
 fn default_command_whitelist() -> Vec<String> {

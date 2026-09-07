@@ -188,6 +188,11 @@ pub struct ApprovalContext {
     pub audit: Option<Arc<crate::audit::AuditLog>>,
     /// ask_user 超时秒数（ADR-0022），构造自 `[runtime].ask_user_timeout_secs`
     pub ask_user_timeout_secs: u64,
+    /// 解释器内联载荷闸门（T3），构造自 `[tools.terminal].interpret_inline != "off"`：
+    /// 开启时 terminal 命令命中 `is_inline_interpreter_command` 即强制人审（即使
+    /// 落在 workspace / 受信目录内）。delegate 频道与 yolo 档不受影响（见
+    /// `approval_decision` 内注释）。
+    pub terminal_inline_gate: bool,
 }
 
 /// 是否交互式频道（能等待用户 /ok /deny /answer）
@@ -231,6 +236,7 @@ pub fn tool_within_workspace(
 }
 
 /// 审批决策
+#[derive(Debug)]
 pub enum ApprovalAction {
     /// 直接执行，无需审批
     Approved,
@@ -248,23 +254,38 @@ pub fn approval_decision(
     trusted: &[PathBuf],
     profile: &str,
     channel: &str,
+    terminal_inline_gate: bool,
 ) -> ApprovalAction {
-    // 子 agent 委派：不受审批拦截（与 P2-a 一致，channel 固定为 "delegate"）
+    // 子 agent 委派：不受审批拦截（与 P2-a 一致，channel 固定为 "delegate"）。
+    // T3 边界（注释留档）：delegate 通道的解释器内联载荷同样绕过审批——
+    // 主 agent 把内联载荷塞进 delegate 任务即可绕过 T3，这是 P2-a 既有性质的
+    // 自然延伸；真正的封堵归 T2（无特权账户）部署规范。
     if channel == "delegate" {
         return ApprovalAction::Approved;
     }
     if profile == "yolo" {
+        // yolo 是显式弃权所有审批的档位，T3 不在其中例外（否则 yolo 语义被破坏）。
         return ApprovalAction::Approved;
     }
     if !tool.requires_confirm() {
         return ApprovalAction::Approved;
     }
     let within = tool_within_workspace(tool.name(), args, workspace, trusted);
-    let required = match profile {
+    let mut required = match profile {
         "read-only" => true,
         // default 或未识别档位：仅 workspace 外需审批
         _ => !within,
     };
+    // T3（plan.md，2026-09-07 grill 定案）：解释器内联载荷强制人审——即使落在
+    // workspace / 受信目录内。`python script.py` 不拦（路径走 path 校验，写入
+    // 在 transcript 可审计），`python -c` / `node -e` / `curl | bash` 等内联形态必审。
+    if !required && terminal_inline_gate && tool.name() == "terminal" {
+        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+            if crate::path_guard::is_inline_interpreter_command(cmd) {
+                required = true;
+            }
+        }
+    }
     if !required {
         return ApprovalAction::Approved;
     }
@@ -513,5 +534,113 @@ mod tests {
             within,
             "moved 目录内带引号的 cd 命令应判定为 workspace 内:\n{cmd}"
         );
+    }
+
+    // ---------------- T3：解释器内联载荷强制人审 ----------------
+
+    fn decision_for(tool: &str, cmd: &str, ws: &Path, profile: &str, gate: bool) -> ApprovalAction {
+        let tool_stub = ToolStub { name: tool };
+        approval_decision(
+            &tool_stub,
+            &json!({ "command": cmd }),
+            ws,
+            &[],
+            profile,
+            "cli",
+            gate,
+        )
+    }
+
+    /// 最小工具桩：只提供 name（requires_confirm 默认 true），让 terminal 命令
+    /// 走 `tool_within_workspace` 的 terminal 分支做范围判定。
+    struct ToolStub<'a> {
+        name: &'a str,
+    }
+    #[async_trait::async_trait]
+    impl Tool for ToolStub<'_> {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn requires_confirm(&self) -> bool {
+            true
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({})
+        }
+        async fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _channel: &str,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn test_t3_inline_interpreter_forces_approval_within_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path();
+        // workspace 内的 python -c：default 档本应免审批，T3 开启时强制人审
+        match decision_for("terminal", "python -c \"print(1)\"", ws, "default", true) {
+            ApprovalAction::NeedsApproval { within_workspace } => {
+                assert!(within_workspace, "命令落在 workspace 内，提示应标注 within");
+            }
+            other => panic!("inline interpreter must require approval, got {other:?}"),
+        }
+        // 管道喂裸解释器同样命中
+        assert!(matches!(
+            decision_for("terminal", "echo x | python", ws, "default", true),
+            ApprovalAction::NeedsApproval { .. }
+        ));
+    }
+
+    #[test]
+    fn test_t3_gate_off_and_script_files_stay_approved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path();
+        // 闸门关闭：同命令恢复 default 档的免审批
+        assert!(matches!(
+            decision_for("terminal", "python -c \"print(1)\"", ws, "default", false),
+            ApprovalAction::Approved
+        ));
+        // 闸门开启：跑脚本文件不拦（T3 只拦内联）
+        assert!(matches!(
+            decision_for("terminal", "python script.py", ws, "default", true),
+            ApprovalAction::Approved
+        ));
+        assert!(matches!(
+            decision_for("terminal", "python -m pytest -q", ws, "default", true),
+            ApprovalAction::Approved
+        ));
+        // 非 terminal 工具不受 T3 影响（memory_write 走兜底分支：视为 workspace 内）
+        assert!(matches!(
+            decision_for(
+                "memory_write",
+                "python -c \"print(1)\"",
+                ws,
+                "default",
+                true
+            ),
+            ApprovalAction::Approved
+        ));
+    }
+
+    #[test]
+    fn test_t3_respects_yolo_and_readonly_profiles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path();
+        // yolo 显式弃权所有审批：T3 不例外
+        assert!(matches!(
+            decision_for("terminal", "python -c \"print(1)\"", ws, "yolo", true),
+            ApprovalAction::Approved
+        ));
+        // read-only 档本就全审，T3 不改变结果
+        assert!(matches!(
+            decision_for("terminal", "python -c \"print(1)\"", ws, "read-only", true),
+            ApprovalAction::NeedsApproval { .. }
+        ));
     }
 }

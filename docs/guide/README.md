@@ -36,6 +36,7 @@
 | [斜杠命令](slash-commands.md) | 会话内全部 `/` 命令 |
 | [内置工具](tools.md) | file / terminal / web / search / memory / delegate / cron / mcp |
 | [权限与安全](permissions.md) | 权限档位、交互式审批、硬边界 |
+| [安全加固](security-hardening.md) | 部署级防线：无特权账户运行（T2）、OS 沙箱评估结论 |
 | [常见问题](faq.md) | 排错与高频疑问 |
 
 ## 文档约定

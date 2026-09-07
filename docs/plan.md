@@ -61,8 +61,10 @@
 - [x] **H4 · 主干体检 backlog 里的机械项提升**（2026-09-06 交付）
       - 常量正则 `unwrap()`：`secrets.rs::is_plaintext` 与 `config.rs::expand_string` 两处补「模式串编译期写死且合法，构造不可能失败」注释；**`approval.rs` 实为笔误**——该文件没有常量正则，实际处理的是 `single_question` 里受 `len()==1` 保护的 `into_iter().next().unwrap()`（同样补注释）。
       - `lock().unwrap()` 毒锁恢复：`slash.rs` 4 处 + `sqlite.rs` 36 处（plan 立项时估的「约 20 处」偏少，实数 40），全部机械替换为 `lock().unwrap_or_else(|e| e.into_inner())`——锁内均同步调用、无 await，`Mutex` 毒化后恢复守卫不丢正确性，与「生产路径不用 unwrap」约定对齐。
-- [ ] **H5 · 入站附件 `uploads/` 无回收通路**（todo GC 的同类项，2026-09-05 顺带查得）：QQ 附件（`channels/qq.rs:872`）与邮件附件（`channels/mail.rs:190`）都落 `<家目录>/uploads/`，全仓库没有任何删除/回收代码，只增不减（本机现 2 个文件 / 220 KB，属还没长起来而不是没问题）。**两条现成通路都不能照搬**：`todos/` 的按会话 uuid GC 在这里无意义（附件不属于会话生命周期，且文件名是 `<msg_id>_<filename>` 不带 uuid），`workspace/tmp/` 的启动期 3 天 mtime 清理又太危险——用户半年前发来的图片可能仍被引用。要先拍板策略（例如「保留全部，只加容量上限 + WebUI 手动清理」或「N 天后移到 `backups/` 而非删除」），再动手。必要性：**低–中**（单用户场景增长慢，但发版前把它记下来比忘掉便宜）。
+- [ ] **H5 · 入站附件 `uploads/` 无回收通路**（todo GC 的同类项，2026-09-05 顺带查得）：QQ 附件（`channels/qq.rs:872`）与邮件附件（`channels/mail.rs:190`）都落 `<家目录>/uploads/`，全仓库没有任何删除/回收代码，只增不减（本机现 2 个文件 / 220 KB，属还没长起来而不是没问题）。**两条现成通路都不能照搬**：`todos/` 的按会话 uuid GC 在这里无意义（附件不属于会话生命周期，且文件名是 `<msg_id>_<filename>` 不带 uuid），`workspace/tmp/` 的启动期 3 天 mtime 清理又太危险——用户半年前发来的图片可能仍被引用。必要性：**低–中**（单用户场景增长慢，但发版前把它记下来比忘掉便宜）。
+      - **定案（grill 2026-09-07）：WebUI 手动清理**——保留全部 + 容量显示 + uploads 文件列表/手动删除，不做任何自动回收（消息历史引用这些路径，自动删/挪都会断链，零自动 = 零断链风险）。挂起到 v0.4.2，v0.4.1 不带。
 - [ ] **H6 · v0.4.1 发版动作**：写好 `docs/release-notes/v0.4.1.md`（简短英文 changelog，`release.yml` 的 release-notes job 会据此填 GitHub release body）→ `git tag -a v0.4.1` → push 分支与 tag。发版节奏与「跨版本号需先改 `Cargo.toml` 再打 tag」的既有约定见 AGENTS.md「发版」。
+      - **时序修订（grill 2026-09-07）**：用户拍板**攒发**——v0.4.1 等 T3 + S1 落地后一起打 tag（覆盖 2026-09-05「v0.4.1 不含 P7 任何子项」的决定；T3/S1 内容届时计入 v0.4.1 changelog）。H5 不等，挂起 v0.4.2。
 
 ---
 
@@ -70,9 +72,9 @@
 
 **状态**：⏳ 计划中（起点 2026-09-04）
 
-> **v0.4.1 不含 P7 任何子项**（用户 2026-09-05 拍板）：T1/T2 是 OS 级防线，要给 terminal 加运行时依赖、与「轻量、可移植、单 crate」的产品定位正面冲突，动手前必须先出 ADR，整体推到 v0.4.2 之后评估。T3（解释器/内联执行强制审批）不依赖沙箱、只是几十行，本轮同样不单独塞进来——它和静态分析层 S1/S2 的去留要一起在 grill 时定，见本节末「建议实现顺序」。近期窗口能做的都已在 **H 系列**。
+> **v0.4.1 内容修订（grill 2026-09-07）**：原「v0.4.1 不含 P7 任何子项」（2026-09-05 拍板）已改为**攒发**——T3 + S1 落地后与 H1–H4 一起打 v0.4.1；T3 范围（只拦内联）、S1 定位（误报修复为主）、S2 划掉、T1/T2/T4 去留均已定案，见上方「terminal 脚本绕过防护」。近期窗口能做的都已在 **H 系列**。
 
-### 🛡️ terminal 脚本绕过防护（2026-09-04 立项，待 grill）
+### 🛡️ terminal 脚本绕过防护（2026-09-04 立项；**grill 定案 2026-09-07**）
 
 **问题**：现有安全模型对「误删大量文件 / 改系统关键位置」的防护建立在**命令行字符串**上——命令黑名单（`path_guard.rs::COMMAND_BLACKLIST`，硬编码）、路径 token 提取（`extract_path_tokens` → `validate_command_paths_in_scope`）、shell 套壳拦截（`check_shell_wrappers`）。但 `python` / `node` / `perl` / `ruby` 等解释器一旦启动，其真正的文件操作发生在解释器内部，框架对子进程的 syscall / 文件系统效果**零感知**。实测三层全部绕过：
 
@@ -80,24 +82,18 @@
 - `check_shell_wrappers` 只拦 `bash/sh/zsh/fish` + `-c` 和 `eval/exec/source/$()/反引号`，`python` 不在 shell 名单、`-c` 非被拦构造；
 - 路径校验从命令行抠 token，`python evil.py` 只看到 `evil.py`（workspace 内合法）；即便 `shutil.rmtree('C:/Windows')` 被抠成含 `/` 的 token，`validate_path` 的黑名单是「危险前缀**开头**」匹配，token 实际以 `shutil.rmtree(` 开头 → 漏判。
 
-**结论**：字符串匹配层无法可靠覆盖「执行任意代码」的载荷，往黑名单里堆关键词是补不完的。真正的防线需要从「检测命令」转向「约束进程」。**候选方案（按可靠度 / 成本排序，待 grill 选型）**：
+**结论**：字符串匹配层无法可靠覆盖「执行任意代码」的载荷，往黑名单里堆关键词是补不完的。真正的防线需要从「检测命令」转向「约束进程」。
 
-- [ ] **T1 · OS 级沙箱（根治，★★★）**：把 terminal 及子进程关进 jail，让「碰不到系统目录」成为内核强制事实而非事后判断。Linux `bubblewrap`/`firejail` + namespace + `landlock`/`seccomp`（workspace 外只读 bind 或隐藏）；Windows `Windows Sandbox` / AppContainer / 低权限账户 + ACL；重任务可容器化（Docker）。结构性改造，动手前出 ADR。必要性：**高**（唯一能覆盖未知 payload 的方案）。
-- [ ] **T2 · 无特权账户运行（最省的强防线，★★☆）**：整个 llaia 进程（含 fork 出的解释器）以专用低权限账户运行，该账户对 workspace 外无写权限——OS 直接 `EACCES`，脚本再聪明也绕不过文件系统权限。缺点：主要挡写/删，挡不住读敏感文件（配合 HOME 隔离 + ACL 缓解）。必要性：**高**，性价比最高。
-- [ ] **T3 · 解释器 / 内联执行强制审批（当天可落地的止血，★☆☆）**：既然静态分析 `-c` 与 `.py` 内容不可靠，就不假装能分析，直接把常见解释器首词（`python/python3/node/perl/ruby/php/deno/bun`）与任意 `-c`/`-e` 内联执行标记为高危——命中即强制 `/ok` 审批（或 `deny`）。在 `check_shell_wrappers` 旁加 `check_high_risk_interpreter(command)`，同步 `[tools.terminal]` 可配开关与 CONFIG_TEMPLATE / `docs/guide/configuration.md` / AGENTS.md 四处（新增 runtime/terminal key 的既有约定）。不挡 `python evil.py` 的实际破坏，但把「跑任意代码」升级到人审这一现有唯一能覆盖未知载荷的闸门。必要性：**中**（真防线归 T1/T2，本项是当下无沙箱环境里的务实收敛）。
-- [ ] **T4 · 缩小爆炸半径（兜底，★☆☆）**：workspace git 跟踪 / 定期备份（误删可回滚）；terminal 默认 `read-only` 权限档、需要写时临时提档；考虑 terminal 断网（多数破坏脚本先下载载荷）。多为运维/配置约定而非进程内逻辑。必要性：**低–中**。
+**grill 定案（2026-09-07，两项拍板合并）**：
 
-> 定案方向预判（2026-09-04 原议）：T3 作为**近期代码改动**先行，T1/T2 作为**部署规范**写进文档（安全/权限相关 guide），T4 作为推荐实践。是否引入 OS 沙箱取决于「是否愿意给 terminal 加运行时依赖」——需与「轻量、可移植、单 crate」的产品定位一并权衡。
->
-> **2026-09-05 修订**：用户拍板 v0.4.1 不动 P7，T1/T2 连 ADR 一起推到 v0.4.2 之后评估；T3 不再是「近期先行」，改为等 S1 落地后一并评估（下面第 3 条）。
+- [x] **T3 · 解释器内联载荷强制审批（★☆☆）** — 已交付（2026-09-07）：`path_guard.rs::is_inline_interpreter_command`（引号感知段切分 + 内联形态识别，16 条单测）+ `approval_decision` 闸门（`ApprovalContext.terminal_inline_gate`，命中即 NeedsApproval，即使落在 workspace/受信目录内，3 条审批单测）+ `[tools.terminal].interpret_inline` 可配开关（默认 `approval`）+ CONFIG_TEMPLATE / guide / AGENTS.md 文档同步。**只拦内联**：`-c`/`-e`/`-r`/`--eval`/`--exec`、heredoc/stdin 进解释器、`deno eval`、裸解释器/shell 被管道喂入（`curl … | bash`）；跑脚本文件不拦（路径走 path 校验，写入在 transcript 可审计）；yolo 档显式弃权不受约束；delegate 频道维持 P2-a 既有绕过（代码注释留档）。验证：fmt/clippy(-D warnings)/test 全绿（lib 571 + 集成 53）
+- [ ] **S1 · 命令拆分 + flag 级路径检查（重新定位：误报修复为主）**：引号感知 tokenizer 替代 `split_whitespace`（修 #C 同类误报：`git commit -m "..."` 字面量被抠成假路径）+ 按 flag 语义判定参数是否路径。**验收标准 = 减少误拒，而非拦截率**——安全收益有限（解释器载荷内容怎么拆都分析不了，拦不住任意代码），安全上的定位是增强而非防线。一到数天，回归风险在审批行为面（需全量回归现有命令样本）。
+- ~~**S2 · `sh -c` 载荷递归解析**~~ **划掉（grill 2026-09-07）**：立项前提不成立——核实 `check_shell_wrappers`（`path_guard.rs:191`）对 `bash/sh/zsh/fish + -c` 是 **bail 硬拒绝**而非人审，不存在「套壳漏网需要解析」的安全缺口；剩余价值仅是把硬拒改成解析放行（易用性），单用户场景 agent 几乎不需要 `sh -c`（`&&` 链即可），不值得引入「解析器认为安全」的新信任面。
+- **T1 · OS 级沙箱：预判不做**（grill 2026-09-07 定调）：与「轻量、可移植、单 crate」产品定位正面冲突，只留本评估记录，除非未来真实发生事故再重启评估。
+- **T2 · 无特权账户运行：文档化（已交付，2026-09-07）**：新增 [docs/guide/security-hardening.md](guide/security-hardening.md)——无特权账户部署规范（Windows 专用账户 + ACL / Linux 专用用户，含「挡写不挡读」的边界与 ACL 缓解）+ T1 不采纳的评估记录 + 已知边界（delegate 绕过、T4 不做的代价）。
+- **T4 · 缩小爆炸半径：全部不做**（grill 2026-09-07 拍板）：git 跟踪/备份指引、read-only 权限档、断网三项均不留，整体归档。已知代价：误删场景无兜底叙事，接受。
 
-### 建议实现顺序（2026-09-05 重排编号）
-
-原笔记（同日）把这三步也写成 T1/T2/T3，与本节上方 T1–T4 的 OS 级语义撞车，现改用 **S 前缀**区分「进程内静态分析层」与「OS/部署级防线」：
-
-1. **S1 · 命令拆分 + flag 级路径检查**：不再从命令行里抠 token 猜路径，先做真正的 shell 词法拆分，再按 flag 语义判定参数是不是路径（含 `--interpreter` / `-e` / `-c` 与裸执行）。**目前只停在决策状态**：`docs/plans/` 下没有对应计划文件，代码零改动——`git log` 里 `c647c9d` 的 8 条 path 规则已是全部现状，`python -c "open(...).write(...)"` 实测过防线。
-2. **S2 · `sh -c` 载荷递归解析**：对套壳的 `-c` 字符串递归跑 S1。依赖 S1，不能先行。
-3. **T3 · 解释器 / 内联执行强制审批**：不依赖 S1/S2，但也不再假装能静态分析 `-c` 与 `.py` 内容——只做「命中即人审」的闸门，等 S1 有结论后一并评估要不要留。
+**实施顺序**：~~T3（半天级）先行~~ 已交付（2026-09-07）→ **下一步 S1**，完成后随 **v0.4.1 攒发**（H6 时序修订，见 H 系列）。T2 文档同批交付；T1 评估记录落在 security-hardening.md。
 
 ### 🧩 待 grill 明确后立项
 

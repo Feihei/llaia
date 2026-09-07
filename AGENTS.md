@@ -182,6 +182,8 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 
 - `command_policy`（`blacklist` 默认 / `whitelist` / `none`）：命令黑白名单
 
+- `interpret_inline`（`approval` 默认 / `off`）：**解释器内联载荷闸门（T3，2026-09-07 grill 定案）**。命令黑名单与路径校验都作用于命令行字符串，`python -c "…"` / `node -e` 的真正文件操作发生在解释器内部、框架零感知（实测三层全绕过）。`path_guard.rs::is_inline_interpreter_command`（引号感知段切分）识别内联形态——解释器 + `-c`/`-e`/`-r`/`--eval`/`--exec`、heredoc/stdin 进解释器、裸解释器/shell 被管道喂入（`curl … | bash`）——命中即在 `approval_decision` 强制人审（`ApprovalContext.terminal_inline_gate`，源自 `interpret_inline != "off"`），**即使落在 workspace/受信目录内**。刻意只拦内联：跑脚本文件不拦（路径走校验、写入在 transcript 可审计）；yolo 档显式弃权不受约束；delegate 频道绕过（P2-a 既有性质）。T2 无特权账户部署规范（真正的进程级防线）见 [docs/guide/security-hardening.md](docs/guide/security-hardening.md)。
+
 > **Windows 执行器**：优先探测 Git Bash（白名单安装路径 + PATH，排除 WSL `System32`/`WindowsApps` 假 bash，`$MSYSTEM` 非空校验），以 `bash -s` 经 **stdin** 喂命令——绕开 MSVCRT argv 转义层，双引号 / `;` 链 / `$VAR` / 中文（UTF-8）按 bash 语义正确执行；无 Git Bash 时回退 `cmd /C` + `raw_arg` 原样传参（引号不再二次转义，但 `;`/`$VAR`/中文受 cmd 限制）。非 Windows 走 `sh -c`。
 
 ### 工具副作用标记
