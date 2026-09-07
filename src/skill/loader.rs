@@ -339,12 +339,12 @@ pub fn default_skill_template(name: &str) -> String {
 }
 
 /// Built-in example skills: (directory name, SKILL.md content)
+///
+/// Only `news-digest` ships as a seeded example (it pairs with the `morning_news`
+/// cron template). `code-review` is generic enough that users configure it themselves,
+/// and the old `todoist` example is misleading now that a first-class `todo` tool exists.
 pub fn example_skills() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("code-review", EXAMPLE_CODE_REVIEW),
-        ("news-digest", EXAMPLE_NEWS_DIGEST),
-        ("todoist", EXAMPLE_TODOIST),
-    ]
+    &[("news-digest", EXAMPLE_NEWS_DIGEST)]
 }
 
 /// 内置元 skill（随 llaia 发布）：引导 agent 如何按 llaia 约定自管 skill
@@ -428,40 +428,9 @@ fn seed_examples(skills_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("SKILL.md"), content)?;
     }
-    tracing::info!(dir = %skills_dir.display(), "seeded example skills (code-review / news-digest / todoist)");
+    tracing::info!(dir = %skills_dir.display(), "seeded example skills (news-digest)");
     Ok(())
 }
-
-const EXAMPLE_CODE_REVIEW: &str = r#"---
-name: code-review
-description: Review code changes in a Git repo and give structured review comments. Use when the user asks for a code review or to review changes.
-duration: turn
-tools: ["file_read", "terminal"]
----
-
-# Code Review
-
-## Workflow
-1. Run `git status` and `git diff HEAD` via terminal to see uncommitted changes (use the user-specified commit range if given)
-2. Analyze changes file by file, focusing on:
-   - Logic bugs and edge cases
-   - Error handling and resource leaks
-   - Security issues (injection, path traversal, sensitive info leakage)
-   - Readability problems that clearly violate project conventions
-3. Use file_read on suspicious spots to confirm context and avoid false positives
-
-## Output Format
-Group by severity:
-- 🔴 Blocker: bugs / security issues that must be fixed
-- 🟡 Suggestion: recommended improvements
-- 🟢 Nitpick: minor style issues
-
-Each comment points to the file and approximate location with a fix suggestion. If nothing is found, say so explicitly.
-
-## Notes
-- Review only; don't modify code unless explicitly asked
-- If the workspace is not a Git repo, tell the user and ask for a file list
-"#;
 
 const EXAMPLE_NEWS_DIGEST: &str = r#"---
 name: news-digest
@@ -488,28 +457,6 @@ End with one sentence summing up the day's overall takeaways. Be concise; avoid 
 ## Notes
 - If search is unavailable (no api_key) → explain and ask the user to configure or provide news URLs
 - Note the information freshness ("as of X date"); never fabricate news
-"#;
-
-const EXAMPLE_TODOIST: &str = r#"---
-name: todoist
-description: Set reminders and to-do tasks for the user (via cron schedules). Use when the user says "remind me...", "add a to-do", or "do X every day/week".
-duration: turn
-tools: ["cron_task", "memory_write"]
----
-
-# Todoist Reminders
-
-## Workflow
-1. Parse from the user message: reminder content, time (one-shot moment or recurring rule)
-2. Create a scheduled task with the cron_task tool:
-   - One-shot reminder → mode = "agent", prompt = "Remind the user: X"
-   - Recurring reminder → write the matching cron expression schedule (5 fields: min hour day month weekday)
-3. Record this reminder into MEMORY.md with memory_write for later lookup/cancellation
-4. Confirm with the user: task id, trigger time, reminder content
-
-## Notes
-- If the time is vague (e.g. "tomorrow morning"), confirm with the user first, or take a reasonable default (8:00 AM) and say so
-- cron_task is only available in serve mode; on tool failure, explain that `llaia serve` must be running
 "#;
 
 #[cfg(test)]
@@ -706,17 +653,15 @@ mod tests {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("skills");
         let skills = load_skills(&dir);
-        // 3 个示例 skill + 1 个内置元 skill（skill-authoring，ensure_builtin_meta_skills 幂等确保）
-        assert_eq!(skills.len(), 4);
-        assert!(skills.iter().any(|s| s.name == "code-review"));
+        // 1 个示例 skill（news-digest）+ 1 个内置元 skill（skill-authoring，ensure_builtin_meta_skills 幂等确保）
+        assert_eq!(skills.len(), 2);
         assert!(skills.iter().any(|s| s.name == "news-digest"));
-        assert!(skills.iter().any(|s| s.name == "todoist"));
         assert!(skills.iter().any(|s| s.name == "skill-authoring"));
         // skills.json 已写入全部条目
         let json_path = skills_json_path(&dir);
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(json_path).unwrap()).unwrap();
-        assert_eq!(json["skills"]["code-review"]["active"], true);
+        assert_eq!(json["skills"]["news-digest"]["active"], true);
     }
 
     #[test]
