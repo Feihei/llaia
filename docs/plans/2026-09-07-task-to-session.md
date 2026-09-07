@@ -32,7 +32,7 @@
 - **cron/delegate 的 fork 共享全局 `workspace_root` Arc**（`fork_for_isolated`，`agent/mod.rs:566+`）：主线 `/move` 进仓库后，cron 的 terminal 也在仓库里跑。session 建模无论怎么选，fork 时都应 pin 明确的作用域（建议恒 pin 家目录，除非未来 session 自带 root）。
 - 归档线不续接 ✓（`state='archived'` 已排除）；cron 会话排除 ✓（`channel NOT LIKE 'cron:%'`）。
 
-## 参照项目对比（.ref 实测，goose 之外三家新查）
+## 参照项目对比（.ref 实测四家 + opencode 在线仓库实测）
 
 | 项目 | 存储模型 | session↔目录 | 重启/续接 | 关键锚点 |
 |---|---|---|---|---|
@@ -40,16 +40,18 @@
 | **pi** | JSONL 按目录命名空间：`~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl`；header 必含 cwd | **目录一等公民**：一目录多 session 天然成立；一 session 一 cwd、**不可移动**，换目录=fork 到新 cwd | `continueRecent(cwd)`：只在本目录的命名空间取最近；stored cwd 消失 → 问"就在当前目录续？"或硬报错 | `config.ts:571`、`session-manager.ts:1552-1675`、`session-cwd.ts:14-58`、per-folder 信任 `project-trust.ts` |
 | **jcode** | 扁平 `sessions/<id>.json` + journal，旁挂 sqlite 元数据索引（working_dir 只是列） | **m:n 最彻底**：working_dir Optional 可变；客户端跨目录 attach 可**改绑**（带防 $HOME 覆写守卫）；`/clear` 换 session 记录但保留 working_dir | 显式 `--resume <id>`；崩溃恢复靠 active_pids 提示 | `session.rs:153`、`client_session.rs:518-553`、`recent_session_index.rs:40` |
 | **deepseek-harness** | 全局 id 寻址、目录不入存储路径；cwd 在 header **optional** | 记录上可有可无，但 API 层 **owner-immutable 硬校验**：`ensureSession(id, cwd)` 不匹配直接 throw `ApiSessionCwdConflict`——"一 session 一目录"是强制约束不是元数据 | 工具每次调用按 `session.header.cwd` 解析相对路径（绝不跟 process.cwd()）；bash 另收 per-call workdir | `session-controller/commands.ts:65-97`、`agent.ts:29-41`、`tool-fs/session-cwd.ts:22-45` |
+| **opencode**（`/move` 的灵感来源，实测 V2/dev 树） | 全局单库 sqlite `session` 表：`project_id`(FK) + `directory` + `path`(worktree 内相对子路径) + per-session permission 列；存储**不**按目录分家 | **目录可变、项目不可变**：`move-session` 只允许同一 project（git worktree 根）内换目录/子目录，跨项目直接 `DestinationProjectMismatchError`；移动=追加一条 `SessionEvent.Moved` 改列，**历史消息不改写**（旧消息带旧 cwd 语境），可选 `moveChanges` 把未提交 git 改动搬去目的地 | `--continue` 在**当前 project 作用域**取最近线；全局列表带目录标签供跨目录选择；stored dir 消失→按请求报错、无自动修复 | `session.ts:224-244`、`move-session.ts:77-138`、`projector.ts:242-255`、`workspace-routing.ts:86-88` |
 
-样本结论：**一 session 一 cwd 是主流**（goose 可变、pi fork-only、DSH 硬锁），真 m:n 只有 jcode 一家，其代价是改绑守卫与"信任根随 cwd 漂移"的问题。用户要的 m:n 不强绑定没有坏先例，但需要自己定义"session 的当前目录到底是什么、谁更新它、重启恢复谁"。
+样本结论修正：**"目录跟 session 走（可变）"有两家**——goose（单值可换 + resume 提示）与 opencode（可换，但被 project 围栏锁在一个仓库内）；jcode 是完全无围栏的 m:n；pi/DSH 不可移动。真正的一线差别不在"能不能换目录"，而在**有没有一个比 session 更稳的锚**（opencode = project/git worktree 根；审批池、LSP、配置等运行时状态按 directory 键控成 per-instance 运行时，与数据面分离），以及**移动时历史如何处置**（opencode：只改指针、不重写）。用户设想的 m:n 在 opencode 就成立（一目录多 session、一 session 多目录），但它给"一个 session 一生 touch 哪些目录"划了界：**仓库范围内随便动，跨仓库请开新 session**。
 
 ## 候选方案（grill 材料，均满足：改名 /session + m:n 前提）
 
-### 方案 1：目录跟线不跟人（mutable last-writer，jcode 形、goose 启动形）
+### 方案 1：目录跟线不跟人（mutable last-writer，jcode / opencode 形、goose 启动形）
 
 session 记录带一个 `current_dir`（可空=家目录）。`/move` 批准 = 更新**当前 session** 的 `current_dir` + 登记 trusted_dirs（写入 sqlite，取代纯内存）；进/切 session 时若 `current_dir`≠当前 root → 自动切换（目录存在性校验，消失则 warn 回家目录）。
 
 - m:n 天然成立：同一目录开多 session 各自记各自的 current_dir；一个 session 多次 /move 留最后值（历史可选 journal 化）。
+- **opencode 验证过该形态的主干**：move 只改指针列、不重写历史（`SessionEvent.Moved` + projector）；但它用 project 围栏限"锚内可动"——LLAIA 要不要这层围栏见开放问题 7。
 - 一致性叙事最顺："进程=对话记忆边界；session=目录作用域的持久身份"。/move 与 /session 不再是两套语义。
 - 待 grill 风险：**重启自动把 workspace_root 恢复到外部目录**=隐式恢复旧授权（trusted_dirs 要不要一起持久？不持久则首写仍需审批但 cwd 已在外，半吊子；持久则违背"重启自愈"）。单 Agent 全局 root 与 per-session root 的落差（切线才生效，同进程内 cron/多频道看到的仍是漂移的全局值）。
 
@@ -79,6 +81,9 @@ session 不持久化作用域，但 `/session close`/列表展示 origin/current
 4. **隐式 resume 规则**：重启续最近线时，任务线排除（方案 2）还是含线并跟随目录（方案 1）？pi 的"stored cwd 消失→问/报错"要不要抄？
 5. **cron 会话归档膨胀**（顺带案）：session 6 攒了 2M 字符而 fork 永远空上下文——"复用会话防碎片化"的设计前提已死，cron 每次新开线或旧 cron 线定期归档，独立小决定。
 6. **`/new` 与 session 的关系**：`/new` 是"同线清上下文"还是"新 session"？pi 的 `/clear`（换记录保留 working_dir）给了参照。
+7. **要不要引入"锚"概念**（opencode 的 lesson）：它的可变目录被一个更稳的 project（worktree 根 / remote 哈希 / root-commit 哈希三级识别）围栏住——锚内随便 move，出锚直接拒绝（`DestinationProjectMismatchError`）。LLAIA 的对应物可以是"session 出生目录"或 worktree 根检测；不引入锚，则 jcode 的改绑守卫（拒绝把 session 绑回 `$HOME`）变成必选项。
+8. **移动的历史语义**：opencode 明确"只改指针、不重写"，旧消息留在旧 cwd 语境。LLAIA 的回灌（只取 user/assistant 尾部）天然就是这个行为；grill 要定注入文案要不要显式告诉模型"这条线之前在 X 目录干过活"。
+9. **审批池粒度**：opencode 的"总是允许"按 directory 键控、同目录多 session 共享、随实例销毁，与数据面分离；LLAIA 现状 trusted_dirs 是 Agent 进程级一维列表。要不要对齐 per-directory？cron fork 拿哪个池？
 
 ## 非目标（本 plan 明确不做）
 
