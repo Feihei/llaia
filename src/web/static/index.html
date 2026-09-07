@@ -146,7 +146,7 @@
           <div x-show="sessionMsg" class="err" x-text="sessionMsg"></div>
           <template x-for="s in sessions" :key="s.session_uuid">
             <div class="session-item" :class="{active: selectedSession === s.session_uuid}" @click="openSession(s.session_uuid)">
-              <div class="session-item-title"><b x-text="s.title || s.channel"></b> <span class="hint" x-text="s.message_count + ' msgs'"></span> <span class="hint" x-show="s.kind === 'task'">[task]</span> <span class="hint" x-show="s.state === 'archived'">[archived]</span></div>
+              <div class="session-item-title"><b x-text="s.title || s.channel"></b> <span class="hint" x-text="s.message_count + ' msgs'"></span> <span class="hint" x-show="s.kind === 'task'">[session]</span> <span class="hint" x-show="s.state === 'archived'">[archived]</span></div>
               <div class="hint" x-text="(s.title ? s.channel + ' · ' : '') + fmtTime(s.last_activity)"></div>
             </div>
           </template>

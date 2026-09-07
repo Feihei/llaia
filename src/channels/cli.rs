@@ -687,7 +687,7 @@ pub async fn build_single_agent(
             .await;
     }
     // 任务线状态（ADR-0031）：启动续接的 session 若是任务线，状态栏注入任务名/绑定目录
-    agent.refresh_task_state();
+    agent.refresh_task_state().await;
 
     Ok((
         Arc::new(Mutex::new(agent)),

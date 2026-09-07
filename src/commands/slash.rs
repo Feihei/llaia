@@ -44,7 +44,7 @@ pub async fn try_handle(
     match cmd_lc.as_str() {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /task [<name>|close] /tasks /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /btw <question> (side question, context read-only) /steer <message> (inject into a running turn) /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
+            "commands: /new /session [<name>|close] /sessions (aliases /task /tasks) /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /btw <question> (side question, context read-only) /steer <message> (inject into a running turn) /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
                 .into(),
         )),
         "/permission" => {
@@ -153,11 +153,24 @@ pub async fn try_handle(
                     )));
                 }
                 agent.set_workspace(home.clone()).await;
-                return Ok(SlashOutcome::Handled(format!(
+                // /move 管 bound_dir：在线上回 home = 解绑（home 是默认态，不入库为绑定）
+                let mut notice = format!(
                     "[restored to home workspace] {} (was: {})",
                     home.display(),
                     current.display()
-                )));
+                );
+                if let Some(t) = agent.active_task.clone() {
+                    let _ = agent.session_store.set_bound_path(agent.session_id, None);
+                    agent.refresh_task_state().await;
+                    notice.push_str(&format!(
+                        "\n[scope] line \"{}\" unbound (was {})",
+                        t.title,
+                        t.bound_path
+                            .map(|b| b.display().to_string())
+                            .unwrap_or_else(|| "no dir".into())
+                    ));
+                }
+                return Ok(SlashOutcome::Handled(notice));
             }
             match validate_move_target(args) {
                 Ok(target) => {
@@ -194,11 +207,13 @@ pub async fn try_handle(
             agent.session_id = new_id;
             agent.context.clear();
             agent.context.summary = None;
-            agent.refresh_task_state();
+            agent.refresh_task_state().await;
             Ok(SlashOutcome::Handled("[new session]".into()))
         }
-        "/task" => match args.trim() {
-            // 无参 = 回通用线（ADR-0031 未决 2 定案）；看列表用 /tasks
+        // /session（原 /task，ADR-0031 2026-09-07 修订）：旧名保留为纯转发别名。
+        // 只管历史记录与上下文回灌；目录作用域归 /move 管，两者对应关系靠 [scope] 提示。
+        "/session" | "/task" => match args.trim() {
+            // 无参 = 回通用线（ADR-0031 未决 2 定案）；看列表用 /sessions
             "" => switch_to_main(agent).await,
             // close = 归档当前任务线并回通用线
             "close" => {
@@ -209,14 +224,14 @@ pub async fn try_handle(
                         // 归档即不可续写；切回通用线并回灌其尾部
                         match switch_to_main(agent).await {
                             Ok(SlashOutcome::Handled(msg)) => Ok(SlashOutcome::Handled(format!(
-                                "[task \"{}\" archived]\n{}",
+                                "[session \"{}\" archived]\n{}",
                                 title, msg
                             ))),
                             other => other,
                         }
                     }
                     None => Ok(SlashOutcome::Handled(
-                        "[not in a task session] usage: /task <name> | /task close | /task (back to main)"
+                        "[not in a session line] usage: /session <name> | /session close | /session (back to main)"
                             .into(),
                     )),
                 }
@@ -226,17 +241,20 @@ pub async fn try_handle(
                 // 已在同名任务线：幂等提示
                 if agent.active_task.as_ref().map(|t| t.title.as_str()) == Some(name) {
                     return Ok(SlashOutcome::Handled(format!(
-                        "[already in task \"{}\"]",
+                        "[already in session \"{}\"]",
                         name
                     )));
                 }
                 match agent.session_store.find_open_task(name)? {
                     // 存在 → 切回并回灌该任务线尾部（ADR-0031 未决 5：不回灌则续做体验不成立）
                     Some(task_id) => {
-                        let n = switch_session(agent, task_id, TASK_BACKFILL_CHAR_BUDGET)?;
+                        let n =
+                            switch_session(agent, task_id, TASK_BACKFILL_CHAR_BUDGET).await?;
                         Ok(SlashOutcome::Handled(format!(
-                            "[switched to task \"{}\"] {} message(s) restored from this task line",
-                            name, n
+                            "[switched to session \"{}\"] {} message(s) restored from this line\n{}",
+                            name,
+                            n,
+                            scope_status_line(agent).await
                         )))
                     }
                     // 不存在 → 新建；回灌通用线尾部当 brief，任务不丢主线背景
@@ -245,7 +263,8 @@ pub async fn try_handle(
                             .session_store
                             .channel_of(agent.session_id)?
                             .unwrap_or_else(|| "cli".to_string());
-                        // 绑定目录：当前工作目录在 home 之外时记录（元数据，不参与审批判定）
+                        // 绑定目录：当前工作目录在 home 之外时记录（"该线当前所在"，
+                        // last-writer 语义，由 /move 维护；纯元数据，不参与审批判定）
                         let current_root = agent.workspace_root.read().await.clone();
                         let bound = if current_root != agent.workspace {
                             Some(current_root.to_string_lossy().to_string())
@@ -279,29 +298,30 @@ pub async fn try_handle(
                         )?;
                         agent.session_id = task_id;
                         agent.context.summary = None;
-                        agent.refresh_task_state();
+                        agent.refresh_task_state().await;
                         Ok(SlashOutcome::Handled(format!(
-                            "[new task \"{}\"{}] started; {} message(s) of main-line context carried over",
+                            "[new session \"{}\"{}] started; {} message(s) of main-line context carried over\n{}",
                             name,
                             bound
                                 .as_ref()
                                 .map(|b| format!(" (bound: {})", b))
                                 .unwrap_or_default(),
-                            brief_n
+                            brief_n,
+                            scope_status_line(agent).await
                         )))
                     }
                 }
             }
         },
-        "/tasks" => {
+        "/sessions" | "/tasks" => {
             let tasks = agent.session_store.list_open_tasks()?;
             if tasks.is_empty() {
                 return Ok(SlashOutcome::Handled(
-                    "[no open task sessions] usage: /task <name> to start one".into(),
+                    "[no open session lines] usage: /session <name> to start one".into(),
                 ));
             }
             let active = agent.active_task.as_ref().map(|t| t.title.as_str());
-            let mut out = String::from("open task sessions:\n");
+            let mut out = String::from("open session lines:\n");
             for t in &tasks {
                 let mark = if active == Some(t.title.as_str()) {
                     " *"
@@ -317,7 +337,7 @@ pub async fn try_handle(
                     t.last_activity
                 ));
             }
-            out.push_str("\n`/task <name>` to switch · `/task close` to archive the current one · `/task` to return to the main line");
+            out.push_str("\n`/session <name>` to switch · `/session close` to archive the current one · `/session` to return to the main line");
             Ok(SlashOutcome::Handled(out))
         }
         "/btw" => {
@@ -669,12 +689,43 @@ async fn resolve_approval(
             // #B：批准过的目录登记为会话级受信目录——之后 /move home 切走再回来、
             // 或切换期间触碰该目录内路径，均免审批（逃出全部受信范围的仍需审批）。
             agent.add_trusted_dir(target.clone()).await;
-            // ADR-0031 Q1：/move 到外部目录是「在该目录执行主线以外任务」的意图信号，
-            // 提示（不自动创建）绑定该目录的任务 session。
-            format!(
-                "[switched working directory to {}] (trusted for this session)\ntip: to run this as an isolated task with its own context, start one with `/task <name>`",
+            let mut lines = vec![format!(
+                "[switched working directory to {}] (trusted for this session)",
                 target.display()
-            )
+            )];
+            // /move 管 bound_dir：线上自动维护该线绑定（last-writer，覆盖不静默）；
+            // 主线不动 sqlite，但若有 open 线正绑着该目录，提示切过去（矩阵 5/6 分支）
+            if let Some(t) = agent.active_task.clone() {
+                let _ = agent
+                    .session_store
+                    .set_bound_path(agent.session_id, Some(&target.to_string_lossy()));
+                agent.refresh_task_state().await;
+                lines.push(match t.bound_path {
+                    Some(old) if old != target => format!(
+                        "[scope] line \"{}\" bound to {} (was {})",
+                        t.title,
+                        target.display(),
+                        old.display()
+                    ),
+                    Some(_) => format!(
+                        "[scope] line \"{}\" bound to {} (unchanged)",
+                        t.title,
+                        target.display()
+                    ),
+                    None => format!("[scope] line \"{}\" bound to {}", t.title, target.display()),
+                });
+            } else {
+                match bound_line_tip(agent, &target) {
+                    Some(tip) => lines.push(tip),
+                    // ADR-0031 Q1：/move 到外部目录是"在该目录执行主线以外任务"的意图信号，
+                    // 提示（不自动创建）绑定该目录的 session 线。
+                    None => lines.push(
+                        "tip: to run this as an isolated task with its own context, start one with `/session <name>`"
+                            .to_string(),
+                    ),
+                }
+            }
+            lines.join("\n")
         } else {
             "[denied] working directory unchanged".to_string()
         };
@@ -688,7 +739,7 @@ async fn resolve_approval(
         None => {
             return Ok(Some(ApprovalOutcome::Done {
                 notice: format!("[tool not found: {}]", pending.tool_name),
-            }))
+            }));
         }
     };
 
@@ -748,11 +799,11 @@ const TASK_BACKFILL_CHAR_BUDGET: usize = 6000;
 /// /btw 侧问读取主上下文的字符预算（快照仅用于回答，不进上下文）。
 const BTW_CONTEXT_CHAR_BUDGET: usize = 6000;
 
-/// `/task`（无参）/`/task close` 的回归路径：切到最近的通用线并回灌其尾部。
+/// `/session`（无参）/`/session close` 的回归路径：切到最近的通用线并回灌其尾部。
 async fn switch_to_main(agent: &mut Agent) -> Result<SlashOutcome> {
     if agent.active_task.is_none() {
         return Ok(SlashOutcome::Handled(
-            "[already on the main line] usage: /task <name> to enter a task session".into(),
+            "[already on the main line] usage: /session <name> to enter a session line".into(),
         ));
     }
     let main_id = match agent.session_store.latest_main_session()? {
@@ -768,18 +819,81 @@ async fn switch_to_main(agent: &mut Agent) -> Result<SlashOutcome> {
                 .create_session(&Uuid::new_v4().to_string(), &channel)?
         }
     };
-    let n = switch_session(agent, main_id, TASK_BACKFILL_CHAR_BUDGET)?;
+    let n = switch_session(agent, main_id, TASK_BACKFILL_CHAR_BUDGET).await?;
     Ok(SlashOutcome::Handled(format!(
-        "[back to main line] {} message(s) restored from the main line",
-        n
+        "[back to main line] {} message(s) restored from the main line\n{}",
+        n,
+        scope_status_line(agent).await
     )))
+}
+
+/// 提示矩阵的统一状态行（2026-09-07 session 定案）：报"线 ↔ 作用域"当前对应关系，
+/// 失配附 /move 对齐 tip、无绑定附 /move 即绑定 tip、一致只报状态——框架摆事实，
+/// 是否同步留给用户。`/session` 切线与 `/move` 落地的 notice 都拼这一行。
+async fn scope_status_line(agent: &Agent) -> String {
+    let root = agent.workspace_root.read().await.clone();
+    match agent.active_task.as_ref() {
+        Some(t) => match &t.bound_path {
+            Some(b) if *b == root => {
+                format!(
+                    "[scope] line \"{}\" bound to {} · current scope matches",
+                    t.title,
+                    b.display()
+                )
+            }
+            Some(b) => format!(
+                "[scope] line \"{}\" bound to {} · current scope {} — tip: /move {} to align scope (optional)",
+                t.title,
+                b.display(),
+                root.display(),
+                b.display()
+            ),
+            None => format!(
+                "[scope] line \"{}\" has no bound dir · current scope {} — tip: a /move inside this line will bind it",
+                t.title,
+                root.display()
+            ),
+        },
+        None => format!("[scope] main line · current scope {}", root.display()),
+    }
+}
+
+/// 主线 /move 落地时：若有 open 任务线正绑定该目录，提示切到对应线（矩阵第 5 分支）。
+/// bound_path 与 target 均为 canonical 字符串（validate_move_target 保证），直接比对。
+fn bound_line_tip(agent: &Agent, dir: &std::path::Path) -> Option<String> {
+    let hits: Vec<String> = agent
+        .session_store
+        .list_open_tasks()
+        .ok()?
+        .into_iter()
+        .filter(|t| {
+            t.bound_path
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .as_deref()
+                == Some(dir)
+        })
+        .map(|t| t.title)
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "tip: {} bound here — /session {} to resume (optional)",
+        if hits.len() == 1 {
+            "a session line is".to_string()
+        } else {
+            format!("{} session lines are", hits.len())
+        },
+        hits.first()?,
+    ))
 }
 
 /// 切换到目标 session 并回灌其 sqlite 尾部（ADR-0031 未决 5 定案）：
 /// context.clear + 回灌目标线尾部（user/assistant 正文，按预算封顶不截半条）。
 /// 切换必 clear → 回灌天然幂等，无需跨切换游标。
 /// 返回回灌条数。
-fn switch_session(agent: &mut Agent, session_id: i64, char_budget: usize) -> Result<usize> {
+async fn switch_session(agent: &mut Agent, session_id: i64, char_budget: usize) -> Result<usize> {
     agent.session_id = session_id;
     agent.context.clear();
     agent.context.summary = None;
@@ -788,7 +902,7 @@ fn switch_session(agent: &mut Agent, session_id: i64, char_budget: usize) -> Res
         .recent_messages_within_budget(session_id, char_budget)
         .unwrap_or_default();
     let n = backfill_context(agent, msgs);
-    agent.refresh_task_state();
+    agent.refresh_task_state().await;
     Ok(n)
 }
 
@@ -1366,10 +1480,17 @@ mod tests {
             .unwrap();
         agent.context.clear();
 
-        // /task 整理：新任务线 + 回灌通用线尾部当 brief
-        let out = try_handle("/task 整理", &mut agent, None).await.unwrap();
+        // /session 整理：新任务线 + 回灌通用线尾部当 brief（home 上开线 = 无绑定，矩阵第 3 分支）
+        let out = try_handle("/session 整理", &mut agent, None).await.unwrap();
         match out {
-            SlashOutcome::Handled(msg) => assert!(msg.contains("[new task \"整理\"]"), "{}", msg),
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("[new session \"整理\"]"), "{}", msg);
+                assert!(
+                    msg.contains("[scope] line \"整理\" has no bound dir"),
+                    "{}",
+                    msg
+                );
+            }
             other => panic!("unexpected outcome: {:?}", other),
         }
         assert!(agent.active_task.is_some());
@@ -1386,7 +1507,7 @@ mod tests {
         assert!(texts.iter().any(|t| t == "主线问题"));
         assert!(texts.iter().any(|t| t == "主线回答"));
         // task_state 注入
-        agent.refresh_task_state();
+        agent.refresh_task_state().await;
         assert!(agent
             .context
             .task_state
@@ -1400,15 +1521,17 @@ mod tests {
             .append_message(task_sid, &Role::User, "任务内消息")
             .unwrap();
 
-        // /tasks 列表含该任务
-        let out = try_handle("/tasks", &mut agent, None).await.unwrap();
+        // /sessions 列表含该任务线（别名 /tasks 冒烟同臂转发）
+        let out = try_handle("/sessions", &mut agent, None).await.unwrap();
         match out {
             SlashOutcome::Handled(msg) => assert!(msg.contains("整理"), "{}", msg),
             other => panic!("unexpected outcome: {:?}", other),
         }
+        let out = try_handle("/tasks", &mut agent, None).await.unwrap();
+        assert!(matches!(&out, SlashOutcome::Handled(m) if m.contains("整理")));
 
-        // /task 无参：回通用线并回灌通用线尾部（不含任务内消息）
-        let out = try_handle("/task", &mut agent, None).await.unwrap();
+        // /session 无参：回通用线并回灌通用线尾部（不含任务内消息）
+        let out = try_handle("/session", &mut agent, None).await.unwrap();
         match out {
             SlashOutcome::Handled(msg) => assert!(msg.contains("[back to main line]"), "{}", msg),
             other => panic!("unexpected outcome: {:?}", other),
@@ -1425,11 +1548,12 @@ mod tests {
         assert!(texts.iter().any(|t| t == "主线问题"));
         assert!(!texts.iter().any(|t| t == "任务内消息"));
 
-        // /task 整理：切回任务线，回灌其尾部（含任务内消息）
+        // /task 整理（别名顺手冒烟）：切回任务线，回灌其尾部（含任务内消息），带 [scope] 行
         let out = try_handle("/task 整理", &mut agent, None).await.unwrap();
         match out {
             SlashOutcome::Handled(msg) => {
-                assert!(msg.contains("[switched to task \"整理\"]"), "{}", msg)
+                assert!(msg.contains("[switched to session \"整理\"]"), "{}", msg);
+                assert!(msg.contains("[scope]"), "{}", msg);
             }
             other => panic!("unexpected outcome: {:?}", other),
         }
@@ -1442,18 +1566,20 @@ mod tests {
             .collect();
         assert!(texts.iter().any(|t| t == "任务内消息"));
 
-        // /task close：归档 + 回通用线；归档后不可再切回
-        let out = try_handle("/task close", &mut agent, None).await.unwrap();
+        // /session close：归档 + 回通用线；归档后不可再切回
+        let out = try_handle("/session close", &mut agent, None)
+            .await
+            .unwrap();
         match out {
             SlashOutcome::Handled(msg) => {
-                assert!(msg.contains("[task \"整理\" archived]"), "{}", msg)
+                assert!(msg.contains("[session \"整理\" archived]"), "{}", msg)
             }
             other => panic!("unexpected outcome: {:?}", other),
         }
         assert_eq!(agent.session_id, main_sid);
         assert_eq!(agent.session_store.find_open_task("整理").unwrap(), None);
         // 同名再建：新建一条全新任务线（不复用归档）
-        try_handle("/task 整理", &mut agent, None).await.unwrap();
+        try_handle("/session 整理", &mut agent, None).await.unwrap();
         assert_ne!(agent.session_id, task_sid);
     }
 

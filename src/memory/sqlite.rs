@@ -51,7 +51,7 @@ pub struct ToolCallRow {
     pub created_at: String,
 }
 
-/// 未归档任务线（ADR-0031 /tasks 列表）。
+/// 未归档任务线（ADR-0031 /sessions 列表）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TaskSessionRow {
     pub session_id: i64,
@@ -338,10 +338,13 @@ END;
         // 排除 cron 自动会话：主对话 session 的 source 为 main/web/cli 等，
         // 而复活的 cron 会话会把 last_activity 刷到最新，若不加过滤会把主对话路由进
         // cron 会话（ADR-0013 会话隔离）。详见 cron 任务诊断。
-        // 归档任务线（ADR-0031 state='archived'）也不续接——归档即不可续写。
+        // 排除归档任务线（`state='archived'` 不可续写）。
+        // 只回 kind='main'（ADR-0031 2026-09-07 修订·重启双自愈）：任务线不进隐式
+        // 续接——空历史 + 任务身份曾诱导模型脑补上下文（9/6 事故），续做走显式
+        // `/session <名>`（自动回灌该线尾部）。
         let mut stmt = conn.prepare(
             "SELECT id, session_uuid FROM sessions
-             WHERE channel NOT LIKE 'cron:%' AND state != 'archived'
+             WHERE kind = 'main' AND channel NOT LIKE 'cron:%' AND state != 'archived'
              ORDER BY last_activity DESC LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
@@ -355,7 +358,8 @@ END;
     // ---- ADR-0031 任务线 ----
 
     /// 创建任务线 session：kind='task'，title 即任务名（查找键），bound_path 为
-    /// 创建时的工作目录（!= home 时才绑定；纯元数据，不参与审批/执行判定）。
+    /// 创建时的工作目录（!= home 才记）。语义="该线当前所在目录"（last-writer），
+    /// 之后由 /move 经 `set_bound_path` 维护；纯元数据，不参与审批/执行判定。
     pub fn create_task_session(
         &self,
         session_uuid: &str,
@@ -373,7 +377,7 @@ END;
         Ok(conn.last_insert_rowid())
     }
 
-    /// 按任务名查找未归档任务线（`/task <名>` 的切换键；同名取最近活跃）。
+    /// 按任务名查找未归档任务线（`/session <名>` 的切换键；同名取最近活跃）。
     pub fn find_open_task(&self, title: &str) -> Result<Option<i64>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
@@ -385,7 +389,7 @@ END;
         Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
     }
 
-    /// 列出所有未归档任务线（/tasks）。
+    /// 列出所有未归档任务线（/sessions）。
     pub fn list_open_tasks(&self) -> Result<Vec<TaskSessionRow>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
@@ -410,12 +414,24 @@ END;
         Ok(out)
     }
 
-    /// 归档会话（`/task close`）：state='archived' 后不可续写，消息仍可被检索。
+    /// 归档会话（`/session close`）：state='archived' 后不可续写，消息仍可被检索。
     pub fn archive_session(&self, session_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE sessions SET state = 'archived' WHERE id = ?1",
             rusqlite::params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// 维护任务线的 bound_path（2026-09-07 session 定案：语义为"该线**当前**所在目录"，
+    /// last-writer，由 /move 自动写入；None = 解绑，如 /move home）。仅动 kind='task'
+    /// 行——主线无绑定语义；bound 仍是纯元数据，不参与审批/执行判定。
+    pub fn set_bound_path(&self, session_id: i64, path: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE sessions SET bound_path = ?2 WHERE id = ?1 AND kind = 'task'",
+            rusqlite::params![session_id, path],
         )?;
         Ok(())
     }
@@ -436,7 +452,7 @@ END;
         }
     }
 
-    /// 最近的通用线（kind='main'，排除 cron 与归档）——`/task` 无参 / close 的回归目标。
+    /// 最近的通用线（kind='main'，排除 cron 与归档）——`/session` 无参 / close 的回归目标。
     pub fn latest_main_session(&self) -> Result<Option<i64>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
@@ -1422,6 +1438,46 @@ mod tests {
             store.session_kind(main).unwrap().unwrap().kind,
             "main".to_string()
         );
+
+        // 重启双自愈（2026-09-07 修订）：任务线 last_activity 更新，latest_session
+        // 也不得隐式续接它——必须回主线（9/6 事故回归位）。
+        store
+            .append_message(t1, &Role::User, "任务线更活跃")
+            .unwrap();
+        assert_eq!(store.latest_session().unwrap().unwrap().0, main);
+
+        // /move 管 bound_dir：set_bound_path 换绑 / 解绑；主线行不受影响
+        store.set_bound_path(t1, Some("/data/other")).unwrap();
+        assert_eq!(
+            store
+                .session_kind(t1)
+                .unwrap()
+                .unwrap()
+                .bound_path
+                .as_deref(),
+            Some("/data/other")
+        );
+        store.set_bound_path(t1, None).unwrap();
+        assert_eq!(
+            store
+                .session_kind(t1)
+                .unwrap()
+                .unwrap()
+                .bound_path
+                .as_deref(),
+            None
+        );
+        store.set_bound_path(main, Some("/nope")).unwrap();
+        assert_eq!(
+            store
+                .session_kind(main)
+                .unwrap()
+                .unwrap()
+                .bound_path
+                .as_deref(),
+            None
+        );
+        store.set_bound_path(t1, Some("/data/docs")).unwrap();
 
         // /tasks 列表带出
         let tasks = store.list_open_tasks().unwrap();

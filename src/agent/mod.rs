@@ -147,7 +147,7 @@ pub struct Agent {
     /// 用户给主线的插话。
     pub steer_buffer: Arc<StdMutex<VecDeque<String>>>,
     /// 当前 active 任务线（ADR-0031）：`refresh_task_state` 从 sqlite 读出缓存；
-    /// 通用线为 None。切线命令（/task /tasks）与 turn 起点刷新。
+    /// 通用线为 None。切线命令（/session /sessions，别名 /task /tasks）与回合起点刷新。
     pub active_task: Option<ActiveTask>,
     /// /btw 最近的侧问问答（plan.md #H 自连上下文）：同进程内最近 2 组，
     /// 拼进下一次 /btw 的 prompt，让追问无需重新交代背景。不进主上下文。
@@ -160,7 +160,7 @@ pub struct Agent {
     pub guard_streak: u32,
 }
 
-/// 当前 active 任务线（ADR-0031）：title 即 `/task <名>` 的任务名。
+/// 当前 active 任务线（ADR-0031）：title 即 `/session <名>` 的线名。
 #[derive(Debug, Clone)]
 pub struct ActiveTask {
     pub title: String,
@@ -363,31 +363,48 @@ impl Agent {
         n
     }
 
-    /// 刷新当前 active 任务线缓存（ADR-0031）：从 sqlite 读 `sessions.kind/title/
-    /// bound_path`，任务线则更新 `active_task` 并把任务名/绑定目录写进 Runtime
-    /// Context（`context.task_state`）；通用线清空两者。切线命令与 turn 起点调用。
-    pub fn refresh_task_state(&mut self) {
+    /// 刷新当前 active 任务线缓存（ADR-0031 + 2026-09-07 session 修订）：从 sqlite 读
+    /// `sessions.kind/title/bound_path`，任务线则更新 `active_task` 并把任务名/绑定目录/
+    /// 作用域对应关系写进 Runtime Context（`context.task_state`）；通用线清空两者。
+    /// 切线命令、回合起点与启动时调用。async：需要当前 workspace_root 与 bound 比对
+    /// （提示矩阵：bound 是"该线当前所在目录"，失配时提示 /move 对齐，不强制）。
+    pub async fn refresh_task_state(&mut self) {
         let info = self
             .session_store
             .session_kind(self.session_id)
             .unwrap_or(None);
         match info {
             Some(i) if i.kind == "task" => {
-                let title = i.title.unwrap_or_else(|| "task".to_string());
+                let title = i.title.unwrap_or_else(|| "session".to_string());
                 let bound_path = i
                     .bound_path
                     .filter(|b| !b.is_empty())
                     .map(std::path::PathBuf::from);
-                self.context.task_state = Some(format!(
-                    "[task] You are working in task session \"{}\"{}. \
+                let root = self.workspace_root.read().await.clone();
+                let mut text = format!(
+                    "[session] You are working in session line \"{}\". \
                      Keep unrelated chatter out of this line; when the task is done, \
-                     suggest the user archive it with `/task close`.",
-                    title,
-                    bound_path
-                        .as_ref()
-                        .map(|p| format!(" (bound directory: {})", p.display()))
-                        .unwrap_or_default()
-                ));
+                     suggest the user archive it with `/session close`.",
+                    title
+                );
+                match &bound_path {
+                    Some(b) => {
+                        text.push_str(&format!(" This line is bound to {}.", b.display()));
+                        if *b != root {
+                            text.push_str(&format!(
+                                " Current file/terminal scope is {} — `/move {}` to align (optional).",
+                                root.display(),
+                                b.display()
+                            ));
+                        }
+                    }
+                    None => {
+                        text.push_str(
+                            " No bound directory yet; a `/move` inside this line will bind it.",
+                        );
+                    }
+                }
+                self.context.task_state = Some(text);
                 self.active_task = Some(ActiveTask { title, bound_path });
             }
             _ => {
@@ -600,8 +617,10 @@ impl Agent {
     /// 互不影响；主 agent 的 `session_id` / `context` 永不被 cron 触碰。
     ///
     /// 复制的字段全都是 `Arc` 共享资源（provider、session_store、tools、config、审批门等），
-    /// 仅 `context` / `session_id` / `turn_tool_calls` 是独立新实例。并发写 `sessions.db` 由
-    /// `SessionStore` 内部的 `Mutex<Connection>` 串行化，安全无竞争。
+    /// 仅 `context` / `session_id` / `turn_tool_calls` 是独立新实例；**`workspace_root` 例外**：
+    /// fork 持有 pin 到家目录的独立副本——主线 `/move` 进仓库后，cron/委派 的隔离 turn
+    /// 不得跟着进仓库（共享 Arc 会让它们跑在漂移的作用域里，2026-09-07 session 修订）。
+    /// 并发写 `sessions.db` 由 `SessionStore` 内部的 `Mutex<Connection>` 串行化，安全无竞争。
     pub fn fork_for_isolated(&self, session_id: i64, disable_thinking: bool) -> Agent {
         let saved_system = self.context.system.clone();
         Agent {
@@ -620,7 +639,7 @@ impl Agent {
             approval_gate: self.approval_gate.clone(),
             permission_profile: self.permission_profile.clone(),
             workspace: self.workspace.clone(),
-            workspace_root: self.workspace_root.clone(),
+            workspace_root: Arc::new(tokio::sync::RwLock::new(self.workspace.clone())),
             trusted_dirs: self.trusted_dirs.clone(),
             config_dir: self.config_dir.clone(),
             is_main: false,
@@ -1045,7 +1064,7 @@ impl Agent {
         };
         // 任务线状态（ADR-0031）：sqlite 直读，切线后无需额外同步；sessions 表
         // 极小，每 turn 一次查询成本可忽略。
-        self.refresh_task_state();
+        self.refresh_task_state().await;
 
         // 拿 provider snapshot：整个 turn 用这个 snapshot，reload 不影响进行中的 turn
         let provider = match self.provider_snapshot().await {
@@ -2675,6 +2694,30 @@ mod tests {
         assert_eq!(reply.unwrap(), "cron reply");
         assert_eq!(agent.session_id, original_session_id);
         assert_eq!(agent.context.history.len(), original_history_len);
+
+        // workspace_root 独立且 pin 家目录：主线 /move 漂移不进 cron fork（9/6 同源缺口）
+        agent
+            .set_workspace(std::path::PathBuf::from("/tmp/llaia-test/repo"))
+            .await;
+        let mut fork2 = agent.fork_for_isolated(cron_sid, false);
+        assert_eq!(
+            fork2.workspace_root.read().await.as_path(),
+            std::path::Path::new("/tmp/llaia-test/workspace"),
+            "fork must pin the agent home dir"
+        );
+        assert_eq!(
+            agent.workspace_root.read().await.as_path(),
+            std::path::Path::new("/tmp/llaia-test/repo"),
+            "main agent keeps its moved scope"
+        );
+        // fork 改 root 也不回灌主线（独立 Arc）
+        fork2
+            .set_workspace(std::path::PathBuf::from("/tmp/llaia-test/cron-scratch"))
+            .await;
+        assert_eq!(
+            agent.workspace_root.read().await.as_path(),
+            std::path::Path::new("/tmp/llaia-test/repo")
+        );
     }
 
     #[tokio::test]
@@ -3473,7 +3516,7 @@ mod tests {
             .create_task_session("task-uuid", "cli", "目录整理", Some("/data/docs"))
             .unwrap();
         agent.session_id = task_sid;
-        agent.refresh_task_state();
+        agent.refresh_task_state().await;
         let task = agent.active_task.clone().unwrap();
         assert_eq!(task.title, "目录整理");
         assert_eq!(
@@ -3483,14 +3526,22 @@ mod tests {
         let injected = agent.context.task_state.clone().unwrap();
         assert!(injected.contains("目录整理"));
         assert!(injected.contains("/data/docs"));
+        // bound(/data/docs) ≠ 当前 root(/tmp/llaia-test/workspace) → 失配对齐提示
+        assert!(
+            injected.contains("`/move /data/docs` to align"),
+            "{}",
+            injected
+        );
         // to_messages 注入（KV 缓存友好尾部区）
         let msgs = agent.context.to_messages(&None);
-        assert!(msgs.iter().any(|m| m.content.as_text().contains("[task]")));
+        assert!(msgs
+            .iter()
+            .any(|m| m.content.as_text().contains("[session]")));
 
         // 切回通用线：状态清空
         let main_sid = store.create_session("main2", "cli").unwrap();
         agent.session_id = main_sid;
-        agent.refresh_task_state();
+        agent.refresh_task_state().await;
         assert!(agent.active_task.is_none());
         assert!(agent.context.task_state.is_none());
     }
