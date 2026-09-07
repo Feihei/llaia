@@ -1,11 +1,11 @@
-use crate::agent::approval::{
-    approval_decision, format_approval_prompt, is_interactive_channel, ApprovalAction,
-    ApprovalContext,
-};
 use crate::agent::TurnEvent;
+use crate::agent::approval::{
+    ApprovalAction, ApprovalContext, approval_decision, format_approval_prompt,
+    is_interactive_channel,
+};
 use crate::provider::{ChatMessage, ToolCall};
-use crate::tools::todo::TodoStore;
 use crate::tools::Tool;
+use crate::tools::todo::TodoStore;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -208,7 +208,6 @@ pub async fn execute_tool_calls(
                     &call.name,
                     &call.arguments,
                     workspace,
-                    &id,
                     within_workspace,
                 );
                 tracing::info!(tool = %call.name, id = %id, "pending approval registered");
@@ -291,7 +290,7 @@ mod tests {
     use super::*;
     use crate::agent::approval::{ApprovalContext, ApprovalGate};
     use async_trait::async_trait;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::path::PathBuf;
     use std::sync::Arc;
 

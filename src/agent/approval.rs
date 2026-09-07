@@ -8,8 +8,8 @@ use crate::tools::Tool;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
@@ -350,7 +350,6 @@ pub fn format_approval_prompt(
     tool_name: &str,
     args: &Value,
     workspace: &Path,
-    id: &str,
     within_workspace: bool,
 ) -> String {
     let summary = summarize_args(tool_name, args);
@@ -372,20 +371,18 @@ pub fn format_approval_prompt(
         _ => format!("target: {}", summary),
     };
     format!(
-        "\n🔐 Requesting approval to execute `{}` ({})\n   {}\n   workspace: {}\n   Reply `/ok {}` to approve or `/deny {}` to reject. When only one approval is pending, a bare `/ok` or `/deny` works.\n",
+        "\n🔐 Requesting approval to execute `{}` ({})\n   {}\n   workspace: {}\n   Reply `/ok` to approve or `/deny` to reject.\n",
         tool_name,
         scope,
         target,
         workspace.display(),
-        id,
-        id
     )
 }
 
 /// 格式化 /move 审批提示
-pub fn format_move_prompt(new_workspace: &Path, id: &str) -> String {
+pub fn format_move_prompt(new_workspace: &Path) -> String {
     format!(
-        "\n🔀 Requesting approval to switch the working directory (workspace) to:\n   {}\n   ⚠️ After switching, file/terminal tools will only operate inside this directory; operations within it are approved by default (no per-step confirmation). Only paths touching outside the directory still require approval. The directory is remembered as trusted for this session, so switching back later keeps it auto-approved.\n   Reply `/ok {id}` to confirm the switch or `/deny {id}` to cancel. When only one approval is pending, a bare `/ok` or `/deny` works.\n",
+        "\n🔀 Requesting approval to switch the working directory (workspace) to:\n   {}\n   ⚠️ After switching, file/terminal tools will only operate inside this directory; operations within it are approved by default (no per-step confirmation). Only paths touching outside the directory still require approval. The directory is remembered as trusted for this session, so switching back later keeps it auto-approved.\n   Reply `/ok` to confirm the switch or `/deny` to cancel.\n",
         new_workspace.display(),
     )
 }
@@ -515,8 +512,7 @@ mod tests {
             "cd \"E:/AIAD_Group/20260807-Agent科普\" && officecli get \"AI Agent科普.pptx\" / --json 2>&1 | head -30",
             "cd \"E:/AIAD_Group/20260807-Agent科普\" && ls -la",
         ] {
-            let within =
-                tool_within_workspace("terminal", &json!({ "command": real }), &ws, &[]);
+            let within = tool_within_workspace("terminal", &json!({ "command": real }), &ws, &[]);
             assert!(within, "moved 目录内的真实命令应免审批:\n{real}");
         }
     }

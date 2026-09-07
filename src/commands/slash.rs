@@ -1,4 +1,4 @@
-use crate::agent::approval::{format_move_prompt, validate_move_target, PendingKind};
+use crate::agent::approval::{PendingKind, format_move_prompt, validate_move_target};
 use crate::agent::Agent;
 use crate::agent::AgentRegistry;
 use crate::config::Config;
@@ -174,7 +174,7 @@ pub async fn try_handle(
             }
             match validate_move_target(args) {
                 Ok(target) => {
-                    let id = agent
+                    let _id = agent
                         .approval_gate
                         .register(
                             "__move_workspace",
@@ -185,7 +185,7 @@ pub async fn try_handle(
                             false,
                         )
                         .await;
-                    let prompt = format_move_prompt(&target, &id);
+                    let prompt = format_move_prompt(&target);
                     Ok(SlashOutcome::Handled(format!(
                         "[switch requested] {}",
                         prompt
