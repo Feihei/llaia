@@ -1,11 +1,11 @@
-use crate::agent::TurnEvent;
 use crate::agent::approval::{
-    ApprovalAction, ApprovalContext, approval_decision, format_approval_prompt,
-    is_interactive_channel,
+    approval_decision, format_approval_prompt, is_interactive_channel, ApprovalAction,
+    ApprovalContext,
 };
+use crate::agent::TurnEvent;
 use crate::provider::{ChatMessage, ToolCall};
-use crate::tools::Tool;
 use crate::tools::todo::TodoStore;
+use crate::tools::Tool;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -290,7 +290,7 @@ mod tests {
     use super::*;
     use crate::agent::approval::{ApprovalContext, ApprovalGate};
     use async_trait::async_trait;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::path::PathBuf;
     use std::sync::Arc;
 

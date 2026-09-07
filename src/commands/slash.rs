@@ -1,4 +1,4 @@
-use crate::agent::approval::{PendingKind, format_move_prompt, validate_move_target};
+use crate::agent::approval::{format_move_prompt, validate_move_target, PendingKind};
 use crate::agent::Agent;
 use crate::agent::AgentRegistry;
 use crate::config::Config;
