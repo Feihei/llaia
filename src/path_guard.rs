@@ -178,13 +178,228 @@ fn looks_like_path(token: &str) -> bool {
         || token.contains('/')
 }
 
-/// 从命令行字符串提取所有路径 token
+/// 引号感知 token：去引号后的文本 + 是否来自引号包裹（S1）
+#[derive(Debug, PartialEq)]
+struct CmdToken {
+    text: String,
+    #[allow(dead_code)]
+    quoted: bool,
+}
+
+/// 引号感知命令行 tokenizer（S1 误报修复）
+///
+/// 贴近 bash 语义，但为兼容 Windows 反斜杠路径做了妥协：
+/// - 顶层空白切分；`'...'` 内全部字面量；`"..."` 内 `\` 仅在 `"` `\` `$` `` ` `` 前生效
+/// - 引号外 `\` 仅在空白/引号前作转义符吞掉，其余保留字面（`C:\Users` 不被破坏）
+/// - 引号未闭合：剩余部分并入当前 token（宽容处理，不报错）
+fn tokenize_command(command: &str) -> Vec<CmdToken> {
+    let mut tokens: Vec<CmdToken> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_quoted = false;
+    let mut iter = command.chars().peekable();
+
+    macro_rules! flush {
+        () => {
+            if cur_quoted || !cur.is_empty() {
+                tokens.push(CmdToken {
+                    text: std::mem::take(&mut cur),
+                    quoted: cur_quoted,
+                });
+                cur_quoted = false;
+            }
+        };
+    }
+
+    while let Some(c) = iter.next() {
+        match c {
+            '\'' => {
+                cur_quoted = true;
+                for c2 in iter.by_ref() {
+                    if c2 == '\'' {
+                        break;
+                    }
+                    cur.push(c2);
+                }
+            }
+            '"' => {
+                cur_quoted = true;
+                while let Some(c2) = iter.next() {
+                    match c2 {
+                        '"' => break,
+                        '\\' => match iter.peek() {
+                            Some(&n) if n == '"' || n == '\\' || n == '$' || n == '`' => {
+                                cur.push(n);
+                                iter.next();
+                            }
+                            _ => cur.push('\\'),
+                        },
+                        _ => cur.push(c2),
+                    }
+                }
+            }
+            '\\' => match iter.peek() {
+                // 仅在空白/引号前作转义（吞反斜杠保字符，且不切分）
+                Some(&n) if n.is_whitespace() || n == '\'' || n == '"' => {
+                    cur.push(n);
+                    iter.next();
+                }
+                _ => cur.push('\\'),
+            },
+            c if c.is_whitespace() => flush!(),
+            _ => cur.push(c),
+        }
+    }
+    flush!();
+    if cur_quoted || !cur.is_empty() {
+        tokens.push(CmdToken {
+            text: cur,
+            quoted: cur_quoted,
+        });
+    }
+    tokens
+}
+
+/// URL 判定：`scheme://...`（http/https/ssh/git/ftp 等）
+fn looks_like_url(token: &str) -> bool {
+    match token.find("://") {
+        Some(pos) => {
+            let scheme = &token[..pos];
+            !scheme.is_empty()
+                && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        }
+        None => false,
+    }
+}
+
+/// 这些 flag 的值不是文件系统路径（消息/表达式/glob 模式/URL 等），
+/// 读取后跳过其值，避免把 `git commit -m "fix: a/b"` 里的文案抠成假路径误拒（S1）。
+/// 只做精确匹配（如 `--manifest-path` ≠ `path`），未知 flag 保持默认判定——
+/// 宁可多查不漏检，本层定位是误报修复而非安全防线（防线归审批/T3/黑名单）。
+const NONPATH_VALUE_FLAGS: &[&str] = &[
+    // 短旗标
+    "e", // grep/sed/perl/ruby/node -e：表达式/脚本文本
+    "m", // git commit/branch -m：提交消息
+    "r", // php -r：内联代码
+    // 文本/消息类
+    "message",
+    "msg",
+    "subject",
+    "body",
+    "comment",
+    "description",
+    "notes",
+    "text",
+    "content",
+    "title",
+    "prompt",
+    // 表达式/模式类
+    "eval",
+    "expression",
+    "regex",
+    "grep",
+    "name",
+    "iname",
+    "path",
+    "include",
+    "exclude",
+    // 输出格式与网络资源
+    "pretty",
+    "format",
+    "data",
+    "url",
+];
+
+/// 首个/全部裸参数不是路径的程序：grep/rg 等首裸参是 pattern，sed/awk/printf
+/// 首裸参是脚本或格式串，echo 的裸参全是文本。
+#[derive(Clone, Copy, PartialEq)]
+enum BareArgSemantics {
+    FirstIsNonpath,
+    AllNonpath,
+}
+
+fn bare_arg_semantics(prog: &str) -> Option<BareArgSemantics> {
+    match prog {
+        "grep" | "egrep" | "fgrep" | "rg" | "ag" | "sed" | "awk" | "gawk" | "printf" => {
+            Some(BareArgSemantics::FirstIsNonpath)
+        }
+        "echo" => Some(BareArgSemantics::AllNonpath),
+        _ => None,
+    }
+}
+
+/// 从命令行字符串提取所有路径 token（S1 重写：引号感知 + flag 语义）
+///
+/// 相比旧的 `split_whitespace` 暴力抠 token：
+/// - 引号感知：引号内空白不切分、引号本身剥除（带引号的真实路径此前连引号
+///   一起送去校验必败；带引号的文案/正则现在作为整 token 判定）
+/// - flag 语义：已知「值非路径」的 flag 跳过其值（含内联 `--flag=value`）；
+///   非 path 值占用的也是裸参 pattern 位，后续裸参正常判定
+/// - 位置语义：grep/sed/awk/printf 首裸参、echo 全部裸参不按路径判定
+/// - URL 与 `VAR=value` 赋值：`https://...`、`VAR=http://...` 不是文件路径；
+///   但 `VAR=/real/path` 的值仍会被提取校验
 pub fn extract_path_tokens(command: &str) -> Vec<String> {
-    command
-        .split_whitespace()
-        .filter(|t| looks_like_path(t))
-        .map(|s| s.to_string())
-        .collect()
+    let mut out = Vec::new();
+    for seg in split_command_segments(command) {
+        let tokens = tokenize_command(&seg);
+        let mut prog_seen = false;
+        let mut bare_rule: Option<BareArgSemantics> = None;
+        let mut skip_next = false;
+        let mut bare_seen = 0usize;
+        for tok in &tokens {
+            let t = tok.text.as_str();
+            // 段首环境变量赋值前缀：值是 URL 则跳过，值形似路径则提取值本身
+            if !prog_seen {
+                if is_env_assignment(t) {
+                    if let Some((_, v)) = t.split_once('=') {
+                        if !looks_like_url(v) && looks_like_path(v) {
+                            out.push(v.to_string());
+                        }
+                    }
+                    continue;
+                }
+                prog_seen = true;
+                bare_rule = bare_arg_semantics(&t.to_ascii_lowercase());
+                continue; // 程序名本身不当路径
+            }
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if t.starts_with('-') && t.len() > 1 {
+                let name_part = t.trim_start_matches('-');
+                if let Some((name, inline)) = name_part.split_once('=') {
+                    if NONPATH_VALUE_FLAGS.contains(&name) {
+                        bare_seen += 1; // 占用裸参位（如 grep -e pattern）
+                        continue;
+                    }
+                    if looks_like_path(inline) {
+                        out.push(inline.to_string());
+                    }
+                } else if NONPATH_VALUE_FLAGS.contains(&name_part) {
+                    skip_next = true;
+                    bare_seen += 1;
+                }
+                continue; // 旗标本身不是路径
+            }
+            if looks_like_url(t) {
+                bare_seen += 1;
+                continue;
+            }
+            let skip_this = match bare_rule {
+                Some(BareArgSemantics::AllNonpath) => true,
+                Some(BareArgSemantics::FirstIsNonpath) if bare_seen == 0 => true,
+                _ => false,
+            };
+            bare_seen += 1;
+            if !skip_this && looks_like_path(t) {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// 第一层：shell 包装拒绝。返回 Ok(()) 表示通过，Err 表示拒绝
@@ -613,6 +828,82 @@ mod tests {
         assert!(hits_command_blacklist("shutdown -h now"));
         assert!(!hits_command_blacklist("ls -la"));
         assert!(!hits_command_blacklist("echo hello"));
+    }
+
+    // ---------- S1：引号感知 + flag 语义（误报修复） ----------
+
+    /// 回归：git 提交消息里的斜杠字面量不再被抠成假路径（旧 split_whitespace 误报）
+    #[test]
+    fn test_s1_quoted_message_not_a_path() {
+        let tokens = extract_path_tokens("git commit -m \"fix: foo/bar and a\\\\nb\"");
+        assert!(
+            tokens.is_empty(),
+            "提交消息不应被当作路径 token: {tokens:?}"
+        );
+        // 内联 =value 形态
+        let tokens = extract_path_tokens("git commit --message=\"see a/b/c\"");
+        assert!(tokens.is_empty(), "tokens: {tokens:?}");
+    }
+
+    /// grep/sed/awk/echo/printf 的模式/脚本/文本位不按路径判定，但后续路径参数仍检出
+    #[test]
+    fn test_s1_positional_pattern_not_a_path() {
+        let tokens = extract_path_tokens("grep \"foo/bar\" src/main.rs");
+        assert_eq!(tokens, vec!["src/main.rs".to_string()]);
+
+        let tokens = extract_path_tokens("sed 's/foo/bar/g' input.txt");
+        assert!(tokens.is_empty(), "tokens: {tokens:?}");
+
+        let tokens = extract_path_tokens("echo hello/world > out.txt");
+        assert!(tokens.is_empty(), "tokens: {tokens:?}");
+
+        // 模式经 -e 给出时，pattern 位已被占用，后续裸参正常判定
+        let tokens = extract_path_tokens("grep -e \"a/b\" src/x.rs");
+        assert_eq!(tokens, vec!["src/x.rs".to_string()]);
+    }
+
+    /// find 的 glob 旗标值（-name/-path/-regex）不是路径
+    #[test]
+    fn test_s1_find_glob_flags_not_a_path() {
+        let tokens = extract_path_tokens("find . -path \"*/target/*\" -name \"*.rs\"");
+        assert!(tokens.is_empty(), "tokens: {tokens:?}");
+    }
+
+    /// URL 与 VAR=http://... 不是文件路径；但 VAR=/real/path 仍被检出
+    #[test]
+    fn test_s1_url_and_env_assignment() {
+        let tokens = extract_path_tokens("git clone https://github.com/user/repo.git");
+        assert!(tokens.is_empty(), "tokens: {tokens:?}");
+
+        let tokens = extract_path_tokens("HTTP_PROXY=http://127.0.0.1:12899 cargo test");
+        assert!(tokens.is_empty(), "tokens: {tokens:?}");
+
+        let tokens = extract_path_tokens("FOO=/outside/dir cargo build");
+        assert_eq!(tokens, vec!["/outside/dir".to_string()]);
+    }
+
+    /// 安全不回退：引号内真实路径仍检出（引号剥除后校验），未知 flag 值保持默认判定
+    #[test]
+    fn test_s1_real_paths_still_detected() {
+        // 引号剥除：绝对路径带引号照样检出（旧实现连引号送去校验反而漏放）
+        let tokens = extract_path_tokens("cat \"/etc/passwd\"");
+        assert_eq!(tokens, vec!["/etc/passwd".to_string()]);
+
+        // -C 不在非路径旗标表内，其值必须检出（tar 换目录是真实越界向量）
+        let tokens = extract_path_tokens("tar -C /outside -xf out.tar");
+        assert!(
+            tokens.contains(&"/outside".to_string()),
+            "tokens: {tokens:?}"
+        );
+
+        // workspace 内带空格引号路径正常通过校验（引号不再干扰 validate_path）
+        let ws = tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("my dir")).unwrap();
+        let cmd = format!(
+            "cat \"{}\"",
+            ws.path().join("my dir").join("f.txt").display()
+        );
+        assert!(validate_command_paths(&cmd, ws.path(), None).is_ok());
     }
 
     // ---------------- T3：解释器内联载荷检测 ----------------
