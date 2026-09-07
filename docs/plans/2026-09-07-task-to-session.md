@@ -77,6 +77,8 @@ session 不持久化作用域，但 `/session close`/列表展示 origin/current
 
 原则：**不复杂化**。/session（原 /task）只管历史记录与上下文回灌；/move 只管 bound_dir；workspace 权限始终是 `workspace_root ∪ trusted_dirs` 并集（现状不变）。重启双自愈：session 自动回主线、cwd 自动回家目录。两者其一修改后**提示**用户改另一个以对应，但不强制——同步与否留给用户。
 
+**bound_path 语义澄清（m:n 的表达方式）**：单值列 = "该 session **当前**所在目录"（last-writer，jcode 同款），**不是出生地**。一个 session 多个 dir = 时间上的多次覆盖、只留最后——历史活在消息流里（与"回灌只取尾部、不重写历史"同一哲学），元数据只存"现在"；一个 dir 多个 session 无约束（多行同值，提示查询列出全部）。不用 origin 语义的原因：那样"主线 /move 有对应线"的提示会指向早已 move 走的线，提示不再是真话——矩阵每个 tip 都基于当前对应关系。
+
 对照参照项目：这是 DSH"声明宽松"与 jcode"无锚 m:n"之间的最小编译——目录不进 session 的执行语义（bound_path 保持纯元数据），一致性靠提示而非机制。opencode 的锚/围栏、pi 的目录命名空间、goose 的 resume-cd 全部不引入。
 
 对原开放问题的处置：
@@ -95,12 +97,12 @@ session 不持久化作用域，但 `/session close`/列表展示 origin/current
 
 1. **rename**（`slash.rs`）：`/task`→`/session`、`/tasks`→`/sessions`；旧名保留为纯转发别名臂；`/help`、guide、WebUI 文案同步。
 2. **重启回主线**（`sqlite.rs::latest_session`）：SQL 加 `AND kind = 'main'`；补/改测试。
-3. **/move 管 bound_dir**（`slash.rs::resolve_approval` 的 `__move_workspace` 批准分支）：当前在任务线时，批准即 `set_bound_path(session_id, target)`（新增 SessionStore 方法，UPDATE bound_path）；主线不动 sqlite。notice 声明绑定已更新。
+3. **/move 管 bound_dir**（`slash.rs::resolve_approval` 的 `__move_workspace` 批准分支）：当前在任务线时，批准即 `set_bound_path(session_id, target)`（新增 SessionStore 方法，UPDATE bound_path）；主线不动 sqlite。notice 状态行显示 `bound to <dir> (was <旧值>)`——覆盖不静默。
 4. **对应性软提示（提示矩阵，统一模板）**：`/session` 与 `/move` 的 notice 一律追加一行状态 `[scope] line "X" bound to D · current scope R`（或 `has no bound dir`），差异时附 tip、一致时只报状态——框架只摆事实，是否同步由用户判断：
    - 切线有 bound ≠ root → `tip: /move <dir> to align scope (optional)`；
    - 切线有 bound = root → 无 tip；
    - 切线无 bound → `tip: a /move inside this line will bind it`（线上 /move 经清单 3 自动绑定）；
-   - 线上 /move → 显示 `bound to <dir> (updated)`，必然一致无 tip；
+   - 线上 /move → 显示 `bound to <dir> (was <旧值>)`（清单 3），绑定后必然一致无 tip；
    - 主线 /move 且**存在** open 线绑定目标目录 → `tip: /session <名> resumes the line bound here (optional)`（复用 `list_open_tasks()` 内存过滤，唯一新增查询）；
    - 主线 /move 无对应线 → 保留既有 tip（建议 `/session <名>` 开新线）。
 5. **task_state 注入微调**（`agent/mod.rs::refresh_task_state`）：bound ≠ 当前 root 时加一句 "scope is currently Y; /move to align"（每回合现算，零存储）。
