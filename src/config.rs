@@ -231,8 +231,10 @@ pub struct ModelConfig {
     #[serde(default)]
     pub native_tool_calling: Option<bool>,
     /// 模型上下文窗口大小（tokens），用于判断何时触发自动压缩。
-    /// 未配置时启动时从服务端探测（llama.cpp /props 或 Ollama /api/show），
-    /// 探测失败回退默认 8192。取 min(配置值, 探测值)。
+    /// 未配置时启动后从服务端懒探测（llama.cpp /props 或 Ollama /api/show）；
+    /// 探测不到的端点（多为远程 API）回退乐观默认 128000——猜小的代价（压缩阈值长期
+    /// 为真、每迭代摘要绞碎上下文）大于猜大（真超载时 provider 报错，触发反应式收缩纠正）。
+    /// 取 min(配置值, 探测值)。
     #[serde(default)]
     pub context_size: Option<usize>,
     /// 单次生成最大 token 数。Anthropic Messages API 必传 max_tokens，

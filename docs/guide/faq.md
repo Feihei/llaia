@@ -30,7 +30,7 @@
 ## 上下文越聊越长，没自动压缩？
 
 - 压缩在上下文占用超过 `[runtime].context_threshold`（默认 0.7）时触发；可手动 `/compact`。
-- 确认 `context_size` 合理：本地模型不配 `context_size` 时启动会探测，探测失败回退 8192。可在 model 下显式设 `context_size`。
+- 确认 `context_size` 合理：本地模型不配 `context_size` 时启动会探测；探测不到的端点（多为远程 API）按乐观默认 128000 假设，真超载时 provider 报错会自动收缩重试。仍建议在 model 下显式设 `context_size`（`llaia doctor` 会提示未配置且探测失败的降级态）。
 - 想用更便宜的模型压缩：`[runtime].compact_model`。
 
 ## 模型卡在重复输出 / 思考失控 / 一直没回复？

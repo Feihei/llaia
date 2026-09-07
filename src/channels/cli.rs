@@ -627,20 +627,32 @@ pub async fn build_single_agent(
     };
 
     // context_size 作为 Agent 的**降级基线**：真正的窗口由 `Agent::context_size_now`
-    // 按活动 provider 懒解析（配置上限 + 探测双源，结果缓存、reload_provider 时失效）。
+    // 按活动 provider 懒解析（配置上限 + 探测双源，结果缓存、reload_provider 时失效；
+    // 双源皆无时回退乐观默认 DEFAULT_CONTEXT_SIZE，超载由 provider 错误反应式收缩纠正）。
     // 此处**不再同步探测** `/props` / `/api/show`，把探测挪到首个 turn 懒执行，
-    // 消除构建期探测对启动的阻塞（见 plan.md #F）。仅按配置显式上限给基线，默认 8192。
+    // 消除构建期探测对启动的阻塞（见 plan.md #F）。仅按配置显式上限给基线。
     let context_size = model_cfg
         .as_ref()
         .and_then(|m| m.context_size)
-        .unwrap_or(8192);
-    tracing::info!(
-        agent = alias,
-        configured = ?model_cfg.as_ref().and_then(|m| m.context_size),
-        final = context_size,
-        degraded = provider.is_none(),
-        "context_size resolved"
-    );
+        .unwrap_or(crate::agent::DEFAULT_CONTEXT_SIZE);
+    // S4：没配 context_size 是最容易被忽略的降级态（昨天的事故形态），启动即 warn。
+    if model_cfg.as_ref().and_then(|m| m.context_size).is_none() {
+        tracing::warn!(
+            agent = alias,
+            final = context_size,
+            degraded = provider.is_none(),
+            "context_size not configured; relying on probe/optimistic default \
+             (set [provider.<id>.<model_alias>].context_size to pin)"
+        );
+    } else {
+        tracing::info!(
+            agent = alias,
+            configured = ?model_cfg.as_ref().and_then(|m| m.context_size),
+            final = context_size,
+            degraded = provider.is_none(),
+            "context_size resolved"
+        );
+    }
 
     let mut agent = Agent::new(
         config,

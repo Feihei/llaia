@@ -58,7 +58,7 @@ api_key = "${OLLAMA_API_KEY}"       # 留空或引用 .env
 [provider.default.qwen]
 model = "qwen2.5:7b"
 native_tool_calling = false          # true=OpenAI function calling；false=标签协议降级
-context_size = 32768                 # 可选，不配则启动时探测，取 min(配置, 探测)
+context_size = 32768                 # 可选；不配则本地端点自动探测，探测不到的按乐观默认 128000（provider 报溢出时自动收缩）。取 min(配置, 探测)
 
 [provider.claude]                     # 云端 Anthropic 示例
 type = "anthropic"

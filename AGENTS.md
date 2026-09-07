@@ -76,6 +76,8 @@ MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消�
 
 - **任务线（ADR-0031）**：通用线（`sessions.kind='main'`）之外可显式开任务线（`kind='task'`，`bound_path` 绑定目录元数据）——`/task <名>` 进出、`/tasks` 列表、`/task close` 归档（`state='archived'` 不可续写）；切线时回灌目标线 sqlite 尾部（6000 字符预算，只取 user/assistant 正文），任务名/绑定目录经 Runtime Context（`Context.task_state`）注入；`/move` 批准后提示开任务线。
 
+> **上下文窗口解析与反应式收缩**：压缩阈值依赖的窗口按「显式配置 `context_size` → provider 探测（llama.cpp `/props`、Ollama `/api/show`，取 min）→ 回退构建期基线」懒解析并缓存（`context_size_now`，`reload_provider` 时失效）。回退基线是**乐观默认 128000**（`DEFAULT_CONTEXT_SIZE`，对齐 goose）而非旧的 8192——猜小会让压缩阈值长期为真、每迭代摘要绞碎上下文；猜错由 **反应式收缩**兜底：回合内 provider 报上下文溢出（`is_context_overflow_error` 分类多措辞）→ 缓存窗口减半（下限 2048、每回合至多 2 次）→ 立即复查压缩 → 重试本迭代，收缩结果驻留供后续回合学习。降级态可见性：启动 warn（未配置即报）、`context_size_now` 兜底 warn、`llaia doctor` 三态检查（configured/detect/兜底 warn）。
+
 详见 [docs/adr/0004-session-and-context.md](docs/adr/0004-session-and-context.md) 与 [docs/adr/0031-task-session-model.md](docs/adr/0031-task-session-model.md)。
 
 ## Provider 与工具调用

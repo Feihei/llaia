@@ -177,8 +177,35 @@ pub struct TurnToolCall {
     pub ok: bool,
 }
 
-/// 模型上下文窗口的全局兜底值：配置未设、provider 探测失败时的最小窗口。
-const DEFAULT_CONTEXT_SIZE: usize = 8192;
+/// 模型上下文窗口的全局兜底值：配置未设、provider 探测失败时的假设窗口。
+///
+/// 乐观默认（128k，对齐 goose 的 `DEFAULT_CONTEXT_LIMIT`）：远程 OpenAI 兼容端点
+/// 没有可探测的窗口元数据，猜小值的代价远大于猜大值——小窗口让压缩阈值长期为真，
+/// 每迭代都触发 LLM 摘要，上下文被自己绞碎（9/6 morning_news 事故形态）；而猜大值
+/// 只在真超载时收到 provider 溢出错误，届时由回合循环的反应式收缩（S2）就地降级
+/// 并学习。本地端点（llama.cpp /props、Ollama /api/show）走探测不走这里。
+pub(crate) const DEFAULT_CONTEXT_SIZE: usize = 128_000;
+
+/// 反应式收缩的下限：再小就该报错了，不做无限减半。
+const CONTEXT_SHRINK_FLOOR: usize = 2_048;
+
+/// 判定 provider 错误文本是否为「上下文超载」家族（各家措辞不一，保守取交集）。
+/// 命中即触发反应式收缩重试（见 handle_input_streaming 的 Failed 分支）。
+fn is_context_overflow_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    [
+        "context_length_exceeded",
+        "context length exceeded",
+        "maximum context length",
+        "exceeds model context",
+        "prompt is too long",
+        "too many tokens",
+        "input tokens exceeded",
+        "requested tokens",
+    ]
+    .iter()
+    .any(|pat| m.contains(pat))
+}
 
 /// AGENTS.md 注入系统提示词的最大字符数（chars/4 启发式 ≈ 2000 token），防大文件撑爆上下文。
 const AGENTS_MD_CHAR_CAP: usize = 8000;
@@ -443,7 +470,19 @@ impl Agent {
             (Some(c), Some(d)) => c.min(d),
             (Some(c), None) => c,
             (None, Some(d)) => d,
-            (None, None) => DEFAULT_CONTEXT_SIZE,
+            (None, None) => {
+                // 回退构建期基线（生产环境 = cli 装配时写入的 DEFAULT_CONTEXT_SIZE）。
+                // S4：兜底是乐观假设不是事实——发 WARN 指明补救路径（结果有缓存，不刷屏）。
+                tracing::warn!(
+                    agent = %self.alias,
+                    baseline = self.context_size,
+                    "context window undetermined (no config, probe unavailable); \
+                     assuming optimistic baseline — if the model's real window is smaller, \
+                     overflow errors will shrink it at runtime; set \
+                     [provider.<id>.<model_alias>].context_size to pin it"
+                );
+                self.context_size
+            }
         };
         *self.resolved_context_size.write().await = Some(size);
         size
@@ -1056,6 +1095,8 @@ impl Agent {
         }
 
         let max_iters = self.max_iterations;
+        // 反应式窗口收缩预算（S2）：每回合至多 2 次，防「收缩→仍溢出→再收缩」失控
+        let mut overflow_shrinks: u32 = 0;
         // 时区快照：整轮用同一个值。turn 中途 WebUI 改配置不会让同一轮里的
         // 状态栏前后矛盾，下一轮自然读到新值。
         let tz = self.timezone().await;
@@ -1136,6 +1177,38 @@ impl Agent {
                 {
                     StreamOutcome::Aborted { text } => return Ok(text),
                     StreamOutcome::Failed { message } => {
+                        // 反应式窗口收缩（S2，goose/deepseek-harness 通路）：乐观默认或
+                        // 虚高的配置值撞上 provider 真实窗口 → 400 溢出。识别即把缓存窗口
+                        // 减半（下限 CONTEXT_SHRINK_FLOOR）并**留在 resolved_context_size
+                        // 里供后续回合学习**（reload_provider 换模型时清空重来）→ 立即按
+                        // 新预算复查压缩 → 重试本迭代。预算内不算 guard 退化（attempt 不
+                        // 递增）；非溢出错误或预算耗尽，维持原硬失败语义。
+                        if is_context_overflow_error(&message) && overflow_shrinks < 2 {
+                            overflow_shrinks += 1;
+                            let cur = self.context_size_now().await;
+                            let shrunk = (cur / 2).max(CONTEXT_SHRINK_FLOOR);
+                            if shrunk < cur {
+                                tracing::warn!(
+                                    from = cur,
+                                    to = shrunk,
+                                    attempt = overflow_shrinks,
+                                    error = %message,
+                                    "provider rejected request size, shrinking cached context window"
+                                );
+                                *self.resolved_context_size.write().await = Some(shrunk);
+                                let _ = event_tx
+                                    .send(TurnEvent::Chunk {
+                                        delta: format!(
+                                            "\n[context] provider rejected the request \
+                                             (assumed window {cur}); shrinking to {shrunk} \
+                                             and retrying ({overflow_shrinks}/2).\n"
+                                        ),
+                                    })
+                                    .await;
+                                self.maybe_auto_compact().await;
+                                continue;
+                            }
+                        }
                         let _ = event_tx
                             .send(TurnEvent::Error {
                                 message: message.clone(),
@@ -2094,6 +2167,91 @@ mod tests {
         });
         agent.reload_provider(Some(provider_c)).await;
         assert_eq!(agent.context_size_now().await, agent.context_size);
+    }
+
+    // --- 反应式窗口收缩（S2：provider 溢出错误分类 + 收缩重试）---
+
+    #[test]
+    fn test_is_context_overflow_error_classification() {
+        assert!(is_context_overflow_error(
+            "provider returned 400: {\"error\":{\"code\":\"context_length_exceeded\"}}"
+        ));
+        assert!(is_context_overflow_error(
+            "This model's maximum context length is 8192 tokens, however you requested 40000"
+        ));
+        assert!(is_context_overflow_error(
+            "prompt is too long: 210000 tokens"
+        ));
+        assert!(!is_context_overflow_error(
+            "provider returned 500: upstream boom"
+        ));
+        assert!(!is_context_overflow_error(
+            "provider returned 429: rate limit exceeded"
+        ));
+    }
+
+    const OVERFLOW_400: &str = "provider returned 400 Bad Request: {\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"This model's maximum context length is 8192 tokens\"}}";
+
+    #[tokio::test]
+    async fn test_overflow_error_shrinks_window_and_retries() {
+        let rounds = vec![
+            vec![StreamEvent::Error(OVERFLOW_400.into())],
+            vec![
+                StreamEvent::TextDelta("recovered after shrink".into()),
+                StreamEvent::Done,
+            ],
+        ];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_with_rounds_seen(true, rounds, seen.clone()).await;
+        // 构造基线 8192（无配置无探测 → 懒解析回退基线）
+        assert_eq!(agent.context_size_now().await, 8192);
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "recovered after shrink");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "overflow error triggers exactly one retry"
+        );
+        // 收缩结果持久在缓存里：后续回合压缩阈值跟随小窗口（换 provider 才清空）
+        assert_eq!(agent.context_size_now().await, 4096);
+    }
+
+    #[tokio::test]
+    async fn test_overflow_shrink_budget_terminates() {
+        // 连续溢出：收缩两次（8192→4096→2048），预算耗尽按真实错误收尾，不再无限重试
+        let rounds = vec![
+            vec![StreamEvent::Error(OVERFLOW_400.into())],
+            vec![StreamEvent::Error(OVERFLOW_400.into())],
+            vec![StreamEvent::Error(OVERFLOW_400.into())],
+        ];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        let (tx, _rx) = mpsc::channel(64);
+        let err = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("context_length_exceeded"));
+        assert_eq!(agent.context_size_now().await, 2048);
+    }
+
+    #[tokio::test]
+    async fn test_non_overflow_error_does_not_shrink() {
+        let rounds = vec![vec![StreamEvent::Error(
+            "provider returned 502: bad gateway".into(),
+        )]];
+        let mut agent = make_agent_with_rounds(true, rounds).await;
+        let (tx, _rx) = mpsc::channel(64);
+        let err = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("502"));
+        assert_eq!(agent.context_size_now().await, 8192);
     }
 
     /// 回归：单回合内长工具链（如 Blender MCP 返回巨大）把上下文撑过阈值时，

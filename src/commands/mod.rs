@@ -70,7 +70,9 @@ dir = "~/.llaia/logs"
 # [provider.default.qwen]
 # model = "qwen2.5:7b"
 # native_tool_calling = false
-# context_size = 32768
+# context_size = 32768           # optional; unset: local endpoints are probed, others
+#                                # assume an optimistic 128000 and shrink reactively
+#                                # when the provider rejects an oversized request
 
 # Cloud Anthropic example (also works with a gateway base_url):
 # [provider.claude]
@@ -1107,14 +1109,32 @@ pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
             match crate::provider::provider_from_ref(&cfg, &a.model) {
                 Ok(p) => {
                     checks.push(DoctorCheck::ok("agent.main.model", p.label()));
-                    match p.detect_context_size().await {
-                        Some(n) => {
+                    // 三态：显式配置 > 探测命中 > 双皆无（回退乐观默认，需用户知情）
+                    let configured =
+                        Config::parse_model_ref(&a.model)
+                            .ok()
+                            .and_then(|(pid, malias)| {
+                                cfg.provider
+                                    .get(pid)
+                                    .and_then(|pr| pr.model.get(malias))
+                                    .and_then(|m| m.context_size)
+                            });
+                    match (configured, p.detect_context_size().await) {
+                        (Some(n), _) => {
+                            checks.push(DoctorCheck::ok("context_size", format!("configured {n}")))
+                        }
+                        (None, Some(n)) => {
                             checks.push(DoctorCheck::ok("context_size", format!("detected {n}")))
                         }
-                        None => checks.push(DoctorCheck::warn(
+                        (None, None) => checks.push(DoctorCheck::warn(
                             "context_size",
-                            "probe failed; falls back to configured value or default 8192 \
-                             (set [provider.<id>].model.<alias>].context_size to override)",
+                            format!(
+                                "not configured and probe failed; falling back to optimistic \
+                                 default {} — set [provider.<id>.<model_alias>].context_size \
+                                 if the real window differs (overflow errors shrink it \
+                                 at runtime)",
+                                crate::agent::DEFAULT_CONTEXT_SIZE
+                            ),
                         )),
                     }
                 }
