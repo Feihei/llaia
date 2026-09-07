@@ -74,7 +74,7 @@ MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消�
 
 - 压缩策略：关键消息保留（SOUL/USER 永留、首条用户消息留、工具调用结果可丢），其余旧消息 LLM 摘要替换
 
-- **任务线（ADR-0031）**：通用线（`sessions.kind='main'`）之外可显式开任务线（`kind='task'`，`bound_path` 绑定目录元数据）——`/task <名>` 进出、`/tasks` 列表、`/task close` 归档（`state='archived'` 不可续写）；切线时回灌目标线 sqlite 尾部（6000 字符预算，只取 user/assistant 正文），任务名/绑定目录经 Runtime Context（`Context.task_state`）注入；`/move` 批准后提示开任务线。
+- **会话线（ADR-0031，2026-09-07 修订）**：通用线（`sessions.kind='main'`）之外可显式开任务线（`kind='task'`，`bound_path`= 该线**当前**所在目录，last-writer 纯元数据，由 /move 维护）——`/session <名>` 进出（旧名 `/task` `/tasks` 保留为前转发别名）、`/sessions` 列表、`/session close` 归档（`state='archived'` 不可续写）；切线时回灌目标线 sqlite 尾部（6000 字符预算，只取 user/assistant 正文），线名/目录/作用域失配经 Runtime Context（`Context.task_state`）注入。**重启双自愈**：`latest_session()` 仅回 kind='main'（任务线不进隐式续接，续做走显式 /session）、cwd 回家目录；`/move` 在线上自动改写 bound_path（notice 回显 was），两者对应关系靠统一的 `[scope]` 状态行 + 软提示，不强制；`fork_for_isolated`（cron/委派）的 workspace_root pin 家目录不随主线漂移。
 
 > **上下文窗口解析与反应式收缩**：压缩阈值依赖的窗口按「显式配置 `context_size` → provider 探测（llama.cpp `/props`、Ollama `/api/show`，取 min）→ 回退构建期基线」懒解析并缓存（`context_size_now`，`reload_provider` 时失效）。回退基线是**乐观默认 128000**（`DEFAULT_CONTEXT_SIZE`，对齐 goose）而非旧的 8192——猜小会让压缩阈值长期为真、每迭代摘要绞碎上下文；猜错由 **反应式收缩**兜底：回合内 provider 报上下文溢出（`is_context_overflow_error` 分类多措辞）→ 缓存窗口减半（下限 2048、每回合至多 2 次）→ 立即复查压缩 → 重试本迭代，收缩结果驻留供后续回合学习。降级态可见性：启动 warn（未配置即报）、`context_size_now` 兜底 warn、`llaia doctor` 三态检查（configured/detect/兜底 warn）。
 
@@ -199,7 +199,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 - `whitelist`：已废弃，加载时 warn 并 fallback 到 `none`
 
 CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道）/ `llaia init`（显式生成配置骨架；`--force` 覆盖重建。serve / chat 启动时经 `prepare_startup_dir` 自动做「迁移 → 幂等补齐模板 → 加载配置」，缺啥补啥、绝不覆盖已有文件，裸 `llaia serve` 在全新机器可直接跑）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
-斜杠命令：`/new` `/task [<名>|close]` `/tasks` `/exit` `/stop` `/compact` `/memory-compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/btw <question>`（侧问：读上下文零污染，答案落 `side_messages` 独立表、WebUI Side 样式渲染） `/steer <msg>`（运行中插话：channel 层拦截投 `Agent.steer_buffer`，agent 工具循环非末轮迭代顶部以 `[steer] User added:` user 消息注入；空闲时降级为普通消息） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
+斜杠命令：`/new` `/session [<名>|close]` `/sessions`（别名 `/task` `/tasks`） `/exit` `/stop` `/compact` `/memory-compact` `/clear` `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/btw <question>`（侧问：读上下文零污染，答案落 `side_messages` 独立表、WebUI Side 样式渲染） `/steer <msg>`（运行中插话：channel 层拦截投 `Agent.steer_buffer`，agent 工具循环非末轮迭代顶部以 `[steer] User added:` user 消息注入；空闲时降级为普通消息） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
 
 > **敏感信息 .env 自动化（P5 S1）**：`src/config/secrets.rs`。WebUI `PUT /api/config` 保存时，明文敏感字段（provider api\_key、频道 token/secret、搜索 key、TTS key、webui token）**先写入** **`<config_dir>/.env`**（幂等 upsert、Unix 0600 权限），config.toml 只保留 `${VAR}` 引用；内存态再展开回明文供热加载（`build_provider_from_config` 不认 `${VAR}`）。`.env` 写入失败 → 保留明文 + warn 降级。存量迁移用 `/migrate-secrets`（toml\_edit 定点替换保注释）；启动时扫描明文敏感字段并 warn。`GET /api/config` 返回时敏感字段掩码为 `••••`（保存时空输入 = 保留原值，见 `mask_sensitive`/`merge_masked`）。
 

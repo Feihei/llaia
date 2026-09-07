@@ -133,3 +133,16 @@ ALTER TABLE sessions ADD COLUMN bound_path TEXT;                     -- 任务�
 - **/move 提示**：批准路径 notice 追加「tip: `/task <name>` 可开绑定该目录的隔离任务」（不自动创建）。
 - **WebUI**：`list_sessions` 带出 `kind`，会话列表 `[task]` / `[archived]` 徽标。
 - **回归测试**：`test_task_switch_backfill_and_archive`（新建/切回/无参回主线/close 归档/同名重建五段）、`test_task_session_lifecycle`、`test_recent_messages_within_budget`、`test_task_columns_added_to_legacy_db`（存量库迁移）、`test_refresh_task_state_injects_runtime_context`。
+
+## 修订（2026-09-07）：/task → /session、重启双自愈、/move 接管 bound_dir
+
+取证背景：9/6 事故——重启 `latest_session()` 续上空历史的 'llaia' 任务线，`[task]` 注入 + 空历史诱导模型脑补上下文乱挖 git；bound_path 名义绑定实际碰不到（连续 outside workspace）。完整设计与参照对比（goose / pi / jcode / DSH / opencode）见 [plans/2026-09-07-task-to-session.md](../plans/2026-09-07-task-to-session.md)。
+
+改动的决策（推翻/替代本文以下原结论）：
+
+1. **改名**：命令面 `/task`→`/session`、`/tasks`→`/sessions`（旧名保留为纯转发别名）；`kind='task'` 值与内部命名（`ActiveTask`/`refresh_task_state`/`find_open_task` 等）**不动**——改名只在用户可见层，避免无谓迁移。术语与主流 coding agent（Claude Code / Codex / goose / opencode）对齐，并消除与 cron「任务」、todo「任务」的撞名。
+2. **重启双自愈**（修订「隐式续接」）：`latest_session()` 加 `kind='main'`——重启恒回通用线，任务线**不进**隐式续接；续做走显式 `/session <名>`（自动回灌该线尾部）。cwd 侧维持原「/move 不持久、重启自愈」。
+3. **bound_path 语义升级为「该线当前所在目录」+ /move 接管**（修订「创建时目录、只读元数据」）：last-writer、纯元数据（仍不参与审批/执行判定）。线上 `/move` 批准自动 `set_bound_path`（notice 回显 `(was X)`，覆盖不静默）；`/move home` = 解绑；主线不写。一个 session 多目录 = 时间覆盖（历史在消息流里），一个目录多 session = 多行同值，无约束。**不引入** opencode 式 project 锚/围栏与目录命名空间。
+4. **对应性提示矩阵**：`/session` 与 `/move` 的 notice 统一带 `[scope]` 状态行（bound·root·是否一致），失配给 `/move <dir> to align (optional)`、无绑定给 `/move 即绑定`、主线 /move 命中他线绑定给 `/session <名>` 切线 tip——框架摆事实，同步与否留给用户（软提示，不强制）。`Context.task_state` 注入同步带失配句。
+5. **fork pin 家目录**（独立缺口，与上同源）：`fork_for_isolated` 不再共享主线 `workspace_root` Arc，fork 持独立副本恒 pin agent 家目录——cron/委派不随主线 `/move` 漂移。
+6. 未决 3 的原「/move 不更新 bound_path」结论由第 3 条替代。
