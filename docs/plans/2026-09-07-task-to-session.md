@@ -1,8 +1,8 @@
-# /task → /session：会话与目录的建模（待 grill）
+# /task → /session：会话与目录的建模
 
-状态：**待 grill**（未定案。本文只沉淀问题、参照与候选，不含实施承诺）
+状态：**已定案**（2026-09-07，方案 2 骨架 + 方案 4 提示；rename-only + 双自愈 + 软提示，无锚概念、无作用域持久化）
 日期：2026-09-07
-关联：ADR-0031（任务线现状，本文可能构成其修订）、commit 5cbf60c（S1/S2/S4 上下文窗口修复，已完成，与本 plan 正交）
+关联：ADR-0031（任务线现状，本文构成其修订）、commit 5cbf60c（S1/S2/S4 上下文窗口修复，已完成，与本 plan 正交）
 
 ## 背景与问题
 
@@ -73,7 +73,35 @@ session 列表/存储按目录分组，`/sessions` 默认列当前目录的线�
 
 session 不持久化作用域，但 `/session close`/列表展示 origin/current 目录 + 启动时在通用线注入"未归档任务线清单（含各自目录）"提醒；恢复动作永远是显式的 `/session <名>` + 可选的跟随式 `/move` 提示（上轮 B-lite）。
 
-## 开放问题（grill 逐条过）
+## 定案（2026-09-07）
+
+原则：**不复杂化**。/session（原 /task）只管历史记录与上下文回灌；/move 只管 bound_dir；workspace 权限始终是 `workspace_root ∪ trusted_dirs` 并集（现状不变）。重启双自愈：session 自动回主线、cwd 自动回家目录。两者其一修改后**提示**用户改另一个以对应，但不强制——同步与否留给用户。
+
+对照参照项目：这是 DSH"声明宽松"与 jcode"无锚 m:n"之间的最小编译——目录不进 session 的执行语义（bound_path 保持纯元数据），一致性靠提示而非机制。opencode 的锚/围栏、pi 的目录命名空间、goose 的 resume-cd 全部不引入。
+
+对原开放问题的处置：
+
+1. 重启恢复 → **消解**：双自愈，trusted_dirs/root 均不持久（维持"重启自愈"既有假设，bootstrap 依赖不变）。
+2. 全局 root vs session root → **消解**：root 保持全局进程级；fork pin 家目录作为独立小修并入（见清单 6）。
+3. 改名半径 → **命令面 rename + 保留 `/task` `/tasks` 别名**；`kind='task'` 值与内部命名（`ActiveTask`/`refresh_task_state`）**不动**（避免迁移与无效重构）；ADR-0031 追加修订节 + AGENTS.md/文档同步。
+4. 隐式 resume → `latest_session()` 加 `kind='main'`：重启恒回主线；任务线靠显式 `/session <名>`（回灌机制不变）。pi 的消失目录问询不引入（bound_path 非执行语义，无从消失）。
+5. cron 会话膨胀 → **保留为独立待办**，不在本 plan。
+6. `/new` → 维持现状（同线清上下文），不动。
+7. 锚概念 → **不引入**（"不要复杂化"直接否决）。
+8. 移动的历史语义 → 回灌天然满足"只改指针不重写"；对应性提示落在切线 notice 里（清单 4）。
+9. 审批池粒度 → 维持进程级 trusted_dirs 并集（"workspace 始终在并集"）。
+
+### 实施清单
+
+1. **rename**（`slash.rs`）：`/task`→`/session`、`/tasks`→`/sessions`；旧名保留为纯转发别名臂；`/help`、guide、WebUI 文案同步。
+2. **重启回主线**（`sqlite.rs::latest_session`）：SQL 加 `AND kind = 'main'`；补/改测试。
+3. **/move 管 bound_dir**（`slash.rs::resolve_approval` 的 `__move_workspace` 批准分支）：当前在任务线时，批准即 `set_bound_path(session_id, target)`（新增 SessionStore 方法，UPDATE bound_path）；主线不动 sqlite。notice 声明绑定已更新。
+4. **对应性软提示**：`/session <名>` 切线 notice 中，若该线 bound_path 存在且 ≠ 当前 root → 追加 "tip: this line is bound to X — /move X to align scope (optional)"。反向（在线上 /move）已由清单 3 自动绑定，无需提示；主线 /move 的既有 tip（建议开任务线）保留。
+5. **task_state 注入微调**（`agent/mod.rs::refresh_task_state`）：bound ≠ 当前 root 时加一句 "scope is currently Y; /move to align"（每回合现算，零存储）。
+6. **fork pin 家目录**（`agent/mod.rs::fork_for_isolated`）：fork 后覆盖写 `workspace_root` 为 `self.workspace`（cron/delegate 永在家目录跑），修复"主线 /move 进仓库、cron 跟着进仓库"的共享 Arc 缺口。
+7. **文档**：ADR-0031 追加修订节（重启续接改双自愈、未决项收录本文结论）、AGENTS.md 任务线段落、docs/guide/slash 命令页、CHANGELOG。
+
+## 开放问题（原 grill 清单，已随定案逐条处置；5 号保留为独立待办）
 
 1. **重启后 workspace_root/trusted_dirs 的恢复语义**——方案 1 的命门：自动恢复外部作用域是否越界？"上次批准过"跨重启还有效吗（单用户私人助理假设下可以放宽？）？
 2. **全局 root vs session root**：LLAIA 一个 main Agent 实例挂多频道 + fork 共享 `Arc<RwLock<PathBuf>>`。若目录跟 session 走，cron/delegate fork 时 pin 什么？WebUI 多对话并发（未来）怎么隔离？这是比改名更根本的架构题，要不要现在就为它设计 per-turn root 快照？
