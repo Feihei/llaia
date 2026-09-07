@@ -96,7 +96,13 @@ session 不持久化作用域，但 `/session close`/列表展示 origin/current
 1. **rename**（`slash.rs`）：`/task`→`/session`、`/tasks`→`/sessions`；旧名保留为纯转发别名臂；`/help`、guide、WebUI 文案同步。
 2. **重启回主线**（`sqlite.rs::latest_session`）：SQL 加 `AND kind = 'main'`；补/改测试。
 3. **/move 管 bound_dir**（`slash.rs::resolve_approval` 的 `__move_workspace` 批准分支）：当前在任务线时，批准即 `set_bound_path(session_id, target)`（新增 SessionStore 方法，UPDATE bound_path）；主线不动 sqlite。notice 声明绑定已更新。
-4. **对应性软提示**：`/session <名>` 切线 notice 中，若该线 bound_path 存在且 ≠ 当前 root → 追加 "tip: this line is bound to X — /move X to align scope (optional)"。反向（在线上 /move）已由清单 3 自动绑定，无需提示；主线 /move 的既有 tip（建议开任务线）保留。
+4. **对应性软提示（提示矩阵，统一模板）**：`/session` 与 `/move` 的 notice 一律追加一行状态 `[scope] line "X" bound to D · current scope R`（或 `has no bound dir`），差异时附 tip、一致时只报状态——框架只摆事实，是否同步由用户判断：
+   - 切线有 bound ≠ root → `tip: /move <dir> to align scope (optional)`；
+   - 切线有 bound = root → 无 tip；
+   - 切线无 bound → `tip: a /move inside this line will bind it`（线上 /move 经清单 3 自动绑定）；
+   - 线上 /move → 显示 `bound to <dir> (updated)`，必然一致无 tip；
+   - 主线 /move 且**存在** open 线绑定目标目录 → `tip: /session <名> resumes the line bound here (optional)`（复用 `list_open_tasks()` 内存过滤，唯一新增查询）；
+   - 主线 /move 无对应线 → 保留既有 tip（建议 `/session <名>` 开新线）。
 5. **task_state 注入微调**（`agent/mod.rs::refresh_task_state`）：bound ≠ 当前 root 时加一句 "scope is currently Y; /move to align"（每回合现算，零存储）。
 6. **fork pin 家目录**（`agent/mod.rs::fork_for_isolated`）：fork 后覆盖写 `workspace_root` 为 `self.workspace`（cron/delegate 永在家目录跑），修复"主线 /move 进仓库、cron 跟着进仓库"的共享 Arc 缺口。
 7. **文档**：ADR-0031 追加修订节（重启续接改双自愈、未决项收录本文结论）、AGENTS.md 任务线段落、docs/guide/slash 命令页、CHANGELOG。
