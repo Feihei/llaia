@@ -312,27 +312,6 @@ END;
         Ok(conn.last_insert_rowid())
     }
 
-    /// 读会话标题（未生成过为 None；plan.md 会话主题自动总结）。
-    pub fn session_title(&self, session_id: i64) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = conn.prepare("SELECT title FROM sessions WHERE id = ?1")?;
-        let mut rows = stmt.query(rusqlite::params![session_id])?;
-        match rows.next()? {
-            Some(row) => Ok(row.get(0)?),
-            None => Ok(None),
-        }
-    }
-
-    /// 写会话标题（压缩时由 compact provider 生成；幂等覆盖）。
-    pub fn set_session_title(&self, session_id: i64, title: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
-            "UPDATE sessions SET title = ?2 WHERE id = ?1",
-            rusqlite::params![session_id, title],
-        )?;
-        Ok(())
-    }
-
     pub fn latest_session(&self) -> Result<Option<(i64, String)>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // 排除 cron 自动会话：主对话 session 的 source 为 main/web/cli 等，
@@ -1402,34 +1381,25 @@ mod tests {
         assert_eq!(stats.series.iter().map(|d| d.requests).sum::<i64>(), 1);
     }
 
+    /// 主线会话无自动标题（压缩主题总结已移除）；标题仅任务线使用。
     #[test]
-    fn test_session_title_round_trip() {
+    fn test_session_title_task_line_only() {
         let store = SessionStore::open_in_memory().unwrap();
         let sid = store.create_session("uuid-title", "web").unwrap();
-        // 新会话无标题
-        assert_eq!(store.session_title(sid).unwrap(), None);
+        // 主线会话 title 恒为 None（list_sessions 一并带出，WebUI 会话列表展示）
         assert_eq!(store.list_sessions(10, 0).unwrap()[0].title, None);
 
-        store.set_session_title(sid, "配置迁移讨论").unwrap();
-        assert_eq!(
-            store.session_title(sid).unwrap().as_deref(),
-            Some("配置迁移讨论")
-        );
-        // list_sessions 一并带出（WebUI 会话列表展示）
+        // 任务线：title 即任务名（查找键），写入后可按名找回
+        store
+            .create_task_session("uuid-task", "web", "配置迁移讨论", None)
+            .unwrap();
+        assert_eq!(store.find_open_task("配置迁移讨论").unwrap(), Some(sid + 1));
         let items = store.list_sessions(10, 0).unwrap();
         let item = items
             .iter()
-            .find(|i| i.session_uuid == "uuid-title")
+            .find(|i| i.session_uuid == "uuid-task")
             .unwrap();
         assert_eq!(item.title.as_deref(), Some("配置迁移讨论"));
-
-        // 幂等覆盖
-        store.set_session_title(sid, "新标题").unwrap();
-        assert_eq!(store.session_title(sid).unwrap().as_deref(), Some("新标题"));
-
-        // 不存在的会话：读返回 None，写不报错（影响 0 行）
-        assert_eq!(store.session_title(99999).unwrap(), None);
-        store.set_session_title(99999, "x").unwrap();
     }
 
     #[test]
@@ -1460,19 +1430,12 @@ mod tests {
         }
         let store = SessionStore::open(&db_path).unwrap();
         let sid = store.session_by_uuid("old-1").unwrap().unwrap().0;
-        assert_eq!(store.session_title(sid).unwrap(), None);
-        store.set_session_title(sid, "回填测试").unwrap();
-        assert_eq!(
-            store.session_title(sid).unwrap().as_deref(),
-            Some("回填测试")
-        );
+        // title 列回填成功：旧行标题为 None，list_sessions 可带出
+        assert_eq!(store.list_sessions(10, 0).unwrap()[0].title, None);
         // 再次打开不报错（幂等），旧行数据保留
         drop(store);
         let store2 = SessionStore::open(&db_path).unwrap();
-        assert_eq!(
-            store2.session_title(sid).unwrap().as_deref(),
-            Some("回填测试")
-        );
+        assert_eq!(store2.session_by_uuid("old-1").unwrap().unwrap().0, sid);
         std::fs::remove_file(&db_path).ok();
     }
 
