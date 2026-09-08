@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -424,19 +424,64 @@ END;
         Ok(())
     }
 
-    /// 批量归档：把 `last_activity` 早于 `cutoff`（RFC3339，与列同格式同 UTC，字符串序即时间序）
-    /// 的所有未归档线置 `state='archived'`，返回条数。WebUI「archive N days ago」卫生工具用。
-    /// 要点：**活跃线自带免疫**——任何写入都会刷新 last_activity，故仍在续写的 cron/主线不会被
-    /// 归档；归档只是状态位翻转，不轮换、不起新线（`session_by_channel` 无 state 过滤），
-    /// 历史仍可查看/导出，删除走既有的按线 delete。
-    pub fn archive_sessions_before(&self, cutoff_rfc3339: &str) -> Result<usize> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let n = conn.execute(
-            "UPDATE sessions SET state = 'archived'
-             WHERE last_activity < ?1 AND state != 'archived'",
-            rusqlite::params![cutoff_rfc3339],
+    /// 消息级归档（WebUI per-session 卫生工具）：把该线 `created_at` 早于 `cutoff`
+    /// （RFC3339，与列同格式同 UTC，字符串序即时间序）的消息整批**搬进**专属接收线——
+    /// channel=`archive:<源uuid>`、state='archived'、kind='task'，同源重复点击复用同一接收线。
+    /// 源线 id 不变、继续当活跃线写：不起新线、不回灌、live context 零感知；接收线可在列表
+    /// 浏览/导出，对其走既有 DELETE 即组合出「delete N days ago」。返回搬运条数。
+    /// 隔离性：接收线 channel 带 `archive:` 前缀，`session_by_channel` 精确匹配永不命中；
+    /// kind='task' + archived 又被 latest_session / find_open_task 双重过滤。FTS 按 rowid
+    /// 对齐 messages.id（搬运不改 id）、tool_calls 挂 message_id，两条通路都无须联动更新。
+    pub fn archive_messages_before(&self, src_id: i64, cutoff_rfc3339: &str) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let hit: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND created_at < ?2",
+            rusqlite::params![src_id, cutoff_rfc3339],
+            |r| r.get(0),
         )?;
-        Ok(n)
+        if hit == 0 {
+            tx.commit()?;
+            return Ok(0); // 没命中就不开接收线
+        }
+        let (src_uuid, src_channel, src_title): (String, String, Option<String>) = tx.query_row(
+            "SELECT session_uuid, channel, title FROM sessions WHERE id = ?1",
+            rusqlite::params![src_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let bucket_channel = format!("archive:{src_uuid}");
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM sessions WHERE channel = ?1",
+                rusqlite::params![bucket_channel],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let bucket_id: i64 = match existing {
+            Some(id) => id,
+            None => {
+                let cutoff_date: String = cutoff_rfc3339.chars().take(10).collect();
+                let label = format!(
+                    "archive of {} (older than {})",
+                    src_title.unwrap_or(src_channel),
+                    cutoff_date
+                );
+                let now = chrono::Utc::now().to_rfc3339();
+                tx.execute(
+                    "INSERT INTO sessions (session_uuid, channel, created_at, last_activity,
+                                           state, kind, title)
+                     VALUES (?1, ?2, ?3, ?3, 'archived', 'task', ?4)",
+                    rusqlite::params![uuid::Uuid::new_v4().to_string(), bucket_channel, now, label],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
+        let moved = tx.execute(
+            "UPDATE messages SET session_id = ?1 WHERE session_id = ?2 AND created_at < ?3",
+            rusqlite::params![bucket_id, src_id, cutoff_rfc3339],
+        )?;
+        tx.commit()?;
+        Ok(moved)
     }
 
     /// 维护任务线的 bound_path（2026-09-07 session 定案：语义为"该线**当前**所在目录"，
@@ -1510,44 +1555,91 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_sessions_before() {
+    fn test_archive_messages_before() {
         let store = SessionStore::open_in_memory().unwrap();
-        store.create_session("active", "web").unwrap();
-        let stale1 = store.create_session("stale1", "cron:dead").unwrap();
-        let stale2 = store
-            .create_task_session("stale2", "cli", "旧线", None)
-            .unwrap();
-        // 把两条线拨回 40 天前（last_activity 是 RFC3339 字符串，测试直改）
+        let src = store.create_session("src-web", "web").unwrap();
         let old = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        // 4 条消息：前 3 条拨回 40 天前，最后 1 条保持现在
+        let mut ids = Vec::new();
+        for i in 0..4 {
+            ids.push(
+                store
+                    .append_message(src, &Role::User, &format!("m{i}"))
+                    .unwrap(),
+            );
+        }
         {
             let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
-            for id in [stale1, stale2] {
+            for id in &ids[..3] {
                 conn.execute(
-                    "UPDATE sessions SET last_activity = ?2 WHERE id = ?1",
+                    "UPDATE messages SET created_at = ?2 WHERE id = ?1",
                     rusqlite::params![id, old],
                 )
                 .unwrap();
             }
         }
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
-        assert_eq!(store.archive_sessions_before(&cutoff).unwrap(), 2);
+        assert_eq!(store.archive_messages_before(src, &cutoff).unwrap(), 3);
+
+        // 源线只剩新消息；接收线承接 3 条且保持原 id（FTS rowid 对齐不破）
+        let src_msgs = store.messages_with_tool_calls(src).unwrap();
+        assert_eq!(src_msgs.len(), 1);
+        assert_eq!(src_msgs[0].id, ids[3]);
+        let bucket = {
+            let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.query_row(
+                "SELECT id FROM sessions WHERE channel = 'archive:src-web'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        let moved = store.messages_with_tool_calls(bucket).unwrap();
         assert_eq!(
-            store.session_by_uuid("stale1").unwrap().unwrap().1.state,
+            moved.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![ids[0], ids[1], ids[2]]
+        );
+
+        // 接收线隔离性：archived + kind=task + archive: 前缀 channel
+        let info = store.session_kind(bucket).unwrap().unwrap();
+        assert_eq!(info.kind, "task");
+        assert!(info.title.unwrap().starts_with("archive of web"));
+        assert_eq!(
+            store
+                .session_by_uuid(&store.session_uuid(bucket).unwrap().unwrap())
+                .unwrap()
+                .unwrap()
+                .1
+                .state,
             "archived".to_string()
         );
-        // 活跃线自带免疫：写入刷新 last_activity，不会被 cutoff 命中
-        assert_eq!(
-            store.session_by_uuid("active").unwrap().unwrap().1.state,
-            "idle".to_string()
-        );
-        // 幂等：再跑一遍不新增（已归档行不重复计数）
-        assert_eq!(store.archive_sessions_before(&cutoff).unwrap(), 0);
-        // 归档≠轮换：session_by_channel 无 state 过滤，线仍可续写、不起新线
-        store.append_message(stale1, &Role::User, "复写").unwrap();
-        assert_eq!(
-            store.session_by_uuid("stale1").unwrap().unwrap().1.state,
-            "archived".to_string()
-        );
+        // 源线本体不动：继续当活跃线写、latest_session 归属不变
+        assert_eq!(store.latest_session().unwrap().unwrap().0, src);
+
+        // 幂等：同一 cutoff 再点不新增（0 命中不开新线，也不重复建桶）
+        assert_eq!(store.archive_messages_before(src, &cutoff).unwrap(), 0);
+        // 同源后续膨胀再归档：复用同一接收线，不建第二个桶
+        store.append_message(src, &Role::User, "later").unwrap();
+        let later = store
+            .messages_with_tool_calls(src)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .id;
+        {
+            let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.execute(
+                "UPDATE messages SET created_at = ?2 WHERE id = ?1",
+                rusqlite::params![later, old],
+            )
+            .unwrap();
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 2); // src + bucket，无新桶
+        }
+        assert_eq!(store.archive_messages_before(src, &cutoff).unwrap(), 1);
+        assert_eq!(store.messages_with_tool_calls(bucket).unwrap().len(), 4);
     }
 
     #[test]

@@ -2127,13 +2127,15 @@ pub struct DeleteMessagesBody {
     pub ids: Option<Vec<i64>>,
 }
 
-/// POST /api/sessions/archive-older?days=N → 批量归档 ≥N 天无活动的闲置线（WebUI 卫生工具）。
-/// 纯状态位翻转：不轮换、不起新线、不删数据；活跃线因写入会刷新 last_activity 自带免疫。
-/// 归档后逐条走既有 DELETE /api/sessions/:uuid，即组合出「delete N days ago」的效果。
-pub async fn archive_older_sessions(
+/// POST /api/sessions/:uuid/archive-older?days=N → 把该会话 N 天前的消息搬进专属 archived
+/// 接收线（消息级卫生工具）：源线继续当活跃线用，不起新线、不回灌、live context 零感知；
+/// 接收线（channel=`archive:<源uuid>`）可在列表浏览/导出，对其走既有 DELETE 即组合出
+/// 「delete N days ago」。见 `SessionStore::archive_messages_before`。
+pub async fn archive_session_older(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<StatsQuery>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
 ) -> Response {
     if !authorize(&state, &headers, &q) {
         return unauthorized();
@@ -2141,11 +2143,27 @@ pub async fn archive_older_sessions(
     let days = q.days.unwrap_or(30).clamp(1, 3650);
     let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
     let agent = state.registry.main.lock().await;
-    match agent.session_store.archive_sessions_before(&cutoff) {
-        Ok(archived) => (
+    let Some((sid, row)) = agent.session_store.session_by_uuid(&uuid).unwrap_or(None) else {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "session not found" })),
+        )
+            .into_response();
+    };
+    if row.channel.starts_with("archive:") {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(
+                serde_json::json!({ "error": "archive receiver lines cannot be archived again" }),
+            ),
+        )
+            .into_response();
+    }
+    match agent.session_store.archive_messages_before(sid, &cutoff) {
+        Ok(moved) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({
-                "archived": archived,
+                "moved": moved,
                 "days": days,
                 "cutoff": cutoff,
             })),
@@ -2508,12 +2526,8 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/doctor", axum::routing::get(get_doctor))
         .route("/api/update/check", axum::routing::get(check_update))
         .route("/api/stats/tokens", axum::routing::get(stats_tokens))
-        // 会话历史（P5 W1）：列表 / 详情 / 删除 / 导出；批量归档（卫生工具）
+        // 会话历史（P5 W1）：列表 / 详情 / 删除 / 导出；消息级归档（卫生工具）
         .route("/api/sessions", axum::routing::get(list_sessions_api))
-        .route(
-            "/api/sessions/archive-older",
-            axum::routing::post(archive_older_sessions),
-        )
         .route(
             "/api/sessions/:uuid",
             axum::routing::get(get_session_detail).delete(delete_session_api),
@@ -2521,6 +2535,10 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route(
             "/api/sessions/:uuid/messages",
             axum::routing::delete(delete_session_messages),
+        )
+        .route(
+            "/api/sessions/:uuid/archive-older",
+            axum::routing::post(archive_session_older),
         )
         .route(
             "/api/sessions/:uuid/export",

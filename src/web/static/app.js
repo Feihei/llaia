@@ -156,8 +156,8 @@ function llaiaApp() {
     selectedSession: null,
     sessionDetail: null,
     sessionMsg: '',
-    // 批量归档（卫生工具）：归档闲置超过 archiveDays 天的线（不起新线、不删数据）
-    archiveDays: 7,
+    // 消息级归档（卫生工具）：把当前查看会话中早于 archiveDays 天的消息搬进 archived 接收线
+    archiveDays: 30,
     // 消息管理模式：勾选单条/多条后删除（仅清理历史，不影响 live context / token 预算）
     manageMode: false,
     delSel: [],
@@ -246,14 +246,17 @@ function llaiaApp() {
       }
     },
     async archiveOlder() {
-      const days = Math.max(1, parseInt(this.archiveDays, 10) || 7);
-      if (!confirm('Archive all sessions idle for more than ' + days + ' day(s)? They are only marked archived (still viewable / exportable / deletable). The active session is not affected and no new line is started.')) return;
+      const uuid = this.selectedSession;
+      if (!uuid) return;
+      const days = Math.max(1, parseInt(this.archiveDays, 10) || 30);
+      if (!confirm('Move this session\'s messages older than ' + days + ' day(s) into a dedicated archived session? This session stays active (no new line, live context untouched). The archived messages remain viewable / exportable — delete that archived session to purge them.')) return;
       try {
-        const r = await this.apiFetch('/api/sessions/archive-older?days=' + days, { method: 'POST' });
+        const r = await this.apiFetch('/api/sessions/' + encodeURIComponent(uuid) + '/archive-older?days=' + days, { method: 'POST' });
         if (r.ok) {
           const j = await r.json();
-          await this.loadSessions(); // 会清 sessionMsg，提示放在其后
-          this.sessionMsg = 'Archived ' + j.archived + ' session(s) idle over ' + days + ' day(s).';
+          await this.openSession(uuid); // 刷新右侧：旧消息已移走
+          await this.loadSessions(); // 左栏出现（或加长）archived 接收线；两步都会清 sessionMsg，提示放最后
+          this.sessionMsg = 'Archived ' + j.moved + ' message(s) older than ' + days + ' day(s) into a separate archived session.';
         } else {
           this.sessionMsg = 'Archive failed: ' + r.status;
         }
