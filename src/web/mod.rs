@@ -2127,6 +2127,38 @@ pub struct DeleteMessagesBody {
     pub ids: Option<Vec<i64>>,
 }
 
+/// POST /api/sessions/archive-older?days=N → 批量归档 ≥N 天无活动的闲置线（WebUI 卫生工具）。
+/// 纯状态位翻转：不轮换、不起新线、不删数据；活跃线因写入会刷新 last_activity 自带免疫。
+/// 归档后逐条走既有 DELETE /api/sessions/:uuid，即组合出「delete N days ago」的效果。
+pub async fn archive_older_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StatsQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let days = q.days.unwrap_or(30).clamp(1, 3650);
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+    let agent = state.registry.main.lock().await;
+    match agent.session_store.archive_sessions_before(&cutoff) {
+        Ok(archived) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "archived": archived,
+                "days": days,
+                "cutoff": cutoff,
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": format!("archive failed: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
 /// 删除某会话内指定 ids 的消息（可多条）。仅清理历史存储，不改动 token 预算。
 pub async fn delete_session_messages(
     State(state): State<AppState>,
@@ -2476,8 +2508,12 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/doctor", axum::routing::get(get_doctor))
         .route("/api/update/check", axum::routing::get(check_update))
         .route("/api/stats/tokens", axum::routing::get(stats_tokens))
-        // 会话历史（P5 W1）：列表 / 详情 / 删除 / 导出
+        // 会话历史（P5 W1）：列表 / 详情 / 删除 / 导出；批量归档（卫生工具）
         .route("/api/sessions", axum::routing::get(list_sessions_api))
+        .route(
+            "/api/sessions/archive-older",
+            axum::routing::post(archive_older_sessions),
+        )
         .route(
             "/api/sessions/:uuid",
             axum::routing::get(get_session_detail).delete(delete_session_api),

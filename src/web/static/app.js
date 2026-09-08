@@ -156,6 +156,8 @@ function llaiaApp() {
     selectedSession: null,
     sessionDetail: null,
     sessionMsg: '',
+    // 批量归档（卫生工具）：归档闲置超过 archiveDays 天的线（不起新线、不删数据）
+    archiveDays: 7,
     // 消息管理模式：勾选单条/多条后删除（仅清理历史，不影响 live context / token 预算）
     manageMode: false,
     delSel: [],
@@ -241,6 +243,22 @@ function llaiaApp() {
         }
       } catch (e) {
         this.sessionMsg = 'Failed to load sessions: ' + e.message;
+      }
+    },
+    async archiveOlder() {
+      const days = Math.max(1, parseInt(this.archiveDays, 10) || 7);
+      if (!confirm('Archive all sessions idle for more than ' + days + ' day(s)? They are only marked archived (still viewable / exportable / deletable). The active session is not affected and no new line is started.')) return;
+      try {
+        const r = await this.apiFetch('/api/sessions/archive-older?days=' + days, { method: 'POST' });
+        if (r.ok) {
+          const j = await r.json();
+          await this.loadSessions(); // 会清 sessionMsg，提示放在其后
+          this.sessionMsg = 'Archived ' + j.archived + ' session(s) idle over ' + days + ' day(s).';
+        } else {
+          this.sessionMsg = 'Archive failed: ' + r.status;
+        }
+      } catch (e) {
+        this.sessionMsg = 'Archive failed: ' + e.message;
       }
     },
     async openSession(uuid) {

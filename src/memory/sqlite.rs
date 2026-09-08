@@ -424,6 +424,21 @@ END;
         Ok(())
     }
 
+    /// 批量归档：把 `last_activity` 早于 `cutoff`（RFC3339，与列同格式同 UTC，字符串序即时间序）
+    /// 的所有未归档线置 `state='archived'`，返回条数。WebUI「archive N days ago」卫生工具用。
+    /// 要点：**活跃线自带免疫**——任何写入都会刷新 last_activity，故仍在续写的 cron/主线不会被
+    /// 归档；归档只是状态位翻转，不轮换、不起新线（`session_by_channel` 无 state 过滤），
+    /// 历史仍可查看/导出，删除走既有的按线 delete。
+    pub fn archive_sessions_before(&self, cutoff_rfc3339: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let n = conn.execute(
+            "UPDATE sessions SET state = 'archived'
+             WHERE last_activity < ?1 AND state != 'archived'",
+            rusqlite::params![cutoff_rfc3339],
+        )?;
+        Ok(n)
+    }
+
     /// 维护任务线的 bound_path（2026-09-07 session 定案：语义为"该线**当前**所在目录"，
     /// last-writer，由 /move 自动写入；None = 解绑，如 /move home）。仅动 kind='task'
     /// 行——主线无绑定语义；bound 仍是纯元数据，不参与审批/执行判定。
@@ -1492,6 +1507,47 @@ mod tests {
         assert_eq!(store.latest_session().unwrap().unwrap().0, main);
         // latest_main_session 排除归档任务线
         assert_eq!(store.latest_main_session().unwrap(), Some(main));
+    }
+
+    #[test]
+    fn test_archive_sessions_before() {
+        let store = SessionStore::open_in_memory().unwrap();
+        store.create_session("active", "web").unwrap();
+        let stale1 = store.create_session("stale1", "cron:dead").unwrap();
+        let stale2 = store
+            .create_task_session("stale2", "cli", "旧线", None)
+            .unwrap();
+        // 把两条线拨回 40 天前（last_activity 是 RFC3339 字符串，测试直改）
+        let old = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
+            for id in [stale1, stale2] {
+                conn.execute(
+                    "UPDATE sessions SET last_activity = ?2 WHERE id = ?1",
+                    rusqlite::params![id, old],
+                )
+                .unwrap();
+            }
+        }
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        assert_eq!(store.archive_sessions_before(&cutoff).unwrap(), 2);
+        assert_eq!(
+            store.session_by_uuid("stale1").unwrap().unwrap().1.state,
+            "archived".to_string()
+        );
+        // 活跃线自带免疫：写入刷新 last_activity，不会被 cutoff 命中
+        assert_eq!(
+            store.session_by_uuid("active").unwrap().unwrap().1.state,
+            "idle".to_string()
+        );
+        // 幂等：再跑一遍不新增（已归档行不重复计数）
+        assert_eq!(store.archive_sessions_before(&cutoff).unwrap(), 0);
+        // 归档≠轮换：session_by_channel 无 state 过滤，线仍可续写、不起新线
+        store.append_message(stale1, &Role::User, "复写").unwrap();
+        assert_eq!(
+            store.session_by_uuid("stale1").unwrap().unwrap().1.state,
+            "archived".to_string()
+        );
     }
 
     #[test]

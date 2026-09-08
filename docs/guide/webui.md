@@ -40,6 +40,7 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 - **MCP**：查看 / 增删 server（见 [MCP](mcp.md)）。
 - **技能**：查看 / 删除（见 [技能](skills.md)）。
 - **Doctor**（Config 页）：一键运行诊断检查——provider 连通性、主模型链、context_size 探测、`.env` 存在性与权限、sessions.db、cron/mcp 解析、skills 计数，结果按 ok / warn / error 分色展示。
+- **会话历史**（Sessions 页）：浏览 / 导出 / 删除会话，Manage 模式可勾选删除单条消息；**Archive idle > N day(s)** 批量归档闲置超过 N 天的线——纯状态位翻转，不起新线、不轮换，仍在写入的活跃线因 `last_activity` 被刷新天然免疫。归档线仍可浏览，要彻底清盘就逐条点 Delete（组合起来即"批量删除 N 天前的历史线"）。
 
 ## REST API 一览
 
@@ -63,6 +64,7 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 | `GET /api/env` · `POST /api/env/refresh` | 环境探测缓存 / 重探 |
 | `GET /api/doctor` | 运行诊断检查 |
 | `GET /api/sessions` | 会话历史列表 / 详情 / 删除 / 导出 |
+| `POST /api/sessions/archive-older?days=N` | 批量归档闲置超 N 天的会话线 |
 
 > 这些接口需要 Web UI 的 token 鉴权（与 `webui.token` 一致）。
 

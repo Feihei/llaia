@@ -143,6 +143,12 @@
         <div class="session-list">
           <div class="config-head">&#x276F; SESSIONS <button class="inline-add" @click="loadSessions()">Refresh</button></div>
           <div class="hint">Click a session to view its message history. Delete removes it from sessions.db (does not affect the live context).</div>
+          <div class="hint" style="display:flex;align-items:center;gap:6px;margin:6px 0;">
+            <span>Archive idle &gt;</span>
+            <input type="number" x-model="archiveDays" min="1" max="3650" style="width:52px">
+            <span>day(s)</span>
+            <button class="inline-add" @click="archiveOlder()">Archive</button>
+          </div>
           <div x-show="sessionMsg" class="err" x-text="sessionMsg"></div>
           <template x-for="s in sessions" :key="s.session_uuid">
             <div class="session-item" :class="{active: selectedSession === s.session_uuid}" @click="openSession(s.session_uuid)">
