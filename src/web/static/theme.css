@@ -346,8 +346,9 @@ option { background: var(--bg-input); color: var(--text); }
 
 /* 单模型可用性探测按钮：默认（复用 inline-add 绿），成功✓保持绿，失败✗转红 */
 #config-pane .probebtn {
-  padding: 2px 5px; font-size: 11px;
-  width: 46px; text-align: center; flex: 0 0 auto;
+  padding: 2px 6px; font-size: 11px;
+  min-width: 46px; text-align: center; flex: 0 0 auto;
+  white-space: nowrap;
 }
 #config-pane .probebtn--ok {
   color: var(--green); border-color: var(--green-deep);
