@@ -33,7 +33,7 @@
 | P5 | ✅ | Provider Compat / 记忆预算 / 统一搜索 / todo / ask_user / skill 自管 / goal / 剩余项 | [CHANGELOG.md](CHANGELOG.md)（§P5） |
 | P6 | ✅ | 稳定性修复 + 快赢 + WebUI 批次 + 任务线/侧问/插话/媒体作用域 + Generation Guard/首运行引导 | [CHANGELOG.md](CHANGELOG.md)（§v0.3.1、§v0.4.0） |
 | v0.4.0 | ✅ | P6 全量 + provider/compat 收口，2026-09-04 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.4.0）、[release-notes/v0.4.0.md](release-notes/v0.4.0.md) |
-| v0.4.1 | 🚧 | 发版后小版本：画像模板升级 + 框架消息英文化收尾 + todo 孤儿清单 GC（三项已落地，**未打 tag**） | [CHANGELOG.md](CHANGELOG.md)（§v0.4.1） |
+| v0.4.1 | 🚧 | 发版小版本（**攒发**）：H1–H4 止血 + T3/S1 terminal 安全收口 + 画像模板升级 + /session 改名 + 框架消息英文化 + todo GC + WebUI 归档卫生（代码全部落地，**未打 tag**，只欠 H6 发版动作） | [CHANGELOG.md](CHANGELOG.md)（§v0.4.1） |
 
 > **P6 已全部交付并归档**：原 P6 节的完整勾选清单（WebUI W1/W2/W3、会话主题总结、provider 针对性优化、`memory_research`、启动优化 #11、主干代码体检、#A–#J 新增发现、Generation Guard、First-run Bootstrap 等）已随各项实现陆续迁入 [CHANGELOG.md](CHANGELOG.md) §v0.3.1 / §v0.4.0，本文件不再保留已交付明细。注意 CHANGELOG 里**没有独立的 §v0.3.2**：原按 0.3.2 攒的开发内容跨版本号当作 v0.4.0 发布，段标题已一并重定。v0.4.1 的三项同样已迁入 CHANGELOG，本文件只留索引与下一步。
 
@@ -41,7 +41,7 @@
 
 ## 近期小修（H 系列，v0.4.1 → v0.4.2 窗口）
 
-**状态**：🚧 进行中（起点 2026-09-05）｜H1–H4 已交付，H5–H6 待拍板｜每项独立可提交、不阻塞发版
+**状态**：🚧 收口中（起点 2026-09-05）｜H1–H4 已交付并迁入 CHANGELOG，H5 已拍板挂起 v0.4.2，H6（打 tag）待发版｜每项独立可提交、不阻塞发版
 
 抽出来的理由：这些都不是「阶段性工程」，而是散在 P7 / 主干体检 backlog 里的低成本止血项——原混在前瞻计划里，既不会被顺手做掉，也看不清发版窗口里还剩什么。
 
@@ -70,7 +70,7 @@
 
 ## P7 — 下一步计划
 
-**状态**：⏳ 计划中（起点 2026-09-04）
+**状态**：⏳ 计划中（起点 2026-09-04；terminal 安全子项 2026-09-07 全部收口，真·P7 候选 2026-09-08 模糊立项）
 
 > **v0.4.1 内容修订（grill 2026-09-07）**：原「v0.4.1 不含 P7 任何子项」（2026-09-05 拍板）已改为**攒发**——T3 + S1 落地后与 H1–H4 一起打 v0.4.1；T3 范围（只拦内联）、S1 定位（误报修复为主）、S2 划掉、T1/T2/T4 去留均已定案，见上方「terminal 脚本绕过防护」。近期窗口能做的都已在 **H 系列**。
 
@@ -87,7 +87,7 @@
 **grill 定案（2026-09-07，两项拍板合并）**：
 
 - [x] **T3 · 解释器内联载荷强制审批（★☆☆）** — 已交付（2026-09-07）：`path_guard.rs::is_inline_interpreter_command`（引号感知段切分 + 内联形态识别，16 条单测）+ `approval_decision` 闸门（`ApprovalContext.terminal_inline_gate`，命中即 NeedsApproval，即使落在 workspace/受信目录内，3 条审批单测）+ `[tools.terminal].interpret_inline` 可配开关（默认 `approval`）+ CONFIG_TEMPLATE / guide / AGENTS.md 文档同步。**只拦内联**：`-c`/`-e`/`-r`/`--eval`/`--exec`、heredoc/stdin 进解释器、`deno eval`、裸解释器/shell 被管道喂入（`curl … | bash`）；跑脚本文件不拦（路径走 path 校验，写入在 transcript 可审计）；yolo 档显式弃权不受约束；delegate 频道维持 P2-a 既有绕过（代码注释留档）。验证：fmt/clippy(-D warnings)/test 全绿（lib 571 + 集成 53）
-- [ ] **S1 · 命令拆分 + flag 级路径检查（重新定位：误报修复为主）**：引号感知 tokenizer 替代 `split_whitespace`（修 #C 同类误报：`git commit -m "..."` 字面量被抠成假路径）+ 按 flag 语义判定参数是否路径。**验收标准 = 减少误拒，而非拦截率**——安全收益有限（解释器载荷内容怎么拆都分析不了，拦不住任意代码），安全上的定位是增强而非防线。一到数天，回归风险在审批行为面（需全量回归现有命令样本）。
+- [x] **S1 · 命令拆分 + flag 级路径检查（重新定位：误报修复为主）**（2026-09-07 交付：`path_guard.rs::tokenize_command` 引号感知 tokenizer + flag 语义表 + 位置语义 + `VAR=value` 按值判定，5 条新单测，明细见 CHANGELOG §v0.4.1）：引号感知 tokenizer 替代 `split_whitespace`（修 #C 同类误报：`git commit -m "..."` 字面量被抠成假路径）+ 按 flag 语义判定参数是否路径。**验收标准 = 减少误拒，而非拦截率**——安全收益有限（解释器载荷内容怎么拆都分析不了，拦不住任意代码），安全上的定位是增强而非防线。回归风险在审批行为面，既有提取回归全过（lib 576）。
 - ~~**S2 · `sh -c` 载荷递归解析**~~ **划掉（grill 2026-09-07）**：立项前提不成立——核实 `check_shell_wrappers`（`path_guard.rs:191`）对 `bash/sh/zsh/fish + -c` 是 **bail 硬拒绝**而非人审，不存在「套壳漏网需要解析」的安全缺口；剩余价值仅是把硬拒改成解析放行（易用性），单用户场景 agent 几乎不需要 `sh -c`（`&&` 链即可），不值得引入「解析器认为安全」的新信任面。
 - **T1 · OS 级沙箱：预判不做**（grill 2026-09-07 定调）：与「轻量、可移植、单 crate」产品定位正面冲突，只留本评估记录，除非未来真实发生事故再重启评估。
 - **T2 · 无特权账户运行：文档化（已交付，2026-09-07）**：新增 [docs/guide/security-hardening.md](guide/security-hardening.md)——无特权账户部署规范（Windows 专用账户 + ACL / Linux 专用用户，含「挡写不挡读」的边界与 ACL 缓解）+ T1 不采纳的评估记录 + 已知边界（delegate 绕过、T4 不做的代价）。
@@ -95,9 +95,18 @@
 
 **实施顺序**：~~T3（半天级）先行~~ 已交付（2026-09-07）→ ~~S1~~ 已交付（2026-09-07）。P7 全部收口，随 **v0.4.1 攒发**（H6 时序修订，见 H 系列）。T2 文档同批交付；T1 评估记录落在 security-hardening.md。
 
+### 🌱 真·P7 候选（2026-09-08 模糊记录，均待 grill 明确后立项）
+
+> 只是把想法落袋防忘，范围、边界、验收标准全部未定；立项前走 grill 工作流逐项拷问。
+
+- **RAG**（模糊记录）：方向是本地知识库检索增强。待 grill：与 `memory_research`（FTS5 全文搜会话历史）的边界？语料源（文档目录 / 会话历史 / 网页剪藏）？嵌入与向量存储的选型（本地优先约束）？切片/召回质量的评估方式？
+- **浏览器自动化**（模糊记录）：方向是 agent 能操作真实浏览器（页面导航/填表/截图抓取）。待 grill：内嵌 headless（如 chromiumoxide）vs 驱动外部实例 vs MCP 外挂？审批面怎么划（浏览器能碰内网/登录态）？与 `web_fetch` 的分工边界？
+- **搜索增强**（模糊记录）：方向是统一 search 的质量/覆盖提升。待 grill：多搜索 provider 扩容（doubao/baidu/brave 之外）？还是检索质量（多源聚合、rerank、结果去重）？成本与 API key 管理约定？
+- **原子工具优化增强**（模糊记录）：方向是现有内置工具（file_*/terminal/search/…) 的参数、组合与输出打磨。待 grill：从实际使用痛点出发逐工具盘点（file_edit 容错、terminal 误报已由 H1/S1 打样）？新原子工具（如 diff/patch、json/yaml 查询）要不要进？
+
 ### 🧩 待 grill 明确后立项
 
-- （暂无新增需求项；terminal 安全项见上 T1–T4 与 S1/S2）
+- （真·P7 四项见上；terminal 安全项 T1–T4 与 S1/S2 已收口，见上）
 
 ---
 
