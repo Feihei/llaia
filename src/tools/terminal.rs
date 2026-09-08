@@ -196,6 +196,24 @@ impl Tool for Terminal {
         true
     }
     async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
+        self.run(args, false).await
+    }
+
+    /// 批准豁免（ADR-0020）：`/ok` 后跳过 workspace 白名单（用户已看到完整命令并
+    /// 批准），shell 包装/路径白名单不再拦截；命令策略（黑名单档含灾难命令表）与
+    /// 危险路径前缀黑名单兜底仍保留。
+    async fn execute_approved(
+        &self,
+        args: &Value,
+        _channel: &str,
+        _event_tx: Option<&tokio::sync::mpsc::Sender<crate::agent::TurnEvent>>,
+    ) -> Result<String> {
+        self.run(args, true).await
+    }
+}
+
+impl Terminal {
+    async fn run(&self, args: &Value, approved: bool) -> Result<String> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -203,12 +221,21 @@ impl Tool for Terminal {
 
         let workspace = self.workspace.read().await.clone();
 
-        // 命令策略校验
+        // 命令策略校验（含用户配置的黑名单档）
         self.check_command_policy(command)?;
 
-        // 三层路径防御
-        let trusted = self.trusted.read().await.clone();
-        self.check_path_safety(command, &workspace, &trusted)?;
+        if !approved {
+            // 三层路径防御
+            let trusted = self.trusted.read().await.clone();
+            self.check_path_safety(command, &workspace, &trusted)?;
+        } else {
+            // 批准豁免仍保留危险路径黑名单兜底（catastrophic 前缀不因人审放行）
+            for token in path_guard::extract_path_tokens(command) {
+                if path_guard::hits_blacklist(&token) {
+                    anyhow::bail!("path {:?} matches dangerous blacklist prefix", token);
+                }
+            }
+        }
 
         #[cfg(windows)]
         let output = run_command(command, self.bash_path.as_deref(), &workspace).await;
@@ -352,6 +379,52 @@ mod tests {
             .execute(&serde_json::json!({"command": "rm -rf /"}), "cli")
             .await;
         assert!(result.is_err());
+    }
+
+    /// 回归（ADR-0020 审批豁免）：用户 `/ok` 批准的 workspace 外命令必须在执行层
+    /// 放行——此前 resolve_approval 批准后 execute 仍重跑完整白名单校验，越界操作
+    /// 被二次拒绝（game-portfolio 事故：批准了却报 "is outside workspace"）。
+    #[tokio::test]
+    async fn test_approved_out_of_workspace_command_executes() {
+        let ws = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "approved-content").unwrap();
+        // 正斜杠路径：Git Bash / sh 都能吃（Windows 反斜杠会被 bash 当转义符）
+        let path_arg = secret.to_string_lossy().replace('\\', "/");
+        let cmd = format!("cat {path_arg}");
+        let t = term("blacklist", ws.path().to_path_buf());
+
+        // 未批准：越界拒绝
+        let err = t
+            .execute(&serde_json::json!({ "command": cmd }), "cli")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outside workspace"), "{err}");
+
+        // 批准豁免：放行并真实执行
+        let out = t
+            .execute_approved(&serde_json::json!({ "command": cmd }), "cli", None)
+            .await
+            .expect("approved out-of-workspace command should run");
+        assert!(out.contains("approved-content"), "{out}");
+    }
+
+    /// 批准豁免不放松灾难前缀黑名单：`C:\Windows` 等前缀即使人审放行也拒绝。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_approved_still_blocks_dangerous_prefix() {
+        let (_g, ws) = make_workspace();
+        let t = term("none", ws);
+        let result = t
+            .execute_approved(
+                &serde_json::json!({"command": r"cat C:\Windows\win.ini"}),
+                "cli",
+                None,
+            )
+            .await;
+        assert!(result.is_err(), "approved mode must keep blacklist prefix");
     }
 
     /// 回归：双引号命令不得被 MSVCRT 转义破坏成 `\"...\"` 字面量。

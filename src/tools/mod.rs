@@ -40,6 +40,21 @@ pub trait Tool: Send + Sync {
         self.execute(args, channel).await
     }
 
+    /// 批准后的执行入口（ADR-0020：`/ok` 即执行真实操作）。
+    ///
+    /// 默认透传 `execute_with_events`。带 workspace 白名单的工具（terminal /
+    /// file_*）override 本方法：跳过越界拒绝（用户已在审批提示里看到完整操作并
+    /// 显式批准，白名单不再是拦截点），但命令策略与危险路径黑名单等兜底防线保留。
+    /// 没有这一入口时，批准的 workspace 外操作会在执行层被二次拒绝，审批形同虚设。
+    async fn execute_approved(
+        &self,
+        args: &Value,
+        channel: &str,
+        event_tx: Option<&mpsc::Sender<TurnEvent>>,
+    ) -> Result<String> {
+        self.execute_with_events(args, channel, event_tx).await
+    }
+
     /// 是否需要确认（有副作用）。默认 false（只读工具）。
     /// 有副作用的工具（file_write, terminal, memory_write 等）应 override 返回 true。
     fn requires_confirm(&self) -> bool {

@@ -168,6 +168,22 @@ impl Tool for FileRead {
         })
     }
     async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
+        self.run(args, false).await
+    }
+
+    /// 批准豁免（ADR-0020）：`/ok` 后跳过 workspace 白名单，危险前缀黑名单保留。
+    async fn execute_approved(
+        &self,
+        args: &Value,
+        _channel: &str,
+        _event_tx: Option<&tokio::sync::mpsc::Sender<crate::agent::TurnEvent>>,
+    ) -> Result<String> {
+        self.run(args, true).await
+    }
+}
+
+impl FileRead {
+    async fn run(&self, args: &Value, approved: bool) -> Result<String> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -184,13 +200,17 @@ impl Tool for FileRead {
                 return Ok(content);
             }
         }
-        let extra = if self.is_main {
-            extra_readable_for_main(&ws)
+        let resolved = if approved {
+            path_guard::resolve_approved_path(&ws, path)?
         } else {
-            None
+            let extra = if self.is_main {
+                extra_readable_for_main(&ws)
+            } else {
+                None
+            };
+            let trusted = self.trusted.read().await.clone();
+            path_guard::validate_path_in_scope(&ws, &trusted, path, extra.as_deref())?
         };
-        let trusted = self.trusted.read().await.clone();
-        let resolved = path_guard::validate_path_in_scope(&ws, &trusted, path, extra.as_deref())?;
         let content = tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| anyhow!("read {:?}: {}", resolved, e))?;
@@ -220,6 +240,22 @@ impl Tool for FileWrite {
         true
     }
     async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
+        self.run(args, false).await
+    }
+
+    /// 批准豁免（ADR-0020）：`/ok` 后跳过 workspace 白名单，危险前缀黑名单保留。
+    async fn execute_approved(
+        &self,
+        args: &Value,
+        _channel: &str,
+        _event_tx: Option<&tokio::sync::mpsc::Sender<crate::agent::TurnEvent>>,
+    ) -> Result<String> {
+        self.run(args, true).await
+    }
+}
+
+impl FileWrite {
+    async fn run(&self, args: &Value, approved: bool) -> Result<String> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -231,8 +267,12 @@ impl Tool for FileWrite {
 
         let ws = self.workspace.read().await;
         // 主 agent 写 subagent/ 路径时拒绝（.inbox/ 例外由 delegate 系统层处理，不经 file 工具）
-        let trusted = self.trusted.read().await.clone();
-        let resolved = path_guard::validate_path_in_scope(&ws, &trusted, path, None)?;
+        let resolved = if approved {
+            path_guard::resolve_approved_path(&ws, path)?
+        } else {
+            let trusted = self.trusted.read().await.clone();
+            path_guard::validate_path_in_scope(&ws, &trusted, path, None)?
+        };
         if self.is_main {
             let subagent_dir = ws.join("subagent");
             if resolved.starts_with(&subagent_dir) {
@@ -277,6 +317,22 @@ impl Tool for FileEdit {
         true
     }
     async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
+        self.run(args, false).await
+    }
+
+    /// 批准豁免（ADR-0020）：`/ok` 后跳过 workspace 白名单，危险前缀黑名单保留。
+    async fn execute_approved(
+        &self,
+        args: &Value,
+        _channel: &str,
+        _event_tx: Option<&tokio::sync::mpsc::Sender<crate::agent::TurnEvent>>,
+    ) -> Result<String> {
+        self.run(args, true).await
+    }
+}
+
+impl FileEdit {
+    async fn run(&self, args: &Value, approved: bool) -> Result<String> {
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -291,8 +347,12 @@ impl Tool for FileEdit {
             .ok_or_else(|| anyhow!("missing 'new_string'"))?;
 
         let ws = self.workspace.read().await;
-        let trusted = self.trusted.read().await.clone();
-        let resolved = path_guard::validate_path_in_scope(&ws, &trusted, path, None)?;
+        let resolved = if approved {
+            path_guard::resolve_approved_path(&ws, path)?
+        } else {
+            let trusted = self.trusted.read().await.clone();
+            path_guard::validate_path_in_scope(&ws, &trusted, path, None)?
+        };
         if self.is_main {
             let subagent_dir = ws.join("subagent");
             if resolved.starts_with(&subagent_dir) {
@@ -380,6 +440,58 @@ mod tests {
             .execute(&json!({"path": "../outside.txt"}), "cli")
             .await;
         assert!(escaped.is_err());
+    }
+
+    /// 回归（ADR-0020 审批豁免）：`/ok` 批准的 workspace 外写入必须在执行层放行，
+    /// 不再被白名单二次拒绝；但灾难前缀黑名单（C:\Windows 等）仍保留。
+    #[tokio::test]
+    async fn test_approved_out_of_workspace_write_executes() {
+        let ws = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let target = outside.path().join("out.txt");
+        let tool = FileWrite::new(
+            Arc::new(RwLock::new(ws.path().to_path_buf())),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+        );
+
+        // 未批准：越界拒绝
+        let result = tool
+            .execute(
+                &json!({"path": target.display().to_string(), "content": "x"}),
+                "cli",
+            )
+            .await;
+        assert!(result.is_err(), "未批准的越界写入应拒绝");
+
+        // 批准豁免：放行并真实写入
+        tool.execute_approved(
+            &json!({"path": target.display().to_string(), "content": "ok"}),
+            "cli",
+            None,
+        )
+        .await
+        .expect("approved out-of-workspace write should run");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "ok");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_approved_write_still_blocks_dangerous_prefix() {
+        let ws = tempdir().unwrap();
+        let tool = FileWrite::new(
+            Arc::new(RwLock::new(ws.path().to_path_buf())),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+        );
+        let result = tool
+            .execute_approved(
+                &json!({"path": r"C:\Windows\evil.txt", "content": "x"}),
+                "cli",
+                None,
+            )
+            .await;
+        assert!(result.is_err(), "approved mode must keep blacklist prefix");
     }
 
     /// 回归（plan.md #B 执行层）：受信目录内的操作在执行层必须放行——

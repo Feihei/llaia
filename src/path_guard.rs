@@ -155,6 +155,23 @@ pub fn validate_path(
     )
 }
 
+/// 批准豁免模式（ADR-0020 `/ok`）的路径解析：只做词法规范化 + 危险黑名单检查，
+/// 不做 workspace 白名单比较——用户已显式批准该操作，白名单不再是拦截点，
+/// 但 `C:\Windows` 等 catastrophic 前缀不因人审放行。
+/// 返回解析后的实际路径（相对路径以 workspace 为基准），供读写直接使用。
+pub fn resolve_approved_path(workspace: &Path, path: &str) -> Result<PathBuf> {
+    if hits_blacklist(path) {
+        anyhow::bail!("path {:?} matches dangerous blacklist prefix", path);
+    }
+    let p = PathBuf::from(path);
+    let joined = if p.is_absolute() {
+        p
+    } else {
+        workspace.join(path)
+    };
+    Ok(normalize_lexical(&joined))
+}
+
 /// 判断 token 是否"看起来像路径"（用于 terminal 命令行路径提取）
 ///
 /// Windows 上不能把「含单个反斜杠」当作路径判据——字面量 `\n`、`\t` 等转义片段

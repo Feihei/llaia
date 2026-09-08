@@ -364,12 +364,7 @@ pub async fn try_handle(
             Some(p) => {
                 let context_size = agent.context_size_now().await;
                 match agent.context.compact(p.as_ref(), 6, context_size).await {
-                    Ok(compacted) => {
-                        if compacted {
-                            agent.ensure_session_title(p.as_ref()).await;
-                        }
-                        Ok(SlashOutcome::Handled("[compacted]".into()))
-                    }
+                    Ok(_) => Ok(SlashOutcome::Handled("[compacted]".into())),
                     Err(e) => Ok(SlashOutcome::Handled(format!("[compact failed: {}]", e))),
                 }
             }
@@ -659,7 +654,7 @@ enum ApprovalOutcome {
 
 /// 解析一条待确认审批：从门控取出 pending，按批准/拒绝决定执行与否。
 ///
-/// - 普通工具：批准则 `execute_with_events` 真正执行，拒绝则返回拒绝提示。
+/// - 普通工具：批准则 `execute_approved` 真正执行（workspace 白名单豁免），拒绝则返回拒绝提示。
 /// - `__move_workspace`：批准则把 agent 工作目录切到目标，拒绝则不动。
 ///
 /// 返回 `Some(Resume)` 时，调用方应启动一次 continuation turn，
@@ -744,8 +739,10 @@ async fn resolve_approval(
     };
 
     let result = if approve {
+        // 批准豁免入口：terminal / file_* 跳过 workspace 白名单（ADR-0020：/ok 即
+        // 执行真实操作），否则批准的越界操作会在执行层被二次拒绝、审批形同虚设。
         match tool
-            .execute_with_events(&pending.args, &pending.channel, None)
+            .execute_approved(&pending.args, &pending.channel, None)
             .await
         {
             Ok(s) => s,
