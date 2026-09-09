@@ -93,6 +93,31 @@ pub(crate) fn strip_verbatim_prefix(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
+/// Git Bash / MSYS 风格绝对路径换算：`/c/Users/x` -> `C:\Users\x`（仅 Windows）。
+///
+/// terminal 在 Windows 上经 Git Bash 执行，agent 产出 MSYS 风格路径；PathBuf 无法
+/// 将其与盘符 workspace 根做 starts_with 比较，导致 workspace 内命令被误判越界、
+/// 每次弹审批。仅换算「单字母首段」（盘符缩写），`/usr/bin`、`/etc/passwd` 等
+/// 多字符首段的 Unix 路径原样放行。非 Windows 平台为恒等转换。
+#[cfg(windows)]
+pub(crate) fn convert_msys_path(path: &str) -> String {
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[2] == b'/' && b[1].is_ascii_alphabetic() {
+        format!(
+            "{}:\\{}",
+            (b[1] as char).to_ascii_uppercase(),
+            path[3..].replace('/', "\\")
+        )
+    } else {
+        path.to_string()
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn convert_msys_path(path: &str) -> String {
+    path.to_string()
+}
+
 /// 校验路径是否落在 workspace 内（第二层白名单 + 第三层黑名单兜底）
 ///
 /// - 相对路径以 workspace 为基准
@@ -107,7 +132,10 @@ pub fn validate_path(
     path: &str,
     extra_readable: Option<&Path>,
 ) -> Result<PathBuf> {
-    // 第三层：黑名单兜底（先查字符串前缀）
+    let path_owned = convert_msys_path(path);
+    let path: &str = &path_owned;
+
+    // 第三层：黑名单兜底（先查字符串前缀；在 MSYS 换算之后查，/c/Windows 同样命中）
     if hits_blacklist(path) {
         anyhow::bail!("path {:?} matches dangerous blacklist prefix", path);
     }
@@ -160,6 +188,8 @@ pub fn validate_path(
 /// 但 `C:\Windows` 等 catastrophic 前缀不因人审放行。
 /// 返回解析后的实际路径（相对路径以 workspace 为基准），供读写直接使用。
 pub fn resolve_approved_path(workspace: &Path, path: &str) -> Result<PathBuf> {
+    let path_owned = convert_msys_path(path);
+    let path: &str = &path_owned;
     if hits_blacklist(path) {
         anyhow::bail!("path {:?} matches dangerous blacklist prefix", path);
     }
@@ -1020,6 +1050,57 @@ mod tests {
         let abs = ws.path().join("file.txt");
         let cmd = format!("cat {}", abs.display());
         assert!(validate_command_paths(&cmd, ws.path(), None).is_ok());
+    }
+
+    /// Git Bash / MSYS 风格绝对路径（/c/...）应换算成盘符路径参与 workspace
+    /// 白名单比较——terminal 在 Windows 上经 Git Bash 执行，agent 产出 MSYS
+    /// 风格路径，旧逻辑直接比较导致 workspace 内命令被误判越界、每次弹审批。
+    #[cfg(windows)]
+    #[test]
+    fn test_msys_style_path_within_workspace() {
+        let ws = tempdir().unwrap();
+        let sub = ws.path().join("cottage");
+        std::fs::create_dir_all(&sub).unwrap();
+        // C:\... -> /c/...
+        let win = ws.path().to_string_lossy().replace('\\', "/");
+        let msys_ws = format!("/{}{}", win[..1].to_ascii_lowercase(), &win[2..]);
+        let r = validate_path(ws.path(), &format!("{msys_ws}/cottage"), None);
+        assert!(
+            r.is_ok(),
+            "msys path {msys_ws}/cottage should be within workspace: {:?}",
+            r.err()
+        );
+        // 换算后的返回值是 Windows 形态、仍落在 workspace 内
+        assert!(r.unwrap().starts_with(ws.path()));
+    }
+
+    /// 单字母首段才换算；/usr、/etc 等多字符首段的 Unix 路径不得误换算
+    #[cfg(windows)]
+    #[test]
+    fn test_msys_conversion_only_single_letter_segment() {
+        assert_eq!(convert_msys_path("/c/Users/x"), r"C:\Users\x");
+        assert_eq!(convert_msys_path("/C/Users/x"), r"C:\Users\x");
+        assert_eq!(convert_msys_path("/usr/bin"), "/usr/bin");
+        assert_eq!(convert_msys_path("/etc/passwd"), "/etc/passwd");
+        assert_eq!(convert_msys_path("/c"), "/c");
+        assert_eq!(convert_msys_path("relative/path"), "relative/path");
+    }
+
+    /// 回归：cd 到 workspace 内的 MSYS 风格目录 + 相对路径拷贝，整条命令免审批
+    #[cfg(windows)]
+    #[test]
+    fn test_git_bash_style_command_within_workspace_no_approval() {
+        let ws = tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("cottage")).unwrap();
+        let win = ws.path().to_string_lossy().replace('\\', "/");
+        let msys_ws = format!("/{}{}", win[..1].to_ascii_lowercase(), &win[2..]);
+        let cmd = format!(
+            "cd {msys_ws}/cottage && cp cottage.blend .snap/cottage.v1.blend 2>/dev/null; mkdir -p .snap; echo ok"
+        );
+        assert!(
+            validate_command_paths(&cmd, ws.path(), None).is_ok(),
+            "workspace 内 git bash 风格命令不应触发审批"
+        );
     }
 
     #[test]
