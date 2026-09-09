@@ -431,10 +431,16 @@ function llaiaApp() {
           this.scrollBottom();
           break;
         case 'tool_start':
-          this.messages.push({ role: 'tool', text: `${ev.name}...` });
+          // text 存工具名（不带省略号），渲染层按 output 是否到达决定形态
+          this.messages.push({ role: 'tool', text: ev.name, output: null });
           break;
         case 'tool_result':
-          this.messages.push({ role: 'tool', text: ev.output });
+          // 合并回最近的 tool_start 消息（输出未到时先挂起），折叠展示
+          if (this.messages.length && this.messages[this.messages.length-1].role === 'tool' && this.messages[this.messages.length-1].output === null) {
+            this.messages[this.messages.length-1].output = ev.output;
+          } else {
+            this.messages.push({ role: 'tool', text: 'tool', output: ev.output });
+          }
           break;
         case 'media':
           this.messages.push({ role: 'media', path: ev.path, kind: ev.kind });

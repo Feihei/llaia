@@ -210,6 +210,18 @@ option { background: var(--bg-input); color: var(--text); }
   cursor: pointer; padding: 0 2px; font-size: 14px; line-height: 1;
 }
 #chat-pane .chip-x:hover { color: var(--red, #e05656); }
+/* chat 内 tool 结果折叠（与 sessions 同款交互） */
+#chat-pane .tool-result { margin: 4px 0; padding-left: 6px; border-left: 1px dashed var(--border); }
+#chat-pane .tool-result-head { cursor: pointer; color: var(--green); font-size: 12px; user-select: none; }
+#chat-pane .tool-result-head:hover { color: var(--cyan); }
+#chat-pane .tool-result-caret { display: inline-block; width: 14px; color: var(--cyan); }
+#chat-pane .tool-result-body {
+  margin: 4px 0 0; padding: 6px 8px;
+  background: #070a07; border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 12px;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 320px; overflow-y: auto;
+}
 
 /* ---------- Config ---------- */
 #config-pane { flex-direction: row; }

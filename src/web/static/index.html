@@ -83,7 +83,16 @@
           <div class="msg" :class="m.role">
             <template x-if="m.role==='user'"><div><b>User:</b> <span x-text="m.text"></span></div></template>
             <template x-if="m.role==='assistant'"><div><b>Assistant:</b> <div x-html="renderMd(m.text)"></div></div></template>
-            <template x-if="m.role==='tool'"><div><b>Tool:</b> <span x-text="m.text"></span></div></template>
+            <template x-if="m.role==='tool' && m.output == null"><div><b>Tool:</b> <span x-text="m.text"></span></div></template>
+            <template x-if="m.role==='tool' && m.output != null">
+              <div class="tool-result" x-data="{open: false}">
+                <div class="tool-result-head" @click="open = !open">
+                  <span class="tool-result-caret" x-text="open ? '▾' : '▸'"></span>
+                  <span x-text="m.text + ' — result (' + m.output.length + ' chars)'"></span>
+                </div>
+                <pre class="tool-result-body" x-show="open" x-text="m.output"></pre>
+              </div>
+            </template>
             <template x-if="m.role==='side'"><div><b>Side:</b> <div class="side-body" x-html="renderMd(m.text)"></div></div></template>
             <template x-if="m.role==='media'">
               <div>
