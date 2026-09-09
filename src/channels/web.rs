@@ -348,6 +348,18 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     write_task.abort();
 }
 
+/// 归一化上传图的路径形态为 `uploads/...`：`/upload` 回传的是带前缀的相对路径，
+/// 手填或旧前端可能只给裸文件名，两种都要能落到 uploads 目录里。反斜杠统一为
+/// 正斜杠、剥掉开头斜杠；刻意不动中间的 `..`——那由 resolve_within 的门禁拒绝。
+fn upload_rel(raw: &str) -> String {
+    let unified = raw.replace('\\', "/");
+    let bare = match unified.strip_prefix("uploads/") {
+        Some(rest) => rest,
+        None => unified.trim_start_matches('/'),
+    };
+    format!("uploads/{}", bare)
+}
+
 fn build_user_message(text: &str, images: Option<&[String]>, workspace: &Path) -> ChatMessage {
     let imgs = images.unwrap_or(&[]);
     if imgs.is_empty() {
@@ -357,9 +369,11 @@ fn build_user_message(text: &str, images: Option<&[String]>, workspace: &Path) -
     if !text.is_empty() {
         parts.push(ContentPart::Text { text: text.into() });
     }
-    let uploads_dir = workspace.join("uploads");
+    // base 用 workspace 本身（与 CLI 频道同一口径）：/upload 回传的相对路径**自带**
+    // uploads/ 前缀，若把 base 也设成 uploads/ 会拼出 uploads/uploads/... 这个永远
+    // 不存在的路径，图片于是全数退化成一段 invalid path 文本——模型根本看不到图。
     for img_rel in imgs {
-        match resolve_within(&uploads_dir, img_rel) {
+        match resolve_within(workspace, &upload_rel(img_rel)) {
             Ok(abs) => {
                 if !image_utils::is_image_file(&abs) {
                     parts.push(ContentPart::Text {
@@ -643,5 +657,84 @@ mod tests {
         // 不应 panic
         sink.on_chunk("hi").await;
         sink.on_done().await;
+    }
+
+    /// 在临时目录里造一个 uploads/ 下的真图（能被 image::open 解码即可）
+    fn make_uploads_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = dir.path().join("uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        image::DynamicImage::new_rgb8(4, 4)
+            .save(uploads.join("shot.png"))
+            .unwrap();
+        dir
+    }
+
+    fn parts_of(msg: &ChatMessage) -> &Vec<ContentPart> {
+        match &msg.content {
+            crate::provider::MessageContent::Multimodal(p) => p,
+            other => panic!("期望多模态消息，实际 {:?}", other),
+        }
+    }
+
+    /// 回归：WebUI 传图曾因 base 又拼了一次 uploads/ 前缀而**从未**成功过——
+    /// 图片静默退化成一段 invalid path 文本，模型看不到图，只能改用 PIL 猜像素。
+    #[test]
+    fn test_build_user_message_attaches_prefixed_upload() {
+        let dir = make_uploads_dir();
+        // 前端原样提交 /upload 回传的形态（自带 uploads/ 前缀）
+        let msg = build_user_message("看图", Some(&["uploads/shot.png".to_string()]), dir.path());
+        let parts = parts_of(&msg);
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { image_url } if image_url.url.starts_with("data:image/"))),
+            "图片未成为 ImageUrl，parts = {:?}",
+            parts
+        );
+        assert!(
+            !parts.iter().any(|p| matches!(p, ContentPart::Text { text }
+                if text.contains("invalid path") || text.contains("load failed")),),
+            "不该出现路径/读取失败的占位文本，parts = {:?}",
+            parts
+        );
+    }
+
+    /// 裸文件名（旧前端或手填）同样应落到 uploads/ 下。
+    #[test]
+    fn test_build_user_message_accepts_bare_filename() {
+        let dir = make_uploads_dir();
+        let msg = build_user_message("", Some(&["shot.png".to_string()]), dir.path());
+        assert!(
+            parts_of(&msg)
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+            "裸文件名也应解析到 uploads/ 下"
+        );
+    }
+
+    /// 不存在的图应报「读取失败」而不是被当成多模态成功；路径侧的语义由
+    /// web::tests::test_resolve_within_missing_path_is_not_reported_as_traversal 锁定。
+    #[test]
+    fn test_build_user_message_missing_upload_degrades_to_text() {
+        let dir = make_uploads_dir();
+        let msg = build_user_message("看图", Some(&["uploads/gone.png".to_string()]), dir.path());
+        assert!(
+            parts_of(&msg)
+                .iter()
+                .any(|p| matches!(p, ContentPart::Text { text }
+                if text.contains("image load failed"))),
+            "缺失文件应降级为 load failed 占位"
+        );
+    }
+
+    #[test]
+    fn test_upload_rel_normalizes_without_swallowing_traversal() {
+        assert_eq!(upload_rel("uploads/a.png"), "uploads/a.png");
+        assert_eq!(upload_rel("a.png"), "uploads/a.png");
+        assert_eq!(upload_rel("/a.png"), "uploads/a.png");
+        assert_eq!(upload_rel("uploads\\a.png"), "uploads/a.png");
+        // 中间的 ParentDir 原样透传，交给 resolve_within 的门禁拒绝
+        assert_eq!(upload_rel("uploads/../secret"), "uploads/../secret");
     }
 }

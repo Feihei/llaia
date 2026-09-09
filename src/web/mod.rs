@@ -105,13 +105,40 @@ pub fn resolve_within(base: &Path, relative: &str) -> Result<PathBuf, String> {
         }
     }
     let joined = base.join(relative);
-    // canonicalize 确认最终路径在 base 内（base 可能不存在，跳过 canonicalize 时回退到 join 比较前缀）
-    let canon_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
-    let canon_joined = joined.canonicalize().unwrap_or_else(|_| joined.clone());
+    // 两侧必须用同一种形态比较：Windows 的 canonicalize 会加 `\\?\` verbatim 前缀，
+    // 若 base 存在（canonical）而 joined 不存在（回退原始路径），starts_with 恒为假，
+    // 一个拼写错误就被报成了越权逃逸。见 canonicalize_lenient。
+    let canon_base = canonicalize_lenient(base);
+    let canon_joined = canonicalize_lenient(&joined);
     if !canon_joined.starts_with(&canon_base) {
         return Err(format!("path escapes base: {}", relative));
     }
     Ok(canon_joined)
+}
+
+/// 对 `p` 做宽容版 canonicalize：逐级向上找到第一个**存在**的祖先做 canonicalize，
+/// 再把剩余分量按原样拼回。目标是让存在与不存在的路径返回同一种形态（同前缀、同
+/// 分隔符），使 `starts_with` 的包含性判断有意义；祖先全都不存在时退回原始 `p`。
+/// 只用于比较基准，不做存在性检查——文件是否真的存在由调用方（读文件失败）报出。
+fn canonicalize_lenient(p: &Path) -> PathBuf {
+    let comps: Vec<Component> = p.components().collect();
+    for split in (0..=comps.len()).rev() {
+        let mut head = PathBuf::new();
+        for c in &comps[..split] {
+            head.push(c.as_os_str());
+        }
+        if head.as_os_str().is_empty() {
+            continue;
+        }
+        if let Ok(canon) = head.canonicalize() {
+            let mut out = canon;
+            for c in &comps[split..] {
+                out.push(c.as_os_str());
+            }
+            return out;
+        }
+    }
+    p.to_path_buf()
 }
 
 /// 在实时作用域（当前工作目录 ∪ 受信目录 ∪ 家目录）内解析 `/file` 请求路径：
@@ -2656,6 +2683,32 @@ mod tests {
         // Windows: canonicalize 给路径加 \\?\ 前缀，对比时统一用 canonicalized base
         let canon_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
         assert!(r.starts_with(&canon_base));
+    }
+
+    /// 回归（修果）：base 存在、joined 不存在时，Windows 的 canonicalize 只给一侧加
+    /// verbatim 前缀，两侧形态不一致曾让 starts_with 恒假，把一个拼错的路径报成
+    /// "path escapes base"——把 bug 说成安全事件，排障被直接带偏。不存在不是越权。
+    #[test]
+    fn test_resolve_within_missing_path_is_not_reported_as_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("uploads");
+        fs::create_dir_all(&base).unwrap();
+        // uploads/uploads/missing.png 这种重复前缀的形态：仍在 base 内，按词法解析
+        let r = resolve_within(&base, "uploads/missing.png");
+        let abs = r.expect("base 内的不存在路径不该报越权");
+        assert!(abs
+            .to_string_lossy()
+            .replace('\\', "/")
+            .ends_with("missing.png"));
+    }
+
+    /// 祖先目录整条都不存在时也不能 panic，且必须退回原始拼接结果。
+    #[test]
+    fn test_resolve_within_with_missing_base_still_contains_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("nope").join("deeper");
+        let r = resolve_within(&base, "a.png");
+        assert!(r.is_ok(), "base 不存在时应按词法通过: {:?}", r);
     }
 
     // Windows-only: on non-Windows the backslash is an ordinary char, so
