@@ -108,15 +108,15 @@
                 <b>Media:</b>
                 <!-- 音频（P5 T1 TTS 产物 mp3/wav/ogg/m4a）→ <audio> 播放 -->
                 <template x-if="/\.(mp3|wav|ogg|m4a)$/i.test(m.path)">
-                  <audio controls :src="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)"></audio>
+                  <audio controls :src="fileUrl(m.path)"></audio>
                 </template>
                 <!-- 图片 -->
                 <template x-if="!/\.(mp3|wav|ogg|m4a)$/i.test(m.path) && /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(m.path)">
-                  <img :src="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)">
+                  <img :src="fileUrl(m.path)">
                 </template>
                 <!-- 其他文件 → 链接 -->
                 <template x-if="!/\.(mp3|wav|ogg|m4a)$/i.test(m.path) && !/\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(m.path)">
-                  <a :href="'/file?path='+encodeURIComponent(m.path)+'&token='+encodeURIComponent(token)" target="_blank" x-text="m.path"></a>
+                  <a :href="fileUrl(m.path)" target="_blank" x-text="m.path"></a>
                 </template>
               </div>
             </template>
@@ -124,7 +124,10 @@
         </template>
       </div>
       <div class="composer">
-        <input type="file" accept="image/*" @change="onUpload($event)" multiple>
+        <!-- 原生 file input 会常显「Choose File + 文件名」，与下方待发芯片行重复：
+             隐藏它，附件入口改成输入框左侧的 [+]（点它才开选择器） -->
+        <input type="file" accept="image/*" multiple @change="onUpload($event)" x-ref="fileInput" hidden>
+        <button class="attach" @click="$refs.fileInput.click()" title="Attach images">+</button>
         <input type="text" x-model="inputText" @keydown.enter="send()" placeholder="Type a message... (while running, input is steered into the current turn)">
         <button @click="send()" x-text="busy ? 'Steer' : 'Send'">Send</button>
         <button @click="stop()" :disabled="!busy">Stop</button>

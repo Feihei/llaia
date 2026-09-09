@@ -189,6 +189,10 @@ option { background: var(--bg-input); color: var(--text); }
   background: var(--bg-panel);
 }
 #chat-pane .composer input[type="text"] { flex: 1; }
+/* 附件入口：紧凑方形 [+]（全局 button 的 [ ] 装饰正好拼出加号造型） */
+#chat-pane .composer .attach { flex: 0 0 auto; padding: 6px 12px; font-size: 15px; line-height: 1; }
+/* 兜底：hidden 属性优先于任何 UA/主题样式，绝不再露出文件名 */
+#chat-pane .composer input[type="file"][hidden] { display: none !important; }
 /* 待发送附件芯片：缩略图 + 文件名 + 移除叉号（不占 composer 单行空间） */
 #chat-pane .upload-row {
   display: flex; gap: 8px; flex-wrap: wrap;

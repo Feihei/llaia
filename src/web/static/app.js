@@ -11,6 +11,8 @@ function llaiaApp() {
     inputText: '',
     busy: false,
     uploaded: [],
+    // WS 未就绪时的待发送帧队列（连上按序补发，见 flushOutbox）
+    outbox: [],
     // todo (ADR-0024, read-only display; v1 no click-to-toggle from UI)
     todos: [],
     questions: [],
@@ -406,6 +408,7 @@ function llaiaApp() {
       if (this.ws) { this.ws.onclose = null; this.ws.close(); }
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       this.ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(this.token)}`);
+      this.ws.onopen = () => this.flushOutbox();
       this.ws.onmessage = (e) => this.onWsMessage(JSON.parse(e.data));
       this.ws.onclose = () => {
         // 连接一断就没有事件回流，本地 busy 必须落下：否则 Send 停在 Steer 态、
@@ -427,7 +430,7 @@ function llaiaApp() {
     },
     onWsMessage(ev) {
       switch (ev.type) {
-        case 'auth_ok': break;
+        case 'auth_ok': this.flushOutbox(); break;
         case 'auth_failed':
           this.forceLogin('WebSocket authentication failed, check token');
           break;
@@ -478,50 +481,87 @@ function llaiaApp() {
     wsOpen() { return !!(this.ws && this.ws.readyState === WebSocket.OPEN); },
     // 统一的文件 URL：/file 的作用域含 agent 家目录，uploads/ 产物恒可取回
     fileUrl(p) { return '/file?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(this.token); },
-    wsDeadNotice() {
-      // 关键是不丢用户的东西：输入与已传图片原地保留，重连后可直接再发
-      this.messages.push({ role: 'tool', text: '[not sent] WebSocket is not connected — reconnecting; your input and images are still in the box.' });
+    // 排队而不是丢弃：socket 未就绪（页面刚打开还在握手、或服务端刚重启）时把帧存进
+    // outbox，连上后按序补发。原实现只是回一句「没连上」，等于把竞态转嫁给用户——
+    // 实测用户第一次 Send 被拒、原样再按一次才发出去。
+    queueFrame(frame, bubble) {
+      this.outbox.push(frame);
+      if (bubble) this.messages.push(bubble);
+      this.messages.push({
+        role: 'tool',
+        text: `[queued] waiting for the WebSocket to connect (${this.outbox.length} frame(s))…`,
+      });
+      this.busy = true;
       this.scrollBottom();
       if (this.authed) this.connectWs();
+    },
+    flushOutbox() {
+      let sentChat = false;
+      while (this.outbox.length && this.wsOpen()) {
+        const f = this.outbox.shift();
+        this.ws.send(JSON.stringify(f));
+        if (f.type === 'chat') sentChat = true;
+      }
+      // 排队帧落地即等于 turn 已在跑：期间 onclose 可能把 busy 落下过，这里补回来，
+      // 否则按钮停在 Send 态、Stop 又禁用，用户没法中断自己刚补发的消息
+      if (sentChat) this.busy = true;
     },
     send() {
       const text = this.inputText.trim();
       if (!text && this.uploaded.length === 0) return;
-      // 不查 readyState 就 send() 会抛 InvalidStateError，异常被点击处理器吞掉，
-      // 表现成「发消息没反应、点 Stop 也没反应」（服务端重启后页面即如此）
-      if (!this.wsOpen()) { this.wsDeadNotice(); return; }
-      // turn 运行中：Send 按钮即 Steer（标签已切换），所有输入自动以 /steer
-      // 投递进插话队列（后端 web.rs 原生支持）；/stop 文本仍走中断。
-      // 末轮残留的 steer 由后端丢弃并回显 [steer not applied] 提示（plan.md #I ③）。
-      if (this.busy) {
+      const lc = text.toLowerCase();
+      if (this.busy && lc === '/stop') {
         this.inputText = '';
-        const lc = text.toLowerCase();
-        if (lc === '/stop') {
-          this.messages.push({ role: 'user', text });
-          this.stop();
-          return;
+        this.messages.push({ role: 'user', text });
+        this.stop();
+        return;
+      }
+      // turn 运行中：Send 按钮即 Steer（标签已切换），输入以 /steer 投递进插话队列
+      // （后端 web.rs 原生支持）。末轮残留的 steer 由后端丢弃并回显提示（plan.md #I ③）。
+      if (this.busy) {
+        if (this.uploaded.length) {
+          // steer 帧只带文本：图片必须留在芯片里，绝不静默丢掉用户选好的附件
+          this.messages.push({ role: 'tool', text: '[not sent] a running turn only takes text — your images are still attached; wait for it to finish or press Stop.' });
         }
         const payload = lc.startsWith('/steer') ? text : '/steer ' + text;
-        this.messages.push({ role: 'user', text });
-        this.ws.send(JSON.stringify({ type: 'chat', text: payload }));
+        const frame = { type: 'chat', text: payload };
+        this.inputText = '';
+        if (this.wsOpen()) {
+          this.ws.send(JSON.stringify(frame));
+          this.messages.push({ role: 'user', text });
+        } else {
+          this.queueFrame(frame, { role: 'user', text });
+        }
+        this.scrollBottom();
         return;
       }
       const imgs = this.uploaded.map(u => u.path);
+      const frame = { type: 'chat', text: this.inputText, images: imgs };
       // images 一并挂到本地消息上：否则对话流里看不见自己发了什么图
-      this.messages.push({ role: 'user', text: this.inputText, images: imgs });
-      this.ws.send(JSON.stringify({ type: 'chat', text: this.inputText, images: imgs }));
-      this.busy = true;
+      const bubble = { role: 'user', text: this.inputText, images: imgs };
       this.inputText = '';
+      // 图片已随帧进入 outbox 或已发出，且在气泡里以缩略图常驻，芯片使命完成
       this.uploaded = [];
+      if (this.wsOpen()) {
+        this.ws.send(JSON.stringify(frame));
+        this.messages.push(bubble);
+        this.busy = true;
+      } else {
+        this.queueFrame(frame, bubble);
+      }
       this.scrollBottom();
     },
     stop() {
-      if (!this.wsOpen()) { this.wsDeadNotice(); return; }
-      this.ws.send(JSON.stringify({ type: 'stop' }));
+      const frame = { type: 'stop' };
+      if (this.wsOpen()) { this.ws.send(JSON.stringify(frame)); return; }
+      this.queueFrame(frame, { role: 'tool', text: '[queued] stop' });
     },
     removeUpload(i) { this.uploaded.splice(i, 1); },
     async onUpload(e) {
-      for (const f of e.target.files) {
+      const files = Array.from(e.target.files);
+      // 清空 value 才能连着两次选同一张图还触发 change（+ 号是可反复点的入口）
+      e.target.value = '';
+      for (const f of files) {
         const fd = new FormData();
         fd.append('file', f);
         const r = await this.apiFetch('/upload', { method: 'POST', body: fd });
