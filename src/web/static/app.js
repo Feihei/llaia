@@ -18,6 +18,7 @@ function llaiaApp() {
     questions: [],
     // 环境探测（P6，只读展示）
     env: '',
+    envError: '',
     doctorChecks: [],
     doctorRunning: false,
     _todoTimer: null,
@@ -199,8 +200,11 @@ function llaiaApp() {
         if (r.ok) {
           const j = await r.json();
           this.env = j.env || '';
+          this.envError = this.env ? '' : 'probe returned nothing — press Refresh';
+        } else {
+          this.envError = 'env lookup failed: HTTP ' + r.status;
         }
-      } catch (e) { /* 非致命：UI 静默跳过 */ }
+      } catch (e) { this.envError = 'env lookup failed: ' + e; }
     },
     async refreshEnv() {
       try {
@@ -208,8 +212,11 @@ function llaiaApp() {
         if (r.ok) {
           const j = await r.json();
           this.env = j.env || '';
+          this.envError = this.env ? '' : 'reprobe returned nothing';
+        } else {
+          this.envError = 'reprobe failed: HTTP ' + r.status;
         }
-      } catch (e) { /* 非致命：UI 静默跳过 */ }
+      } catch (e) { this.envError = 'reprobe failed: ' + e; }
     },
     async loadTodos() {
       try {

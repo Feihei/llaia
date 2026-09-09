@@ -152,9 +152,10 @@
         </template>
       </div>
         </div>
-        <!-- 右侧栏：todo 清单 + 环境探测（只读，随内容出现） -->
-        <aside class="side-panel" x-show="todos.length || env">
-          <!-- 规划后执行（ADR-0024）：当前会话 todo 清单只读展示 -->
+        <!-- 右侧栏：todo 清单 + 环境探测（只读）。**常驻显示**——原先两块都空时整体隐藏，
+             于是 env 为空时连唯一的重取入口 Refresh 也一起被藏掉，用户只会看到「栏没了」 -->
+        <aside class="side-panel">
+          <!-- 规划后执行（ADR-0024）：当前会话 todo 清单只读展示（没有清单就不占位） -->
           <div class="todo-panel" x-show="todos.length">
             <div class="todo-head">&#x276F; TODO <span class="todo-count" x-text="todos.length"></span></div>
             <template x-for="t in todos" :key="t.id">
@@ -164,10 +165,11 @@
               </div>
             </template>
           </div>
-          <!-- 环境探测（P6）：本机工具链只读展示 -->
-          <div class="todo-panel" x-show="env" style="border-left-color:#7ec27e;">
+          <!-- 环境探测（P6）：本机工具链只读展示；空/失败都留一行说明，不给静默空白 -->
+          <div class="todo-panel" style="border-left-color:#7ec27e;">
             <div class="todo-head" style="color:#7ec27e;">&#x276F; ENV <button class="inline-add" @click="refreshEnv()">Refresh</button></div>
-            <div class="todo-item"><span class="todo-task todo-progress" style="white-space:pre-wrap;" x-text="env"></span></div>
+            <div class="todo-item" x-show="env"><span class="todo-task todo-progress" style="white-space:pre-wrap;" x-text="env"></span></div>
+            <div class="todo-item" x-show="!env"><span class="todo-task" style="color:var(--text-faint);" x-text="envError || 'not probed yet — press Refresh'"></span></div>
           </div>
         </aside>
       </div>

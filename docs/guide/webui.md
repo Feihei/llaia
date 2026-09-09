@@ -23,11 +23,12 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 
 对话通过 WebSocket（`/ws`）进行，支持流式输出（见 [ADR-0010](../adr/0010-streaming-output.md)）。
 
-聊天页底部有若干**只读面板**实时展示运行时状态：
+聊天页**右侧状态栏**实时展示运行时状态（窄屏 ≤900px 时折到消息流下方）：
 
-- **TODO**：当前会话的任务清单（agent 用 `todo` 工具维护）。
-- **QUESTIONS**：agent 通过 `ask_user` 抛出的待回答问题。
-- **ENV**：本机环境探测结果（工具链快照），点 Refresh 重新探测。
+- **TODO**：当前会话的任务清单（agent 用 `todo` 工具维护）。没有清单时该块不占位。
+- **ENV**：本机环境探测结果（工具链快照），点 Refresh 重新探测。此块**常驻**——尚未探测或探测失败时会直接写明原因，而不是留一片空白。
+
+**QUESTIONS**（agent 通过 `ask_user` 抛出的待回答问题）仍显示在左列输入框下方。
 
 ## 文件
 
