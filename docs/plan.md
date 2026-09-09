@@ -16,7 +16,7 @@
 > 条目勾选框语义：**`[x]` = 代码已落地**，`[ ]` = 尚有未完部分（含「已定案未实现」「部分交付」）。
 > 「已定案/已立项」只是决策完成，不算 `[x]`——须在实现后勾上，并在条目标注交付日期与代码位置。
 
-> **编号约定**（一个编号只表示一件事，2026-09-05 起）：**P*** = 阶段性工程（P1…P7）；**T*** = P7 里 OS/部署级安全防线（T1–T4）；**S*** = 进程内静态分析层（S1–S2，P7 的前置）；**H*** = 近期小修（发版窗口内的低风险止血项）。曾有一版把静态分析三步也写成 T1/T2/T3，与 T1–T4 撞车，已改。
+> **编号约定**（一个编号只表示一件事，2026-09-05 起）：**P*** = 阶段性工程（P1…P7）；**H*** = 近期小修（发版窗口内的低风险止血项）。T1–T4（OS/部署级安全防线）与 S1–S2（进程内静态分析）曾是旧 P7「terminal 脚本绕过防护」的子项编号，2026-09-07 随专项收口退役（归档见 CHANGELOG §v0.4.1）；新 P7 于 2026-09-09 重新立项，不再使用 T/S 编号。曾有一版把静态分析三步也写成 T1/T2/T3，与 T1–T4 撞车，已改（后者改用 S 前缀）。
 
 ---
 
@@ -57,7 +57,7 @@
 - [x] **H3 · 文档一致性欠账**（2026-09-06 交付：`AGENTS.md` + `docs/guide/memory-and-context.md`）
       - ~~AGENTS.md 仍写「chat 主路径当前仍整块返回，未启用流式」~~ 已改：主路径流式（`chat_stream` + Generation Guard 消费框架），非流式 `chat()` 只剩不带工具的 sidecar 单发调用（压缩摘要 / reminder 提炼 / 会话标题 / vision 描述 / `/btw` / 记忆压缩）。
       - ~~用户文档没跟上 v0.4.1 的画像模板改动（`88e96b7` 只动了 `src/`）~~ 已补进 `guide/memory-and-context.md` 的 Bootstrap 节：SOUL 默认 `# Name` = LLAIA、USER 的 `language` 留空由引导去问（旧模板预填值会替英文用户做主）、启动时自动升级逐字节未改动的旧占位文件（`refresh_placeholder_templates`，改过一行就不动）。
-      - 本文件自身的编号冲突（**已修**，随 H 系列立项那笔提交落地）：P7 的 T1–T4 与当日笔记里另套 T1/T2/T3 含义互相矛盾，已把「静态分析层」改称 S1/S2，见 P7 节末。
+      - 本文件自身的编号冲突（**已修**，随 H 系列立项那笔提交落地）：P7 的 T1–T4 与当日笔记里另套 T1/T2/T3 含义互相矛盾，已把「静态分析层」改称 S1/S2（旧 P7 专项编号已于 2026-09-07 收口退役，归档见 CHANGELOG §v0.4.1）。
 - [x] **H4 · 主干体检 backlog 里的机械项提升**（2026-09-06 交付）
       - 常量正则 `unwrap()`：`secrets.rs::is_plaintext` 与 `config.rs::expand_string` 两处补「模式串编译期写死且合法，构造不可能失败」注释；**`approval.rs` 实为笔误**——该文件没有常量正则，实际处理的是 `single_question` 里受 `len()==1` 保护的 `into_iter().next().unwrap()`（同样补注释）。
       - `lock().unwrap()` 毒锁恢复：`slash.rs` 4 处 + `sqlite.rs` 36 处（plan 立项时估的「约 20 处」偏少，实数 40），全部机械替换为 `lock().unwrap_or_else(|e| e.into_inner())`——锁内均同步调用、无 await，`Mutex` 毒化后恢复守卫不丢正确性，与「生产路径不用 unwrap」约定对齐。
@@ -70,43 +70,17 @@
 
 ## P7 — 下一步计划
 
-**状态**：⏳ 计划中（起点 2026-09-04；terminal 安全子项 2026-09-07 全部收口，真·P7 候选 2026-09-08 模糊立项）
+**状态**：⏳ 计划中（2026-09-09 立项；五项均为模糊记录，待 grill 逐项拷问后正式立项展开）
 
-> **v0.4.1 内容修订（grill 2026-09-07）**：原「v0.4.1 不含 P7 任何子项」（2026-09-05 拍板）已改为**攒发**——T3 + S1 落地后与 H1–H4 一起打 v0.4.1；T3 范围（只拦内联）、S1 定位（误报修复为主）、S2 划掉、T1/T2/T4 去留均已定案，见上方「terminal 脚本绕过防护」。近期窗口能做的都已在 **H 系列**。
+> **旧 P7 已收口归档**：P7 编号曾用于 terminal 脚本绕过防护专项（T1–T4 / S1–S2），2026-09-07 全部定案——T3（解释器内联载荷强制审批）、S1（命令拆分 + flag 级路径检查）、T2（无特权账户文档化）已交付，S2 / T1 / T4 定案不做；完整记录（含不做项评估）随 **v0.4.1 攒发**迁入 [CHANGELOG.md](CHANGELOG.md) §v0.4.1，本文件不再保留。
 
-### 🛡️ terminal 脚本绕过防护（2026-09-04 立项；**grill 定案 2026-09-07**）
+> 下面五项只是想法落袋防忘，范围、边界、验收标准全部未定；立项前走 grill 工作流逐项拷问，定案一项就在本节展开一项的勾选清单。
 
-**问题**：现有安全模型对「误删大量文件 / 改系统关键位置」的防护建立在**命令行字符串**上——命令黑名单（`path_guard.rs::COMMAND_BLACKLIST`，硬编码）、路径 token 提取（`extract_path_tokens` → `validate_command_paths_in_scope`）、shell 套壳拦截（`check_shell_wrappers`）。但 `python` / `node` / `perl` / `ruby` 等解释器一旦启动，其真正的文件操作发生在解释器内部，框架对子进程的 syscall / 文件系统效果**零感知**。实测三层全部绕过：
-
-- 命令黑名单只做子串匹配，`python -c "..."` 不命中任何条目；
-- `check_shell_wrappers` 只拦 `bash/sh/zsh/fish` + `-c` 和 `eval/exec/source/$()/反引号`，`python` 不在 shell 名单、`-c` 非被拦构造；
-- 路径校验从命令行抠 token，`python evil.py` 只看到 `evil.py`（workspace 内合法）；即便 `shutil.rmtree('C:/Windows')` 被抠成含 `/` 的 token，`validate_path` 的黑名单是「危险前缀**开头**」匹配，token 实际以 `shutil.rmtree(` 开头 → 漏判。
-
-**结论**：字符串匹配层无法可靠覆盖「执行任意代码」的载荷，往黑名单里堆关键词是补不完的。真正的防线需要从「检测命令」转向「约束进程」。
-
-**grill 定案（2026-09-07，两项拍板合并）**：
-
-- [x] **T3 · 解释器内联载荷强制审批（★☆☆）** — 已交付（2026-09-07）：`path_guard.rs::is_inline_interpreter_command`（引号感知段切分 + 内联形态识别，16 条单测）+ `approval_decision` 闸门（`ApprovalContext.terminal_inline_gate`，命中即 NeedsApproval，即使落在 workspace/受信目录内，3 条审批单测）+ `[tools.terminal].interpret_inline` 可配开关（默认 `approval`）+ CONFIG_TEMPLATE / guide / AGENTS.md 文档同步。**只拦内联**：`-c`/`-e`/`-r`/`--eval`/`--exec`、heredoc/stdin 进解释器、`deno eval`、裸解释器/shell 被管道喂入（`curl … | bash`）；跑脚本文件不拦（路径走 path 校验，写入在 transcript 可审计）；yolo 档显式弃权不受约束；delegate 频道维持 P2-a 既有绕过（代码注释留档）。验证：fmt/clippy(-D warnings)/test 全绿（lib 571 + 集成 53）
-- [x] **S1 · 命令拆分 + flag 级路径检查（重新定位：误报修复为主）**（2026-09-07 交付：`path_guard.rs::tokenize_command` 引号感知 tokenizer + flag 语义表 + 位置语义 + `VAR=value` 按值判定，5 条新单测，明细见 CHANGELOG §v0.4.1）：引号感知 tokenizer 替代 `split_whitespace`（修 #C 同类误报：`git commit -m "..."` 字面量被抠成假路径）+ 按 flag 语义判定参数是否路径。**验收标准 = 减少误拒，而非拦截率**——安全收益有限（解释器载荷内容怎么拆都分析不了，拦不住任意代码），安全上的定位是增强而非防线。回归风险在审批行为面，既有提取回归全过（lib 576）。
-- ~~**S2 · `sh -c` 载荷递归解析**~~ **划掉（grill 2026-09-07）**：立项前提不成立——核实 `check_shell_wrappers`（`path_guard.rs:191`）对 `bash/sh/zsh/fish + -c` 是 **bail 硬拒绝**而非人审，不存在「套壳漏网需要解析」的安全缺口；剩余价值仅是把硬拒改成解析放行（易用性），单用户场景 agent 几乎不需要 `sh -c`（`&&` 链即可），不值得引入「解析器认为安全」的新信任面。
-- **T1 · OS 级沙箱：预判不做**（grill 2026-09-07 定调）：与「轻量、可移植、单 crate」产品定位正面冲突，只留本评估记录，除非未来真实发生事故再重启评估。
-- **T2 · 无特权账户运行：文档化（已交付，2026-09-07）**：新增 [docs/guide/security-hardening.md](guide/security-hardening.md)——无特权账户部署规范（Windows 专用账户 + ACL / Linux 专用用户，含「挡写不挡读」的边界与 ACL 缓解）+ T1 不采纳的评估记录 + 已知边界（delegate 绕过、T4 不做的代价）。
-- **T4 · 缩小爆炸半径：全部不做**（grill 2026-09-07 拍板）：git 跟踪/备份指引、read-only 权限档、断网三项均不留，整体归档。已知代价：误删场景无兜底叙事，接受。
-
-**实施顺序**：~~T3（半天级）先行~~ 已交付（2026-09-07）→ ~~S1~~ 已交付（2026-09-07）。P7 全部收口，随 **v0.4.1 攒发**（H6 时序修订，见 H 系列）。T2 文档同批交付；T1 评估记录落在 security-hardening.md。
-
-### 🌱 真·P7 候选（2026-09-08 模糊记录，均待 grill 明确后立项）
-
-> 只是把想法落袋防忘，范围、边界、验收标准全部未定；立项前走 grill 工作流逐项拷问。
-
-- **RAG**（模糊记录）：方向是本地知识库检索增强。待 grill：与 `memory_research`（FTS5 全文搜会话历史）的边界？语料源（文档目录 / 会话历史 / 网页剪藏）？嵌入与向量存储的选型（本地优先约束）？切片/召回质量的评估方式？
-- **浏览器自动化**（模糊记录）：方向是 agent 能操作真实浏览器（页面导航/填表/截图抓取）。待 grill：内嵌 headless（如 chromiumoxide）vs 驱动外部实例 vs MCP 外挂？审批面怎么划（浏览器能碰内网/登录态）？与 `web_fetch` 的分工边界？
-- **搜索增强**（模糊记录）：方向是统一 search 的质量/覆盖提升。待 grill：多搜索 provider 扩容（doubao/baidu/brave 之外）？还是检索质量（多源聚合、rerank、结果去重）？成本与 API key 管理约定？
-- **原子工具优化增强**（模糊记录）：方向是现有内置工具（file_*/terminal/search/…) 的参数、组合与输出打磨。待 grill：从实际使用痛点出发逐工具盘点（file_edit 容错、terminal 误报已由 H1/S1 打样）？新原子工具（如 diff/patch、json/yaml 查询）要不要进？
-
-### 🧩 待 grill 明确后立项
-
-- （真·P7 四项见上；terminal 安全项 T1–T4 与 S1/S2 已收口，见上）
+- **RAG**（2026-09-08）：方向是本地知识库检索增强。待 grill：与 `memory_research`（FTS5 全文搜会话历史）的边界？语料源（文档目录 / 会话历史 / 网页剪藏）？嵌入与向量存储的选型（本地优先约束）？切片/召回质量的评估方式？
+- **浏览器自动化**（2026-09-08）：方向是 agent 能操作真实浏览器（页面导航/填表/截图抓取）。待 grill：内嵌 headless（如 chromiumoxide）vs 驱动外部实例 vs MCP 外挂？审批面怎么划（浏览器能碰内网/登录态）？与 `web_fetch` 的分工边界？
+- **搜索增强**（2026-09-08）：方向是统一 search 的质量/覆盖提升。待 grill：多搜索 provider 扩容（doubao/baidu/brave 之外）？还是检索质量（多源聚合、rerank、结果去重）？成本与 API key 管理约定？
+- **原子工具优化增强**（2026-09-08）：方向是现有内置工具（file_*/terminal/search/…) 的参数、组合与输出打磨。待 grill：从实际使用痛点出发逐工具盘点（file_edit 容错、terminal 误报已由 H1/S1 打样）？新原子工具（如 diff/patch、json/yaml 查询）要不要进？
+- **WebUI chat 界面增强**（2026-09-09）：方向是把 chat 主界面从「单会话流水」升级为「会话可管理的工作台」。待 grill：① chat 页内嵌 session 列表（现有 Sessions 独立 tab 不够顺手？切线/回灌在 chat 页直接做？）；② bound path / 任务线状态的可视化列表（当前只有 `[scope]` 文本状态行，要不要图形化 + 一键 /move？）；③ 审批交互（`/ok` 现在走聊天流，要不要独立审批卡片/按钮？多端同时在线的审批归属？）；④ 运行状态提示（busy/工具调用/steer/todo 进度等在 chat 页的呈现优化）；⑤ 与既有 P6 WebUI 批次（Sessions tab、pane 布局）的关系——增强 or 重构？
 
 ---
 
