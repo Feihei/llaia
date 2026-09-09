@@ -81,7 +81,16 @@
       <div class="messages" x-ref="messages">
         <template x-for="(m, i) in messages" :key="i">
           <div class="msg" :class="m.role">
-            <template x-if="m.role==='user'"><div><b>User:</b> <span x-text="m.text"></span></div></template>
+            <template x-if="m.role==='user'"><div><b>User:</b> <span x-text="m.text"></span>
+              <!-- 自己发的图也要出现在对话流里：缩略图 + 点击开原图，否则无法判断图发没发 -->
+              <template x-if="m.images && m.images.length">
+                <div class="msg-images">
+                  <template x-for="(p, j) in m.images" :key="j">
+                    <a :href="fileUrl(p)" target="_blank"><img class="msg-img" :src="fileUrl(p)" :alt="p" :title="p"></a>
+                  </template>
+                </div>
+              </template>
+            </div></template>
             <template x-if="m.role==='assistant'"><div><b>Assistant:</b> <div x-html="renderMd(m.text)"></div></div></template>
             <template x-if="m.role==='tool' && m.output == null"><div><b>Tool:</b> <span x-text="m.text"></span></div></template>
             <template x-if="m.role==='tool' && m.output != null">
@@ -123,7 +132,7 @@
       <div class="upload-row" x-show="uploaded.length">
         <template x-for="(u, i) in uploaded" :key="u.path">
           <span class="upload-chip">
-            <img class="chip-thumb" :src="'/file?path='+encodeURIComponent(u.path)+'&token='+encodeURIComponent(token)" alt="">
+            <img class="chip-thumb" :src="fileUrl(u.path)" alt="">
             <span class="chip-name" x-text="u.path.split(/[\\/]/).pop()" :title="u.path"></span>
             <button class="chip-x" @click="removeUpload(i)" title="Remove">×</button>
           </span>

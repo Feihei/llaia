@@ -32,7 +32,9 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 ## 文件
 
 - 上传：`POST /upload` → 落到 `workspace/uploads/`，可在对话里引用。
+- 发图：图片与文字一起发出，模型按视觉输入读图；发出的图会以缩略图留在你自己的消息气泡里，点开可看原图。
 - 取回：`GET /file` 从工作区提供文件。
+- 连接断开（例如服务端重启）时发送**不会静默丢失**：输入与已选图片原地保留，消息流提示 `[not sent] WebSocket is not connected` 并自动重连，恢复后再发即可。
 
 ## 管理界面
 

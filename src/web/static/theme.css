@@ -204,6 +204,10 @@ option { background: var(--bg-input); color: var(--text); }
   font-size: 12px;
 }
 #chat-pane .chip-thumb { width: 28px; height: 28px; object-fit: cover; border: 1px solid var(--border); }
+/* 用户自己发出的图片：排成一行的小缩略图（点开看原图）。刻意压过全局
+   `.msg img { max-width: 400px }`——看得见发没发不等于把版面撑爆 */
+#chat-pane .msg-images { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+#chat-pane .msg-img { max-width: 160px; max-height: 120px; object-fit: cover; cursor: zoom-in; }
 #chat-pane .chip-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #chat-pane .chip-x {
   border: none; background: none; color: var(--text-dim);

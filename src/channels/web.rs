@@ -372,13 +372,16 @@ fn build_user_message(text: &str, images: Option<&[String]>, workspace: &Path) -
     // base 用 workspace 本身（与 CLI 频道同一口径）：/upload 回传的相对路径**自带**
     // uploads/ 前缀，若把 base 也设成 uploads/ 会拼出 uploads/uploads/... 这个永远
     // 不存在的路径，图片于是全数退化成一段 invalid path 文本——模型根本看不到图。
+    // 三处降级都只往消息里塞一段占位文本，历史上没有任何日志痕迹——用户只能从
+    // agent 的怪行为（改用 PIL 猜像素）反推出图丢了。统一收口成一条 WARN。
+    let mut degraded: Vec<String> = Vec::new();
     for img_rel in imgs {
         match resolve_within(workspace, &upload_rel(img_rel)) {
             Ok(abs) => {
                 if !image_utils::is_image_file(&abs) {
-                    parts.push(ContentPart::Text {
-                        text: format!("[not an image: {}]", img_rel),
-                    });
+                    let why = format!("[not an image: {}]", img_rel);
+                    degraded.push(why.clone());
+                    parts.push(ContentPart::Text { text: why });
                     continue;
                 }
                 match image_utils::prepare_image_for_vision(&abs) {
@@ -388,18 +391,25 @@ fn build_user_message(text: &str, images: Option<&[String]>, workspace: &Path) -
                         });
                     }
                     Err(e) => {
-                        parts.push(ContentPart::Text {
-                            text: format!("[image load failed: {}]", e),
-                        });
+                        let why = format!("[image load failed: {}]", e);
+                        degraded.push(why.clone());
+                        parts.push(ContentPart::Text { text: why });
                     }
                 }
             }
             Err(e) => {
-                parts.push(ContentPart::Text {
-                    text: format!("[invalid path: {}]", e),
-                });
+                let why = format!("[invalid path: {}]", e);
+                degraded.push(why.clone());
+                parts.push(ContentPart::Text { text: why });
             }
         }
+    }
+    if !degraded.is_empty() {
+        tracing::warn!(
+            requested = ?imgs,
+            degraded = ?degraded,
+            "web image did not reach the model; message sent without it"
+        );
     }
     if parts.is_empty() {
         ChatMessage::user(text)

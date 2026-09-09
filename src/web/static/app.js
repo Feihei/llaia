@@ -407,7 +407,16 @@ function llaiaApp() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       this.ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(this.token)}`);
       this.ws.onmessage = (e) => this.onWsMessage(JSON.parse(e.data));
-      this.ws.onclose = () => { if (this.authed) setTimeout(() => this.connectWs(), 3000); };
+      this.ws.onclose = () => {
+        // 连接一断就没有事件回流，本地 busy 必须落下：否则 Send 停在 Steer 态、
+        // Stop 又对着死 socket 抛异常，整个界面看起来毫无反应（服务端重启即此场景）
+        if (this.busy) {
+          this.busy = false;
+          this.messages.push({ role: 'tool', text: '[disconnected] live stream lost, reconnecting…' });
+          this.scrollBottom();
+        }
+        if (this.authed) setTimeout(() => this.connectWs(), 3000);
+      };
       // 心跳保活：每 25 秒发 ping，防止浏览器/代理关闭空闲 WS
       if (this._pingTimer) clearInterval(this._pingTimer);
       this._pingTimer = setInterval(() => {
@@ -466,9 +475,21 @@ function llaiaApp() {
         case 'pong': break;
       }
     },
+    wsOpen() { return !!(this.ws && this.ws.readyState === WebSocket.OPEN); },
+    // 统一的文件 URL：/file 的作用域含 agent 家目录，uploads/ 产物恒可取回
+    fileUrl(p) { return '/file?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(this.token); },
+    wsDeadNotice() {
+      // 关键是不丢用户的东西：输入与已传图片原地保留，重连后可直接再发
+      this.messages.push({ role: 'tool', text: '[not sent] WebSocket is not connected — reconnecting; your input and images are still in the box.' });
+      this.scrollBottom();
+      if (this.authed) this.connectWs();
+    },
     send() {
       const text = this.inputText.trim();
       if (!text && this.uploaded.length === 0) return;
+      // 不查 readyState 就 send() 会抛 InvalidStateError，异常被点击处理器吞掉，
+      // 表现成「发消息没反应、点 Stop 也没反应」（服务端重启后页面即如此）
+      if (!this.wsOpen()) { this.wsDeadNotice(); return; }
       // turn 运行中：Send 按钮即 Steer（标签已切换），所有输入自动以 /steer
       // 投递进插话队列（后端 web.rs 原生支持）；/stop 文本仍走中断。
       // 末轮残留的 steer 由后端丢弃并回显 [steer not applied] 提示（plan.md #I ③）。
@@ -485,14 +506,19 @@ function llaiaApp() {
         this.ws.send(JSON.stringify({ type: 'chat', text: payload }));
         return;
       }
+      const imgs = this.uploaded.map(u => u.path);
+      // images 一并挂到本地消息上：否则对话流里看不见自己发了什么图
+      this.messages.push({ role: 'user', text: this.inputText, images: imgs });
+      this.ws.send(JSON.stringify({ type: 'chat', text: this.inputText, images: imgs }));
       this.busy = true;
-      this.messages.push({ role: 'user', text: this.inputText });
-      this.ws.send(JSON.stringify({ type: 'chat', text: this.inputText, images: this.uploaded.map(u=>u.path) }));
       this.inputText = '';
       this.uploaded = [];
       this.scrollBottom();
     },
-    stop() { this.ws.send(JSON.stringify({ type: 'stop' })); },
+    stop() {
+      if (!this.wsOpen()) { this.wsDeadNotice(); return; }
+      this.ws.send(JSON.stringify({ type: 'stop' }));
+    },
     removeUpload(i) { this.uploaded.splice(i, 1); },
     async onUpload(e) {
       for (const f of e.target.files) {
