@@ -76,6 +76,8 @@
   </header>
   <main>
     <div id="chat-pane" class="pane" :class="{active: tab==='chat'}">
+      <div class="chat-layout">
+        <div class="chat-main">
       <div class="messages" x-ref="messages">
         <template x-for="(m, i) in messages" :key="i">
           <div class="msg" :class="m.role">
@@ -118,16 +120,6 @@
           </span>
         </template>
       </div>
-      <!-- 规划后执行（ADR-0024）：当前会话 todo 清单只读展示 -->
-      <div class="todo-panel" x-show="todos.length">
-        <div class="todo-head">&#x276F; TODO <span class="todo-count" x-text="todos.length"></span></div>
-        <template x-for="t in todos" :key="t.id">
-          <div class="todo-item">
-            <span class="todo-mark" :class="t.status" x-text="t.status === 'done' ? '✓' : (t.status === 'in_progress' ? '~' : '○')"></span>
-            <span class="todo-task" :class="{done: t.status === 'done'}" x-text="t.task"></span>
-          </div>
-        </template>
-      </div>
       <!-- ask_user（ADR-0022）：当前待回答问题只读展示 -->
       <div class="todo-panel" x-show="questions.length" style="border-left-color:#d9b34a;">
         <div class="todo-head" style="color:#d9b34a;">&#x276F; QUESTIONS <span class="todo-count" x-text="questions.length"></span></div>
@@ -138,10 +130,25 @@
           </div>
         </template>
       </div>
-      <!-- 环境探测（P6）：本机工具链只读展示 -->
-      <div class="todo-panel" x-show="env" style="border-left-color:#7ec27e;">
-        <div class="todo-head" style="color:#7ec27e;">&#x276F; ENV <button class="inline-add" @click="refreshEnv()">Refresh</button></div>
-        <div class="todo-item"><span class="todo-task todo-progress" style="white-space:pre-wrap;" x-text="env"></span></div>
+        </div>
+        <!-- 右侧栏：todo 清单 + 环境探测（只读，随内容出现） -->
+        <aside class="side-panel" x-show="todos.length || env">
+          <!-- 规划后执行（ADR-0024）：当前会话 todo 清单只读展示 -->
+          <div class="todo-panel" x-show="todos.length">
+            <div class="todo-head">&#x276F; TODO <span class="todo-count" x-text="todos.length"></span></div>
+            <template x-for="t in todos" :key="t.id">
+              <div class="todo-item">
+                <span class="todo-mark" :class="t.status" x-text="t.status === 'done' ? '✓' : (t.status === 'in_progress' ? '~' : '○')"></span>
+                <span class="todo-task" :class="{done: t.status === 'done'}" x-text="t.task"></span>
+              </div>
+            </template>
+          </div>
+          <!-- 环境探测（P6）：本机工具链只读展示 -->
+          <div class="todo-panel" x-show="env" style="border-left-color:#7ec27e;">
+            <div class="todo-head" style="color:#7ec27e;">&#x276F; ENV <button class="inline-add" @click="refreshEnv()">Refresh</button></div>
+            <div class="todo-item"><span class="todo-task todo-progress" style="white-space:pre-wrap;" x-text="env"></span></div>
+          </div>
+        </aside>
       </div>
     </div>
 
