@@ -105,10 +105,18 @@
       </div>
       <div class="composer">
         <input type="file" accept="image/*" @change="onUpload($event)" multiple>
-        <input type="text" x-model="inputText" @keydown.enter="send()" :disabled="busy" placeholder="Type a message...">
-        <button @click="send()" :disabled="busy">Send</button>
+        <input type="text" x-model="inputText" @keydown.enter="send()" placeholder="Type a message... (while running, input is steered into the current turn)">
+        <button @click="send()" x-text="busy ? 'Steer' : 'Send'">Send</button>
         <button @click="stop()" :disabled="!busy">Stop</button>
-        <span x-text="uploaded.map(u=>u.path).join(', ')"></span>
+      </div>
+      <div class="upload-row" x-show="uploaded.length">
+        <template x-for="(u, i) in uploaded" :key="u.path">
+          <span class="upload-chip">
+            <img class="chip-thumb" :src="'/file?path='+encodeURIComponent(u.path)+'&token='+encodeURIComponent(token)" alt="">
+            <span class="chip-name" x-text="u.path.split(/[\\/]/).pop()" :title="u.path"></span>
+            <button class="chip-x" @click="removeUpload(i)" title="Remove">×</button>
+          </span>
+        </template>
       </div>
       <!-- 规划后执行（ADR-0024）：当前会话 todo 清单只读展示 -->
       <div class="todo-panel" x-show="todos.length">

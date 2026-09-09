@@ -461,7 +461,24 @@ function llaiaApp() {
       }
     },
     send() {
-      if (!this.inputText.trim() && this.uploaded.length === 0) return;
+      const text = this.inputText.trim();
+      if (!text && this.uploaded.length === 0) return;
+      // turn 运行中：Send 按钮即 Steer（标签已切换），所有输入自动以 /steer
+      // 投递进插话队列（后端 web.rs 原生支持）；/stop 文本仍走中断。
+      // 末轮残留的 steer 由后端丢弃并回显 [steer not applied] 提示（plan.md #I ③）。
+      if (this.busy) {
+        this.inputText = '';
+        const lc = text.toLowerCase();
+        if (lc === '/stop') {
+          this.messages.push({ role: 'user', text });
+          this.stop();
+          return;
+        }
+        const payload = lc.startsWith('/steer') ? text : '/steer ' + text;
+        this.messages.push({ role: 'user', text });
+        this.ws.send(JSON.stringify({ type: 'chat', text: payload }));
+        return;
+      }
       this.busy = true;
       this.messages.push({ role: 'user', text: this.inputText });
       this.ws.send(JSON.stringify({ type: 'chat', text: this.inputText, images: this.uploaded.map(u=>u.path) }));
@@ -470,6 +487,7 @@ function llaiaApp() {
       this.scrollBottom();
     },
     stop() { this.ws.send(JSON.stringify({ type: 'stop' })); },
+    removeUpload(i) { this.uploaded.splice(i, 1); },
     async onUpload(e) {
       for (const f of e.target.files) {
         const fd = new FormData();

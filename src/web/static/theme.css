@@ -170,6 +170,27 @@ option { background: var(--bg-input); color: var(--text); }
   background: var(--bg-panel);
 }
 #chat-pane .composer input[type="text"] { flex: 1; }
+/* 待发送附件芯片：缩略图 + 文件名 + 移除叉号（不占 composer 单行空间） */
+#chat-pane .upload-row {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  padding: 0 10px 8px;
+  border-top: none;
+  background: var(--bg-panel);
+}
+#chat-pane .upload-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+}
+#chat-pane .chip-thumb { width: 28px; height: 28px; object-fit: cover; border: 1px solid var(--border); }
+#chat-pane .chip-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#chat-pane .chip-x {
+  border: none; background: none; color: var(--text-dim);
+  cursor: pointer; padding: 0 2px; font-size: 14px; line-height: 1;
+}
+#chat-pane .chip-x:hover { color: var(--red, #e05656); }
 
 /* ---------- Config ---------- */
 #config-pane { flex-direction: row; }
