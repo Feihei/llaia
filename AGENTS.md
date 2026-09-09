@@ -145,6 +145,8 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 
 详见 [docs/adr/0026-provider-compat.md](docs/adr/0026-provider-compat.md) 与规划 [docs/plans/2026-08-14-provider-compat.md](docs/plans/2026-08-14-provider-compat.md)。
 
+> **模型级 `enabled`（可发现性开关，2026-09-09）**：`[provider.<id>].model.<alias>.enabled`（bool，默认 true）用于"把模型参数记在配置里但暂不想被选中"。四条不可破坏的性质：**(1) 只管可发现性**——`flatten_model_refs`（`/provider` 列表与 `<序号>` 索引基准）与前端 `modelRefs()`（agent model / fallback 下拉）过滤 disabled，但 **`provider_from_ref` 绝不拦**：硬拦会让"关掉当前 `agent.model` 指向的模型"变成下次启动即失败、且 WebUI 保存连改回来都走不通（下拉靠既有的 `xxx (current)` 兜底）。**(2) `skip_serializing_if` 方向不能反**——必须 true 时省略（只写显式 `= false`）；写成 false 时省略会配合 provider 子树的 replace 合并（缺失即删）让 disabled 状态保存时静默蒸发。**(3) 间接引用收敛**在 `Config::reconcile_disabled_models`：fallback 剔除、`compact_model`/`vision_model` warn + 置 None（回退主模型，**只改内存态**、盘上引用保留以便重新启用后自动恢复），由 `Config::load` 与 `put_config` 各调一次（后者不走 load，少调就要重启才生效）。**(4) 前端须归一化**——`skip_serializing_if` 对 `serde_json` 同样生效，GET /api/config 省略该键，装载时 `enabled ??= true` 否则 checkbox 把启用态显示成未勾选；另开关必须用 checkbox（`x-model` 产出真 boolean），用 `<select>` 会得到字符串 `"true"` 使 serde bool 解析失败、整个 PUT 返 400。UI 采 astrbot 式：行常驻 + 灰化 + 开关，不从列表抹掉。详见 [docs/plans/2026-09-09-model-enabled-toggle.md](docs/plans/2026-09-09-model-enabled-toggle.md)。
+
 详见 [docs/adr/0005-provider-and-tool-calling.md](docs/adr/0005-provider-and-tool-calling.md)。
 
 ## 工具集

@@ -241,10 +241,24 @@ pub struct ModelConfig {
     /// 未配置时默认 4096；OpenAI 兼容 provider 忽略此项。
     #[serde(default)]
     pub max_tokens: Option<usize>,
+    /// 是否对外可见。**只管可发现性**（`/provider` 列表、WebUI model/fallback 下拉），
+    /// `provider_from_ref` 仍接受显式引用——关掉当前 `agent.model` 指向的模型不该让
+    /// 下次启动直接失败。用途：把模型参数记在配置里但暂不想被选中。
+    ///
+    /// `skip_serializing_if` 的方向**不能反**：必须 true 时省略（只写显式 `= false`）。
+    /// 若写成 false 时省略，配合 provider 子树的 replace 合并（缺失即删，
+    /// `web/mod.rs:606-615`）会让 disabled 状态在保存时静默蒸发、回读变 true。
+    /// 代价：GET /api/config 也省略该键，前端装载须 `enabled ??= true` 归一化。
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -952,6 +966,9 @@ impl Config {
                 tracing::debug!(agent = alias.as_str(), "fallback chain sanitized");
             }
         }
+        // disabled model（enabled = false）的间接引用收敛。WebUI put_config 不走 load，
+        // 那边单独也调一次，否则「在 WebUI 里关掉模型」要重启才生效。
+        config.reconcile_disabled_models();
         config.expand_paths()?;
         Ok(config)
     }
@@ -995,6 +1012,62 @@ impl Config {
         Ok(())
     }
 
+    /// 把引用了 disabled model（`[provider.<id>.<alias>].enabled = false`）的**间接**
+    /// 引用收敛到可用集合：
+    ///
+    /// - `runtime.compact_model` / `runtime.vision_model` → warn + 置 None（回退主模型）
+    /// - `agent.<alias>.fallback` → 剔除（备用链不该指向故意停用的模型）
+    /// - `agent.<alias>.model` → **刻意不碰**：那是用户显式选定的当前模型，`enabled`
+    ///   只管可发现性（见 `ModelConfig::enabled`），硬拦会让"关掉当前模型"变成下次
+    ///   启动即失败、且 WebUI 保存路径连改回来都走不通。
+    ///
+    /// 由 `Config::load` 与 WebUI `put_config` 各调一次（后者不走 `load`）。
+    pub fn reconcile_disabled_models(&mut self) {
+        let mut disabled: Vec<String> = Vec::new();
+        for (pid, p) in &self.provider {
+            for (alias, m) in &p.model {
+                if !m.enabled {
+                    disabled.push(format!("{}.{}", pid, alias));
+                }
+            }
+        }
+        if disabled.is_empty() {
+            return;
+        }
+        let is_disabled = |r: &str| disabled.iter().any(|d| d == r);
+
+        if let Some(m) = &self.runtime.compact_model {
+            if is_disabled(m) {
+                tracing::warn!(
+                    model = m.as_str(),
+                    "runtime.compact_model references a disabled model (enabled = false), falling back to the main model"
+                );
+                self.runtime.compact_model = None;
+            }
+        }
+        if let Some(m) = &self.runtime.vision_model {
+            if is_disabled(m) {
+                tracing::warn!(
+                    model = m.as_str(),
+                    "runtime.vision_model references a disabled model (enabled = false), images will go to the main model"
+                );
+                self.runtime.vision_model = None;
+            }
+        }
+        for (alias, agent_cfg) in self.agent.iter_mut() {
+            let before = agent_cfg.fallback.len();
+            agent_cfg.fallback.retain(|m| !is_disabled(m));
+            let removed = before - agent_cfg.fallback.len();
+            if removed > 0 {
+                tracing::warn!(
+                    agent = alias.as_str(),
+                    count = removed,
+                    "removed agent fallback entries referencing disabled models (enabled = false)"
+                );
+            }
+        }
+    }
+
     /// 解析 "provider_id.model_alias"，返回 (provider_id, model_alias)
     pub fn parse_model_ref(ref_str: &str) -> Result<(&str, &str)> {
         ref_str
@@ -1015,6 +1088,7 @@ impl Config {
                 native_tool_calling: Some(true),
                 context_size: None,
                 max_tokens: None,
+                enabled: true,
             },
         );
         provider.insert(
@@ -1549,5 +1623,118 @@ confirm_mode = "whitelist"
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
         assert_eq!(config.channels.qq.confirm_mode, "none"); // 废弃后 fallback
+    }
+
+    /// 存量配置（无 enabled 键）读出 true；且序列化方向必须是「true 时省略」。
+    /// 反了的话 disabled 不落盘，配合 provider 子树 replace 合并会在保存时被静默删除。
+    #[test]
+    fn test_model_enabled_default_and_serialize_direction() {
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.legacy]
+model = "no-enabled-key"
+
+[provider.default.hidden]
+model = "explicit-off"
+enabled = false
+
+[agent.main]
+model = "default.legacy"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        let models = &config.provider["default"].model;
+        assert!(models["legacy"].enabled, "缺省应为启用（存量零迁移）");
+        assert!(!models["hidden"].enabled);
+
+        let out = toml::to_string(&config).expect("serialize config");
+        assert!(
+            out.contains("enabled = false"),
+            "disabled 必须显式落盘:\n{out}"
+        );
+        assert!(
+            !out.contains("enabled = true"),
+            "启用态应省略该键（否则每个 model 表都多一行脏 diff）:\n{out}"
+        );
+
+        // 往返：disabled 不会被写盘过程洗掉
+        let back: Config = toml::from_str(&out).expect("re-parse serialized config");
+        assert!(!back.provider["default"].model["hidden"].enabled);
+        assert!(back.provider["default"].model["legacy"].enabled);
+    }
+
+    /// `enabled` 只管可发现性：间接引用（fallback / compact / vision）被收敛，
+    /// 但 agent.main.model 指向 disabled 模型时刻意保持不变（否则关掉当前模型=下次启动失败）。
+    #[test]
+    fn test_reconcile_disabled_models() {
+        let toml = r#"
+[runtime]
+compact_model = "default.hidden"
+vision_model = "default.hidden"
+
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.kept]
+model = "visible"
+
+[provider.default.hidden]
+model = "disabled"
+enabled = false
+
+[agent.main]
+model = "default.hidden"
+fallback = ["default.kept", "default.hidden"]
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+
+        assert_eq!(
+            config.agent["main"].model, "default.hidden",
+            "不碰显式当前模型"
+        );
+        assert_eq!(
+            config.agent["main"].fallback,
+            vec!["default.kept".to_string()]
+        );
+        assert_eq!(config.runtime.compact_model, None, "回退主模型");
+        assert_eq!(config.runtime.vision_model, None, "图片回退主模型");
+    }
+
+    /// 没有任何 disabled 模型时不得误伤引用（尤其 fallback 顺序与 compact/vision）。
+    #[test]
+    fn test_reconcile_keeps_enabled_refs() {
+        let toml = r#"
+[runtime]
+compact_model = "default.a"
+vision_model = "default.b"
+
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.a]
+model = "one"
+
+[provider.default.b]
+model = "two"
+enabled = true
+
+[agent.main]
+model = "default.a"
+fallback = ["default.b"]
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert_eq!(config.runtime.compact_model.as_deref(), Some("default.a"));
+        assert_eq!(config.runtime.vision_model.as_deref(), Some("default.b"));
+        assert_eq!(config.agent["main"].fallback, vec!["default.b".to_string()]);
     }
 }

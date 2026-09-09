@@ -336,8 +336,13 @@
                 </div>
                 <h4>Models</h4>
                 <template x-for="(m, alias) in p.model" :key="alias">
-                  <div class="model-row">
-                    <label x-text="alias"></label>
+                  <div class="model-row" :class="{ 'model-row--off': m.enabled === false }">
+                    <label class="switch" :title="m.enabled === false
+                        ? 'disabled: params kept, hidden from /provider and the model pickers'
+                        : 'enabled'">
+                      <input type="checkbox" x-model="m.enabled">
+                      <span x-text="alias"></span>
+                    </label>
                     <input x-model="m.model" style="width:150px" placeholder="model id">
                     <input type="number" placeholder="ctx" title="context window (tokens)" x-model.number="m.context_size" style="width:64px">
                     <input type="number" placeholder="max_tokens" title="single-response token cap (per-model)" x-model.number="m.max_tokens" style="width:84px">

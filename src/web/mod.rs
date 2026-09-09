@@ -516,6 +516,12 @@ pub async fn put_config(
     // 注意：写盘保留 ${VAR} 引用，但内存态须展开为明文（build_provider 不认 ${VAR}；
     // 下次启动 Config::load → expand_paths 再展开，行为一致）。runtime_config 已在
     // apply_refs 之前克隆，新落盘 secret 保持明文，这里只展开旧的 ${VAR} 引用。
+    //
+    // disabled model 收敛：本路径不走 Config::load，不调这里的话「在 WebUI 里把
+    // compact_model/vision_model 指向的模型关掉」要重启才生效。只作用于内存态
+    // runtime_config，**不动 merged（真正写盘的那份）**——runtime 子树走 preserve 合并，
+    // 盘上的引用原样留着，模型重新启用后自动恢复，不需要用户重填。
+    runtime_config.reconcile_disabled_models();
     crate::config::secrets::expand_config_secrets(&mut runtime_config);
     if let Err(e) = build_provider_from_config(&runtime_config) {
         return json_err(

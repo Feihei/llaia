@@ -73,6 +73,10 @@ dir = "~/.llaia/logs"
 # context_size = 32768           # optional; unset: local endpoints are probed, others
 #                                # assume an optimistic 128000 and shrink reactively
 #                                # when the provider rejects an oversized request
+# enabled = false                # optional; defaults to true. Keep the params on file but
+#                                # hide the model from /provider and the WebUI pickers.
+#                                # Explicit references still work (e.g. an agent.model
+#                                # already pointing here keeps running until you switch)
 
 # Cloud Anthropic example (also works with a gateway base_url):
 # [provider.claude]
@@ -853,11 +857,14 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         for (pid, p) in &cfg.provider {
             println!("\nprovider.{}: {}", pid, p.base_url);
             for (alias, m) in &p.model {
+                // /provider 不列 disabled 模型，这里不标出来会显得两处视图不一致
+                let hidden = if m.enabled { "" } else { " [disabled]" };
                 println!(
-                    "  model.{}: {} (native_tool_calling={})",
+                    "  model.{}: {} (native_tool_calling={}){}",
                     alias,
                     m.model,
-                    native_label(m.native_tool_calling)
+                    native_label(m.native_tool_calling),
+                    hidden
                 );
             }
         }

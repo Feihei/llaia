@@ -364,6 +364,12 @@ option { background: var(--bg-input); color: var(--text); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--text-dim); flex: 0 1 auto;
 }
+/* 启用开关：checkbox 不参与 label 的 ellipsis 压缩 */
+#config-pane .model-row .switch input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+/* 禁用态：行常驻、只灰化字段与按钮（抹掉行会导致关掉的模型找不回来） */
+#config-pane .model-row--off > input,
+#config-pane .model-row--off > button { opacity: .38; }
+#config-pane .model-row--off .switch { color: var(--text-faint); }
 
 /* 单模型可用性探测按钮：默认（复用 inline-add 绿），成功✓保持绿，失败✗转红 */
 #config-pane .probebtn {
@@ -423,11 +429,11 @@ option { background: var(--bg-input); color: var(--text); }
 #config-pane .compat-fields {
   display: flex; flex-direction: column; gap: 7px; margin-top: 6px;
 }
-#config-pane .compat-fields .switch {
+#config-pane .switch {
   display: flex; align-items: center; gap: 8px;
   color: var(--text); font-size: 13px;
 }
-#config-pane .compat-fields .switch select { margin-left: 4px; }
+#config-pane .switch select { margin-left: 4px; }
 
 /* ---------- Cron / MCP（Config 内嵌 section） ---------- */
 .subtabs { margin-bottom: 14px; }

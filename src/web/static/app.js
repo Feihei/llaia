@@ -533,6 +533,9 @@ function llaiaApp() {
             if (k !== 'type' && k !== 'base_url' && k !== 'api_key' && k !== 'model' && k !== 'compat') {
               p.model[k] = p[k];
               delete p[k];
+              // enabled 走 serde skip_serializing_if（true 时省略），所以 GET 回来的
+              // 启用模型不带该键。不归一化的话 checkbox 会把「启用」显示成未勾选。
+              if (p.model[k].enabled === undefined) p.model[k].enabled = true;
             }
           }
         }
@@ -625,7 +628,7 @@ function llaiaApp() {
       const alias = prompt('Enter new model alias (e.g., qwen3, gpt4):');
       if (!alias || !alias.trim()) return;
       if (this.cfg.provider[pid].model[alias]) { alert('Model already exists: ' + alias); return; }
-      this.cfg.provider[pid].model[alias] = { model: '', context_size: null, max_tokens: null };
+      this.cfg.provider[pid].model[alias] = { model: '', context_size: null, max_tokens: null, enabled: true };
     },
     deleteModel(pid, alias) {
       if (!confirm('Delete model ' + pid + '.' + alias + '?')) return;
@@ -683,7 +686,7 @@ function llaiaApp() {
       const models = this.cfg.provider[pid].model;
       for (const m of picked) {
         const alias = this.genModelAlias(pid, m.id);
-        models[alias] = { model: m.id, context_size: null, max_tokens: null };
+        models[alias] = { model: m.id, context_size: null, max_tokens: null, enabled: true };
       }
       this.probeModels[pid] = [];
       this.probeChecked[pid] = {};
@@ -750,13 +753,17 @@ function llaiaApp() {
       };
       this.fallbackDraft[alias] = '';
     },
-    // 所有可选项的 model ref 列表（provider_id.model_alias）
+    // 所有可选项的 model ref 列表（provider_id.model_alias）。
+    // enabled = false 的模型不列出（只管可发现性；显式当前值由下拉的 "(current)" 兜底）。
     modelRefs() {
       const refs = [];
       const p = this.cfg.provider || {};
       for (const pid in p) {
         const models = p[pid].model || {};
-        for (const m in models) refs.push(pid + '.' + m);
+        for (const m in models) {
+          if (models[m].enabled === false) continue;
+          refs.push(pid + '.' + m);
+        }
       }
       return refs;
     },

@@ -1051,15 +1051,22 @@ pub fn split_steer(line: &str) -> Option<&str> {
     Some(&trimmed[trimmed.len() - rest.len()..])
 }
 
-/// 把 config 中所有 provider/model 组合 flatten 成有序 model ref 列表
+/// 把 config 中所有**已启用**的 provider/model 组合 flatten 成有序 model ref 列表
 /// （provider id 排序，alias 排序），同时作为 `/provider <序号>` 的索引基准。
+/// `enabled = false` 的模型不进列表也不占序号（`enabled` 只管可发现性）；显式写
+/// `/provider <id.alias>` 仍可切换，见 `provider_from_ref`。
 pub fn flatten_model_refs(config: &Config) -> Vec<String> {
     let mut ids: Vec<&String> = config.provider.keys().collect();
     ids.sort();
     let mut refs = Vec::new();
     for id in ids {
         let prov = &config.provider[id];
-        let mut aliases: Vec<&String> = prov.model.keys().collect();
+        let mut aliases: Vec<&String> = prov
+            .model
+            .iter()
+            .filter(|(_, m)| m.enabled)
+            .map(|(alias, _)| alias)
+            .collect();
         aliases.sort();
         for alias in aliases {
             refs.push(format!("{}.{}", id, alias));
@@ -1074,23 +1081,38 @@ async fn list_providers(agent: &Agent) -> String {
     let live = live_arc.read().await;
     let refs = flatten_model_refs(&live);
     if refs.is_empty() {
-        return "no providers configured".into();
+        if live.provider.is_empty() {
+            return "no providers configured".into();
+        }
+        return "no enabled models — every configured model has enabled = false \
+               ([provider.<id>.<model_alias>].enabled)"
+            .into();
     }
     let current_label = match agent.provider_snapshot().await {
         Some(p) => p.label(),
         None => String::new(),
     };
     let mut out = String::from("providers:\n");
+    let mut current_listed = false;
     for (i, r) in refs.iter().enumerate() {
         // refs 由 flatten 生成，格式保证合法
         let (prov_id, alias) = Config::parse_model_ref(r).unwrap_or(("", ""));
         let model_name = live.provider[prov_id].model[alias].model.clone();
         let mark = if model_name == current_label {
+            current_listed = true;
             " *"
         } else {
             ""
         };
         out.push_str(&format!("{}. {} ({}){}\n", i + 1, r, model_name, mark));
+    }
+    // 当前模型本身被 enabled = false 隐藏时，上面不会有 `*`——不说明的话像模型丢了
+    if !current_listed && !current_label.is_empty() {
+        out.push_str(&format!(
+            "(current model '{}' is hidden: enabled = false. \
+             /provider [--temp] <id.alias> still switches to it explicitly)\n",
+            current_label
+        ));
     }
     out.push_str("usage: /provider [--temp] <num> | /provider [--temp] <id.alias>");
     out.push_str("   (default persists to [agent].model; --temp switches in memory only)");
@@ -1253,6 +1275,7 @@ mod tests {
                         native_tool_calling: Some(true),
                         context_size: None,
                         max_tokens: None,
+                        enabled: true,
                     },
                 )]
                 .into_iter()
@@ -1273,6 +1296,7 @@ mod tests {
                         native_tool_calling: Some(true),
                         context_size: None,
                         max_tokens: None,
+                        enabled: true,
                     },
                 )]
                 .into_iter()
@@ -1332,6 +1356,20 @@ mod tests {
         assert_eq!(refs, vec!["a.big", "b.small", "default.qwen"]);
     }
 
+    #[test]
+    fn test_flatten_model_refs_hides_disabled() {
+        // enabled = false 的模型不进列表、也不占 /provider <序号> 的位置
+        let mut cfg = test_config();
+        cfg.provider
+            .get_mut("a")
+            .unwrap()
+            .model
+            .get_mut("big")
+            .unwrap()
+            .enabled = false;
+        assert_eq!(flatten_model_refs(&cfg), vec!["b.small", "default.qwen"]);
+    }
+
     #[tokio::test]
     async fn test_provider_list_marks_current() {
         let agent = test_agent(test_config()).await;
@@ -1339,6 +1377,28 @@ mod tests {
         assert!(out.contains("1. a.big (big-model) *"));
         assert!(out.contains("2. b.small (small-model)"));
         assert!(!out.contains("2. b.small (small-model) *"));
+        // 当前模型在列表里时不该有「hidden」补充说明
+        assert!(!out.contains("is hidden"));
+    }
+
+    #[tokio::test]
+    async fn test_provider_list_notes_hidden_current() {
+        // 把 main 正在用的模型关掉：列表里没有它，也就没有 `*`——必须说明，否则像模型丢了
+        let mut cfg = test_config();
+        cfg.provider
+            .get_mut("a")
+            .unwrap()
+            .model
+            .get_mut("big")
+            .unwrap()
+            .enabled = false;
+        let agent = test_agent(cfg).await;
+        let out = list_providers(&agent).await;
+        assert!(!out.contains("a.big"), "disabled 模型不进列表");
+        assert!(
+            out.contains("current model 'big-model' is hidden: enabled = false"),
+            "missing hidden-current note:\n{out}"
+        );
     }
 
     #[tokio::test]

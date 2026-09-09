@@ -59,6 +59,7 @@ api_key = "${OLLAMA_API_KEY}"       # 留空或引用 .env
 model = "qwen2.5:7b"
 native_tool_calling = false          # true=OpenAI function calling；false=标签协议降级
 context_size = 32768                 # 可选；不配则本地端点自动探测，探测不到的按乐观默认 128000（provider 报溢出时自动收缩）。取 min(配置, 探测)
+enabled = false                      # 可选；默认 true。把参数留在配置里，但不进 /provider 列表与 WebUI 模型下拉
 
 [provider.claude]                     # 云端 Anthropic 示例
 type = "anthropic"
@@ -70,6 +71,16 @@ max_tokens = 8192                     # Anthropic 必传，未配默认 4096
 ```
 
 `[provider.<id>]` 的 `type` 决定走哪套实现：`anthropic` 走 Anthropic Provider；缺省/未知回退 OpenAI 兼容（存量配置不受影响）。
+
+### 模型级 `enabled`（可发现性开关）
+
+用途：模型参数先记在配置里，但暂时不希望它被选中。
+
+- 缺省即 `true`，存量配置无需改动；**只有显式 `enabled = false` 会写入** `config.toml`（启用态不落盘，避免每个模型多一行脏 diff）。WebUI Config → Provider 的模型行前有同名开关，关闭后该行灰化但仍可编辑、可重新启用。
+- 只影响**可发现性**，不影响可用性：`provider_from_ref` 不拦显式引用，所以 `agent.<alias>.model` 指向已禁用模型时**继续生效**（否则"关掉当前模型"会变成下次启动即失败）；WebUI 下拉此时把当前值显示为 `xxx (current)`。
+- `agent.<alias>.fallback` 中指向禁用模型的项被剔除并 warn。
+- `runtime.compact_model` / `runtime.vision_model` 指向禁用模型时 warn 并回退主模型；**磁盘上的引用原样保留**，模型重新启用后自动恢复，无需重填。
+- 校验发生在 `Config::reconcile_disabled_models`，由 `Config::load` 与 WebUI 保存路径各调一次，因此改动即时生效、不需重启。
 
 ## `[agent.main]`
 
