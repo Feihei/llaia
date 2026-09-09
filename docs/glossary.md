@@ -89,7 +89,7 @@ Provider trait 含 `native_tool_calling: bool` 能力声明，决定工具调用
 
 ### OpenAiCompatible Provider
 兼容 OpenAI Chat Completions API 的 provider，覆盖 Ollama、Llama.cpp、LMStudio 等本地端点。
-配置项：`base_url`、`api_key`、`model`、`native_tool_calling`。
+配置分两层：`[provider.<id>]` 是 provider 层（端点与鉴权），其下每个 alias 是一条 model 层条目（模型 id、窗口、上限、工具调用协议、启用开关）。字段清单见 [配置参考](guide/configuration.md)。
 
 ### 原生工具调用（Native Tool Calling）
 走 OpenAI function calling 协议。`native_tool_calling = true` 时启用。

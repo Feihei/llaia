@@ -190,3 +190,7 @@ ws_base = "https://open.feishu.cn"
 
 
 微信登录态（bot_token / sync_buf / context_tokens）不入 config.toml，持久化在 config 目录下独立文件 `wechat_state.json`，避免敏感凭证与配置混写。
+
+## 增量（2026-09-09）
+
+**ModelConfig 新增 `enabled`**：`bool`，默认 `true`（缺键即启用，存量配置零迁移）。语义是**只管可发现性**——`enabled = false` 让模型退出 `/provider` 列表（含 `<序号>` 索引基准）与 WebUI 的 agent model / fallback 下拉，但 `provider_from_ref` 仍解析显式引用：在该收口拦截会把「关掉当前 `agent.model` 指向的模型」变成下次启动即失败。序列化上 `skip_serializing_if` 跳过 **true** 那一侧（只有显式 `enabled = false` 落盘，config.toml 不被脏 diff 污染），代价是 `GET /api/config` 一并省略该键、前端装载需 `enabled ??= true` 归一化。间接引用由 `Config::reconcile_disabled_models` 收敛：`agent.<alias>.fallback` 剔除，`runtime.compact_model` / `runtime.vision_model` warn + 置 None 回退主模型——**只改内存态、不改写盘**，故盘上引用原样保留、模型重新启用后自动恢复。详见 [plans/2026-09-09-model-enabled-toggle.md](../plans/2026-09-09-model-enabled-toggle.md)。

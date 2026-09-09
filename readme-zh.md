@@ -89,6 +89,7 @@ LLAIA 是模块化的。每个能力都有专门的用户指南——从你需�
 - [zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) - Rust 编写的轻量 agent
 - [goose](https://github.com/aaif-goose/goose) - Rust 编写的编码 agent
 - [nanobot](https://github.com/HKUDS/nanobot) - 轻量个人agent框架
-- [pi](https://github.com/earendil-works/pi)- 极简agent工具
-- [deepseek harness](https://github.com/deepseek-ai/deepseek-harness/)
-- [深入理解 AI Agent：设计原理与工程实践](https://github.com/bojieli/ai-agent-book)
+- [pi](https://github.com/earendil-works/pi) - 极简agent工具
+- [jcode](https://github.com/1jehuang/jcode) - 最省内存的 harness in Rust
+- [deepseek harness](https://github.com/deepseek-ai/deepseek-harness/) - 一切皆插件的harness
+- [深入理解 AI Agent：设计原理与工程实践](https://github.com/bojieli/ai-agent-book) - 一本书

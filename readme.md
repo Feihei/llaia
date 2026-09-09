@@ -89,6 +89,7 @@ LLAIA is modular. Each capability has a dedicated user guide — start from the 
 - [zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) - Lightweight agent in rust
 - [goose](https://github.com/aaif-goose/goose) - coding agent in rust
 - [nanobot](https://github.com/HKUDS/nanobot) - Lightweight personal agent framework
-- [pi](https://github.com/earendil-works/pi)- minimal agent toolkit
-- [deepseek harness](https://github.com/deepseek-ai/deepseek-harness/)
-- [深入理解 AI Agent：设计原理与工程实践](https://github.com/bojieli/ai-agent-book)
+- [pi](https://github.com/earendil-works/pi) - minimal agent toolkit
+- [jcode](https://github.com/1jehuang/jcode) - The most RAM efficient harness in Rust
+- [deepseek harness](https://github.com/deepseek-ai/deepseek-harness/) - Everything plugin harness
+- [深入理解 AI Agent：设计原理与工程实践](https://github.com/bojieli/ai-agent-book) - A book

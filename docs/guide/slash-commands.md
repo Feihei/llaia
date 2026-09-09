@@ -13,8 +13,8 @@
 | `/clear` | 清空上下文（等同 `/new` 的清空效果）。 |
 | `/stats` | 显示上下文统计：context_size、阈值、当前 token 占比（正文 + 工具 schema 分项）、历史条数、session id、摘要状态、工具分组计数、压缩用 provider。 |
 | `/remember <text>` | 往 `MEMORY.md` 追加一条记忆（等价 CLI `llaia remember`）。 |
-| `/provider` | 列出所有可用模型，当前模型标 `*`。 |
-| `/provider <num>` · `/provider <id.alias>` | 运行时切换模型（不写 config；保留 fallback 降级链）。 |
+| `/provider` | 列出所有**已启用**模型，当前模型标 `*`。`enabled = false` 的模型不进列表、也不占 `<num>` 序号；若当前正在用的模型被隐藏了，列表末尾附一行说明（否则看起来像模型丢了）。 |
+| `/provider <num>` · `/provider <id.alias>` | 运行时切换模型（不写 config；保留 fallback 降级链）。显式 `<id.alias>` 仍可指向 `enabled = false` 的模型——该开关只管可发现性，不影响可用性。 |
 | `/permission [read-only\|default\|yolo]` | 查看或切换权限档位（不写 config）。 |
 | `/reasoning [on\|off]` | 会话级开关推理模型的深度思考。`off` 提速日常问答（对 llama.cpp / Ollama / vLLM 等支持 `chat_template_kwargs` 的端点生效，其它忽略）；仅当前会话有效，不写 config。 |
 | `/ok <id>` | 批准一个待确认的操作（交互式审批）。 |
