@@ -3381,6 +3381,7 @@ mod tests {
                 default: Some(ThinkingLevel::High),
                 level_wire: Some(ThinkingLevelWire::ReasoningEffort),
                 off_wire: Some(ThinkingOffWire::ReasoningEffortNone),
+                preserve: None,
             }),
         )
         .await;
@@ -3476,6 +3477,7 @@ mod tests {
             default: None,
             level_wire: Some(ThinkingLevelWire::None),
             off_wire: Some(ThinkingOffWire::Unsupported),
+            preserve: None,
         };
         let s = build_reasoning_state(ThinkingIntent::None, false, Some(&cfg)).unwrap();
         assert!(s.contains("unsupported"), "got: {s}");

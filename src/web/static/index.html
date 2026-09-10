@@ -379,17 +379,23 @@
                 </div>
                 <h4>Models</h4>
                 <template x-for="(m, alias) in p.model" :key="alias">
-                  <div class="model-row" :class="{ 'model-row--off': m.enabled === false }">
-                    <label class="switch" :title="m.enabled === false
+                  <div>
+                    <div class="model-row" :class="{ 'model-row--off': m.enabled === false }">
+                      <label class="switch" :title="m.enabled === false
                         ? 'disabled: params kept, hidden from /provider and the model pickers'
                         : 'enabled'">
-                      <input type="checkbox" x-model="m.enabled">
-                      <span x-text="alias"></span>
-                    </label>
-                    <input x-model="m.model" style="width:150px" placeholder="model id">
-                    <input type="number" placeholder="ctx" title="context window (tokens)" x-model.number="m.context_size" style="width:64px">
-                    <input type="number" placeholder="max_tokens" title="single-response token cap (per-model)" x-model.number="m.max_tokens" style="width:84px">
-                    <button type="button" class="inline-add probebtn"
+                        <input type="checkbox" x-model="m.enabled">
+                        <span x-text="alias"></span>
+                      </label>
+                      <input x-model="m.model" style="width:150px" placeholder="model id">
+                      <input type="number" placeholder="ctx" title="context window (tokens)" x-model.number="m.context_size" style="width:64px">
+                      <input type="number" placeholder="max_tokens" title="single-response token cap (per-model)" x-model.number="m.max_tokens" style="width:84px">
+                      <button type="button" class="collapse-toggle" @click="toggleThinking(pid, alias)"
+                              title="[provider.<id>.<alias>.thinking] — per-model thinking capability (values from wire probes, off by default)">
+                        <span x-text="m.thinking ? '▾' : '▸'"></span> thinking
+                        <span class="hint" x-show="thinkingConfigured(m)">configured</span>
+                      </button>
+                      <button type="button" class="inline-add probebtn"
                       :class="{ 'probebtn--ok': probeStatus[pid + '.' + alias] === 'ok', 'probebtn--err': probeStatus[pid + '.' + alias] && probeStatus[pid + '.' + alias] !== 'ok' }"
                       :title="probeModelBtnTitle(pid, alias)"
                       @click="probeModel(pid, alias)"
@@ -398,7 +404,41 @@
                     </button>
                     <button class="btn-delete" @click="deleteModel(pid, alias)">×</button>
                   </div>
-                </template>
+                  <!-- 模型级 thinking 能力声明（P2-12）：值必须来自 wire 实测，全空 = 未声明 -->
+                  <template x-if="m.thinking">
+                    <div class="compat-body" style="margin:2px 0 6px 22px">
+                      <div class="hint">[thinking] capability for this model — dialects must come from wire probes (see thinking-capability plan); all-unset = no [thinking] section, requests stay byte-identical to legacy.</div>
+                      <label class="switch">default level:
+                        <select x-model="m.thinking.default">
+                          <option :value="null">unknown (unset)</option>
+                          <option value="none">none</option>
+                          <option value="low">low</option>
+                          <option value="medium">medium</option>
+                          <option value="high">high</option>
+                          <option value="max">max</option>
+                        </select>
+                      </label>
+                      <label class="switch">level wire:
+                        <select x-model="m.thinking.level_wire">
+                          <option :value="null">unset (no knob)</option>
+                          <option value="none">none (endpoint ignores effort)</option>
+                          <option value="reasoning_effort">reasoning_effort (validated server-side)</option>
+                        </select>
+                      </label>
+                      <label class="switch">off wire:
+                        <select x-model="m.thinking.off_wire">
+                          <option :value="null">unset (legacy fallback)</option>
+                          <option value="enable_thinking_false">enable_thinking_false (chat_template_kwargs)</option>
+                          <option value="thinking_disabled">thinking_disabled (DeepSeek)</option>
+                          <option value="reasoning_effort_none">reasoning_effort_none (Ollama/agnes)</option>
+                          <option value="unsupported">unsupported (rejects /reasoning none)</option>
+                        </select>
+                      </label>
+                      <label class="switch"><input type="checkbox" x-model="m.thinking.preserve"> preserve: echo reasoning_content back (default off; only enable if the server verifiably consumes it)</label>
+                    </div>
+                  </template>
+                </div>
+              </template>
                 <button class="inline-add" @click="addModel(pid)">+ Add model</button>
               </div>
             </template>

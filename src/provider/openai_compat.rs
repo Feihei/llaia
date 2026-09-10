@@ -76,6 +76,16 @@ impl OpenAiCompatibleProvider {
     fn thinking_capability_impl(&self) -> Option<crate::config::ThinkingConfig> {
         self.thinking.clone()
     }
+
+    /// P2-11：思考回传出站开关（`thinking.preserve`，缺省关）。
+    /// 只有写了 `[thinking]` 段且显式开时才带 `reasoning_content` 键——
+    /// 性质 1（不写段不发新键）由「None = 不回传」一并保证。
+    fn preserve_enabled(&self) -> bool {
+        self.thinking
+            .as_ref()
+            .and_then(|t| t.preserve)
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Serialize)]
@@ -86,6 +96,10 @@ struct OpenAiMessage<'a> {
     tool_calls: Option<Vec<OpenAiToolCallSer<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<&'a str>,
+    /// 思考逐字回传（P2-11）：仅 `thinking.preserve=true` 且消息确有留存时填，
+    /// 缺就缺（D6 红线：不补空、不代写）；preserve 关时整个键不出现。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<&'a str>,
 }
 
 /// 把 MessageContent 转为 OpenAI 兼容的 JSON value：
@@ -120,7 +134,11 @@ fn parse_usage(v: Option<&serde_json::Value>) -> Option<Usage> {
 /// 对应 tool 消息的 tool_call_id 为空；严格端点（sensenova/tokenrouter/agnes）
 /// 会以 400 拒绝这类消息 → 触发 fallback 级联。这里在发送前就地丢弃坏消息，
 /// 避免把错误传进请求历史。
-fn build_openai_messages<'a>(req: &'a ChatRequest<'a>, compat: &Compat) -> Vec<OpenAiMessage<'a>> {
+fn build_openai_messages<'a>(
+    req: &'a ChatRequest<'a>,
+    compat: &Compat,
+    preserve: bool,
+) -> Vec<OpenAiMessage<'a>> {
     let mut messages: Vec<OpenAiMessage<'_>> = req
         .messages
         .iter()
@@ -155,11 +173,18 @@ fn build_openai_messages<'a>(req: &'a ChatRequest<'a>, compat: &Compat) -> Vec<O
             });
             // 过滤后无有效 tool_calls → 视为普通 assistant 消息
             let tool_calls = tool_calls.filter(|tcs| !tcs.is_empty());
+            // 思考逐字回传（P2-11）：仅 preserve 开且留存非空；缺就缺，不补空串
+            let reasoning_content = if preserve {
+                m.reasoning_content.as_deref().filter(|s| !s.is_empty())
+            } else {
+                None
+            };
             Some(OpenAiMessage {
                 role,
                 content: content_to_json(&m.content),
                 tool_calls,
                 tool_call_id: m.tool_call_id.as_deref(),
+                reasoning_content,
             })
         })
         .collect();
@@ -171,6 +196,7 @@ fn build_openai_messages<'a>(req: &'a ChatRequest<'a>, compat: &Compat) -> Vec<O
                     content: serde_json::Value::String(String::new()),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 });
             }
         }
@@ -253,7 +279,7 @@ impl Provider for OpenAiCompatibleProvider {
         let url = format!("{}/chat/completions", self.base_url);
 
         // 构造 messages（含 requires_assistant_after_tool 占位）
-        let messages = build_openai_messages(req, &self.compat);
+        let messages = build_openai_messages(req, &self.compat, self.preserve_enabled());
 
         let tools: Option<Vec<OpenAiTool>> = if self.native_tool_calling {
             req.tools.map(|ts| {
@@ -800,6 +826,7 @@ mod tests {
             default: Some(ThinkingLevel::High),
             level_wire,
             off_wire,
+            preserve: None,
         })
     }
 
@@ -814,6 +841,75 @@ mod tests {
                 done()
             ))
             .create()
+    }
+
+    #[tokio::test]
+    async fn preserve_echoes_reasoning_verbatim_only_when_enabled() {
+        // P2-11：preserve=true → 历史 assistant 的思考逐字出站（缺就缺，不补空）；
+        // preserve 未设置（默认关，D6）→ 请求体整个不含 reasoning_content 键。
+        let mut server = mockito::Server::new_async().await;
+        let msgs = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant_with_reasoning("partial", Some("let me think...".into())),
+            ChatMessage::user("go"),
+        ];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+            thinking: None,
+        };
+        let expected = json!({"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "partial", "reasoning_content": "let me think..."},
+            {"role": "user", "content": "go"}
+        ]});
+        let m_on = server
+            .mock("POST", "/chat/completions")
+            .match_body(mockito::Matcher::PartialJson(expected))
+            .with_status(200)
+            .with_body(format!(
+                "{}{}",
+                sse(json!({"choices": [{"delta": {"content": "ok"}}]})),
+                done()
+            ))
+            .create();
+        let p_on =
+            OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::default())
+                .unwrap()
+                .with_thinking(Some(ThinkingConfig {
+                    default: None,
+                    level_wire: None,
+                    off_wire: None,
+                    preserve: Some(true),
+                }));
+        p_on.chat(&req).await.unwrap();
+        m_on.assert();
+
+        let m_off = server
+            .mock("POST", "/chat/completions")
+            .match_request(|req| {
+                let empty: Vec<u8> = Vec::new();
+                let body = String::from_utf8_lossy(req.body().unwrap_or(&empty));
+                !body.contains("reasoning_content")
+            })
+            .with_status(200)
+            .with_body(format!(
+                "{}{}",
+                sse(json!({"choices": [{"delta": {"content": "ok"}}]})),
+                done()
+            ))
+            .create();
+        let p_off =
+            OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::default())
+                .unwrap()
+                .with_thinking(Some(ThinkingConfig {
+                    default: None,
+                    level_wire: None,
+                    off_wire: None,
+                    preserve: None,
+                }));
+        p_off.chat(&req).await.unwrap();
+        m_off.assert();
     }
 
     #[tokio::test]
@@ -1238,10 +1334,10 @@ mod tests {
             thinking: None,
         };
         // ollama 预设：requires_assistant_after_tool = true
-        let with_ph = build_openai_messages(&req, &Compat::ollama());
+        let with_ph = build_openai_messages(&req, &Compat::ollama(), false);
         assert_eq!(with_ph.last().unwrap().role, "assistant");
         // 默认：不补占位
-        let no_ph = build_openai_messages(&req, &Compat::default());
+        let no_ph = build_openai_messages(&req, &Compat::default(), false);
         assert_eq!(no_ph.last().unwrap().role, "tool");
         // 不以 tool 结尾时不补
         let msgs2 = vec![ChatMessage::user("hi")];
@@ -1250,7 +1346,10 @@ mod tests {
             tools: None,
             thinking: None,
         };
-        assert_eq!(build_openai_messages(&req2, &Compat::ollama()).len(), 1);
+        assert_eq!(
+            build_openai_messages(&req2, &Compat::ollama(), false).len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1315,7 +1414,7 @@ mod tests {
             tools: None,
             thinking: None,
         };
-        let out = build_openai_messages(&req, &Compat::default());
+        let out = build_openai_messages(&req, &Compat::default(), false);
         // user + assistant(仅 file_read) + tool(1)，共 3 条
         assert_eq!(out.len(), 3);
         assert_eq!(out[1].role, "assistant");

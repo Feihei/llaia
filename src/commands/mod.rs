@@ -77,6 +77,19 @@ dir = "~/.llaia/logs"
 #                                # hide the model from /provider and the WebUI pickers.
 #                                # Explicit references still work (e.g. an agent.model
 #                                # already pointing here keeps running until you switch)
+#
+# [provider.default.qwen.thinking]  # optional; per-model thinking capability (P1/P2,
+#                                   # docs/plans/2026-09-10-thinking-capability-model.md).
+#                                   # All fields default to unknown/unset: /reasoning then
+#                                   # rejects levels and legacy-falls-back for off. Fill in
+#                                   # from wire probes only — dialects bind to deployment,
+#                                   # never guess from the model name.
+# default = "unknown"            # model's resting level: none|low|medium|high|max|unknown
+# level_wire = "reasoning_effort"  # how levels are sent: reasoning_effort | none (no knob)
+# off_wire = "reasoning_effort_none"  # how "off" is sent: enable_thinking_false |
+#                                  # thinking_disabled | reasoning_effort_none | unsupported
+# preserve = false               # echo reasoning_content back verbatim (default off;
+#                                # enable only if the server verifiably consumes it)
 
 # Cloud Anthropic example (also works with a gateway base_url):
 # [provider.claude]

@@ -72,3 +72,27 @@
 llaia 的流解析（`openai_compat.rs`）本就同时读 `reasoning_content` 与 `thinking`、从不读
 `reasoning`，故这条规则在 llaia 里没有字段选择可言，唯一效果就是强制把思考折回可见文本
 ——纯 bug 放大器。删除后 per-model 表只剩 `max_tokens_field` 一项。
+
+### 2026-09-10：思考能力模型与 `disable_thinking` → `ThinkingIntent`（P1/P2）
+
+随 [thinking-capability plan](../plans/2026-09-10-thinking-capability-model.md) 对五家在用
+端点的 wire 实测，本 ADR 的 compat 面有两点演进：
+
+**`disable_thinking: bool` 升级为 `ChatRequest.thinking: Option<ThinkingIntent>`。**
+单一 bool 隐含「所有端点共享一种关方言」的前提被实测推翻：本地靠嵌套
+`chat_template_kwargs`、DeepSeek 靠 `thinking:{type:"disabled"}`、Ollama/agnes 只认
+`reasoning_effort:"none"`、GLM 部分网关直接 400。请求体组装改由
+`resolve_thinking()` 在 provider 层唯一收口：显式声明（`[provider.<id>.<model>.thinking]`
+的 `level_wire`/`off_wire`，值必须来自 wire 实测）走对应方言，声明未写的段（unknown）
+沿 `compat.disable_thinking_template` 门走 legacy 兜底——旧 `disable_thinking` 的全部
+语义由 `ThinkingIntent::None` + legacy 兜底承接，`auto` 请求体与旧版逐字节一致。
+
+**「折回 content」与「独立 `reasoning_content` 字段」的二选一前提被服务端演进打破。**
+llama.cpp 新 build（10867+）的 `--reasoning-format deepseek-legacy` 同时填 `content`（带
+`<think>` 标签）与 `reasoning_content`，说明二者在服务端可以共存。框架侧仍维持二选一：
+`reasoning_to_content=true` 折回通路不产出留存（避免同一段文本双份吃预算），独立字段通路
+（P0 留存 + P2 `preserve` 回传）不折回。这也修正本 ADR 决策 1 的叙事：折回与否在当时
+是「显示偏好」，实测后确认对某些部署形态它是功能必需——但正确解法是按部署声明方言，
+而不是按模型家族猜。`guard_thinking_cap` 的长期方向是映射为 llama.cpp 的请求级
+`--reasoning-budget`（token 级连续预算），只在端点不支持时退化成 abort + 重试
+（登记为后续项，未在 P1/P2 分期内实现）。

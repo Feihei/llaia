@@ -286,6 +286,13 @@ pub struct ThinkingConfig {
     /// （compat.disable_thinking_template 门内注入 chat_template_kwargs）。
     #[serde(default)]
     pub off_wire: Option<crate::provider::ThinkingOffWire>,
+    /// 是否把历史 assistant 消息的思考留存**逐字**回传出站（P2-11，D6：默认关）。
+    /// 开启前提是服务端确认消费该字段——llama.cpp 新 build（≥10867）有
+    /// `--reasoning-preserve`（默认 enabled）；远端 b10645 实测在请求解析阶段丢弃、
+    /// Ollama 双通路控制组实测不消费（plan「待实测 6」）。红线：缺就缺，
+    /// 框架绝不补空或代写；未写 `[thinking]` 段时请求体不发任何新键（性质 1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve: Option<bool>,
 }
 
 /// `default = "unknown"` → None（未知）；其余按档位名解析，拼错直接报错不静默吞。

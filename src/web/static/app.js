@@ -625,6 +625,15 @@ function llaiaApp() {
               // enabled 走 serde skip_serializing_if（true 时省略），所以 GET 回来的
               // 启用模型不带该键。不归一化的话 checkbox 会把「启用」显示成未勾选。
               if (p.model[k].enabled === undefined) p.model[k].enabled = true;
+              // thinking 同理：未设置的字段被省略，归一化成 null（select 显示 unset）。
+              // 注意 default = "unknown" 反序列化成 None（GET 不带该键）——语义本就是未指定。
+              if (p.model[k].thinking) {
+                const t = p.model[k].thinking;
+                if (t.default === undefined) t.default = null;
+                if (t.level_wire === undefined) t.level_wire = null;
+                if (t.off_wire === undefined) t.off_wire = null;
+                if (t.preserve === undefined) t.preserve = null;
+              }
             }
           }
         }
@@ -664,7 +673,17 @@ function llaiaApp() {
       for (const pid in cfgToSend.provider) {
         const p = cfgToSend.provider[pid];
         if (p.model) {
-          for (const alias in p.model) { p[alias] = p.model[alias]; }
+          for (const alias in p.model) {
+            // 全 null / 空值的 thinking 等价于未设置，丢弃以免写入空段（同 compat）
+            const t = p.model[alias].thinking;
+            if (t) {
+              for (const k of ['default', 'level_wire', 'off_wire', 'preserve']) {
+                if (t[k] === '' || t[k] === undefined) delete t[k];
+              }
+              if (Object.keys(t).length === 0) delete p.model[alias].thinking;
+            }
+            p[alias] = p.model[alias];
+          }
           delete p.model;
         }
         // 全 null 的 compat 覆盖层等价于未设置，丢弃以免在 TOML 写入空 compat = {}
@@ -718,6 +737,20 @@ function llaiaApp() {
       if (!alias || !alias.trim()) return;
       if (this.cfg.provider[pid].model[alias]) { alert('Model already exists: ' + alias); return; }
       this.cfg.provider[pid].model[alias] = { model: '', context_size: null, max_tokens: null, enabled: true };
+    },
+    // ---- 模型级 thinking 能力声明（P2-12）----
+    toggleThinking(pid, alias) {
+      const m = this.cfg.provider[pid].model[alias];
+      if (!m) return;
+      if (!m.thinking) {
+        // 全 null = 未设置：保存时整段丢弃，等价于不写 [thinking]
+        m.thinking = { default: null, level_wire: null, off_wire: null, preserve: null };
+      } else if (Object.values(m.thinking).every(v => v === null)) {
+        delete m.thinking;
+      }
+    },
+    thinkingConfigured(m) {
+      return m.thinking && Object.values(m.thinking).some(v => v !== null);
     },
     deleteModel(pid, alias) {
       if (!confirm('Delete model ' + pid + '.' + alias + '?')) return;

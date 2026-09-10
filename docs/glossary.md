@@ -100,6 +100,26 @@ provider 返回结构化的 `tool_calls` 字段，无需文本解析。
 模型用 `<tool_call>{"name":"...","arguments":{...}}</tool_call>` 包裹调用，
 回复文本由解析器抽取。兼容不支持 function calling 的本地模型。
 
+### 思考档位（Thinking Level）
+`/reasoning` 的规范取值：`auto|none|low|medium|high|max`。`auto` 不发任何思考参数
+（维持服务端默认）；`none` 要求关思考；其余调档位。能否关/能否调由模型级
+`[provider.<id>.<model>.thinking]` 能力声明决定，声明未覆盖的意图被拒收而非静默降级。
+详见 [thinking-capability plan](plans/2026-09-10-thinking-capability-model.md)。
+
+### 生效态（Effective Thinking State）
+意图 × 能力求值后的真实落地情况（生效 / 该模型不支持 / 通路被忽略），`/reasoning`
+按它回显，并每回合注入尾部 Runtime Context（不进 system 前缀，保 KV 缓存字节稳定）。
+
+### 留存（Thinking Retention）
+provider 流收集的思考原文（`reasoning_content` / `thinking` SSE 字段）写入
+`ChatMessage.reasoning_content` 并落 sqlite 与 WebUI 渲染；不改出站请求。
+逐字保存，框架不截断、不摘要、不生成。
+
+### 回传（Thinking Preserve）
+`[thinking].preserve = true` 时把历史 assistant 消息的思考留存**逐字**随请求发回
+（P2，默认关）。前提是服务端确认消费该字段（llama.cpp `--reasoning-preserve`）；
+缺就缺，绝不补空或代写。与「折回 content」（`reasoning_to_content`）二选一，不双份。
+
 ## 工具相关
 
 ### Tool

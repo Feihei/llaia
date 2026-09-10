@@ -554,6 +554,7 @@ mod tests {
             default: Some(ThinkingLevel::High),
             level_wire,
             off_wire,
+            preserve: None,
         };
         // None intent（缺省）≡ Auto：什么都不发（性质 1）
         assert_eq!(resolve_thinking(None, None), ResolvedThinking::Nothing);
@@ -635,6 +636,7 @@ mod tests {
             default: Some(ThinkingLevel::High),
             level_wire: None, // caps 在场但未经重复采样，保守 none
             off_wire: Some(ThinkingOffWire::EnableThinkingFalse),
+            preserve: None,
         };
         assert!(evaluate_reasoning(ThinkingIntent::None, Some(&llamacpp))
             .unwrap()
@@ -648,6 +650,7 @@ mod tests {
             default: Some(ThinkingLevel::Max),
             level_wire: Some(ThinkingLevelWire::None),
             off_wire: Some(ThinkingOffWire::Unsupported),
+            preserve: None,
         };
         let err = evaluate_reasoning(ThinkingIntent::None, Some(&glm)).unwrap_err();
         assert!(err.contains("cannot disable thinking"), "{err}");
