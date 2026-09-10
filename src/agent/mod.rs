@@ -31,6 +31,9 @@ use tokio::sync::{mpsc, RwLock};
 pub enum TurnEvent {
     /// 文本增量（已过滤掉 tool_call 标签）
     Chunk { delta: String },
+    /// 思考流增量（P0 留存的流式旁路）：默认频道忽略，WebUI 用于
+    /// chat 界面的折叠思考块。不与 Chunk 混流——思考不进可见文本。
+    Reasoning { delta: String },
     /// 工具调用开始
     ToolStart { id: String, name: String },
     /// 工具执行结果
@@ -1681,9 +1684,12 @@ impl Agent {
                 StreamEvent::ToolCall(tc) => {
                     calls.push(tc);
                 }
-                // P0 留存：思考流只收集，不向用户流式输出（思考不进 Chunk）
+                // P0 留存：思考流只收集，不向用户流式输出（思考不进 Chunk）。
+                // Reasoning 帧是旁路：仅 WebUI（及未来支持的频道）消费，
+                // CLI/IM 频道的 sink 默认忽略。
                 StreamEvent::ReasoningDelta(d) => {
                     iter_reasoning.push_str(&d);
+                    let _ = event_tx.send(TurnEvent::Reasoning { delta: d }).await;
                 }
                 StreamEvent::Usage(u) => match iter_usage.as_mut() {
                     Some(acc) => {
@@ -3338,8 +3344,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, "final answer");
-        // 流式事件里不含思考文本（收完事件才能判定，先 drain）
-        while rx.try_recv().is_ok() {}
+        // drain：Reasoning 帧是旁路事件（WebUI 折叠思考块用），Chunk 不得携带思考文本
+        let mut reasoning_total = String::new();
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                TurnEvent::Reasoning { delta } => reasoning_total.push_str(&delta),
+                TurnEvent::Chunk { delta } => {
+                    assert!(
+                        !delta.contains("think"),
+                        "reasoning must never leak into visible Chunk: {delta}"
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(reasoning_total, "let me think...");
         // sqlite：assistant 行带 reasoning_content
         let msgs = agent
             .session_store

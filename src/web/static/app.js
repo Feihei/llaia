@@ -453,12 +453,24 @@ function llaiaApp() {
           break;
         case 'chunk':
           if (this.messages.length === 0 || this.messages[this.messages.length-1].role !== 'assistant') {
-            this.messages.push({ role: 'assistant', text: ev.delta });
+            this.messages.push({ role: 'assistant', text: ev.delta, streaming: true });
           } else {
             this.messages[this.messages.length-1].text += ev.delta;
           }
           this.scrollBottom();
           break;
+        case 'reasoning': {
+          // 思考流：合并进当前 assistant 消息的 reasoning 字段，折叠块展示。
+          // 流式期间该块自动展开（open===null 表示未手动点过），done 后收起。
+          if (this.messages.length === 0 || this.messages[this.messages.length-1].role !== 'assistant') {
+            this.messages.push({ role: 'assistant', text: '', reasoning: ev.delta, streaming: true });
+          } else {
+            const last = this.messages[this.messages.length-1];
+            last.reasoning = (last.reasoning || '') + ev.delta;
+          }
+          this.scrollBottom();
+          break;
+        }
         case 'tool_start':
           // text 存工具名（不带省略号），渲染层按 output 是否到达决定形态
           this.messages.push({ role: 'tool', text: ev.name, output: null });
@@ -478,6 +490,8 @@ function llaiaApp() {
         case 'error':
         case 'interrupted':
           this.busy = false;
+          // 流式结束：所有 assistant 消息退出流式态（思考块从自动展开切回折叠）
+          this.messages.forEach(m => { if (m.role === 'assistant') m.streaming = false; });
           if (ev.type === 'error') this.messages.push({ role: 'tool', text: `[error: ${ev.message}]` });
           if (ev.type === 'interrupted') this.messages.push({ role: 'tool', text: '[Interrupted]' });
           break;

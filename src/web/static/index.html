@@ -91,7 +91,19 @@
                 </div>
               </template>
             </div></template>
-            <template x-if="m.role==='assistant'"><div><b>Assistant:</b> <div x-html="renderMd(m.text)"></div></div></template>
+            <template x-if="m.role==='assistant'"><div><b>Assistant:</b>
+              <!-- 思考折叠块（P0 留存 + 流式 Reasoning 帧）：与 session 详情同族交互；
+                   open===null 表示未手动点过 → 流式期间自动展开，done 后收起 -->
+              <template x-if="m.reasoning">
+                <div class="reasoning" x-data="{open: null}">
+                  <div class="reasoning-head" @click="open = !open">
+                    <span class="reasoning-caret" x-text="(open === null ? m.streaming : open) ? '▾' : '▸'"></span>
+                    <span x-text="(m.streaming ? 'Thinking… ' : 'Thinking (') + m.reasoning.length + (m.streaming ? '' : ' chars)')"></span>
+                  </div>
+                  <div class="reasoning-body" x-show="open === null ? m.streaming : open" x-text="m.reasoning"></div>
+                </div>
+              </template>
+              <div x-html="renderMd(m.text)"></div></div></template>
             <template x-if="m.role==='tool' && m.output == null"><div><b>Tool:</b> <span x-text="m.text"></span></div></template>
             <template x-if="m.role==='tool' && m.output != null">
               <div class="tool-result" x-data="{open: false}">
@@ -289,8 +301,47 @@
         <div :class="{active: configSection==='doctor'}" @click="switchDoctor()">Doctor</div>
         <div :class="{active: configSection==='about'}" @click="switchAbout()">About</div>
       </div>
-      <div class="content">
-        <div class="config-head">&#x276F; CONFIG <span x-text="configSection"></span></div>
+      <div class="config-main">
+        <div class="config-head">
+          <span>&#x276F; CONFIG <span x-text="configSection"></span></span>
+          <span class="config-head-actions">
+            <template x-if="['runtime','log','provider','agent','channels','tools'].includes(configSection)">
+              <button @click="saveConfig()">Save</button>
+            </template>
+            <template x-if="configSection==='raw'">
+              <span class="config-head-actions">
+                <button @click="validateRaw()">Validate</button>
+                <button @click="saveRaw()">Save</button>
+                <span class="cron-msg" x-text="rawMsg"></span>
+              </span>
+            </template>
+            <template x-if="configSection==='cron' && cronSection==='raw'">
+              <span class="config-head-actions">
+                <button @click="saveCronRaw()">Save</button>
+                <span class="cron-msg" x-text="cronRawMsg"></span>
+              </span>
+            </template>
+            <template x-if="configSection==='mcp' && mcpSection==='servers'">
+              <span class="config-head-actions">
+                <button @click="saveMcp()">Save</button>
+                <span class="cron-msg" x-text="mcpMsg"></span>
+              </span>
+            </template>
+            <template x-if="configSection==='mcp' && mcpSection==='raw'">
+              <span class="config-head-actions">
+                <button @click="saveMcpRaw()">Save</button>
+                <span class="cron-msg" x-text="mcpRawMsg"></span>
+              </span>
+            </template>
+            <template x-if="configSection==='skills' && skillEditing">
+              <span class="config-head-actions">
+                <button @click="saveSkillContent()">Save</button>
+                <span class="cron-msg" x-text="skillContentMsg"></span>
+              </span>
+            </template>
+          </span>
+        </div>
+        <div class="content">
         <template x-if="configSection==='runtime'">
           <div>
             <div class="form-row"><label>context_threshold</label><input type="number" step="0.1" min="0" max="1" x-model.number="cfg.runtime.context_threshold"></div>
@@ -299,7 +350,6 @@
             <div class="form-row"><label>permission</label><select x-model="cfg.runtime.permission"><option value="">unset (→ default)</option><option value="default">default</option><option value="read-only">read-only</option><option value="yolo">yolo</option></select></div>
             <div class="form-row"><label>keepalive_interval_secs</label><input type="number" min="30" x-model.number="cfg.runtime.keepalive_interval_secs" title="long-task heartbeat interval (seconds): chat channels send a still-working notice this often"></div>
             <div class="form-row"><label>max_turn_duration_secs</label><input type="number" min="60" x-model.number="cfg.runtime.max_turn_duration_secs" title="max wall-clock seconds per turn; the turn is interrupted beyond this, guarding against runaway loops"></div>
-            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='log'">
@@ -308,7 +358,6 @@
               <select x-model="cfg.log.level"><option>debug</option><option>info</option><option>warn</option><option>error</option></select>
             </div>
             <div class="form-row"><label>dir</label><input type="text" x-model="cfg.log.dir" style="width:400px"></div>
-            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='provider'">
@@ -443,7 +492,6 @@
               </div>
             </template>
             <button class="btn-add" @click="addProvider()">+ Add provider</button>
-            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='agent'">
@@ -493,7 +541,6 @@
               </div>
             </template>
             <button class="btn-add" @click="addAgent()">+ Add agent</button>
-            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='channels'">
@@ -540,7 +587,7 @@
               </template>
 
             </div>
-            <button @click="saveConfig()">Save</button>
+
           </div>
         </template>
         <template x-if="configSection==='tools'">
@@ -563,7 +610,6 @@
             <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.tts.api_key"></div>
             <div class="form-row"><label>model</label><input x-model="cfg.tools.tts.model"></div>
             <div class="form-row"><label>voice</label><input x-model="cfg.tools.tts.voice"></div>
-            <button @click="saveConfig()">Save</button>
           </div>
         </template>
         <template x-if="configSection==='skills'">
@@ -574,9 +620,7 @@
                 <h3 x-text="'SKILL.md — ' + skillEditing"></h3>
                 <textarea x-model="skillContent" spellcheck="false" style="width:100%;height:420px;font-family:monospace"></textarea>
                 <div class="cron-toolbar">
-                  <button @click="saveSkillContent()">Save</button>
                   <button @click="skillEditing=null">Back</button>
-                  <span class="cron-msg" x-text="skillContentMsg"></span>
                 </div>
                 <div class="hint">frontmatter must contain name and description (YAML, wrapped in ---).</div>
               </div>
@@ -619,9 +663,6 @@
         <template x-if="configSection==='raw'">
           <div>
             <textarea x-ref="rawEditor" x-model="rawToml" style="width:100%;height:500px;font-family:monospace"></textarea>
-            <button @click="validateRaw()">Validate</button>
-            <button @click="saveRaw()">Save</button>
-            <span x-text="rawMsg"></span>
           </div>
         </template>
 
@@ -697,10 +738,6 @@
             <template x-if="cronSection==='raw'">
               <div>
                 <textarea x-ref="cronRawEditor" x-model="cronRaw" style="width:100%;height:500px;font-family:monospace"></textarea>
-                <div class="cron-toolbar">
-                  <button @click="saveCronRaw()">Save</button>
-                  <span class="cron-msg" x-text="cronRawMsg"></span>
-                </div>
                 <div class="hint">Saving cron.toml hot-reloads the scheduler immediately; no restart needed.</div>
               </div>
             </template>
@@ -760,9 +797,7 @@
                   </div>
                 </template>
                 <div class="cron-toolbar">
-                  <button @click="saveMcp()">Save</button>
                   <button @click="loadMcp()">Refresh</button>
-                  <span class="cron-msg" x-text="mcpMsg"></span>
                 </div>
                 <div class="hint">Toggle <b>enabled</b> per server then <b>Save</b> to write mcp.toml and hot-reload (no restart). Tools are named <code>&lt;server&gt;__&lt;tool&gt;</code>.</div>
               </div>
@@ -771,10 +806,6 @@
             <template x-if="mcpSection==='raw'">
               <div>
                 <textarea x-ref="mcpRawEditor" x-model="mcpRaw" style="width:100%;height:500px;font-family:monospace"></textarea>
-                <div class="cron-toolbar">
-                  <button @click="saveMcpRaw()">Save</button>
-                  <span class="cron-msg" x-text="mcpRawMsg"></span>
-                </div>
                 <div class="hint">Saving mcp.toml hot-reloads the MCP connection immediately; no restart needed.</div>
               </div>
             </template>
@@ -848,6 +879,7 @@
             </div>
           </div>
         </template>
+        </div>
       </div>
     </div>
     <div id="stats-pane" class="pane" :class="{active: tab==='stats'}">

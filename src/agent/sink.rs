@@ -7,6 +7,8 @@ use async_trait::async_trait;
 pub trait OutputSink: Send {
     /// 文本增量
     async fn on_chunk(&mut self, delta: &str);
+    /// 思考流增量（默认忽略；WebUI override 渲染折叠思考块）
+    async fn on_reasoning(&mut self, _delta: &str) {}
     /// 工具调用开始
     async fn on_tool_start(&mut self, name: &str);
     /// 工具执行结果（默认忽略，CLI override 打印预览）
@@ -114,6 +116,7 @@ pub async fn run_turn(
                     Some(ev) => {
                         match ev {
                             TurnEvent::Chunk { delta } => sink.on_chunk(&delta).await,
+                            TurnEvent::Reasoning { delta } => sink.on_reasoning(&delta).await,
                             TurnEvent::ToolStart { name, .. } => sink.on_tool_start(&name).await,
                             TurnEvent::ToolResult { output, .. } => sink.on_tool_result(&output).await,
                             TurnEvent::MediaOutput { path, kind } => sink.on_media(&path, kind).await,

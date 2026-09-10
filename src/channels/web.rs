@@ -27,6 +27,10 @@ pub enum WebEvent {
     Chunk {
         delta: String,
     },
+    /// 思考流增量（chat 界面折叠思考块，流式期间自动展开）
+    Reasoning {
+        delta: String,
+    },
     ToolStart {
         id: String,
         name: String,
@@ -87,6 +91,14 @@ impl OutputSink for WebSink {
         let _ = self
             .tx
             .send(WebEvent::Chunk {
+                delta: delta.into(),
+            })
+            .await;
+    }
+    async fn on_reasoning(&mut self, delta: &str) {
+        let _ = self
+            .tx
+            .send(WebEvent::Reasoning {
                 delta: delta.into(),
             })
             .await;
