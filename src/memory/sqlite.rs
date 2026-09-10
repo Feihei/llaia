@@ -606,6 +606,19 @@ END;
     }
 
     pub fn append_message(&self, session_id: i64, role: &Role, content: &str) -> Result<i64> {
+        self.append_message_with_reasoning(session_id, role, content, None)
+    }
+
+    /// 带 thinking 留存的写入（P0，thinking-capability plan）：messages 表
+    /// `reasoning_content` 列建表时已有，此前无写入通路恒为 NULL。
+    /// `reasoning` 传 None/空串等价于 `append_message`。
+    pub fn append_message_with_reasoning(
+        &self,
+        session_id: i64,
+        role: &Role,
+        content: &str,
+        reasoning: Option<&str>,
+    ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         let role_str = match role {
             Role::System => "system",
@@ -613,10 +626,11 @@ END;
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
+        let reasoning = reasoning.filter(|r| !r.is_empty());
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![session_id, role_str, content, now],
+            "INSERT INTO messages (session_id, role, content, reasoning_content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![session_id, role_str, content, reasoning, now],
         )?;
         let msg_id = conn.last_insert_rowid();
         conn.execute(
@@ -1078,6 +1092,30 @@ mod tests {
         store.append_message(id1, &Role::User, "hi").unwrap();
         let latest = store.latest_session().unwrap().unwrap();
         assert_eq!(latest.0, id1);
+    }
+
+    #[test]
+    fn test_append_message_with_reasoning_roundtrip() {
+        // P0 thinking 留存：五列写入 → 读取通路（recent_messages）带出 reasoning_content；
+        // None 与空串等价于旧四列写入（列保持 NULL 而非空串）。
+        let store = open_temp();
+        let sid = store.create_session("uuid", "cli").unwrap();
+        store
+            .append_message_with_reasoning(sid, &Role::Assistant, "answer", Some("let me think..."))
+            .unwrap();
+        store
+            .append_message_with_reasoning(sid, &Role::Assistant, "plain", None)
+            .unwrap();
+        store
+            .append_message_with_reasoning(sid, &Role::Assistant, "blank", Some(""))
+            .unwrap();
+        let msgs = store.recent_messages(sid, 10).unwrap();
+        assert_eq!(
+            msgs[0].reasoning_content.as_deref(),
+            Some("let me think...")
+        );
+        assert_eq!(msgs[1].reasoning_content, None);
+        assert_eq!(msgs[2].reasoning_content, None);
     }
 
     #[test]

@@ -1249,6 +1249,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 finish_reason: None,
+                reasoning: None,
             })
         }
         async fn chat_stream(&self, _req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
@@ -1728,6 +1729,7 @@ mod tests {
                     tool_calls: vec![],
                     usage: None,
                     finish_reason: None,
+                    reasoning: None,
                 })
             }
             async fn chat_stream(

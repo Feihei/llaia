@@ -137,6 +137,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 finish_reason: None,
+                reasoning: None,
             })
         }
 
@@ -251,6 +252,7 @@ mod tests {
                     }],
                     usage: None,
                     finish_reason: None,
+                    reasoning: None,
                 })
             }
             async fn chat_stream(

@@ -80,6 +80,12 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 思考文本留存（P0，docs/plans/2026-09-10-thinking-capability-model.md）：
+    /// provider 流收集的 reasoning_content/thinking 原文，落 sqlite 与 WebUI 渲染。
+    /// 仅随留存走，出站请求不携带（`build_openai_messages` 等序列化器不读该字段），
+    /// 回传（preserve）是 P2 的事。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -89,6 +95,7 @@ impl ChatMessage {
             content: MessageContent::Text(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
     pub fn user(content: impl Into<String>) -> Self {
@@ -97,6 +104,7 @@ impl ChatMessage {
             content: MessageContent::Text(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -105,6 +113,17 @@ impl ChatMessage {
             content: MessageContent::Text(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+    /// 带 thinking 留存的 assistant 消息（P0）：`reasoning` 为 None/空等价于 `assistant`。
+    pub fn assistant_with_reasoning(content: impl Into<String>, reasoning: Option<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: MessageContent::Text(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: reasoning.filter(|r| !r.is_empty()),
         }
     }
     pub fn assistant_with_tools(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
@@ -113,6 +132,7 @@ impl ChatMessage {
             content: MessageContent::Text(content.into()),
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
     pub fn tool(content: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
@@ -121,6 +141,7 @@ impl ChatMessage {
             content: MessageContent::Text(content.into()),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            reasoning_content: None,
         }
     }
     /// 多模态用户消息：parts 至少含一个文本 part 和/或图片 part
@@ -130,6 +151,7 @@ impl ChatMessage {
             content: MessageContent::Multimodal(parts),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 }
@@ -167,6 +189,9 @@ pub struct ChatResponse {
     pub usage: Option<Usage>,
     /// 有效 finish_reason（含 compat 推断）；默认 None。
     pub finish_reason: Option<String>,
+    /// 思考文本留存（P0）：`reasoning_to_content=false` 时 provider 从 SSE 收集的
+    /// reasoning_content/thinking 原文；折回 content 的通路不填（避免双份）。
+    pub reasoning: Option<String>,
 }
 
 /// 单次生成的 token 用量统计。
@@ -182,6 +207,11 @@ pub struct Usage {
 pub enum StreamEvent {
     /// 文本增量
     TextDelta(String),
+    /// 思考流增量（P0 留存）：provider 从 SSE 的 reasoning_content/thinking 收集。
+    /// 仅在 `reasoning_to_content=false`（不折回可见文本）时产生——折回通路里
+    /// 思考已混进 TextDelta，为避免同一段文本双份存储不另发此事件。
+    /// agent 层收集后只落 sqlite/留存，不向用户流式输出。
+    ReasoningDelta(String),
     /// 工具调用（native 模式下完整 ToolCall；标签模式不产生此事件，由 Agent 状态机解析）
     ToolCall(ToolCall),
     /// 本轮流式结束

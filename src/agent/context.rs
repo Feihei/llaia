@@ -107,11 +107,21 @@ impl Context {
     /// JSON 结构开销（role/header 等，近似 8 token/条）。tool definitions 是
     /// 常量不随对话增长，由调用方按需追加（`/stats` 用 `tools.specs()` 序列化
     /// 估算；压缩判定不依赖它——相对变化不受影响）。
+    ///
+    /// P0：assistant 消息的 thinking 留存（`reasoning_content`）一并计入——
+    /// 当前 P0 不回传出站，但它是 P2 preserve 的原料，且字段随消息长期驻留
+    /// history；不计入会低估窗口占用（同型教训：runtime context 曾漏计）。
     pub fn estimate_tokens(&self) -> usize {
         let msgs = self.to_messages(&None);
         let text_tokens: usize = msgs
             .iter()
-            .map(|m| m.content.as_text().chars().count() / 4)
+            .map(|m| {
+                m.content.as_text().chars().count() / 4
+                    + m.reasoning_content
+                        .as_deref()
+                        .map(|r| r.chars().count() / 4)
+                        .unwrap_or(0)
+            })
             .sum();
         text_tokens + msgs.len() * 8
     }
@@ -295,14 +305,21 @@ impl Context {
 
     /// 廉价抽取式归一化（不调 LLM）：丢弃空消息、图片降级、工具消息截断、连续重复去重。
     /// 在 `compact` 每轮开头对整段 history 跑一次，幂等。
+    /// P0：不截断/不改写 assistant 消息的 `reasoning_content`（留存逐字，thinking-capability
+    /// plan 性质 5/7）；正文为空但思考非空的 assistant 消息不丢（思考是有效留存内容）。
     fn cheap_normalize(&mut self) {
         let mut out: Vec<ChatMessage> = Vec::with_capacity(self.history.len());
         for mut m in self.history.drain(..) {
             let text = m.content.as_text();
-            // 丢弃空消息。两个例外：tool 结果（需与 tool_call_id 配对）与带
+            // 丢弃空消息。三个例外：tool 结果（需与 tool_call_id 配对）、带
             // tool_calls 的 assistant 消息——原生工具调用常见「零文本 + tool_calls」
-            // 形态，丢掉会产生孤儿 tool 消息，违反 OpenAI 消息结构（严格端点 400）。
-            if text.trim().is_empty() && m.role != Role::Tool && m.tool_calls.is_none() {
+            // 形态，丢掉会产生孤儿 tool 消息，违反 OpenAI 消息结构（严格端点 400）、
+            // 以及带思考留存的 assistant（reasoning 非空即有效内容）。
+            if text.trim().is_empty()
+                && m.role != Role::Tool
+                && m.tool_calls.is_none()
+                && m.reasoning_content.is_none()
+            {
                 continue;
             }
             // 多模态图片降级为文本占位（省 token，图片信息已由 vision 模型描述进入上下文）
@@ -532,6 +549,40 @@ mod tests {
         assert!(ctx.needs_compaction(est * 2, 0.3, 0));
         assert!(!ctx.needs_compaction(est * 2, 0.9, 0));
     }
+
+    #[test]
+    fn test_estimate_tokens_counts_reasoning() {
+        // P0：assistant 思考留存计入 token 估算（与 runtime context 同型教训）
+        let mut ctx = Context::new("S".into());
+        ctx.push(ChatMessage::assistant_with_reasoning(
+            "answer",
+            Some("x".repeat(400)),
+        ));
+        let base = ctx.estimate_tokens();
+        ctx.history[0].reasoning_content = None;
+        assert!(
+            base > ctx.estimate_tokens() + 90,
+            "400 chars of reasoning ≈ 100 tokens must be counted"
+        );
+    }
+
+    #[test]
+    fn test_cheap_normalize_keeps_reasoning_only_assistant() {
+        // P0：正文为空但思考非空的 assistant 消息不丢（reasoning 是有效留存内容），
+        // 且 reasoning 不得被截断/改写
+        let mut ctx = Context::new("S".into());
+        ctx.push(ChatMessage::user("q"));
+        let mut m = ChatMessage::assistant("");
+        m.reasoning_content = Some("thought ".repeat(500));
+        ctx.push(m);
+        ctx.cheap_normalize();
+        assert_eq!(ctx.history.len(), 2);
+        assert_eq!(
+            ctx.history[1].reasoning_content.as_deref(),
+            Some("thought ".repeat(500).as_str()),
+            "reasoning must survive cheap_normalize verbatim"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -550,6 +601,7 @@ mod compact_tests {
                 tool_calls: vec![],
                 usage: None,
                 finish_reason: None,
+                reasoning: None,
             })
         }
         async fn chat_stream(

@@ -207,12 +207,14 @@ impl Provider for OpenAiCompatibleProvider {
     async fn chat(&self, req: &ChatRequest<'_>) -> Result<ChatResponse> {
         let mut stream = self.chat_stream(req).await;
         let mut text = String::new();
+        let mut reasoning = String::new();
         let mut tool_calls = Vec::new();
         let mut usage = None;
         let mut finish_reason = None;
         while let Some(ev) = stream.next().await {
             match ev? {
                 StreamEvent::TextDelta(d) => text.push_str(&d),
+                StreamEvent::ReasoningDelta(d) => reasoning.push_str(&d),
                 StreamEvent::ToolCall(tc) => tool_calls.push(tc),
                 StreamEvent::Usage(u) => usage = Some(u),
                 StreamEvent::FinishReason(fr) => finish_reason = Some(fr),
@@ -225,6 +227,11 @@ impl Provider for OpenAiCompatibleProvider {
             tool_calls,
             usage,
             finish_reason,
+            reasoning: if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            },
         })
     }
 
@@ -325,6 +332,8 @@ impl Provider for OpenAiCompatibleProvider {
             let mut raw_finish: Option<String> = None;
             // Generation Guard：思考流（reasoning_content/thinking）累计字符数
             let mut reasoning_chars: usize = 0;
+            // P0 留存：当前 SSE 事件内攒到的思考增量（事件边界 flush，保序）
+            let mut pending_reasoning = String::new();
             // 空闲计时锚点：仅「真实 data 事件」会刷新；keepalive 注释 `: ping` 不会。
             let mut last_data = Instant::now();
 
@@ -416,7 +425,9 @@ impl Provider for OpenAiCompatibleProvider {
                                                 yield StreamEvent::TextDelta(content.to_string());
                                             }
                                         }
-                                        // reasoning 折回 content（Ollama / Llama.cpp 深度思考模型）
+                                        // reasoning 折回 content（Ollama / Llama.cpp 深度思考模型）。
+                                        // 折回通路不另发 ReasoningDelta——同一段文本双份
+                                        // 存储（content + reasoning）会吃两份预算（P0-3）。
                                         if self.compat.reasoning_to_content {
                                             if let Some(r) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
                                                 if !r.is_empty() {
@@ -428,33 +439,37 @@ impl Provider for OpenAiCompatibleProvider {
                                                     yield StreamEvent::TextDelta(t.to_string());
                                                 }
                                             }
-                                        } else if self.thinking_cap > 0 {
-                                            // Generation Guard：reasoning 不折回时在此被丢弃、
-                                            // 对框架完全不可见——思考流失控表现为用户侧画面
-                                            // 冻结而 token 空转。此处计数并截流：超限提前
-                                            // Done（相当于截断思考），agent 层空输出判定接住
-                                            // 后触发 [guard] 重试（强制关思考）。
-                                            let n = delta
-                                                .get("reasoning_content")
-                                                .and_then(|c| c.as_str())
-                                                .map(|s| s.chars().count())
-                                                .unwrap_or(0)
-                                                + delta
-                                                    .get("thinking")
-                                                    .and_then(|c| c.as_str())
-                                                    .map(|s| s.chars().count())
-                                                    .unwrap_or(0);
-                                            if n > 0 {
-                                                reasoning_chars += n;
-                                                if reasoning_chars >= self.thinking_cap {
-                                                    tracing::warn!(
-                                                        reasoning_chars,
-                                                        cap = self.thinking_cap,
-                                                        "reasoning stream exceeded thinking cap, truncating stream"
-                                                    );
-                                                    yield StreamEvent::Done;
+                                        } else {
+                                            // 不折回：边计数（Generation Guard）边收集（P0 留存），
+                                            // 以 ReasoningDelta 发给上层；agent 层只落 sqlite，
+                                            // 不向用户流式输出。
+                                            let mut emit = |s: &str, reasoning_chars: &mut usize| {
+                                                if s.is_empty() {
                                                     return;
                                                 }
+                                                *reasoning_chars += s.chars().count();
+                                                pending_reasoning.push_str(s);
+                                            };
+                                            if let Some(r) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+                                                emit(r, &mut reasoning_chars);
+                                            }
+                                            if let Some(t) = delta.get("thinking").and_then(|c| c.as_str()) {
+                                                emit(t, &mut reasoning_chars);
+                                            }
+                                            // 攒下的思考在本事件循环位置统一 flush（保持事件顺序：
+                                            // 思考 delta 先于后续 content/tool_call）
+                                            if !pending_reasoning.is_empty() {
+                                                let chunk = std::mem::take(&mut pending_reasoning);
+                                                yield StreamEvent::ReasoningDelta(chunk);
+                                            }
+                                            if self.thinking_cap > 0 && reasoning_chars >= self.thinking_cap {
+                                                tracing::warn!(
+                                                    reasoning_chars,
+                                                    cap = self.thinking_cap,
+                                                    "reasoning stream exceeded thinking cap, truncating stream"
+                                                );
+                                                yield StreamEvent::Done;
+                                                return;
                                             }
                                         }
                                         if let Some(tcs) = delta.get("tool_calls") {
@@ -778,6 +793,8 @@ mod tests {
         let text = resp.text.as_deref().unwrap_or_default();
         assert!(!text.contains("I think..."), "text={text}");
         assert!(text.contains("The answer is 42"), "text={text}");
+        // P0 留存：思考不折回时由 provider 收集进 ChatResponse.reasoning
+        assert_eq!(resp.reasoning.as_deref(), Some("I think..."));
         m.assert();
     }
 
@@ -859,6 +876,8 @@ mod tests {
         // reasoning_content 折回 content
         assert!(resp.text.as_deref().unwrap().contains("I think..."));
         assert!(resp.text.as_deref().unwrap().contains("The answer is 42"));
+        // P0-3：折回通路不另发 ReasoningDelta → reasoning 不填，避免双份存储
+        assert!(resp.reasoning.is_none());
         // tool_calls 解析
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].name, "file_read");
@@ -901,6 +920,51 @@ mod tests {
         assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));
         // 流式未带 usage → None
         assert!(resp.usage.is_none());
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn reasoning_delta_stream_event_collected() {
+        // P0 留存：流式通路逐事件产出 ReasoningDelta（不混入 TextDelta），
+        // chat() 折叠后进 ChatResponse.reasoning。thinking 字段同样收集。
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/chat/completions")
+            .expect(2) // chat_stream 与 chat() 各请求一次
+            .with_status(200)
+            .with_body(format!(
+                "{}{}{}{}",
+                sse(json!({"choices":[{"delta":{"reasoning_content":"think ","content":""}}]})),
+                sse(json!({"choices":[{"delta":{"thinking":"more"}}]})),
+                sse(json!({"choices":[{"delta":{"content":"answer"}}]})),
+                done()
+            ))
+            .create();
+        let p = OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::ollama())
+            .unwrap();
+        let msgs = vec![ChatMessage::user("hi")];
+        let req = ChatRequest {
+            messages: &msgs,
+            tools: None,
+            disable_thinking: false,
+        };
+        let events: Vec<_> = p.chat_stream(&req).await.collect().await;
+        let reasoning: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(StreamEvent::ReasoningDelta(d)) => Some(d.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning.join(""), "think more");
+        // 思考不得混进可见文本事件
+        assert!(events.iter().all(|e| !matches!(
+            e,
+            Ok(StreamEvent::TextDelta(t)) if t.contains("think") || t.contains("more")
+        )));
+        let resp = p.chat(&req).await.unwrap();
+        assert_eq!(resp.reasoning.as_deref(), Some("think more"));
+        assert_eq!(resp.text.as_deref(), Some("answer"));
         m.assert();
     }
 

@@ -747,6 +747,17 @@ option { background: var(--bg-input); color: var(--text); }
 #sessions-pane .scroll-fab-top { bottom: 52px; }
 #sessions-pane .scroll-fab-bottom { bottom: 14px; }
 #sessions-pane .msg-content { white-space: pre-wrap; word-break: break-word; margin-top: 4px; }
+/* P0 thinking 留存：assistant 思考块折叠展示（与 tool-result 同族交互，紫调区分） */
+#sessions-pane .reasoning { margin: 6px 0 0 4px; padding-left: 6px; border-left: 1px dashed #9a6cf5; }
+#sessions-pane .reasoning-head { cursor: pointer; color: #9a6cf5; font-size: 12px; user-select: none; }
+#sessions-pane .reasoning-head:hover { color: #c39bff; }
+#sessions-pane .reasoning-caret { display: inline-block; width: 14px; color: #9a6cf5; }
+#sessions-pane .reasoning-body {
+margin: 4px 0 0; padding: 6px 8px;
+background: #0a0710; border: 1px solid var(--border);
+font-size: 12px; color: var(--text-dim);
+white-space: pre-wrap; word-break: break-word;
+}
 #sessions-pane .toolcall {
   background: var(--bg-panel); border-left: 2px solid var(--cyan);
   padding: 6px 10px; margin: 6px 0;

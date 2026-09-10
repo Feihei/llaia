@@ -357,6 +357,7 @@ impl Provider for GeminiProvider {
             tool_calls,
             usage,
             finish_reason: None,
+            reasoning: None,
         })
     }
 

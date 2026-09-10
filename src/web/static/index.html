@@ -232,8 +232,18 @@
                       <div class="msg-content" x-show="open" x-text="m.content"></div>
                     </div>
                   </template>
-                  <div class="msg-content" x-text="m.content" x-show="m.role !== 'tool'"></div>
-                  <template x-if="m.tool_calls && m.tool_calls.length">
+<div class="msg-content" x-text="m.content" x-show="m.role !== 'tool'"></div>
+<!-- P0 thinking 留存：assistant 思考原文折叠展示（无思考不渲染） -->
+<template x-if="m.role === 'assistant' && m.reasoning_content">
+<div class="reasoning" x-data="{open: false}">
+<div class="reasoning-head" @click="open = !open">
+<span class="reasoning-caret" x-text="open ? '▾' : '▸'"></span>
+<span x-text="'Thinking (' + m.reasoning_content.length + ' chars)'"></span>
+</div>
+<div class="reasoning-body" x-show="open" x-text="m.reasoning_content"></div>
+</div>
+</template>
+<template x-if="m.tool_calls && m.tool_calls.length">
                     <details>
                       <summary x-text="m.tool_calls.length + ' tool call(s)'"></summary>
                       <template x-for="tc in m.tool_calls" :key="tc.id">

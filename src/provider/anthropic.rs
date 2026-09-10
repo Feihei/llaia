@@ -228,6 +228,7 @@ impl Provider for AnthropicProvider {
         while let Some(ev) = stream.next().await {
             match ev? {
                 StreamEvent::TextDelta(d) => text.push_str(&d),
+                StreamEvent::ReasoningDelta(_) => {}
                 StreamEvent::ToolCall(tc) => tool_calls.push(tc),
                 StreamEvent::Usage(u) => usage = Some(u),
                 StreamEvent::FinishReason(_) => {}
@@ -240,6 +241,7 @@ impl Provider for AnthropicProvider {
             tool_calls,
             usage,
             finish_reason: None,
+            reasoning: None,
         })
     }
 

@@ -1080,7 +1080,8 @@ impl Agent {
             // 强制关思考重试；重试耗尽 → 诊断收尾 + 连续失败报警（熔断只报警不拒服）。
             let guard = self.guard.clone();
             let mut attempt: u32 = 0;
-            let (mut iter_text, calls, iter_usage, degenerate) = loop {
+            // P0 留存：健康流的思考原文随 iter_text 一起出循环（退化流丢弃）
+            let (mut iter_text, iter_reasoning, calls, iter_usage, degenerate) = loop {
                 let messages = self.context.to_messages(&tz);
                 let tools = if force_summary {
                     None
@@ -1106,8 +1107,8 @@ impl Agent {
                     .consume_stream_guarded(&mut stream, &event_tx, &guard)
                     .await?
                 {
-                    StreamOutcome::Aborted { text } => return Ok(text),
-                    StreamOutcome::Failed { message } => {
+                    StreamOutcome::Aborted { text, .. } => return Ok(text),
+                    StreamOutcome::Failed { message, .. } => {
                         // 反应式窗口收缩（S2，goose/deepseek-harness 通路）：乐观默认或
                         // 虚高的配置值撞上 provider 真实窗口 → 400 溢出。识别即把缓存窗口
                         // 减半（下限 CONTEXT_SHRINK_FLOOR）并**留在 resolved_context_size
@@ -1153,9 +1154,14 @@ impl Agent {
                             self.guard_retry_prep(&event_tx).await?;
                             continue;
                         }
-                        break (String::new(), Vec::new(), None, Some(reason));
+                        break (String::new(), String::new(), Vec::new(), None, Some(reason));
                     }
-                    StreamOutcome::Completed { text, calls, usage } => {
+                    StreamOutcome::Completed {
+                        text,
+                        calls,
+                        usage,
+                        reasoning,
+                    } => {
                         // 空输出判定：流正常结束但无文本无工具调用 = 思考流被剥离/
                         // provider 丢弃后什么都没产出的残余形态，同样判退化走重试。
                         // 空回复本身就是坏的，无需区分原因。
@@ -1167,12 +1173,13 @@ impl Agent {
                             }
                             break (
                                 text,
+                                reasoning.unwrap_or_default(),
                                 calls,
                                 usage,
                                 Some("empty output (no text, no tool calls)".to_string()),
                             );
                         }
-                        break (text, calls, usage, None);
+                        break (text, reasoning.unwrap_or_default(), calls, usage, None);
                     }
                 }
             };
@@ -1229,9 +1236,16 @@ impl Agent {
                     iter_text.push_str(&note);
                     let _ = event_tx.send(TurnEvent::Chunk { delta: note }).await;
                 }
-                self.session_store
-                    .append_message(self.session_id, &Role::Assistant, &iter_text)?;
-                self.context.push(ChatMessage::assistant(&iter_text));
+                self.session_store.append_message_with_reasoning(
+                    self.session_id,
+                    &Role::Assistant,
+                    &iter_text,
+                    Some(&iter_reasoning),
+                )?;
+                self.context.push(ChatMessage::assistant_with_reasoning(
+                    &iter_text,
+                    Some(iter_reasoning.clone()),
+                ));
                 let _ = event_tx.send(TurnEvent::Done).await;
                 return Ok(iter_text);
             }
@@ -1256,10 +1270,16 @@ impl Agent {
                 }
             }
 
-            let assistant_msg = ChatMessage::assistant_with_tools(iter_text.clone(), calls.clone());
-            let assistant_msg_id =
-                self.session_store
-                    .append_message(self.session_id, &Role::Assistant, &iter_text)?;
+            let mut assistant_msg =
+                ChatMessage::assistant_with_tools(iter_text.clone(), calls.clone());
+            assistant_msg.reasoning_content =
+                Some(iter_reasoning.clone()).filter(|r| !r.is_empty());
+            let assistant_msg_id = self.session_store.append_message_with_reasoning(
+                self.session_id,
+                &Role::Assistant,
+                &iter_text,
+                Some(&iter_reasoning),
+            )?;
             self.context.push(assistant_msg);
 
             for tc in &calls {
@@ -1485,6 +1505,9 @@ impl Agent {
         };
         parser.set_think_monitor(think_monitor);
         let mut iter_text = String::new();
+        // P0 留存：思考流增量收集（provider 层 ReasoningDelta；折回通路不发此事件）。
+        // 只落 sqlite/留存，不向用户流式输出。
+        let mut iter_reasoning = String::new();
         let mut calls: Vec<crate::provider::ToolCall> = Vec::new();
         // 本次请求（尝试）累计的 token 用量：Usage 事件可能在流中多次出现，合并成一条
         let mut iter_usage: Option<crate::provider::Usage> = None;
@@ -1494,12 +1517,16 @@ impl Agent {
             if event_tx.is_closed() {
                 tracing::info!("stream aborted by user (tx closed)");
                 if !iter_text.is_empty() {
-                    self.session_store.append_message(
+                    self.session_store.append_message_with_reasoning(
                         self.session_id,
                         &Role::Assistant,
                         &iter_text,
+                        Some(&iter_reasoning),
                     )?;
-                    self.context.push(ChatMessage::assistant(&iter_text));
+                    self.context.push(ChatMessage::assistant_with_reasoning(
+                        &iter_text,
+                        Some(iter_reasoning.clone()),
+                    ));
                 }
                 return Ok(StreamOutcome::Aborted { text: iter_text });
             }
@@ -1551,6 +1578,10 @@ impl Agent {
                 StreamEvent::ToolCall(tc) => {
                     calls.push(tc);
                 }
+                // P0 留存：思考流只收集，不向用户流式输出（思考不进 Chunk）
+                StreamEvent::ReasoningDelta(d) => {
+                    iter_reasoning.push_str(&d);
+                }
                 StreamEvent::Usage(u) => match iter_usage.as_mut() {
                     Some(acc) => {
                         acc.prompt_tokens += u.prompt_tokens;
@@ -1566,12 +1597,16 @@ impl Agent {
                     // 用户已在频道看到这些文本，不落 context/sqlite 会让下一轮
                     // 模型不知道自己说过什么。
                     if !iter_text.is_empty() {
-                        self.session_store.append_message(
+                        self.session_store.append_message_with_reasoning(
                             self.session_id,
                             &Role::Assistant,
                             &iter_text,
+                            Some(&iter_reasoning),
                         )?;
-                        self.context.push(ChatMessage::assistant(&iter_text));
+                        self.context.push(ChatMessage::assistant_with_reasoning(
+                            &iter_text,
+                            Some(iter_reasoning.clone()),
+                        ));
                     }
                     return Ok(StreamOutcome::Failed { message: msg });
                 }
@@ -1593,6 +1628,11 @@ impl Agent {
             text: iter_text,
             calls,
             usage: iter_usage,
+            reasoning: if iter_reasoning.is_empty() {
+                None
+            } else {
+                Some(iter_reasoning)
+            },
         })
     }
 }
@@ -1604,12 +1644,14 @@ enum StreamOutcome {
         text: String,
         calls: Vec<crate::provider::ToolCall>,
         usage: Option<crate::provider::Usage>,
+        /// P0 留存：思考流原文（无思考为 None）
+        reasoning: Option<String>,
     },
     /// guard 判定退化：流已中止，产物丢弃（不落库不进 context）
     Degenerate { reason: String },
-    /// 用户中止（tx closed）：部分输出已保存
+    /// 用户中止（tx closed）：部分输出（含思考留存）已保存
     Aborted { text: String },
-    /// 流错误：部分输出已保存
+    /// 流错误：部分输出（含思考留存）已保存
     Failed { message: String },
 }
 
@@ -2716,6 +2758,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 finish_reason: None,
+                reasoning: None,
             })
         }
         async fn chat_stream(&self, _req: &ChatRequest<'_>) -> BoxStream<'_, Result<StreamEvent>> {
@@ -3107,6 +3150,70 @@ mod tests {
     }
 
     // ---- /steer 注入（plan.md #I）----
+
+    // ---- P0 thinking 留存（docs/plans/2026-09-10-thinking-capability-model.md）----
+
+    #[tokio::test]
+    async fn test_reasoning_delta_persisted_to_sqlite_and_context() {
+        // 流带 ReasoningDelta：思考留存进 sqlite reasoning_content 列与
+        // context assistant 消息；不向用户流式输出（不产生 Chunk）。
+        let mut agent = make_agent_with_rounds(
+            true,
+            vec![vec![
+                StreamEvent::ReasoningDelta("let me ".into()),
+                StreamEvent::ReasoningDelta("think...".into()),
+                StreamEvent::TextDelta("final answer".into()),
+                StreamEvent::Done,
+            ]],
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let out = agent
+            .handle_input_streaming("question", "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(out, "final answer");
+        // 流式事件里不含思考文本（收完事件才能判定，先 drain）
+        while rx.try_recv().is_ok() {}
+        // sqlite：assistant 行带 reasoning_content
+        let msgs = agent
+            .session_store
+            .recent_messages(agent.session_id, 50)
+            .unwrap();
+        let a = msgs
+            .iter()
+            .find(|m| m.role == "assistant" && m.content == "final answer")
+            .expect("assistant row");
+        assert_eq!(a.reasoning_content.as_deref(), Some("let me think..."));
+        // context：assistant 消息携带同一段思考
+        let ctx = agent
+            .context
+            .history
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .expect("assistant in context");
+        assert_eq!(ctx.reasoning_content.as_deref(), Some("let me think..."));
+    }
+
+    #[tokio::test]
+    async fn test_reasoning_only_stream_not_mistaken_for_output() {
+        // 只有思考没有正文/工具调用：空输出判定不受 ReasoningDelta 影响——
+        // 思考不算产出，仍走 guard 空输出重试路径（此处 guard 耗尽 → 诊断收尾）。
+        let mut agent = make_agent_with_rounds(
+            true,
+            vec![vec![
+                StreamEvent::ReasoningDelta("hmm".into()),
+                StreamEvent::Done,
+            ]],
+        )
+        .await;
+        let (tx, _rx) = mpsc::channel(64);
+        let out = agent.handle_input_streaming("q", "cli", tx).await.unwrap();
+        assert!(
+            out.contains("[guard]"),
+            "empty output (reasoning only) should trigger guard diagnosis: {out}"
+        );
+    }
 
     #[tokio::test]
     async fn test_steer_injected_into_context_and_sqlite() {
