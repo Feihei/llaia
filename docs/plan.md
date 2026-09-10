@@ -16,7 +16,7 @@
 > 条目勾选框语义：**`[x]` = 代码已落地**，`[ ]` = 尚有未完部分（含「已定案未实现」「部分交付」）。
 > 「已定案/已立项」只是决策完成，不算 `[x]`——须在实现后勾上，并在条目标注交付日期与代码位置。
 
-> **编号约定**（一个编号只表示一件事，2026-09-05 起）：**P*** = 阶段性工程（P1…P7）；**H*** = 近期小修（发版窗口内的低风险止血项）。T1–T4（OS/部署级安全防线）与 S1–S2（进程内静态分析）曾是旧 P7「terminal 脚本绕过防护」的子项编号，2026-09-07 随专项收口退役（归档见 CHANGELOG §v0.4.1）；新 P7 于 2026-09-09 重新立项，不再使用 T/S 编号。曾有一版把静态分析三步也写成 T1/T2/T3，与 T1–T4 撞车，已改（后者改用 S 前缀）。
+> **编号约定**（一个编号只表示一件事，2026-09-05 起）：**P*** = 阶段性工程（P1…P7）；**H*** = 近期小修（发版窗口内的低风险止血项）。T1–T4（OS/部署级安全防线）与 S1–S2（进程内静态分析）曾是旧 P7「terminal 脚本绕过防护」的子项编号，2026-09-07 随专项收口退役（归档见 CHANGELOG §v0.5.0）；新 P7 于 2026-09-09 重新立项，不再使用 T/S 编号。曾有一版把静态分析三步也写成 T1/T2/T3，与 T1–T4 撞车，已改（后者改用 S 前缀）。
 
 ---
 
@@ -33,15 +33,15 @@
 | P5 | ✅ | Provider Compat / 记忆预算 / 统一搜索 / todo / ask_user / skill 自管 / goal / 剩余项 | [CHANGELOG.md](CHANGELOG.md)（§P5） |
 | P6 | ✅ | 稳定性修复 + 快赢 + WebUI 批次 + 任务线/侧问/插话/媒体作用域 + Generation Guard/首运行引导 | [CHANGELOG.md](CHANGELOG.md)（§v0.3.1、§v0.4.0） |
 | v0.4.0 | ✅ | P6 全量 + provider/compat 收口，2026-09-04 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.4.0）、[release-notes/v0.4.0.md](release-notes/v0.4.0.md) |
-| v0.4.1 | 🚧 | 发版小版本（**攒发**）：H1–H4 止血 + T3/S1 terminal 安全收口 + 画像模板升级 + /session 改名 + 框架消息英文化 + todo GC + WebUI 归档卫生（代码全部落地，**未打 tag**，只欠 H6 发版动作） | [CHANGELOG.md](CHANGELOG.md)（§v0.4.1） |
+| v0.5.0 | 🚧 | 发版版本（**攒发**；因含行为不兼容改动由原定的 v0.4.1 直升 minor）：H1–H4 止血 + T3/S1 terminal 安全收口 + 画像模板升级 + /session 改名 + 框架消息英文化 + todo GC + WebUI 归档卫生（代码全部落地，**未打 tag**，只欠 H6 发版动作） | [CHANGELOG.md](CHANGELOG.md)（§v0.5.0） |
 
-> **P6 已全部交付并归档**：原 P6 节的完整勾选清单（WebUI W1/W2/W3、会话主题总结、provider 针对性优化、`memory_research`、启动优化 #11、主干代码体检、#A–#J 新增发现、Generation Guard、First-run Bootstrap 等）已随各项实现陆续迁入 [CHANGELOG.md](CHANGELOG.md) §v0.3.1 / §v0.4.0，本文件不再保留已交付明细。注意 CHANGELOG 里**没有独立的 §v0.3.2**：原按 0.3.2 攒的开发内容跨版本号当作 v0.4.0 发布，段标题已一并重定。v0.4.1 的三项同样已迁入 CHANGELOG，本文件只留索引与下一步。
+> **P6 已全部交付并归档**：原 P6 节的完整勾选清单（WebUI W1/W2/W3、会话主题总结、provider 针对性优化、`memory_research`、启动优化 #11、主干代码体检、#A–#J 新增发现、Generation Guard、First-run Bootstrap 等）已随各项实现陆续迁入 [CHANGELOG.md](CHANGELOG.md) §v0.3.1 / §v0.4.0，本文件不再保留已交付明细。注意 CHANGELOG 里**没有独立的 §v0.3.2**：原按 0.3.2 攒的开发内容跨版本号当作 v0.4.0 发布，段标题已一并重定。v0.5.0 的三项同样已迁入 CHANGELOG，本文件只留索引与下一步。
 
 ---
 
-## 近期小修（H 系列，v0.4.1 → v0.4.2 窗口）
+## 近期小修（H 系列，v0.5.0 → v0.5.1 窗口）
 
-**状态**：🚧 收口中（起点 2026-09-05）｜H1–H4 已交付并迁入 CHANGELOG，H5 已拍板挂起 v0.4.2，H6（打 tag）待发版｜每项独立可提交、不阻塞发版
+**状态**：🚧 收口中（起点 2026-09-05）｜H1–H4 已交付并迁入 CHANGELOG，H5 已拍板挂起 v0.5.1，H6（打 tag）待发版｜每项独立可提交、不阻塞发版
 
 抽出来的理由：这些都不是「阶段性工程」，而是散在 P7 / 主干体检 backlog 里的低成本止血项——原混在前瞻计划里，既不会被顺手做掉，也看不清发版窗口里还剩什么。
 
@@ -49,22 +49,23 @@
       - **先说结论：判定逻辑没坏，四次失败全是模型侧文本不符**。对照 `22302d8^` 的原文逐行验过：阿来改 `todo.rs` 的两次（`tool_calls` 1260/1265）把 `/// 禁用落盘（测试 / 无 workspace 场景）。` 记成了 `/// 禁用落盘的降级实例（测试用）。`；改 `plan.md` 的两次（09-04，calls 1088/1091）引用了一条从没进过仓库正文的行（`git log -S "N+1"` 全历史无命中）。
       - **原来工具还在帮倒忙**：`file.rs` 只回 `old_string not found in <path>`，不提示「先 `file_read` 拿准原文再重试」，模型于是拿同一份脑内快照连撞四五次，一次编辑烧掉五个回合。现在 0 命中会附一段以 `old_string` 首个可命中行为锚点的**带行号文件摘录**（无锚点时退化为「内容可能过期，请重新 file_read 逐字复制」的行动指引）。
       - **已修的潜在坑（本机当时未复现，Windows 用户必踩）**：匹配曾是字节级 `content.matches(old)`、零归一化。本仓库工作树恰好纯 LF，但 `core.autocrlf = true` 且**无 `.gitattributes`** → 新克隆到 Windows 得到 CRLF 工作树，模型按 LF 给 `old_string` 必然 0 命中，`file_edit` 直接废掉。现在首选完全一致，未命中且两侧行尾单纯不同时换算行尾重试一次，写回只替换命中片段、不整篇改行尾（混合行尾不在宽容范围）。
-- [x] **H2 · 标签模式下 `` ```json `` 围栏的工具调用不被解析**（2026-09-05 交付：`tool_call/stream_parser.rs` + `tool_call/prompt.rs`，端到端用例在 `agent/mod.rs`；明细见 CHANGELOG §v0.4.1）
+- [x] **H2 · 标签模式下 `` ```json `` 围栏的工具调用不被解析**（2026-09-05 交付：`tool_call/stream_parser.rs` + `tool_call/prompt.rs`，端到端用例在 `agent/mod.rs`；明细见 CHANGELOG §v0.5.0）
       - 原现象：首运行引导实测中，模型唯一一次尝试写 SOUL/USER 是把工具调用包在 `` ```json … ``` `` 里，静默不执行。原根因：`FENCE_LANGS` 只含 `tool_call|toolcall|tool-call|invoke`，`json` 不匹配 → 不进 `InFence`，整块按普通文本透传。仅影响标签降级模式（本地小模型主路径）。
       - **实现与原提案有两处偏差**（都朝更简单的方向）：① 没用「已注册工具名白名单」（要改 parser 签名并穿线），改为**通用语言名走严格判定**——`value_to_fenced_call` 要求同时带 `arguments` 键，`{"name":"张三","age":3}` 这类展示数据因此不会被凭空执行成 unknown tool 调用，专用围栏 ```` ```tool_call ```` 维持原宽松判定零回归；② 补了原提案没想到的两处还原：解析失败时连开栏原文一起吐（否则用户看到丢格式的正文 + 孤儿闭栏），未闭合的通用围栏在 `finish()` 还原而非静默丢弃（截断时宁可看到半截 JSON；专用围栏仍按原语义丢弃，防泄漏）。
       - 死码已清：`tool_call/tag_parser.rs`（同一套规则的正则版、334 行、零生产调用点）删除，等价覆盖落在 `stream_parser.rs` 的 7 条新单测；`agent/mod.rs` 另加一条端到端用例证明围栏调用真被执行——只在 parser 层测绿保证不了接线。
       - **已知代价**：```` ```json ```` 块要缓冲到闭栏才输出，这类代码块不再逐字流式（```` ```python ```` 等不受影响，`test_java_fence_not_hijacked_by_json_prefix` 钉住同前缀不被劫持）。单用户场景可接受，先记录不优化。
 - [x] **H3 · 文档一致性欠账**（2026-09-06 交付：`AGENTS.md` + `docs/guide/memory-and-context.md`）
       - ~~AGENTS.md 仍写「chat 主路径当前仍整块返回，未启用流式」~~ 已改：主路径流式（`chat_stream` + Generation Guard 消费框架），非流式 `chat()` 只剩不带工具的 sidecar 单发调用（压缩摘要 / reminder 提炼 / 会话标题 / vision 描述 / `/btw` / 记忆压缩）。
-      - ~~用户文档没跟上 v0.4.1 的画像模板改动（`88e96b7` 只动了 `src/`）~~ 已补进 `guide/memory-and-context.md` 的 Bootstrap 节：SOUL 默认 `# Name` = LLAIA、USER 的 `language` 留空由引导去问（旧模板预填值会替英文用户做主）、启动时自动升级逐字节未改动的旧占位文件（`refresh_placeholder_templates`，改过一行就不动）。
-      - 本文件自身的编号冲突（**已修**，随 H 系列立项那笔提交落地）：P7 的 T1–T4 与当日笔记里另套 T1/T2/T3 含义互相矛盾，已把「静态分析层」改称 S1/S2（旧 P7 专项编号已于 2026-09-07 收口退役，归档见 CHANGELOG §v0.4.1）。
+      - ~~用户文档没跟上 v0.5.0 的画像模板改动（`88e96b7` 只动了 `src/`）~~ 已补进 `guide/memory-and-context.md` 的 Bootstrap 节：SOUL 默认 `# Name` = LLAIA、USER 的 `language` 留空由引导去问（旧模板预填值会替英文用户做主）、启动时自动升级逐字节未改动的旧占位文件（`refresh_placeholder_templates`，改过一行就不动）。
+      - 本文件自身的编号冲突（**已修**，随 H 系列立项那笔提交落地）：P7 的 T1–T4 与当日笔记里另套 T1/T2/T3 含义互相矛盾，已把「静态分析层」改称 S1/S2（旧 P7 专项编号已于 2026-09-07 收口退役，归档见 CHANGELOG §v0.5.0）。
 - [x] **H4 · 主干体检 backlog 里的机械项提升**（2026-09-06 交付）
       - 常量正则 `unwrap()`：`secrets.rs::is_plaintext` 与 `config.rs::expand_string` 两处补「模式串编译期写死且合法，构造不可能失败」注释；**`approval.rs` 实为笔误**——该文件没有常量正则，实际处理的是 `single_question` 里受 `len()==1` 保护的 `into_iter().next().unwrap()`（同样补注释）。
       - `lock().unwrap()` 毒锁恢复：`slash.rs` 4 处 + `sqlite.rs` 36 处（plan 立项时估的「约 20 处」偏少，实数 40），全部机械替换为 `lock().unwrap_or_else(|e| e.into_inner())`——锁内均同步调用、无 await，`Mutex` 毒化后恢复守卫不丢正确性，与「生产路径不用 unwrap」约定对齐。
 - [ ] **H5 · 入站附件 `uploads/` 无回收通路**（todo GC 的同类项，2026-09-05 顺带查得）：QQ 附件（`channels/qq.rs:872`）与邮件附件（`channels/mail.rs:190`）都落 `<家目录>/uploads/`，全仓库没有任何删除/回收代码，只增不减（本机现 2 个文件 / 220 KB，属还没长起来而不是没问题）。**两条现成通路都不能照搬**：`todos/` 的按会话 uuid GC 在这里无意义（附件不属于会话生命周期，且文件名是 `<msg_id>_<filename>` 不带 uuid），`workspace/tmp/` 的启动期 3 天 mtime 清理又太危险——用户半年前发来的图片可能仍被引用。必要性：**低–中**（单用户场景增长慢，但发版前把它记下来比忘掉便宜）。
-      - **定案（grill 2026-09-07）：WebUI 手动清理**——保留全部 + 容量显示 + uploads 文件列表/手动删除，不做任何自动回收（消息历史引用这些路径，自动删/挪都会断链，零自动 = 零断链风险）。挂起到 v0.4.2，v0.4.1 不带。
-- [ ] **H6 · v0.4.1 发版动作**：写好 `docs/release-notes/v0.4.1.md`（简短英文 changelog，`release.yml` 的 release-notes job 会据此填 GitHub release body）→ `git tag -a v0.4.1` → push 分支与 tag。发版节奏与「跨版本号需先改 `Cargo.toml` 再打 tag」的既有约定见 AGENTS.md「发版」。
-      - **时序修订（grill 2026-09-07）**：用户拍板**攒发**——v0.4.1 等 T3 + S1 落地后一起打 tag（覆盖 2026-09-05「v0.4.1 不含 P7 任何子项」的决定；T3/S1 内容届时计入 v0.4.1 changelog）。H5 不等，挂起 v0.4.2。
+      - **定案（grill 2026-09-07）：WebUI 手动清理**——保留全部 + 容量显示 + uploads 文件列表/手动删除，不做任何自动回收（消息历史引用这些路径，自动删/挪都会断链，零自动 = 零断链风险）。挂起到 v0.5.1，v0.5.0 不带。
+- [ ] **H6 · v0.5.0 发版动作**：写好 `docs/release-notes/v0.5.0.md`（简短英文 changelog，`release.yml` 的 release-notes job 会据此填 GitHub release body）→ `git tag -a v0.5.0` → push 分支与 tag。发版节奏与「跨版本号需先改 `Cargo.toml` 再打 tag」的既有约定见 AGENTS.md「发版」。
+      - **升号说明（2026-09-10）**：原定 v0.4.1 小版本，因内容滚入行为不兼容改动（`interpret_inline` 默认强制人审、任务线重启不再隐式续接、自动会话标题移除、画像模板升级改写）且体量达 feature 级，按 pre-1.0 semver 直升 v0.5.0。
+      - **时序修订（grill 2026-09-07）**：用户拍板**攒发**——本版等 T3 + S1 落地后一起打 tag（覆盖 2026-09-05「不含 P7 任何子项」的决定；T3/S1 内容届时计入 changelog）。H5 不等，挂起 v0.5.1。
 
 ---
 
@@ -72,7 +73,7 @@
 
 **状态**：⏳ 计划中（2026-09-09 立项；五项均为模糊记录，待 grill 逐项拷问后正式立项展开）
 
-> **旧 P7 已收口归档**：P7 编号曾用于 terminal 脚本绕过防护专项（T1–T4 / S1–S2），2026-09-07 全部定案——T3（解释器内联载荷强制审批）、S1（命令拆分 + flag 级路径检查）、T2（无特权账户文档化）已交付，S2 / T1 / T4 定案不做；完整记录（含不做项评估）随 **v0.4.1 攒发**迁入 [CHANGELOG.md](CHANGELOG.md) §v0.4.1，本文件不再保留。
+> **旧 P7 已收口归档**：P7 编号曾用于 terminal 脚本绕过防护专项（T1–T4 / S1–S2），2026-09-07 全部定案——T3（解释器内联载荷强制审批）、S1（命令拆分 + flag 级路径检查）、T2（无特权账户文档化）已交付，S2 / T1 / T4 定案不做；完整记录（含不做项评估）随 **v0.5.0 攒发**迁入 [CHANGELOG.md](CHANGELOG.md) §v0.5.0，本文件不再保留。
 
 > 下面五项只是想法落袋防忘，范围、边界、验收标准全部未定；立项前走 grill 工作流逐项拷问，定案一项就在本节展开一项的勾选清单。
 
@@ -97,8 +98,8 @@
 ### 排查提示（留档，不是待办）
 
 - **agent 改自己的持久化，验证必须由外部实例做**（2026-09-05 定）：running 的 llaia 进程锁着自己的 `sessions.db` 与 workspace，让 agent 自测「删会话后清单是否被回收」这类项必然测不到——写验证脚本得另起一个实例、复制一份状态目录。同因：本机跑 `cargo test` 前须停掉运行中的 llaia，否则 `target\debug\llaia.exe` 被锁报拒绝访问（os error 5）。
-- 残留数据清理的现行结论（`todos/` 启动期 GC 已落地）见 [CHANGELOG.md](CHANGELOG.md) §v0.4.1。
-- **定期主干代码体检**是**例行项**而非一次性交付：需要时手动触发（用户定，2026-08-25），主干模块（agent loop / provider / memory / web）逐次过一遍，产出为检查记录（发现项 → 直接修 / 单独立项 / 搁置留档）。历轮已交付修复见 CHANGELOG §v0.3.1 / §v0.4.0 / §v0.4.1。
+- 残留数据清理的现行结论（`todos/` 启动期 GC 已落地）见 [CHANGELOG.md](CHANGELOG.md) §v0.5.0。
+- **定期主干代码体检**是**例行项**而非一次性交付：需要时手动触发（用户定，2026-08-25），主干模块（agent loop / provider / memory / web）逐次过一遍，产出为检查记录（发现项 → 直接修 / 单独立项 / 搁置留档）。历轮已交付修复见 CHANGELOG §v0.3.1 / §v0.4.0 / §v0.5.0。
 
 ---
 

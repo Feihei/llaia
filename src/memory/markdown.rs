@@ -59,7 +59,7 @@ pub const USER_TEMPLATE: &str = r#"# Basic Info
 - language:
 "#;
 
-/// v0.4.1 之前的 SOUL / USER 模板原文。
+/// v0.5.0 之前的 SOUL / USER 模板原文。
 ///
 /// 模板常量同时是 `is_unfilled` 的**指纹**：文案一改，存量仍是旧占位符的画像就被判成
 /// "已填写"，first-run bootstrap 哑火、tail reminder 门禁反向误烧一个隔离 turn。

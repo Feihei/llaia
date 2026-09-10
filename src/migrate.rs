@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::memory::{SOUL_TEMPLATE, SOUL_TEMPLATE_LEGACY, USER_TEMPLATE, USER_TEMPLATE_LEGACY};
 
-/// 画像模板升级（v0.4.1：SOUL 加 `# Name`、USER 的 `language` 改为留空）。
+/// 画像模板升级（v0.5.0：SOUL 加 `# Name`、USER 的 `language` 改为留空）。
 ///
 /// 为什么改文件而不是让 `is_unfilled` 认多个版本：模板常量是"用户从未填写"的**指纹**，
 /// 文案一改，存量仍是旧占位符的文件就被判成已填写——first-run bootstrap 从此哑火，

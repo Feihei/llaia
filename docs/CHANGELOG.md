@@ -6,7 +6,7 @@
 
 ---
 
-## v0.4.1 (未发布)
+## v0.5.0 (未发布)
 
 **Bug fixes / 稳定性**
 - **approval**：`/ok` 批准的 workspace 外操作在执行层被**二次拒绝**，审批形同虚设（实测于 game-portfolio 会话：agent 提交一条带越界路径的 terminal 命令，用户 `/ok` 批准后执行仍报 `is outside workspace`，错误以 user 消息灌回 context）。根因：`resolve_approval` 批准后走 `execute_with_events`，而 terminal / file_* 的 `execute` 内部**无条件**重跑 workspace 白名单校验——审批层判「需人审」的操作执行层必拒，与 ADR-0020「`/ok`：执行工具、真实结果写回上下文」相悖；v0.4.0 #B 只修了受信目录这一种放行通路，人审通路一直断着。修复：`Tool` trait 新增 `execute_approved`（默认透传 `execute_with_events`），terminal / file_* 覆写为**跳过越界白名单**（用户已在审批提示看到完整操作并显式批准），但命令策略、危险路径黑名单前缀（`C:\Windows` 等）兜底保留。回归测试：批准的越界 `cat` / `file_write` 真实执行、未批准仍拒、黑名单前缀批准后仍拒
