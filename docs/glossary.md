@@ -132,8 +132,14 @@ REPL 内以 `/` 开头的指令。P1 清单：
 ### `llaia chat`
 进入交互式 REPL。默认子命令（`llaia` 无参数等价于此）。
 
+### `llaia serve`
+主入口：拉起 WebUI + 已启用的 IM 频道 + cron 调度器。可选 `--host` / `--port` 覆盖**本次**监听地址，不回写 `config.toml`（Config 页仍显示文件值）。
+
 ### `llaia config`
 打印当前配置。
+
+### 状态目录（State Dir）
+`config.toml` / `.env` / `logs/` / `workspace/` 的父目录，默认 `~/.llaia`。解析优先级：`--config-dir` > `LLAIA_HOME` > 默认值。与 `workspace_root`（文件/终端工具的实时作用域，可被 `/move` 切换）**不是一回事**。
 
 ### `llaia doctor`
 诊断 provider 连通性、文件完整性。
@@ -202,7 +208,7 @@ P3-a 重定义为**全局开关**（不再 per-channel）：
 P3-a 引入。`~/.llaia/logs/audit.log` 记录所有有副作用工具的调用（timestamp / agent / channel / tool / args / result），文本追加，不做链式哈希。
 
 ### llaia init
-P3-b 引入。`llaia init [--workspace <path>] [--force]` 生成 `~/.llaia/` 目录骨架 + config.toml/SOUL.md/USER.md/MEMORY.md 模板，纯模板生成不交互问答，引导用户运行 `llaia serve` 进 WebUI 配置。详见 [ADR-0012](adr/0012-llaia-init.md)。
+P3-b 引入。`llaia init [--force]` 生成 `~/.llaia/` 目录骨架 + config.toml/SOUL.md/USER.md/MEMORY.md 模板，纯模板生成不交互问答，引导用户运行 `llaia serve` 进 WebUI 配置。详见 [ADR-0012](adr/0012-llaia-init.md)。
 
 ### cron 任务（Cron Task）
 P3-c 引入。定时任务定义在 `~/.llaia/cron.toml`，双模式：

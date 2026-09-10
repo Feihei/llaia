@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::config::Config;
+use crate::config::{Config, WebUiConfig};
 
 /// 渲染 `native_tool_calling` 展示：None（auto）= "auto"（跟随 Compat 探测，#10）。
 fn native_label(v: Option<bool>) -> String {
@@ -382,10 +382,39 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
     crate::channels::Channel::run(cli, registry).await
 }
 
+/// `llaia serve --host/--port` 的覆盖值。刻意**只影响绑定**：`config.toml` 与
+/// WebUI Config 页（读写 `live_config` 里那份文件值）都不被污染——否则页面会显示
+/// 一个并非来自配置文件的端口，用户下次保存时就把它静默写回盘上。
+#[derive(Debug, Clone, Default)]
+pub struct WebBindOverride {
+    pub host: Option<String>,
+    pub port: Option<u16>,
+}
+
+impl WebBindOverride {
+    pub fn is_none(&self) -> bool {
+        self.host.is_none() && self.port.is_none()
+    }
+}
+
+/// 把 CLI 覆盖值套到文件配置上，得到「实际绑定用」的那份 WebUI 配置。
+/// 纯函数，便于单测覆盖优先级（CLI > 文件）。
+pub fn effective_webui(file: &WebUiConfig, bind: &WebBindOverride) -> WebUiConfig {
+    let mut eff = file.clone();
+    if let Some(host) = bind.host.as_deref() {
+        eff.host = host.to_string();
+    }
+    if let Some(port) = bind.port {
+        eff.port = port;
+    }
+    eff
+}
+
 /// 守护进程模式：启动所有非 CLI 的后台频道（QQ、未来 WebUI 等），不启动终端交互
-pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
+pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride) -> Result<()> {
     prepare_startup_dir(config_dir)?;
     let config = load_config_or_init(config_dir)?;
+    let webui = effective_webui(&config.webui, &bind);
     warn_plaintext_secrets(config_dir);
 
     let log_dir = PathBuf::from(&config.log.dir);
@@ -418,8 +447,8 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
         if !a.has_provider().await {
             tracing::warn!(
                 "No provider configured; chat is unavailable. Configure [provider.default] in WebUI (http://{}:{})",
-                config.webui.host,
-                config.webui.port
+                webui.host,
+                webui.port
             );
         }
     }
@@ -553,7 +582,7 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     // 再 spawn WebChannel::run（build_router 在 run 内调用，此时 cron_scheduler 已就位）
     let config_path = config_dir.join("config.toml");
     let web = std::sync::Arc::new(crate::channels::web::WebChannel::new(
-        config.webui.clone(),
+        webui.clone(),
         registry.clone(),
         live_config.clone(),
         config_path,
@@ -564,8 +593,18 @@ pub async fn serve_cmd(config_dir: &Path) -> Result<()> {
     // cron_tool 注入 WebChannel，供热加载 cron 时重新指向新调度器（P4-f）
     web.set_cron_tool(cron_tool.clone());
     let web_pusher_for_cron: std::sync::Arc<dyn crate::cron::ProactivePusher> = web.clone();
-    let web_host = config.webui.host.clone();
-    let web_port = config.webui.port;
+    let web_host = webui.host.clone();
+    let web_port = webui.port;
+    if !bind.is_none() {
+        // 覆盖必须可见：否则「页面里写着 51217、实际听 51220」看起来像 bug
+        tracing::info!(
+            cli_host = ?bind.host,
+            cli_port = ?bind.port,
+            file_host = %config.webui.host,
+            file_port = config.webui.port,
+            "webui bind overridden by CLI (config.toml and the Config page keep the file values)"
+        );
+    }
 
     // 启动 cron 调度器（仅 serve 模式）
     let cron_path = config_dir.join("cron.toml");
@@ -1242,6 +1281,58 @@ impl Drop for PidGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--host/--port` 只喂给绑定，**不得**改写文件态：WebUI Config 页读写的是
+    /// `live_config` 里那份，一旦被覆盖值污染，用户下次保存就把临时端口静默落盘。
+    #[test]
+    fn web_bind_override_never_mutates_file_config() {
+        let file = WebUiConfig {
+            host: "127.0.0.1".into(),
+            port: 51217,
+            token: "t".into(),
+        };
+        let bind = WebBindOverride {
+            host: Some("0.0.0.0".into()),
+            port: Some(51220),
+        };
+        let eff = effective_webui(&file, &bind);
+        assert_eq!((eff.host.as_str(), eff.port), ("0.0.0.0", 51220));
+        assert_eq!(
+            (file.host.as_str(), file.port),
+            ("127.0.0.1", 51217),
+            "文件值必须原样"
+        );
+        assert_eq!(eff.token, "t", "token 不参与覆盖");
+    }
+
+    #[test]
+    fn web_bind_override_is_per_field() {
+        let file = WebUiConfig {
+            host: "127.0.0.1".into(),
+            port: 51217,
+            token: String::new(),
+        };
+        // 只给 port：host 沿用文件值（不是回落到某个默认地址）
+        let only_port = effective_webui(
+            &file,
+            &WebBindOverride {
+                host: None,
+                port: Some(8080),
+            },
+        );
+        assert_eq!(
+            (only_port.host.as_str(), only_port.port),
+            ("127.0.0.1", 8080)
+        );
+        // 无覆盖：逐字段等于文件值，且 is_none 为真（决定是否打那条 INFO）
+        assert_eq!(effective_webui(&file, &Default::default()).port, 51217);
+        assert!(WebBindOverride::default().is_none());
+        assert!(!WebBindOverride {
+            host: None,
+            port: Some(1)
+        }
+        .is_none());
+    }
 
     fn write_config(dir: &std::path::Path, base_url: &str) {
         let toml = format!(

@@ -1,6 +1,6 @@
 # 配置参考
 
-主配置文件是 `~/.llaia/config.toml`（可用 `--config-dir` 改路径）。敏感凭据集中放同目录的 `.env`，config 里用 `${VAR}` 引用，避免明文落盘。
+主配置文件是数据目录下的 `config.toml`，默认 `~/.llaia/config.toml`。数据目录的解析优先级为 `--config-dir` > 环境变量 `LLAIA_HOME` > `~/.llaia`（见 [CLI 参考](cli.md)）。敏感凭据集中放同目录的 `.env`，config 里用 `${VAR}` 引用，避免明文落盘。
 
 > 配置 schema 的设计背景与完整示例见开发文档 [ADR-0008](../adr/0008-config-schema-v1.1.md)。本页是从用户视角使用配置的速查。
 
