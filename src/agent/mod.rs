@@ -16,7 +16,7 @@ use crate::config::Config;
 use crate::memory::sqlite::SessionStore;
 use crate::provider::{
     ChatMessage, ChatRequest, ContentPart, ImageUrlContent, MessageContent, Provider, Role,
-    StreamEvent,
+    StreamEvent, ThinkingIntent, ThinkingOffWire,
 };
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -133,13 +133,15 @@ pub struct Agent {
     /// （reload_skills 只在我们这边缓存、不再另外持参），否则 /move 会把 skills 段挤掉。
     skills_prompt_cache: String,
     /// cron 等自动化任务关闭模型「深度思考」：推理模型（Qwen3 等）在结构化
-    /// 合成任务上思考纯属浪费且撑爆超时。置位后请求带 `disable_thinking`，
-    /// 由 provider 注入 chat_template_kwargs 关掉思考。
+    /// 合成任务上思考纯属浪费且撑爆超时。置位后请求带 `ThinkingIntent::None`，
+    /// 由 provider 按 off_wire/能力声明收口成出站参数。
     /// `fork_for_isolated` 派生的 cron 副本按需置位，主 agent 恒为 false。
     disable_thinking: bool,
-    /// 用户经 `/reasoning off` 设置的会话级思考开关：true = 关闭深度思考。
-    /// 与上面的自动任务位独立（OR 关系），cron 副本置位不影响主会话开关。
-    pub thinking_off: bool,
+    /// 用户经 `/reasoning` 设置的思考意图（P1 D1，进程级、跨频道共享、重启失效）。
+    /// Auto = 不发任何参数；请求层与 cron 的 disable_thinking、guard 强制关
+    /// 正交合成（见主循环 intent 计算）；能力未知/不支持由命令层门禁与 provider
+    /// 收口兜底，不在此处预判。
+    pub thinking_intent: ThinkingIntent,
     /// /steer 插话缓冲（plan.md #I）：channel 在 turn 持锁期间仍可投递（本字段为
     /// 独立 Arc，不经 Agent 锁）；agent 在工具循环非末轮迭代顶部 drain，以
     /// `[steer] User added: ...` 的 user 消息注入，模型下一迭代自然看到。
@@ -311,7 +313,7 @@ impl Agent {
             agents_md_prompt: String::new(),
             skills_prompt_cache: String::new(),
             disable_thinking: false,
-            thinking_off: false,
+            thinking_intent: ThinkingIntent::Auto,
             steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
             active_task: None,
             btw_recent: Vec::new(),
@@ -430,6 +432,14 @@ impl Agent {
     /// None 表示降级模式（无 provider）。
     pub async fn provider_snapshot(&self) -> Option<Arc<dyn Provider>> {
         self.provider.read().await.clone()
+    }
+
+    /// 当前 provider 的思考能力声明（P1 D5）：`/reasoning` 回显与 `/provider`
+    /// 切换重估用。None = 未配置 `[thinking]`（unknown 三态）。
+    pub async fn thinking_capability(&self) -> Option<crate::config::ThinkingConfig> {
+        self.provider_snapshot()
+            .await
+            .and_then(|p| p.thinking_capability())
     }
 
     /// 实时配置（WebUI 热加载写入的 Arc），用于读取最新的 provider/model 列表。
@@ -648,7 +658,8 @@ impl Agent {
             turn_tool_calls: Vec::new(),
             config: self.config.clone(),
             disable_thinking,
-            thinking_off: false,
+            // 隔离副本继承主线的 /reasoning 意图；cron 副本另有 disable_thinking 强制关
+            thinking_intent: self.thinking_intent,
             live_config: self.live_config.clone(),
             resolved_context_size: self.resolved_context_size.clone(),
             system_prompt_base: self.system_prompt_base.clone(),
@@ -790,7 +801,7 @@ impl Agent {
         let req = ChatRequest {
             messages: std::slice::from_ref(&req_msg),
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         match provider.chat(&req).await {
             Ok(resp) => resp
@@ -1080,8 +1091,26 @@ impl Agent {
             // 强制关思考重试；重试耗尽 → 诊断收尾 + 连续失败报警（熔断只报警不拒服）。
             let guard = self.guard.clone();
             let mut attempt: u32 = 0;
+            // 思考能力门禁（P1 D3，注入前求值）：off_wire 是否实测有效——决定
+            // guard 重试能不能真的关思考（false → D7 分流：提示 + 收紧思考帽）。
+            let capability = provider.thinking_capability();
+            let off_ok = matches!(
+                capability.as_ref().and_then(|c| c.off_wire),
+                Some(
+                    ThinkingOffWire::EnableThinkingFalse
+                        | ThinkingOffWire::ThinkingDisabled
+                        | ThinkingOffWire::ReasoningEffortNone
+                )
+            );
+            // D5 生效态尾部注入（状态栏/todo/env/task 同区，不进 system 前缀）：
+            // Auto 且非 cron 时不注入，请求组包与历史字节一致。
+            self.context.reasoning_state = build_reasoning_state(
+                self.thinking_intent,
+                self.disable_thinking,
+                capability.as_ref(),
+            );
             // P0 留存：健康流的思考原文随 iter_text 一起出循环（退化流丢弃）
-            let (mut iter_text, iter_reasoning, calls, iter_usage, degenerate) = loop {
+            let (mut iter_text, iter_reasoning, calls, iter_usage, turn_end) = loop {
                 let messages = self.context.to_messages(&tz);
                 let tools = if force_summary {
                     None
@@ -1094,17 +1123,39 @@ impl Agent {
                     }
                 };
                 let tools_ref = tools.as_deref();
+                // 思考意图合成（P1）：cron 强制关（disable_thinking）> guard 强制关
+                // （attempt > 0 且该端点 off_wire 实测有效，D7）> 用户 /reasoning 意图
+                // > auto。D7 分流：off_wire unknown/unsupported 时重试不再"假装关思考"
+                // （Ollama 上 kwargs 被忽略 → 重试完全无效的死循环），改走 [guard] 提示
+                // + 收紧思考帽（下方 guard_attempt）。
+                let req_intent = if self.disable_thinking || (attempt > 0 && off_ok) {
+                    Some(ThinkingIntent::None)
+                } else if self.thinking_intent != ThinkingIntent::Auto {
+                    Some(self.thinking_intent)
+                } else {
+                    None
+                };
                 let req = ChatRequest {
                     messages: &messages,
                     tools: tools_ref,
-                    // 重试（attempt > 0）强制关思考：思考流失控是退化的主要形态，
-                    // 重试时从根上掐掉（provider 注入 chat_template_kwargs）
-                    disable_thinking: self.disable_thinking || self.thinking_off || attempt > 0,
+                    thinking: req_intent,
                 };
+
+                // 重试时按 off_wire 分流调整思考帽：关不动就给思考上更紧的箍
+                // （减半，下限 2048 字符；0=不限时给有限兜底），配合 [guard] 提示
+                // 引导模型直接作答（D7）。
+                let mut guard_attempt = guard.clone();
+                if attempt > 0 && !off_ok {
+                    guard_attempt.thinking_cap = if guard_attempt.thinking_cap > 0 {
+                        (guard_attempt.thinking_cap / 2).max(2048)
+                    } else {
+                        16_384
+                    };
+                }
 
                 let mut stream = provider.chat_stream(&req).await;
                 match self
-                    .consume_stream_guarded(&mut stream, &event_tx, &guard)
+                    .consume_stream_guarded(&mut stream, &event_tx, &guard_attempt)
                     .await?
                 {
                     StreamOutcome::Aborted { text, .. } => return Ok(text),
@@ -1154,18 +1205,38 @@ impl Agent {
                             self.guard_retry_prep(&event_tx).await?;
                             continue;
                         }
-                        break (String::new(), String::new(), Vec::new(), None, Some(reason));
+                        break (
+                            String::new(),
+                            String::new(),
+                            Vec::new(),
+                            None,
+                            TurnEnd::Degenerate(reason),
+                        );
                     }
                     StreamOutcome::Completed {
                         text,
                         calls,
                         usage,
                         reasoning,
+                        finish_reason,
                     } => {
                         // 空输出判定：流正常结束但无文本无工具调用 = 思考流被剥离/
                         // provider 丢弃后什么都没产出的残余形态，同样判退化走重试。
                         // 空回复本身就是坏的，无需区分原因。
                         if guard.enabled && text.trim().is_empty() && calls.is_empty() {
+                            // D3 硬要求：finish_reason=length + 空 content = 输出预算在
+                            // 产出任何可见文本前被吃满（最常见：思考流吃满 max_tokens）——
+                            // 不是模型退化。重试不加预算不可能变好，不判退化、不重试、
+                            // 不计熔断，直接诊断收尾指向预算调整。
+                            if finish_reason.as_deref() == Some("length") {
+                                break (
+                                    text,
+                                    reasoning.unwrap_or_default(),
+                                    calls,
+                                    usage,
+                                    TurnEnd::BudgetExhausted,
+                                );
+                            }
                             if attempt < guard.max_retries {
                                 attempt += 1;
                                 self.guard_retry_prep(&event_tx).await?;
@@ -1176,25 +1247,55 @@ impl Agent {
                                 reasoning.unwrap_or_default(),
                                 calls,
                                 usage,
-                                Some("empty output (no text, no tool calls)".to_string()),
+                                TurnEnd::Degenerate(
+                                    "empty output (no text, no tool calls)".to_string(),
+                                ),
                             );
                         }
-                        break (text, reasoning.unwrap_or_default(), calls, usage, None);
+                        break (
+                            text,
+                            reasoning.unwrap_or_default(),
+                            calls,
+                            usage,
+                            TurnEnd::Healthy,
+                        );
                     }
                 }
             };
 
             // 本流正常走完（未中途 abort/error/退化中止）：记录 token 用量。
-            // 退化中止的流 usage 丢弃（部分 usage 不完整，统计意义有限）。
-            if degenerate.is_none() {
-                if let Some(u) = iter_usage {
-                    self.record_turn_usage(&u).await;
+            // 退化中止的流 usage 丢弃（部分 usage 不完整，统计意义有限）；
+            // 预算耗尽（finish_reason=length）的流 usage 真实有效，照记。
+            match turn_end {
+                TurnEnd::Healthy | TurnEnd::BudgetExhausted => {
+                    if let Some(u) = iter_usage {
+                        self.record_turn_usage(&u).await;
+                    }
                 }
+                TurnEnd::Degenerate(_) => {}
+            }
+
+            // 预算耗尽收尾（D3：不得判退化）：诊断消息指向预算调整，不递增熔断。
+            if matches!(turn_end, TurnEnd::BudgetExhausted) {
+                let diag = "[guard] The output budget was consumed before any content was \
+                            produced (finish_reason=length): raise max_tokens or set a thinking \
+                            budget (llama.cpp --reasoning-budget). This turn ends here."
+                    .to_string();
+                self.session_store
+                    .append_message(self.session_id, &Role::Assistant, &diag)?;
+                self.context.push(ChatMessage::assistant(&diag));
+                let _ = event_tx
+                    .send(TurnEvent::Chunk {
+                        delta: diag.clone(),
+                    })
+                    .await;
+                let _ = event_tx.send(TurnEvent::Done).await;
+                return Ok(diag);
             }
 
             // 熔断收尾：重试耗尽仍退化 → 诊断消息结束本轮，streak 递增；
             // 达到阈值附加醒目警告（只报警不拒服：退化有随机性，下轮任务可能正常）。
-            if let Some(reason) = degenerate {
+            if let TurnEnd::Degenerate(reason) = turn_end {
                 self.guard_streak += 1;
                 tracing::warn!(
                     streak = self.guard_streak,
@@ -1511,6 +1612,8 @@ impl Agent {
         let mut calls: Vec<crate::provider::ToolCall> = Vec::new();
         // 本次请求（尝试）累计的 token 用量：Usage 事件可能在流中多次出现，合并成一条
         let mut iter_usage: Option<crate::provider::Usage> = None;
+        // 有效 finish_reason（含 compat 推断）：D3 用它区分「预算耗尽」与「真退化」
+        let mut iter_finish_reason: Option<String> = None;
 
         while let Some(ev) = stream.next().await {
             // 用户中止（Ctrl+C）：event_tx 被关闭，提前结束并保存部分输出
@@ -1590,7 +1693,7 @@ impl Agent {
                     }
                     None => iter_usage = Some(u),
                 },
-                StreamEvent::FinishReason(_) => {}
+                StreamEvent::FinishReason(fr) => iter_finish_reason = Some(fr),
                 StreamEvent::Done => break,
                 StreamEvent::Error(msg) => {
                     // 保存错误前已生成的部分输出（与 tx-closed 中止路径同构）：
@@ -1633,6 +1736,7 @@ impl Agent {
             } else {
                 Some(iter_reasoning)
             },
+            finish_reason: iter_finish_reason,
         })
     }
 }
@@ -1646,6 +1750,8 @@ enum StreamOutcome {
         usage: Option<crate::provider::Usage>,
         /// P0 留存：思考流原文（无思考为 None）
         reasoning: Option<String>,
+        /// 有效 finish_reason（含 compat 推断）；D3 用它分流预算耗尽
+        finish_reason: Option<String>,
     },
     /// guard 判定退化：流已中止，产物丢弃（不落库不进 context）
     Degenerate { reason: String },
@@ -1653,6 +1759,36 @@ enum StreamOutcome {
     Aborted { text: String },
     /// 流错误：部分输出（含思考留存）已保存
     Failed { message: String },
+}
+
+/// 主循环单轮的结束形态（P1 D3）：Healthy / 预算耗尽 / 退化三分。
+/// 预算耗尽（finish_reason=length + 空内容）不是退化：不重试、不计熔断。
+enum TurnEnd {
+    Healthy,
+    BudgetExhausted,
+    Degenerate(String),
+}
+
+/// D5 尾部注入的生效态行：`[reasoning] effective: …`。
+/// Auto 且非 cron 强制关时不注入（请求组包与历史字节一致）。
+fn build_reasoning_state(
+    intent: ThinkingIntent,
+    cron_off: bool,
+    cfg: Option<&crate::config::ThinkingConfig>,
+) -> Option<String> {
+    let effective = if cron_off {
+        ThinkingIntent::None
+    } else {
+        intent
+    };
+    if effective == ThinkingIntent::Auto {
+        return None;
+    }
+    let echo = match crate::provider::evaluate_reasoning(effective, cfg) {
+        Ok(s) => s,
+        Err(e) => format!("unsupported: {e}"),
+    };
+    Some(format!("[reasoning] {}", echo))
 }
 
 /// 非图片工具结果超长截断：超过 `cap` 保留头部并附占位说明。
@@ -1712,7 +1848,8 @@ fn build_repeated_tool_warning(tool_name: &str, streak: u32) -> String {
 mod tests {
     use super::*;
     use crate::provider::{
-        ChatRequest, ChatResponse, ContentPart, ImageUrlContent, Provider, StreamEvent, ToolCall,
+        ChatRequest, ChatResponse, ContentPart, ImageUrlContent, Provider, StreamEvent,
+        ThinkingLevel, ThinkingLevelWire, ToolCall,
     };
     use crate::tools::Tool;
     use async_stream::try_stream;
@@ -1724,12 +1861,17 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::mpsc;
 
+    /// MockProvider 请求形态记录：每次 chat_stream 的 (thinking 意图, 是否带 tools)
+    type SeenLog = Arc<StdMutex<Vec<(Option<ThinkingIntent>, bool)>>>;
+
     /// Mock provider：每次 chat_stream 调用返回下一组预设事件
     struct MockProvider {
         native: bool,
         rounds: Arc<StdMutex<std::collections::VecDeque<Vec<StreamEvent>>>>,
-        /// 记录每次 chat_stream 收到的 disable_thinking / tools 形态（回归断言用）
-        seen: Arc<StdMutex<Vec<(bool, bool)>>>,
+        /// 记录每次 chat_stream 收到的 thinking 意图 / tools 形态（回归断言用）
+        seen: SeenLog,
+        /// 思考能力声明（P1）：None = unknown
+        thinking: Option<crate::config::ThinkingConfig>,
     }
 
     impl MockProvider {
@@ -1738,6 +1880,7 @@ mod tests {
                 native,
                 rounds: Arc::new(StdMutex::new(rounds.into())),
                 seen: Arc::new(StdMutex::new(Vec::new())),
+                thinking: None,
             }
         }
     }
@@ -1751,7 +1894,7 @@ mod tests {
             self.seen
                 .lock()
                 .unwrap()
-                .push((req.disable_thinking, req.tools.is_some()));
+                .push((req.thinking, req.tools.is_some()));
             let events = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
             let s = try_stream! {
                 for ev in events {
@@ -1763,6 +1906,9 @@ mod tests {
         fn native_tool_calling(&self) -> bool {
             self.native
         }
+        fn thinking_capability(&self) -> Option<crate::config::ThinkingConfig> {
+            self.thinking.clone()
+        }
     }
 
     async fn make_agent_with_rounds(native: bool, rounds: Vec<Vec<StreamEvent>>) -> Agent {
@@ -1772,7 +1918,17 @@ mod tests {
     async fn make_agent_with_rounds_seen(
         native: bool,
         rounds: Vec<Vec<StreamEvent>>,
-        seen: Arc<StdMutex<Vec<(bool, bool)>>>,
+        seen: SeenLog,
+    ) -> Agent {
+        make_agent_mock(native, rounds, seen, None).await
+    }
+
+    /// P1 测试用：可指定思考能力声明的 agent 构造
+    async fn make_agent_mock(
+        native: bool,
+        rounds: Vec<Vec<StreamEvent>>,
+        seen: SeenLog,
+        thinking: Option<crate::config::ThinkingConfig>,
     ) -> Agent {
         let store = SessionStore::open_in_memory().unwrap();
         let sid = store.create_session("test", "test").unwrap();
@@ -1780,6 +1936,7 @@ mod tests {
             native,
             rounds: Arc::new(StdMutex::new(rounds.into())),
             seen,
+            thinking,
         });
         let tools = Arc::new(ToolRegistry::new());
         let config = Config::default_for_workspace("/tmp/llaia-test");
@@ -1810,7 +1967,7 @@ mod tests {
     async fn make_agent_with_config(
         native: bool,
         rounds: Vec<Vec<StreamEvent>>,
-        seen: Arc<StdMutex<Vec<(bool, bool)>>>,
+        seen: SeenLog,
         customize: impl FnOnce(&mut Config),
     ) -> Agent {
         let store = SessionStore::open_in_memory().unwrap();
@@ -1819,6 +1976,7 @@ mod tests {
             native,
             rounds: Arc::new(StdMutex::new(rounds.into())),
             seen,
+            thinking: None,
         });
         let tools = Arc::new(ToolRegistry::new());
         let mut config = Config::default_for_workspace("/tmp/llaia-test");
@@ -1873,11 +2031,18 @@ mod tests {
             .unwrap();
         assert_eq!(result, "recovered answer");
 
-        // 重试发生且强制 disable_thinking
+        // 重试发生；D7 分流：mock 未配置 [thinking]（能力未知）→ 不再"假装关思考"，
+        // 改为收紧思考帽（本测试用短 cap 已能触发，第二次尝试正常作答）
         let rec = seen.lock().unwrap();
         assert_eq!(rec.len(), 2);
-        assert!(!rec[0].0, "first attempt keeps session thinking setting");
-        assert!(rec[1].0, "retry forces disable_thinking");
+        assert_eq!(
+            rec[0].0, None,
+            "first attempt keeps session thinking setting"
+        );
+        assert_eq!(
+            rec[1].0, None,
+            "retry with unknown off_wire must NOT fake-disable thinking (D7)"
+        );
         drop(rec);
 
         // [guard] 提示已持久化进 context；退化的思考内容不进 context
@@ -3193,6 +3358,127 @@ mod tests {
             .find(|m| m.role == Role::Assistant)
             .expect("assistant in context");
         assert_eq!(ctx.reasoning_content.as_deref(), Some("let me think..."));
+    }
+
+    #[tokio::test]
+    async fn test_guard_retry_forces_off_only_when_wire_known() {
+        // P1 D7：off_wire 实测有效（reasoning_effort_none，Ollama/agnes 方言）→
+        // 重试强制 Off 意图（provider 收口成 reasoning_effort:"none"）；
+        // 对照：unknown 能力的同一场景见 test_guard_thinking_cap_triggers_retry。
+        let rounds = vec![
+            vec![StreamEvent::Done], // 空流 → 空输出判退化 → 重试
+            vec![
+                StreamEvent::TextDelta("recovered".into()),
+                StreamEvent::Done,
+            ],
+        ];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_mock(
+            true,
+            rounds,
+            seen.clone(),
+            Some(crate::config::ThinkingConfig {
+                default: Some(ThinkingLevel::High),
+                level_wire: Some(ThinkingLevelWire::ReasoningEffort),
+                off_wire: Some(ThinkingOffWire::ReasoningEffortNone),
+            }),
+        )
+        .await;
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "recovered");
+        let rec = seen.lock().unwrap();
+        assert_eq!(rec.len(), 2);
+        assert_eq!(rec[0].0, None, "first attempt: Auto sends nothing");
+        assert_eq!(
+            rec[1].0,
+            Some(ThinkingIntent::None),
+            "retry with known-good off_wire forces off"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finish_reason_length_empty_content_is_budget_not_degenerate() {
+        // P1 D3：finish_reason=length + 空 content = 思考吃满输出预算，不是退化：
+        // 不重试（seen 只有 1 次请求）、不计熔断，诊断消息指向预算调整。
+        let rounds = vec![vec![
+            StreamEvent::ReasoningDelta("thinking...".into()),
+            StreamEvent::FinishReason("length".into()),
+            StreamEvent::Done,
+        ]];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_mock(true, rounds, seen.clone(), None).await;
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("finish_reason=length"),
+            "budget diagnostic expected: {result}"
+        );
+        assert!(!result.contains("Output degenerated"));
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "no retry on budget exhaustion"
+        );
+        assert_eq!(
+            agent.guard_streak, 0,
+            "budget exhaustion is not a degeneration"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reasoning_state_tail_injection() {
+        // P1 D5：非 Auto 意图回合起点注入生效态；Auto 不注入（字节稳定）。
+        let rounds = vec![vec![StreamEvent::TextDelta("ok".into()), StreamEvent::Done]];
+        let mut agent =
+            make_agent_mock(true, rounds, Arc::new(StdMutex::new(Vec::new())), None).await;
+        agent.thinking_intent = ThinkingIntent::None;
+        let (tx, _rx) = mpsc::channel(64);
+        agent
+            .handle_message_streaming(ChatMessage::user("q"), "cli", tx)
+            .await
+            .unwrap();
+        let rs = agent.context.reasoning_state.as_deref().unwrap_or_default();
+        assert!(rs.starts_with("[reasoning]"), "got: {rs}");
+        assert!(
+            rs.contains("effective: unknown"),
+            "unknown capability echo: {rs}"
+        );
+        // 尾部注入真的进请求消息
+        assert!(agent
+            .context
+            .to_messages(&None)
+            .iter()
+            .any(|m| m.role == Role::User && m.content.as_text().starts_with("[reasoning]")));
+    }
+
+    #[test]
+    fn test_build_reasoning_state_semantics() {
+        // Auto 不注入（字节稳定）；cron 强制关按 Off 求值；unsupported 折进提示
+        assert_eq!(
+            build_reasoning_state(ThinkingIntent::Auto, false, None),
+            None
+        );
+        // cron 强制关（cron_off=true）把 Auto 也折成 Off 求值
+        let s = build_reasoning_state(ThinkingIntent::Auto, true, None).unwrap();
+        assert!(s.contains("effective: unknown"), "cron forced off: {s}");
+        let s = build_reasoning_state(ThinkingIntent::None, false, None).unwrap();
+        assert!(s.contains("effective: unknown"), "got: {s}");
+        let s = build_reasoning_state(ThinkingIntent::None, true, None).unwrap();
+        assert!(s.contains("effective: unknown"), "cron off: {s}");
+        let cfg = crate::config::ThinkingConfig {
+            default: None,
+            level_wire: Some(ThinkingLevelWire::None),
+            off_wire: Some(ThinkingOffWire::Unsupported),
+        };
+        let s = build_reasoning_state(ThinkingIntent::None, false, Some(&cfg)).unwrap();
+        assert!(s.contains("unsupported"), "got: {s}");
     }
 
     #[tokio::test]

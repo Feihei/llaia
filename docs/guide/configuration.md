@@ -72,6 +72,17 @@ max_tokens = 8192                     # Anthropic 必传，未配默认 4096
 
 `[provider.<id>]` 的 `type` 决定走哪套实现：`anthropic` 走 Anthropic Provider；缺省/未知回退 OpenAI 兼容（存量配置不受影响）。
 
+### 模型级 `thinking`（思考能力声明）
+
+```toml
+[provider.ollama-local.qwen35.thinking]
+default = "high"                    # 模型默认档位：none|low|medium|high|max|unknown（缺省=unknown）
+level_wire = "reasoning_effort"     # 档位方言：reasoning_effort（服务端校验非法值）或 none（不给旋钮）
+off_wire = "reasoning_effort_none"  # 关方言：enable_thinking_false | thinking_disabled | reasoning_effort_none | unsupported
+```
+
+供 `/reasoning` 使用（详见 [斜杠命令](slash-commands.md)）：`level_wire` 决定档位怎么发（`reasoning_effort` = 顶层 `reasoning_effort` 字段），`off_wire` 决定「关」怎么发——`enable_thinking_false` 发嵌套 `chat_template_kwargs:{enable_thinking:false}`（llama.cpp 实测）、`thinking_disabled` 发 `thinking:{type:"disabled"}`（DeepSeek 系）、`reasoning_effort_none` 发顶层 `reasoning_effort:"none"`（Ollama/agnes 实测唯一有效的关）、`unsupported` 表示该端点拒绝关思考（GLM 经部分网关实测 400），`/reasoning none` 会被拒收。三个字段**全部缺省 = 能力未知**：档位意图被拒收、`none` 走 legacy 兜底（`compat.disable_thinking_template` 门内注入，字节兼容旧行为）。字段值请按实测填写，不要按模型名猜——方言挂在部署形态上，同名模型在不同网关/推理引擎下方言可能不同（详见 `docs/plans/2026-09-10-thinking-capability-model.md`）。`preserve`（思考回传）为 P2 字段，暂未开放。
+
 ### 模型级 `enabled`（可发现性开关）
 
 用途：模型参数先记在配置里，但暂时不希望它被选中。

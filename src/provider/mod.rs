@@ -170,15 +170,200 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
+/// 规范档位（P1 D1）：`none|low|medium|high|max`。
+/// `none` = 要求关；与请求意图 `ThinkingIntent::Auto`（不发任何参数）严格区分。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    None,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl ThinkingLevel {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(Self::None),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+}
+
+/// 档位方言（P1 D2）：怎么在请求里表达档位与「关」。值集来自五家端点 wire 实测，
+/// 不做模型名猜测（plan「明确否决」节）。serde 名即 toml 字面值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ThinkingLevelWire {
+    /// 不给旋钮：端点不校验档位（bogus 也 200），发了也白发
+    #[serde(rename = "none")]
+    None,
+    /// 顶层 `reasoning_effort` 字段，服务端校验非法值（400 ⇒ 支持）
+    #[serde(rename = "reasoning_effort")]
+    ReasoningEffort,
+}
+
+/// 「关」的方言（P1 D2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ThinkingOffWire {
+    /// 嵌套 `chat_template_kwargs:{enable_thinking:false}`（llama.cpp 实测有效）
+    #[serde(rename = "enable_thinking_false")]
+    EnableThinkingFalse,
+    /// `thinking:{type:"disabled"}`（sensenova DeepSeek 实测；非法组合 400 规则来自错误消息）
+    #[serde(rename = "thinking_disabled")]
+    ThinkingDisabled,
+    /// 顶层 `reasoning_effort:"none"`（Ollama / agnes 实测唯一有效的关）
+    #[serde(rename = "reasoning_effort_none")]
+    ReasoningEffortNone,
+    /// 该端点明确拒绝关思考（GLM 实测 400）——任何关意图整个短路
+    #[serde(rename = "unsupported")]
+    Unsupported,
+}
+
+/// 请求级思考意图（P1 D1）：这轮要多少思考。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingIntent {
+    /// 默认：不发任何思考参数，维持服务端默认行为（取代旧 `on` 的语义）
+    Auto,
+    /// 要求关思考（能不能关由该模型的 `off_wire` 决定，见 `resolve_thinking`）
+    None,
+    /// 要求指定档位（能不能调由 `level_wire` 决定）
+    Level(ThinkingLevel),
+}
+
+impl ThinkingIntent {
+    /// 命令回显用名（与 `/reasoning` 参数一致）
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::None => "none",
+            Self::Level(l) => l.as_str(),
+        }
+    }
+}
+
+/// 意图 × 能力声明 → 出站参数决议（P1 D2 映射规则，provider 层唯一收口）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedThinking {
+    /// 不发任何字段（Auto；unsupported 短路；未知端点的档位意图被门禁拒绝）
+    Nothing,
+    /// 顶层 `reasoning_effort: <level>`（含 "none"：off_wire=reasoning_effort_none）
+    Effort(ThinkingLevel),
+    /// 嵌套 `chat_template_kwargs:{enable_thinking:false}`（off_wire 显式声明，不经 compat 门）
+    EnableThinkingFalse,
+    /// `thinking:{type:"disabled"}`（DeepSeek 方言；单意图构造下 effort 字段天然不并发，
+    /// D2 的「同时抑制 effort」自动满足）
+    ThinkingDisabled,
+    /// 能力未知时的 legacy 兜底：仅在 compat.disable_thinking_template 门内注入 kwargs
+    /// （= 旧 `disable_thinking` 的行为：llama.cpp 有效，忽略方无害，字节兼容存量）
+    LegacyDisable,
+}
+
+/// P1 D2/D3：请求意图 × `[provider.<id>.<model>.thinking]` 声明 → 出站决议。
+/// 这是唯一允许把思考参数写进请求体的地方。
+pub fn resolve_thinking(
+    intent: Option<ThinkingIntent>,
+    cfg: Option<&crate::config::ThinkingConfig>,
+) -> ResolvedThinking {
+    let Some(intent) = intent else {
+        return ResolvedThinking::Nothing;
+    };
+    match intent {
+        ThinkingIntent::Auto => ResolvedThinking::Nothing,
+        ThinkingIntent::None => match cfg.and_then(|c| c.off_wire) {
+            Some(ThinkingOffWire::EnableThinkingFalse) => ResolvedThinking::EnableThinkingFalse,
+            Some(ThinkingOffWire::ThinkingDisabled) => ResolvedThinking::ThinkingDisabled,
+            Some(ThinkingOffWire::ReasoningEffortNone) => {
+                ResolvedThinking::Effort(ThinkingLevel::None)
+            }
+            // unsupported：任何关意图整个短路（GLM 实测发 disabled 必 400）
+            Some(ThinkingOffWire::Unsupported) => ResolvedThinking::Nothing,
+            // unknown：legacy 兜底（llama.cpp/Ollama 预设门内注入，其余端点不发）
+            None => ResolvedThinking::LegacyDisable,
+        },
+        ThinkingIntent::Level(l) => match cfg.and_then(|c| c.level_wire) {
+            Some(ThinkingLevelWire::ReasoningEffort) => ResolvedThinking::Effort(l),
+            // none/unknown：不发（命令层已拒绝；guard 不会发档位意图）
+            _ => ResolvedThinking::Nothing,
+        },
+    }
+}
+
+/// P1 D5：`/reasoning` 意图按能力求值三态回显。
+/// `Ok(生效描述)` = 接受设置；`Err(拒绝理由)` = 该模型不支持（不发请求、不改设置——
+/// `none` 落在不支持关的端点上报错并列出可用路径，不静默降级，性质 6）。
+pub fn evaluate_reasoning(
+    intent: ThinkingIntent,
+    cfg: Option<&crate::config::ThinkingConfig>,
+) -> Result<String, String> {
+    let default_desc = match cfg.and_then(|c| c.default) {
+        Some(l) => l.as_str().to_string(),
+        None => "unknown".to_string(),
+    };
+    Ok(match intent {
+        ThinkingIntent::Auto => {
+            format!("effective: auto (no thinking params sent; model default: {default_desc})")
+        }
+        ThinkingIntent::None => match cfg.and_then(|c| c.off_wire) {
+            Some(ThinkingOffWire::EnableThinkingFalse) => {
+                "effective: off (wire: chat_template_kwargs.enable_thinking=false)".into()
+            }
+            Some(ThinkingOffWire::ThinkingDisabled) => {
+                "effective: off (wire: thinking.type=disabled)".into()
+            }
+            Some(ThinkingOffWire::ReasoningEffortNone) => {
+                "effective: off (wire: reasoning_effort=none)".into()
+            }
+            Some(ThinkingOffWire::Unsupported) => {
+                return Err(
+                    "this model cannot disable thinking (off_wire=unsupported: the disable \
+                     dialect is rejected with HTTP 400); use /reasoning auto to leave the \
+                     model default untouched"
+                        .into(),
+                );
+            }
+            None => format!(
+                "effective: unknown — no [thinking] section configured; falling back to legacy \
+                 chat_template_kwargs (best-effort). model default: {default_desc}"
+            ),
+        },
+        ThinkingIntent::Level(l) => match cfg.and_then(|c| c.level_wire) {
+            Some(ThinkingLevelWire::ReasoningEffort) => {
+                format!("effective: {} (wire: reasoning_effort)", l.as_str())
+            }
+            _ => {
+                return Err(
+                    "this endpoint has no level knob (level_wire=none/unknown: effort params \
+                     are ignored or unvalidated); use /reasoning none|auto instead"
+                        .into(),
+                );
+            }
+        },
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest<'a> {
     pub messages: &'a [ChatMessage],
     pub tools: Option<&'a [ToolSpec]>,
-    /// 内部/自动化 turn（cron 等）请求关闭模型「深度思考」。
-    /// 推理模型（Qwen3 等）在结构化合成任务上思考纯属浪费且撑爆超时；
-    /// 关掉后由 provider 注入 `chat_template_kwargs: {enable_thinking: false}`（llama.cpp 等）。
-    /// 普通交互 turn 保持 false。默认 false → 不注入任何额外字段，零回归。
-    pub disable_thinking: bool,
+    /// 请求级思考意图（P1，docs/plans/2026-09-10-thinking-capability-model.md D1）。
+    /// `None`（缺省）= Auto：不发任何思考参数，请求体与今天逐字节一致（性质 1）。
+    /// 由 `resolve_thinking` × 该模型的 `[thinking]` 能力声明唯一收口成出站参数；
+    /// 旧 `disable_thinking: bool` 的全部语义由 `ThinkingIntent::None` + legacy 兜底承接。
+    pub thinking: Option<ThinkingIntent>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -236,6 +421,12 @@ pub trait Provider: Send + Sync {
     /// 可读标识（模型名），用于 `/provider` 列表标记当前模型。默认 "unknown"。
     fn label(&self) -> String {
         "unknown".into()
+    }
+    /// 思考能力声明（P1 D2）：`[provider.<id>.<model>.thinking]` 的载入结果。
+    /// `None` = 未配置（unknown）：Off 意图走 legacy 兜底，档位意图被门禁拒绝。
+    /// `FallbackProvider` 委托链上主 provider。
+    fn thinking_capability(&self) -> Option<crate::config::ThinkingConfig> {
+        None
     }
     /// 提供器类型标识（诊断/测试用）：默认 `"provider"`，`FallbackProvider` 覆盖为 `"fallback"`。
     /// 供 `/provider` 切换等场景断言降级链是否保留。
@@ -310,7 +501,8 @@ pub fn provider_from_ref(
                     model_cfg.max_tokens,
                     compat,
                 )?
-                .with_thinking_cap(thinking_cap),
+                .with_thinking_cap(thinking_cap)
+                .with_thinking(model_cfg.thinking.clone()),
             ))
         }
     }
@@ -353,6 +545,119 @@ pub fn build_provider_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ThinkingConfig;
+
+    #[test]
+    fn resolve_thinking_matrix() {
+        // P1 D2 映射规则全矩阵：意图 × 能力声明 → 出站决议
+        let cfg = |level_wire, off_wire| ThinkingConfig {
+            default: Some(ThinkingLevel::High),
+            level_wire,
+            off_wire,
+        };
+        // None intent（缺省）≡ Auto：什么都不发（性质 1）
+        assert_eq!(resolve_thinking(None, None), ResolvedThinking::Nothing);
+        assert_eq!(
+            resolve_thinking(Some(ThinkingIntent::Auto), None),
+            ResolvedThinking::Nothing
+        );
+        assert_eq!(
+            resolve_thinking(Some(ThinkingIntent::Auto), Some(&cfg(None, None))),
+            ResolvedThinking::Nothing
+        );
+        // Off × 四种 off_wire + unknown
+        assert_eq!(
+            resolve_thinking(
+                Some(ThinkingIntent::None),
+                Some(&cfg(None, Some(ThinkingOffWire::EnableThinkingFalse)))
+            ),
+            ResolvedThinking::EnableThinkingFalse
+        );
+        assert_eq!(
+            resolve_thinking(
+                Some(ThinkingIntent::None),
+                Some(&cfg(None, Some(ThinkingOffWire::ThinkingDisabled)))
+            ),
+            ResolvedThinking::ThinkingDisabled
+        );
+        assert_eq!(
+            resolve_thinking(
+                Some(ThinkingIntent::None),
+                Some(&cfg(None, Some(ThinkingOffWire::ReasoningEffortNone)))
+            ),
+            ResolvedThinking::Effort(ThinkingLevel::None)
+        );
+        // unsupported：任何关意图整个短路（GLM 实测 400）
+        assert_eq!(
+            resolve_thinking(
+                Some(ThinkingIntent::None),
+                Some(&cfg(None, Some(ThinkingOffWire::Unsupported)))
+            ),
+            ResolvedThinking::Nothing
+        );
+        // unknown：legacy 兜底（compat 门内 kwargs）
+        assert_eq!(
+            resolve_thinking(Some(ThinkingIntent::None), Some(&cfg(None, None))),
+            ResolvedThinking::LegacyDisable
+        );
+        // Level × level_wire
+        assert_eq!(
+            resolve_thinking(
+                Some(ThinkingIntent::Level(ThinkingLevel::Medium)),
+                Some(&cfg(
+                    Some(ThinkingLevelWire::ReasoningEffort),
+                    Some(ThinkingOffWire::ReasoningEffortNone)
+                ))
+            ),
+            ResolvedThinking::Effort(ThinkingLevel::Medium)
+        );
+        // level_wire=none/unknown：档位意图不发（命令层已拒绝）
+        assert_eq!(
+            resolve_thinking(
+                Some(ThinkingIntent::Level(ThinkingLevel::Low)),
+                Some(&cfg(Some(ThinkingLevelWire::None), None))
+            ),
+            ResolvedThinking::Nothing
+        );
+        assert_eq!(
+            resolve_thinking(
+                Some(ThinkingIntent::Level(ThinkingLevel::Low)),
+                Some(&cfg(None, None))
+            ),
+            ResolvedThinking::Nothing
+        );
+    }
+
+    #[test]
+    fn evaluate_reasoning_three_states() {
+        // D5 三态：生效 / 该模型不支持（Err，不改设置）/ 通路被忽略（unknown 提示）
+        let llamacpp = ThinkingConfig {
+            default: Some(ThinkingLevel::High),
+            level_wire: None, // caps 在场但未经重复采样，保守 none
+            off_wire: Some(ThinkingOffWire::EnableThinkingFalse),
+        };
+        assert!(evaluate_reasoning(ThinkingIntent::None, Some(&llamacpp))
+            .unwrap()
+            .contains("effective: off"));
+        // llamacpp 无档位旋钮 → 档位意图被拒收
+        assert!(
+            evaluate_reasoning(ThinkingIntent::Level(ThinkingLevel::Low), Some(&llamacpp)).is_err()
+        );
+        // GLM（tokenrouter）：关被拒收（D1：报错不静默降级）
+        let glm = ThinkingConfig {
+            default: Some(ThinkingLevel::Max),
+            level_wire: Some(ThinkingLevelWire::None),
+            off_wire: Some(ThinkingOffWire::Unsupported),
+        };
+        let err = evaluate_reasoning(ThinkingIntent::None, Some(&glm)).unwrap_err();
+        assert!(err.contains("cannot disable thinking"), "{err}");
+        assert!(evaluate_reasoning(ThinkingIntent::Level(ThinkingLevel::Low), Some(&glm)).is_err());
+        // unknown：Off 仍可设但回显 unknown 三态
+        let echo = evaluate_reasoning(ThinkingIntent::None, None).unwrap();
+        assert!(echo.contains("effective: unknown"), "{echo}");
+        // auto 永远可行
+        assert!(evaluate_reasoning(ThinkingIntent::Auto, None).is_ok());
+    }
 
     #[test]
     fn test_chat_message_constructors() {

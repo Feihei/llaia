@@ -43,10 +43,10 @@ pub async fn try_handle(
     let cmd_lc = cmd.to_ascii_lowercase();
     match cmd_lc.as_str() {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
-        "/help" => Ok(SlashOutcome::Handled(
-            "commands: /new /session [<name>|close] /sessions (aliases /task /tasks) /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [on|off] /skill list [--all] /btw <question> (side question, context read-only) /steer <message> (inject into a running turn) /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
-                .into(),
-        )),
+"/help" => Ok(SlashOutcome::Handled(
+"commands: /new /session [<name>|close] /sessions (aliases /task /tasks) /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [auto|none|low|medium|high|max] /skill list [--all] /btw <question> (side question, context read-only) /steer <message> (inject into a running turn) /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
+.into(),
+)),
         "/permission" => {
             if args.is_empty() {
                 let cur = agent.permission_profile.read().await.clone();
@@ -543,30 +543,69 @@ tools: {}
                 cur
             )))
         }
-        "/reasoning" => {
-            // 会话级思考开关：/reasoning off 关深度思考（推理模型日常问答提速），
-            // /reasoning on 恢复。仅对支持 chat_template_kwargs 的 provider 生效
-            // （llama.cpp / Ollama / vLLM 等，其它端点忽略，无害）。
-            let state = |a: &Agent| if a.thinking_off { "off" } else { "on" };
-            match args.trim() {
-                "off" => {
-                    agent.thinking_off = true;
-                    Ok(SlashOutcome::Handled("[reasoning: off]".into()))
-                }
-                "on" => {
-                    agent.thinking_off = false;
-                    Ok(SlashOutcome::Handled("[reasoning: on]".into()))
-                }
-                "" => Ok(SlashOutcome::Handled(format!(
-                    "[reasoning: {}] usage: /reasoning on|off",
-                    state(agent)
-                ))),
-                other => Ok(SlashOutcome::Handled(format!(
-                    "[unknown arg '{}'] usage: /reasoning on|off",
-                    other
-                ))),
-            }
-        }
+"/reasoning" => {
+// P1（D1/D5）：规范档位 auto|none|low|medium|high|max，小写归一；
+// legacy on/off 作别名（on→auto，off→none）。意图按能力声明求值三态回显：
+// 生效 / 该模型不支持（拒收，不改设置）/ 通路被忽略（unknown 仍可设，回显提示）。
+let arg = args.trim().to_ascii_lowercase();
+let intent = match arg.as_str() {
+"" => None,
+"auto" | "on" => Some(crate::provider::ThinkingIntent::Auto),
+"off" | "none" => Some(crate::provider::ThinkingIntent::None),
+"low" => Some(crate::provider::ThinkingIntent::Level(
+crate::provider::ThinkingLevel::Low,
+)),
+"medium" => Some(crate::provider::ThinkingIntent::Level(
+crate::provider::ThinkingLevel::Medium,
+)),
+"high" => Some(crate::provider::ThinkingIntent::Level(
+crate::provider::ThinkingLevel::High,
+)),
+"max" => Some(crate::provider::ThinkingIntent::Level(
+crate::provider::ThinkingLevel::Max,
+)),
+other => {
+return Ok(SlashOutcome::Handled(format!(
+"[unknown arg '{}'] usage: /reasoning [auto|none|low|medium|high|max]",
+other
+)));
+}
+};
+match intent {
+// 无参：回显当前意图 × 能力
+None => {
+let cfg = agent.thinking_capability().await;
+let echo = match crate::provider::evaluate_reasoning(agent.thinking_intent, cfg.as_ref())
+{
+Ok(s) => s,
+Err(e) => format!("unsupported on this model: {e}"),
+};
+Ok(SlashOutcome::Handled(format!(
+"[reasoning: {}] {}",
+agent.thinking_intent.name(),
+echo
+)))
+}
+Some(i) => {
+let cfg = agent.thinking_capability().await;
+match crate::provider::evaluate_reasoning(i, cfg.as_ref()) {
+Ok(echo) => {
+agent.thinking_intent = i;
+Ok(SlashOutcome::Handled(format!(
+"[reasoning: {}] {echo}",
+i.name()
+)))
+}
+Err(e) => {
+// D1：none 落在不支持关的模型上 → 报错，不静默降级
+Ok(SlashOutcome::Handled(format!(
+"[reasoning rejected: {e}]"
+)))
+}
+}
+}
+}
+}
         "/migrate-secrets" => {
             // 敏感信息 .env 自动化（P5 S1）：把 config.toml 里的明文敏感字段
             // 迁移到 .env（config 改为 ${VAR} 引用），保留注释。
@@ -1005,7 +1044,7 @@ pub async fn run_btw(agent: &mut Agent, question: &str) -> Result<String> {
     let req = ChatRequest {
         messages: &messages,
         tools: None,
-        disable_thinking: false,
+        thinking: Some(crate::provider::ThinkingIntent::None),
     };
     let resp = provider.chat(&req).await?;
     let answer = resp
@@ -1175,7 +1214,19 @@ async fn switch_provider(agent: &mut Agent, arg: &str) -> Result<String> {
     tracing::info!(model = %model_ref, persist, "provider switched at runtime");
     let suffix = if persist { "" } else { " (temporary)" };
     // 默认持久化保持既有消息格式 `[switched to X]`，临时切换追加 `(temporary)` 标注。
-    Ok(format!("[switched to {}{}]", model_ref, suffix))
+    let mut msg = format!("[switched to {}{}]", model_ref, suffix);
+    // P1-7：切换后重估思考意图——新模型可能不支持当前 /reasoning 设置。
+    // 不改用户设置（意图是显式意愿），只提示生效态变化，请求层会短路不发参数。
+    if agent.thinking_intent != crate::provider::ThinkingIntent::Auto {
+        let cap = agent.thinking_capability().await;
+        if let Err(e) = crate::provider::evaluate_reasoning(agent.thinking_intent, cap.as_ref()) {
+            msg.push_str(&format!(
+                "\n[note] /reasoning {} is no longer effective on this model: {e}",
+                agent.thinking_intent.name()
+            ));
+        }
+    }
+    Ok(msg)
 }
 
 /// 解析 `/provider` 参数：`--temp <sel>` 临时切换（不写 config），其余默认持久化。
@@ -1277,6 +1328,7 @@ mod tests {
                         context_size: None,
                         max_tokens: None,
                         enabled: true,
+                        thinking: None,
                     },
                 )]
                 .into_iter()
@@ -1298,6 +1350,7 @@ mod tests {
                         context_size: None,
                         max_tokens: None,
                         enabled: true,
+                        thinking: None,
                     },
                 )]
                 .into_iter()

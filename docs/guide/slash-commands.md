@@ -16,7 +16,7 @@
 | `/provider` | 列出所有**已启用**模型，当前模型标 `*`。`enabled = false` 的模型不进列表、也不占 `<num>` 序号；若当前正在用的模型被隐藏了，列表末尾附一行说明（否则看起来像模型丢了）。 |
 | `/provider <num>` · `/provider <id.alias>` | 运行时切换模型（不写 config；保留 fallback 降级链）。显式 `<id.alias>` 仍可指向 `enabled = false` 的模型——该开关只管可发现性，不影响可用性。 |
 | `/permission [read-only\|default\|yolo]` | 查看或切换权限档位（不写 config）。 |
-| `/reasoning [on\|off]` | 会话级开关推理模型的深度思考。`off` 提速日常问答（对 llama.cpp / Ollama / vLLM 等支持 `chat_template_kwargs` 的端点生效，其它忽略）；仅当前会话有效，不写 config。 |
+| `/reasoning [auto\|none\|low\|medium\|high\|max]` | 思考档位（进程级，跨频道共享，重启失效，不写 config）。`auto`（默认）不发任何参数；`none` 要求关思考；`low`–`max` 调档位。能否关/能否调由该模型 `[provider.<id>.<model>.thinking]` 能力声明决定：不支持的档位/方言**拒收并报错**，不静默降级；能力未配置时 `none` 走 legacy 兜底（对 llama.cpp 等支持 `chat_template_kwargs` 的端点有效）。`on`/`off` 仍作 `auto`/`none` 的别名。生效态每回合注入尾部上下文，`/provider` 切换时重估并提示。 |
 | `/ok <id>` | 批准一个待确认的操作（交互式审批）。 |
 | `/deny <id>` | 拒绝一个待确认的操作。 |
 | `/move [<path>\|home]` · `/cd` | 切换工作目录；无参数 / `home` / `~` / `-` 恢复到原始 workspace；其它路径需 `/ok` 确认。在会话线内时，批准即自动把该线的绑定目录改写为新目录（回显 `was`）；回 `home` 则解绑。重启后作用域恢复家目录（不持久）。 |

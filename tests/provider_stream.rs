@@ -42,7 +42,7 @@ async fn test_stream_text_deltas() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
-        disable_thinking: false,
+        thinking: None,
     };
     let mut stream = provider.chat_stream(&req).await;
 
@@ -92,7 +92,7 @@ async fn test_stream_tool_calls_accumulated() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
-        disable_thinking: false,
+        thinking: None,
     };
     let mut stream = provider.chat_stream(&req).await;
 
@@ -145,7 +145,7 @@ async fn test_stream_crlf_event_separator() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
-        disable_thinking: false,
+        thinking: None,
     };
     let mut stream = provider.chat_stream(&req).await;
 
@@ -187,7 +187,7 @@ async fn test_stream_error_status() {
     let req = ChatRequest {
         messages: &msgs,
         tools: None,
-        disable_thinking: false,
+        thinking: None,
     };
     let mut stream = provider.chat_stream(&req).await;
 

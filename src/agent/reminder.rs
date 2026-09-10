@@ -126,7 +126,7 @@ async fn generate_reminder(
     let req = crate::provider::ChatRequest {
         messages: &messages,
         tools: None,
-        disable_thinking: true,
+        thinking: Some(crate::provider::ThinkingIntent::None),
     };
     let resp = provider.chat(&req).await?;
     let text = resp.text.unwrap_or_default();

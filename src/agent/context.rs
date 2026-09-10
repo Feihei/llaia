@@ -20,6 +20,10 @@ pub struct Context {
     /// 当前 active 任务线信息（ADR-0031）：任务线内注入「任务名 + 绑定目录」，
     /// 让模型知道自己身在哪个任务；通用线为 None。与 todo 同区（KV 缓存友好）。
     pub task_state: Option<String>,
+    /// 思考生效态（P1 D5）：`/reasoning` 意图 × 模型能力声明的求值结果，
+    /// 尾部注入（todo/env/task 同区，reminder 之前）。Auto 时不注入，
+    /// 不进 system 前缀（KV 缓存前提）。回合起点由 agent 计算。
+    pub reasoning_state: Option<String>,
     /// 自动生成的 Tail Reminder（P6）：LLM 从 SOUL+USER 提炼的抗漂移要点，
     /// 存 `workspace/reminder.md`，hash 失配时后台重生成。排在 todo/env/task 尾部
     /// 消息之后，仅 bootstrap 指令在其后（离生成点最近，注意力最强）。
@@ -40,6 +44,7 @@ impl Context {
             todo_state: None,
             env_state: None,
             task_state: None,
+            reasoning_state: None,
             reminder: None,
             bootstrap: None,
         }
@@ -82,6 +87,12 @@ impl Context {
         if let Some(task) = &self.task_state {
             if !task.is_empty() {
                 msgs.push(ChatMessage::user(task.clone()));
+            }
+        }
+        // 思考生效态（P1 D5）：让模型与命令回显一致地知道这轮思考意图的落地情况。
+        if let Some(rs) = &self.reasoning_state {
+            if !rs.is_empty() {
+                msgs.push(ChatMessage::user(rs.clone()));
             }
         }
         // Tail Reminder（P6）：抗风格/身份漂移的要点重申。
@@ -287,7 +298,7 @@ impl Context {
         let req = ChatRequest {
             messages: &messages,
             tools: None,
-            disable_thinking: false,
+            thinking: Some(crate::provider::ThinkingIntent::None),
         };
         let resp: ChatResponse = provider.chat(&req).await?;
         let summary = resp.text.unwrap_or_default();
@@ -538,6 +549,29 @@ mod tests {
             with_todo > base + 90,
             "todo list should be counted in the token estimate"
         );
+    }
+
+    #[test]
+    fn test_reasoning_state_injected_when_set() {
+        // P1 D5：生效态尾部注入，排在 task 之后、reminder 之前；未设置不注入
+        let mut ctx = Context::new("S".into());
+        ctx.reminder = Some("[reminder]".into());
+        ctx.push(ChatMessage::user("q"));
+        ctx.cheap_normalize();
+        assert!(ctx
+            .to_messages(&None)
+            .iter()
+            .all(|m| !m.content.as_text().starts_with("[reasoning]")));
+        ctx.reasoning_state =
+            Some("[reasoning] effective: off (wire: reasoning_effort=none)".into());
+        let msgs = ctx.to_messages(&None);
+        let texts: Vec<String> = msgs.iter().map(|m| m.content.as_text()).collect();
+        let rs = texts
+            .iter()
+            .position(|t| t.starts_with("[reasoning]"))
+            .unwrap();
+        let rem = texts.iter().position(|t| *t == "[reminder]").unwrap();
+        assert!(rs < rem, "reasoning state must precede reminder");
     }
 
     #[test]

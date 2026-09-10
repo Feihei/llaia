@@ -28,6 +28,9 @@ pub struct OpenAiCompatibleProvider {
     /// Generation Guard：思考流（reasoning_content/thinking）字符上限，
     /// 超限截流（提前 Done）；0 = 不限。经 `with_thinking_cap` 设置。
     thinking_cap: usize,
+    /// 思考能力声明（P1 D2）：`[provider.<id>.<model>.thinking]` 载入结果；
+    /// None = 能力未知。经 `with_thinking` 设置。
+    thinking: Option<crate::config::ThinkingConfig>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -52,6 +55,7 @@ impl OpenAiCompatibleProvider {
             max_tokens,
             compat,
             thinking_cap: 0,
+            thinking: None,
         })
     }
 
@@ -61,6 +65,16 @@ impl OpenAiCompatibleProvider {
     pub fn with_thinking_cap(mut self, cap: usize) -> Self {
         self.thinking_cap = cap;
         self
+    }
+
+    /// 设置思考能力声明（P1 D2）：意图 × 能力的出站收口在请求体构造处执行。
+    pub fn with_thinking(mut self, cfg: Option<crate::config::ThinkingConfig>) -> Self {
+        self.thinking = cfg;
+        self
+    }
+
+    fn thinking_capability_impl(&self) -> Option<crate::config::ThinkingConfig> {
+        self.thinking.clone()
     }
 }
 
@@ -276,15 +290,44 @@ impl Provider for OpenAiCompatibleProvider {
             None
         };
 
-        // disable_thinking：内部/自动化 turn 关掉推理模型的深度思考，避免无谓的长推理撑爆超时。
-        // 仅当 compat 支持（llama.cpp/Ollama 预设）且本请求显式要求时注入。
-        let chat_template_kwargs = if self.compat.disable_thinking_template && req.disable_thinking
-        {
-            Some(ChatTemplateKwargs {
-                enable_thinking: false,
-            })
-        } else {
-            None
+        // 思考意图 × 能力声明 → 出站参数（P1 D2 映射规则，唯一收口）：
+        // - Effort → 顶层 reasoning_effort（含 "none"：off_wire=reasoning_effort_none）
+        // - EnableThinkingFalse → chat_template_kwargs:{enable_thinking:false}
+        //   （显式声明不经 compat 门——用户已实测声明该方言，不再猜）
+        // - ThinkingDisabled → thinking:{type:"disabled"}；单意图构造下 effort
+        //   字段天然不并发，D2 的「同时抑制 effort」自动满足
+        // - LegacyDisable → 能力未知时的兑底：仅在 compat.disable_thinking_template
+        //   门内注入 kwargs（= 旧 disable_thinking 行为，字节兼容存量）
+        // - Nothing → 不发任何字段（auto / unsupported 短路 / 门禁拒绝档位）
+        let resolved = crate::provider::resolve_thinking(req.thinking, self.thinking.as_ref());
+        let (chat_template_kwargs, reasoning_effort, thinking_disabled) = match resolved {
+            crate::provider::ResolvedThinking::Nothing => (None, None, None),
+            crate::provider::ResolvedThinking::Effort(l) => {
+                (None, Some(l.as_str().to_string()), None)
+            }
+            crate::provider::ResolvedThinking::EnableThinkingFalse => (
+                Some(ChatTemplateKwargs {
+                    enable_thinking: false,
+                }),
+                None,
+                None,
+            ),
+            crate::provider::ResolvedThinking::ThinkingDisabled => (
+                None,
+                None,
+                Some(ThinkingDisabledWire { r#type: "disabled" }),
+            ),
+            crate::provider::ResolvedThinking::LegacyDisable => (
+                if self.compat.disable_thinking_template {
+                    Some(ChatTemplateKwargs {
+                        enable_thinking: false,
+                    })
+                } else {
+                    None
+                },
+                None,
+                None,
+            ),
         };
 
         let body = ChatCompletionsStreamRequest {
@@ -297,6 +340,8 @@ impl Provider for OpenAiCompatibleProvider {
             max_completion_tokens,
             stream_options,
             chat_template_kwargs,
+            reasoning_effort,
+            thinking_disabled,
         };
 
         let mut request = self.client.post(&url).json(&body);
@@ -564,6 +609,10 @@ impl Provider for OpenAiCompatibleProvider {
     fn label(&self) -> String {
         self.model.clone()
     }
+
+    fn thinking_capability(&self) -> Option<crate::config::ThinkingConfig> {
+        self.thinking_capability_impl()
+    }
 }
 
 /// 探测目标是否为本地后端（plan.md #4 残余）。
@@ -706,10 +755,17 @@ struct ChatCompletionsStreamRequest<'a> {
     /// 流式 usage 开关：仅 compat.streaming_usage 时发送（请求尾包带 usage）
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
-    /// 关闭模型「深度思考」：仅 compat.disable_thinking_template 且请求 disable_thinking 时发送。
-    /// llama.cpp / Ollama 等支持，其它 OpenAI 兼容端点忽略即可（无害）。
+    /// 关闭模型「深度思考」：legacy 兑底（能力未知）或 off_wire=enable_thinking_false
+    /// 显式方言。llama.cpp / Ollama 等支持，其它 OpenAI 兼容端点忽略即可（无害）。
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_template_kwargs: Option<ChatTemplateKwargs>,
+    /// 顶层 `reasoning_effort`（P1）：档位方言（level_wire=reasoning_effort）
+    /// 或关方言（off_wire=reasoning_effort_none 时发 "none"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    /// `thinking:{type:"disabled"}`（P1）：DeepSeek 方言（off_wire=thinking_disabled）
+    #[serde(rename = "thinking", skip_serializing_if = "Option::is_none")]
+    thinking_disabled: Option<ThinkingDisabledWire>,
 }
 
 #[derive(Serialize)]
@@ -723,10 +779,183 @@ struct ChatTemplateKwargs {
     enable_thinking: bool,
 }
 
+/// `thinking:{type:"disabled"}` 的 wire 形态（P1 DeepSeek 方言）
+#[derive(Serialize)]
+struct ThinkingDisabledWire {
+    r#type: &'static str,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ThinkingConfig;
     use crate::provider::compat::Compat;
+    use crate::provider::{ThinkingIntent, ThinkingLevel, ThinkingLevelWire, ThinkingOffWire};
+
+    fn thinking_cfg(
+        level_wire: Option<ThinkingLevelWire>,
+        off_wire: Option<ThinkingOffWire>,
+    ) -> Option<ThinkingConfig> {
+        Some(ThinkingConfig {
+            default: Some(ThinkingLevel::High),
+            level_wire,
+            off_wire,
+        })
+    }
+
+    async fn post_once(server: &mut mockito::Server, matcher: mockito::Matcher) -> mockito::Mock {
+        server
+            .mock("POST", "/chat/completions")
+            .match_body(matcher)
+            .with_status(200)
+            .with_body(format!(
+                "{}{}",
+                sse(json!({"choices": [{"delta": {"content": "ok"}}]})),
+                done()
+            ))
+            .create()
+    }
+
+    #[tokio::test]
+    async fn thinking_wires_emit_expected_fields() {
+        // P1 D2 wire 集成：四种决议各自产出正确的请求体字段
+        let cases: Vec<(
+            &str,
+            Option<ThinkingConfig>,
+            Option<ThinkingIntent>,
+            mockito::Matcher,
+        )> = vec![
+            (
+                "off via reasoning_effort=none (Ollama/agnes 方言)",
+                thinking_cfg(
+                    Some(ThinkingLevelWire::ReasoningEffort),
+                    Some(ThinkingOffWire::ReasoningEffortNone),
+                ),
+                Some(ThinkingIntent::None),
+                mockito::Matcher::PartialJson(json!({"reasoning_effort": "none"})),
+            ),
+            (
+                "level via reasoning_effort",
+                thinking_cfg(
+                    Some(ThinkingLevelWire::ReasoningEffort),
+                    Some(ThinkingOffWire::ReasoningEffortNone),
+                ),
+                Some(ThinkingIntent::Level(ThinkingLevel::High)),
+                mockito::Matcher::PartialJson(json!({"reasoning_effort": "high"})),
+            ),
+            (
+                "off via thinking.type=disabled (DeepSeek 方言)",
+                thinking_cfg(None, Some(ThinkingOffWire::ThinkingDisabled)),
+                Some(ThinkingIntent::None),
+                mockito::Matcher::PartialJson(json!({"thinking": {"type": "disabled"}})),
+            ),
+            (
+                "off via chat_template_kwargs (llama.cpp 方言，显式声明不经 compat 门)",
+                thinking_cfg(None, Some(ThinkingOffWire::EnableThinkingFalse)),
+                Some(ThinkingIntent::None),
+                mockito::Matcher::PartialJson(
+                    json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                ),
+            ),
+            (
+                "legacy 兜底：unknown 能力 + ollama 预设 → kwargs（旧 disable_thinking 行为）",
+                None,
+                Some(ThinkingIntent::None),
+                mockito::Matcher::PartialJson(
+                    json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                ),
+            ),
+        ];
+        for (name, cfg, intent, matcher) in cases {
+            let mut server = mockito::Server::new_async().await;
+            let m = post_once(&mut server, matcher).await;
+            let p =
+                OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, Compat::ollama())
+                    .unwrap()
+                    .with_thinking(cfg);
+            let msgs = vec![ChatMessage::user("hi")];
+            let req = ChatRequest {
+                messages: &msgs,
+                tools: None,
+                thinking: intent,
+            };
+            p.chat(&req).await.unwrap();
+            m.assert();
+            tracing::debug!(case = name, "wire case ok");
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_wires_emit_nothing_when_must_not() {
+        // 反向：auto / unsupported 短路 / bare 预设的 legacy 门关着 → 请求体不含任何思考键
+        let cases: Vec<(&str, Option<ThinkingConfig>, Option<ThinkingIntent>, bool)> = vec![
+            (
+                "auto",
+                thinking_cfg(None, Some(ThinkingOffWire::EnableThinkingFalse)),
+                None,
+                true,
+            ),
+            (
+                "unsupported 短路（GLM）",
+                thinking_cfg(None, Some(ThinkingOffWire::Unsupported)),
+                Some(ThinkingIntent::None),
+                true,
+            ),
+            (
+                "unknown 能力 + bare compat（disable_thinking_template=false）→ legacy 门拦住",
+                None,
+                Some(ThinkingIntent::None),
+                false,
+            ),
+            (
+                "level_wire=none：档位意图不发",
+                thinking_cfg(Some(ThinkingLevelWire::None), None),
+                Some(ThinkingIntent::Level(ThinkingLevel::Low)),
+                true,
+            ),
+        ];
+        for (name, cfg, intent, ollama) in cases {
+            let mut server = mockito::Server::new_async().await;
+            let compat = if ollama {
+                Compat::ollama()
+            } else {
+                // 显式构造「legacy 门关闭」的 compat：disable_thinking_template
+                // 默认 true（ADR-0026），须手动关掉才能验证 unknown + 关门的组合
+                Compat {
+                    disable_thinking_template: false,
+                    ..Compat::default()
+                }
+            };
+            let m = server
+                .mock("POST", "/chat/completions")
+                .match_request(|req| {
+                    let empty: Vec<u8> = Vec::new();
+                    let body = String::from_utf8_lossy(req.body().unwrap_or(&empty));
+                    !body.contains("reasoning_effort")
+                        && !body.contains("chat_template_kwargs")
+                        && !body.contains("\"thinking\"")
+                })
+                .with_status(200)
+                .with_body(format!(
+                    "{}{}",
+                    sse(json!({"choices": [{"delta": {"content": "ok"}}]})),
+                    done()
+                ))
+                .create();
+            let p = OpenAiCompatibleProvider::new(server.url(), "", "m", true, None, compat)
+                .unwrap()
+                .with_thinking(cfg);
+            let msgs = vec![ChatMessage::user("hi")];
+            let req = ChatRequest {
+                messages: &msgs,
+                tools: None,
+                thinking: intent,
+            };
+            eprintln!("absence case: {name}");
+            p.chat(&req).await.unwrap();
+            m.assert();
+        }
+    }
     use crate::provider::ChatMessage;
     use serde_json::json;
 
@@ -756,7 +985,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let resp = p.chat(&req).await.unwrap();
         assert_eq!(resp.text.as_deref(), Some("hello"));
@@ -787,7 +1016,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let resp = p.chat(&req).await.unwrap();
         let text = resp.text.as_deref().unwrap_or_default();
@@ -822,7 +1051,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let events: Vec<_> = p.chat_stream(&req).await.collect().await;
         assert!(
@@ -870,7 +1099,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let resp = p.chat(&req).await.unwrap();
         // reasoning_content 折回 content
@@ -910,7 +1139,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let resp = p.chat(&req).await.unwrap();
         // thinking 默认不折回（思考不该混入可见文本）；正式回答照常
@@ -946,7 +1175,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let events: Vec<_> = p.chat_stream(&req).await.collect().await;
         let reasoning: Vec<String> = events
@@ -1006,7 +1235,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         // ollama 预设：requires_assistant_after_tool = true
         let with_ph = build_openai_messages(&req, &Compat::ollama());
@@ -1019,7 +1248,7 @@ mod tests {
         let req2 = ChatRequest {
             messages: &msgs2,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         assert_eq!(build_openai_messages(&req2, &Compat::ollama()).len(), 1);
     }
@@ -1047,7 +1276,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let resp = p.chat(&req).await.unwrap();
         assert_eq!(resp.tool_calls.len(), 1);
@@ -1084,7 +1313,7 @@ mod tests {
         let req = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let out = build_openai_messages(&req, &Compat::default());
         // user + assistant(仅 file_read) + tool(1)，共 3 条

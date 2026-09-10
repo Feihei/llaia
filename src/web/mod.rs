@@ -2485,7 +2485,7 @@ pub async fn probe_model(
     let req = crate::provider::ChatRequest {
         messages: &msgs,
         tools: None,
-        disable_thinking: false,
+        thinking: Some(crate::provider::ThinkingIntent::None),
     };
     // 外层超时兜底：OpenAiCompatibleProvider 单个 chunk 空闲超时 120s 对探测太长。
     match tokio::time::timeout(std::time::Duration::from_secs(30), p.chat(&req)).await {

@@ -95,6 +95,12 @@ impl Provider for FallbackProvider {
         self.main().label()
     }
 
+    fn thinking_capability(&self) -> Option<crate::config::ThinkingConfig> {
+        // 委托主 provider：能力声明 per (provider, model)，fallback 链通常是
+        // 同一后端的不同模型，生效态以主模型为准（与 detect_context_size 同理）
+        self.main().thinking_capability()
+    }
+
     fn kind(&self) -> &'static str {
         "fallback"
     }
@@ -178,7 +184,7 @@ mod tests {
         let r = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let resp = fb.chat(&r).await.unwrap();
         assert_eq!(resp.text.as_deref(), Some("ok"));
@@ -195,7 +201,7 @@ mod tests {
         let r = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let err = fb.chat(&r).await.unwrap_err();
         assert!(err.to_string().contains("bad2"));
@@ -212,7 +218,7 @@ mod tests {
         let r = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let events: Vec<_> = fb.chat_stream(&r).await.collect().await;
         assert_eq!(events.len(), 2);
@@ -274,7 +280,7 @@ mod tests {
         let r = ChatRequest {
             messages: &msgs,
             tools: None,
-            disable_thinking: false,
+            thinking: None,
         };
         let resp = fb.chat(&r).await.unwrap();
         assert_eq!(resp.tool_calls.len(), 1);

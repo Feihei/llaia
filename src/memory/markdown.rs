@@ -135,7 +135,7 @@ pub async fn compress_memory(
     let req = ChatRequest {
         messages: &messages,
         tools: None,
-        disable_thinking: false,
+        thinking: Some(crate::provider::ThinkingIntent::None),
     };
     let resp: ChatResponse = provider.chat(&req).await?;
     let new_content = resp.text.unwrap_or_default();

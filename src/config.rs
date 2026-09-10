@@ -225,6 +225,14 @@ pub struct ProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub model: String,
+    /// 思考能力声明（P1，docs/plans/2026-09-10-thinking-capability-model.md D2）：
+    /// `[provider.<id>.<model>.thinking]`。None（未写段）= 能力未知。
+    ///
+    /// `skip_serializing_if` 方向照 `enabled` 教训：必须 None 时省略——provider
+    /// 子树在 `put_config` 走 replace 合并（缺失即删），若写成「Some 时省略」
+    /// 会让已声明的 thinking 在 WebUI 保存时静默蒸发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
     /// 是否用 OpenAI function calling 协议（发 `tools` + 期待结构化 `tool_calls`）。
     /// `None`（缺省）= auto：跟随 `Compat` 探测/配置结果（plan #10），不再要求用户手设。
     /// 存量 `native_tool_calling = true/false` 仍按 Option 语义解析为 Some(…)，零破坏。
@@ -255,6 +263,49 @@ pub struct ModelConfig {
 
 fn default_true() -> bool {
     true
+}
+
+/// 思考能力声明（P1 D2）：`[provider.<id>.<model>.thinking]`。
+/// 三个字段全部「缺省 = unknown」：不写就是能力未知，请求层按 unknown 语义处理
+/// （Off 意图走 legacy 兜底、档位意图被门禁拒绝、回显 unknown 三态）。
+/// 字段值全部来自 wire 实测（probe 控制组），不做任何模型名猜测。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    /// 模型默认档位：`none|low|medium|high|max`；缺省或字面 `unknown` = 未知
+    /// （实测只能断言「非 none」时写 unknown）。仅用于生效态回显，不发请求。
+    #[serde(default, deserialize_with = "deserialize_level_or_unknown")]
+    pub default: Option<crate::provider::ThinkingLevel>,
+    /// 档位怎么表达：`reasoning_effort`（顶层字段，服务端校验非法值 ⇒ 可信）或
+    /// `none`（不给旋钮——端点不校验档位，发了也白发）。缺省 = unknown，按 none 处理。
+    #[serde(default)]
+    pub level_wire: Option<crate::provider::ThinkingLevelWire>,
+    /// 「关」怎么表达：`enable_thinking_false`（嵌套 chat_template_kwargs，llama.cpp 实测）/
+    /// `thinking_disabled`（DeepSeek 方言，实测 400 规则来自错误消息）/
+    /// `reasoning_effort_none`（Ollama/agnes 实测唯一有效的关）/
+    /// `unsupported`（GLM 实测 400，任何关意图短路）。缺省 = unknown → legacy 兜底
+    /// （compat.disable_thinking_template 门内注入 chat_template_kwargs）。
+    #[serde(default)]
+    pub off_wire: Option<crate::provider::ThinkingOffWire>,
+}
+
+/// `default = "unknown"` → None（未知）；其余按档位名解析，拼错直接报错不静默吞。
+fn deserialize_level_or_unknown<'de, D>(
+    d: D,
+) -> Result<Option<crate::provider::ThinkingLevel>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    if s == "unknown" {
+        return Ok(None);
+    }
+    crate::provider::ThinkingLevel::parse(&s)
+        .map(Some)
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown thinking level '{s}' (expected none|low|medium|high|max|unknown)"
+            ))
+        })
 }
 
 fn is_true(b: &bool) -> bool {
@@ -1089,6 +1140,7 @@ impl Config {
                 context_size: None,
                 max_tokens: None,
                 enabled: true,
+                thinking: None,
             },
         );
         provider.insert(
@@ -1164,6 +1216,48 @@ pub(crate) fn expand_string(s: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn thinking_config_toml_roundtrip_and_skip_direction() {
+        // P1 D2：thinking 段解析；unknown 字面值 → None；skip 方向（enabled 教训）：
+        // None 时序列化省略键（provider 子树 replace 合并缺失即删，方向不能反）
+        let mc: ModelConfig = toml::from_str(
+            r#"
+model = "m"
+[thinking]
+default = "unknown"
+level_wire = "reasoning_effort"
+off_wire = "enable_thinking_false"
+"#,
+        )
+        .unwrap();
+        let t = mc.thinking.as_ref().unwrap();
+        assert_eq!(t.default, None, "literal 'unknown' deserializes to None");
+        assert_eq!(
+            t.level_wire,
+            Some(crate::provider::ThinkingLevelWire::ReasoningEffort)
+        );
+        assert_eq!(
+            t.off_wire,
+            Some(crate::provider::ThinkingOffWire::EnableThinkingFalse)
+        );
+        // 具体档位值解析
+        let mc2: ModelConfig =
+            toml::from_str("model = \"m\"\n[thinking]\ndefault = \"high\"").unwrap();
+        assert_eq!(
+            mc2.thinking.as_ref().unwrap().default,
+            Some(crate::provider::ThinkingLevel::High)
+        );
+        // 拼错的档位直接报错（不静默吞）
+        assert!(
+            toml::from_str::<ModelConfig>("model = \"m\"\n[thinking]\ndefault = \"hgh\"").is_err()
+        );
+        // None 时序列化省略 thinking 键
+        let bare: ModelConfig = toml::from_str("model = \"m\"").unwrap();
+        assert!(!toml::to_string(&bare).unwrap().contains("thinking"));
+        // Some 时保留（put_config 往返不蒸发）
+        assert!(toml::to_string(&mc).unwrap().contains("[thinking]"));
+    }
 
     #[test]
     fn test_load_full_config() {
