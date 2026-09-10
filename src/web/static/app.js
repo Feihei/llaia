@@ -243,6 +243,11 @@ function llaiaApp() {
       if (this.sessions.length === 0) await this.loadSessions();
     },
     async loadSessions() {
+      // turn 中 /api/sessions 抢不到 agent 锁，请求会一直挂着：短路不发，提示用户稍后再试
+      if (this.busy) {
+        this.sessionMsg = 'Agent turn in progress — try again after it finishes.';
+        return;
+      }
       try {
         const r = await this.apiFetch('/api/sessions?limit=200');
         if (r.ok) {
@@ -274,6 +279,11 @@ function llaiaApp() {
       }
     },
     async openSession(uuid) {
+      if (this.busy) {
+        this.selectedSession = uuid;
+        this.sessionMsg = 'Agent turn in progress — try again after it finishes.';
+        return;
+      }
       this.selectedSession = uuid;
       try {
         const r = await this.apiFetch('/api/sessions/' + encodeURIComponent(uuid));
@@ -1180,6 +1190,12 @@ function llaiaApp() {
       this.loadStats();
     },
     async loadStats() {
+      // turn 中 /api/stats/tokens 抢不到 agent 锁，请求会一直挂着：短路不发，提示用户稍后再试
+      if (this.busy) {
+        this.statsLoading = false;
+        this.statsError = 'Agent turn in progress — try again after it finishes.';
+        return;
+      }
       this.statsLoading = true;
       this.statsError = '';
       // 切换 range 时清掉旧数据：避免请求挂起/失败期间继续显示上个 range 的 7d 数字与柱状图

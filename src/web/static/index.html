@@ -128,7 +128,7 @@
              隐藏它，附件入口改成输入框左侧的 [+]（点它才开选择器） -->
         <input type="file" accept="image/*" multiple @change="onUpload($event)" x-ref="fileInput" hidden>
         <button class="attach" @click="$refs.fileInput.click()" title="Attach images">+</button>
-        <input type="text" x-model="inputText" @keydown.enter="send()" placeholder="Type a message... (while running, input is steered into the current turn)">
+        <input type="text" x-model="inputText" @keydown.enter="send()" :placeholder="busy ? 'Type steer message or stop...' : 'Type a message...'">
         <button @click="send()" x-text="busy ? 'Steer' : 'Send'">Send</button>
         <button @click="stop()" :disabled="!busy">Stop</button>
       </div>
@@ -181,6 +181,9 @@
         <div class="session-list">
           <div class="config-head">&#x276F; SESSIONS <button class="inline-add" @click="loadSessions()">Refresh</button></div>
           <div class="hint">Click a session to view its message history. Delete removes it from sessions.db (does not affect the live context).</div>
+          <!-- turn 中 /api/sessions 抢不到 agent 锁（后端 handler 与回合循环互斥），请求只会挂着；
+               这里既显示提示，也在 loadSessions/openSession 里直接短路不发请求 -->
+          <div x-show="busy" class="err">Agent turn in progress — session data can't be fetched right now. Try again after the turn finishes.</div>
           <div x-show="sessionMsg" class="err" x-text="sessionMsg"></div>
           <template x-for="s in sessions" :key="s.session_uuid">
             <div class="session-item" :class="{active: selectedSession === s.session_uuid}" @click="openSession(s.session_uuid)">
@@ -806,6 +809,9 @@
       </div>
       <div x-show="statsLoading" class="hint">Loading…</div>
       <div x-show="statsError" class="err" x-text="statsError"></div>
+      <!-- turn 中 /api/stats/tokens 抢不到 agent 锁（后端 handler 与回合循环互斥），请求只会挂着；
+           这里既显示提示，也在 loadStats 里直接短路不发请求 -->
+      <div x-show="busy" class="err">Agent turn in progress — stats data can't be fetched right now. Try again after the turn finishes.</div>
       <template x-if="stats">
         <div>
           <div class="stats-cards">
