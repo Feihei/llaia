@@ -187,7 +187,7 @@ off_wire = "unsupported"               # 实测 400
 ## 明确否决
 
 - **pi-ai 式全矩阵**（7 档 × 11 方言 + per-model 全量 pin）：实测五家只用 3 种表达，且主力本地模型没有可信档位。
-- **按模型名 substring 猜方言**：只当默认值（agnes 双向证伪：文档写的方言无效、文档没写的方言有效）。
+- **按模型名 substring 猜方言（作为机制）**：方言挂在部署粒度而非名字——同名 `deepseek-v4-flash` 在 modelscope 静默空响应、sensenova 正常；`glm-5.3` 直连与经 tokenrouter 连「校验与否」都不同；llama.cpp 上方言由 server + GGUF 决定、跨家族稳定（ornith ≡ qwen3.6），substring 会漏配 ornith、错配同名异部署模型。名字只许当默认值/先验，且先验必须经 bogus→400 类正向探测验证后才可采信（agnes 旁证：文档写的方言全无效、有效的方言文档没写——名字连可靠先验都给不了）。陌生名字走 unknown 兜底，这正是 substring 的预测行为，不构成反例。
 - **云端启动期探测** / **靠单发 reason_len 判档位**：前者花真 token 且不幂等，后者被采样抖动支配。
 - **新增 `/think` 命令**：命令面已够挤，`/reasoning` 保名改语义。
 
