@@ -33,7 +33,7 @@
 | P5 | ✅ | Provider Compat / 记忆预算 / 统一搜索 / todo / ask_user / skill 自管 / goal / 剩余项 | [CHANGELOG.md](CHANGELOG.md)（§P5） |
 | P6 | ✅ | 稳定性修复 + 快赢 + WebUI 批次 + 任务线/侧问/插话/媒体作用域 + Generation Guard/首运行引导 | [CHANGELOG.md](CHANGELOG.md)（§v0.3.1、§v0.4.0） |
 | v0.4.0 | ✅ | P6 全量 + provider/compat 收口，2026-09-04 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.4.0）、[release-notes/v0.4.0.md](release-notes/v0.4.0.md) |
-| v0.5.0 | 🚧 | 发版版本（**攒发**；因含行为不兼容改动由原定的 v0.4.1 直升 minor）：H1–H4 止血 + T3/S1 terminal 安全收口 + 画像模板升级 + /session 改名 + 框架消息英文化 + todo GC + WebUI 归档卫生 + chat 会话线侧栏（代码全部落地，**未打 tag**，只欠 H6 发版动作） | [CHANGELOG.md](CHANGELOG.md)（§v0.5.0） |
+| v0.5.0 | ✅ | 发版版本（因含行为不兼容改动由原定的 v0.4.1 直升 minor）：H1–H4 止血 + T3/S1 terminal 安全收口 + 画像模板升级 + /session 改名 + 框架消息英文化 + todo GC + WebUI 归档卫生 + chat 会话线侧栏，2026-09-11 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.5.0）、[release-notes/v0.5.0.md](release-notes/v0.5.0.md) |
 
 > **P6 已全部交付并归档**：原 P6 节的完整勾选清单（WebUI W1/W2/W3、会话主题总结、provider 针对性优化、`memory_research`、启动优化 #11、主干代码体检、#A–#J 新增发现、Generation Guard、First-run Bootstrap 等）已随各项实现陆续迁入 [CHANGELOG.md](CHANGELOG.md) §v0.3.1 / §v0.4.0，本文件不再保留已交付明细。注意 CHANGELOG 里**没有独立的 §v0.3.2**：原按 0.3.2 攒的开发内容跨版本号当作 v0.4.0 发布，段标题已一并重定。v0.5.0 的三项同样已迁入 CHANGELOG，本文件只留索引与下一步。
 
@@ -41,7 +41,7 @@
 
 ## 近期小修（H 系列，v0.5.0 → v0.5.1 窗口）
 
-**状态**：🚧 收口中（起点 2026-09-05）｜H1–H4 已交付并迁入 CHANGELOG，H5 已拍板挂起 v0.5.1，H6（打 tag）待发版｜每项独立可提交、不阻塞发版
+**状态**：✅ v0.5.0 已发版（2026-09-11）｜H1–H4 + H6 已交付并迁入 CHANGELOG，H5 挂起 v0.5.1（当前开发版本 0.5.1，工作区版本号恒为下一开发版）｜每项独立可提交、不阻塞发版
 
 抽出来的理由：这些都不是「阶段性工程」，而是散在 P7 / 主干体检 backlog 里的低成本止血项——原混在前瞻计划里，既不会被顺手做掉，也看不清发版窗口里还剩什么。
 
@@ -63,7 +63,7 @@
       - `lock().unwrap()` 毒锁恢复：`slash.rs` 4 处 + `sqlite.rs` 36 处（plan 立项时估的「约 20 处」偏少，实数 40），全部机械替换为 `lock().unwrap_or_else(|e| e.into_inner())`——锁内均同步调用、无 await，`Mutex` 毒化后恢复守卫不丢正确性，与「生产路径不用 unwrap」约定对齐。
 - [ ] **H5 · 入站附件 `uploads/` 无回收通路**（todo GC 的同类项，2026-09-05 顺带查得）：QQ 附件（`channels/qq.rs:872`）与邮件附件（`channels/mail.rs:190`）都落 `<家目录>/uploads/`，全仓库没有任何删除/回收代码，只增不减（本机现 2 个文件 / 220 KB，属还没长起来而不是没问题）。**两条现成通路都不能照搬**：`todos/` 的按会话 uuid GC 在这里无意义（附件不属于会话生命周期，且文件名是 `<msg_id>_<filename>` 不带 uuid），`workspace/tmp/` 的启动期 3 天 mtime 清理又太危险——用户半年前发来的图片可能仍被引用。必要性：**低–中**（单用户场景增长慢，但发版前把它记下来比忘掉便宜）。
       - **定案（grill 2026-09-07）：WebUI 手动清理**——保留全部 + 容量显示 + uploads 文件列表/手动删除，不做任何自动回收（消息历史引用这些路径，自动删/挪都会断链，零自动 = 零断链风险）。挂起到 v0.5.1，v0.5.0 不带。
-- [ ] **H6 · v0.5.0 发版动作**：写好 `docs/release-notes/v0.5.0.md`（简短英文 changelog，`release.yml` 的 release-notes job 会据此填 GitHub release body）→ `git tag -a v0.5.0` → push 分支与 tag。发版节奏与「跨版本号需先改 `Cargo.toml` 再打 tag」的既有约定见 AGENTS.md「发版」。
+- [x] **H6 · v0.5.0 发版动作**（2026-09-11 交付：release-notes/v0.5.0.md + tag `v0.5.0`，Release/Deploy workflow 已触发）：写好 `docs/release-notes/v0.5.0.md`（简短英文 changelog，`release.yml` 的 release-notes job 会据此填 GitHub release body）→ `git tag -a v0.5.0` → push 分支与 tag。发版节奏与「跨版本号需先改 `Cargo.toml` 再打 tag」的既有约定见 AGENTS.md「发版」。
       - **升号说明（2026-09-10）**：原定 v0.4.1 小版本，因内容滚入行为不兼容改动（`interpret_inline` 默认强制人审、任务线重启不再隐式续接、自动会话标题移除、画像模板升级改写）且体量达 feature 级，按 pre-1.0 semver 直升 v0.5.0。
       - **时序修订（grill 2026-09-07）**：用户拍板**攒发**——本版等 T3 + S1 落地后一起打 tag（覆盖 2026-09-05「不含 P7 任何子项」的决定；T3/S1 内容届时计入 changelog）。H5 不等，挂起 v0.5.1。
 
