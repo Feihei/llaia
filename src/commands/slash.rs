@@ -44,7 +44,7 @@ pub async fn try_handle(
     match cmd_lc.as_str() {
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
 "/help" => Ok(SlashOutcome::Handled(
-"commands: /new /session [<name>|close] /sessions (aliases /task /tasks) /exit /stop /compact /memory-compact /clear /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [auto|none|low|medium|high|max] /skill list [--all] /btw <question> (side question, context read-only) /steer <message> (inject into a running turn) /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
+"commands: /archive [days] (move messages older than N days into an archived line, default 30) /session [<name>|close] /sessions (aliases /task /tasks) /exit /stop /compact /memory-compact /clear (context + todo list) /stats /remember <text> /provider [--temp] <n|id.alias> /permission [read-only|default|yolo] /reasoning [auto|none|low|medium|high|max] /skill list [--all] /btw <question> (side question, context read-only) /steer <message> (inject into a running turn) /ok <id> /deny <id> /answer <id> <text> /cancel <id> /move [<path>|home] (alias /cd) — no arg or `/move home` restores the home workspace /config /env /migrate-secrets /delegate-list /delegate-cancel <id> /help"
 .into(),
 )),
         "/permission" => {
@@ -194,21 +194,37 @@ pub async fn try_handle(
                 Err(e) => Ok(SlashOutcome::Handled(format!("[move failed: {}]", e))),
             }
         }
-        "/new" => {
-            // 真正开启一个新会话：新建 session 并切换到它（沿用当前会话的 channel），
-            // 而非仅清空内存 context。否则所有"新"对话都会继续追加到同一个旧会话里。
-            let channel = agent
+        "/archive" => {
+            // 会话线模型收口（2026-09-11 定案）：主线恒一条，「换一页」= 消息级归档。
+            // 与 WebUI archive-older 同一条 `archive_messages_before` 通路：搬移 N 天前
+            // 的消息进归档桶，源线继续当活跃线，live context 零感知。无参默认 30 天。
+            let days: i64 = if args.is_empty() {
+                30
+            } else {
+                match args.parse::<i64>() {
+                    Ok(n) if (1..=3650).contains(&n) => n,
+                    _ => {
+                        return Ok(SlashOutcome::Handled(
+                            "usage: /archive <days> (1-3650, default 30)".into(),
+                        ))
+                    }
+                }
+            };
+            let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+            match agent
                 .session_store
-                .channel_of(agent.session_id)?
-                .unwrap_or_else(|| "cli".to_string());
-            let new_id = agent
-                .session_store
-                .create_session(&Uuid::new_v4().to_string(), &channel)?;
-            agent.session_id = new_id;
-            agent.context.clear();
-            agent.context.summary = None;
-            agent.refresh_task_state().await;
-            Ok(SlashOutcome::Handled("[new session]".into()))
+                .archive_messages_before(agent.session_id, &cutoff)
+            {
+                Ok(0) => Ok(SlashOutcome::Handled(format!(
+                    "[no messages older than {} day(s) to archive]",
+                    days
+                ))),
+                Ok(moved) => Ok(SlashOutcome::Handled(format!(
+                    "[archived {} message(s) older than {} day(s) into an archived line — live context untouched]",
+                    moved, days
+                ))),
+                Err(e) => Ok(SlashOutcome::Handled(format!("[archive failed: {}]", e))),
+            }
         }
         // /session（原 /task，ADR-0031 2026-09-07 修订）：旧名保留为纯转发别名。
         // 只管历史记录与上下文回灌；目录作用域归 /move 管，两者对应关系靠 [scope] 提示。
@@ -358,7 +374,10 @@ pub async fn try_handle(
         "/clear" => {
             agent.context.clear();
             agent.context.summary = None;
-            Ok(SlashOutcome::Handled("[context cleared]".into()))
+            // 会话线模型收口（2026-09-11 定案）：todo 定位短期小计划，与内存上下文
+            // 同生命周期——主线 uuid 恒定，不清则清单永生。
+            agent.tools.todo_store.clear_current();
+            Ok(SlashOutcome::Handled("[context cleared (todo list cleared too)]".into()))
         }
         "/compact" => match agent.provider_for_compact().await {
             Some(p) => {
@@ -1692,6 +1711,71 @@ mod tests {
         // 同名再建：新建一条全新任务线（不复用归档）
         try_handle("/session 整理", &mut agent, None).await.unwrap();
         assert_ne!(agent.session_id, task_sid);
+    }
+
+    /// 会话线模型收口（2026-09-11）：/archive 换一页 + /clear 连带清 todo。
+    #[tokio::test]
+    async fn test_archive_noop_and_clear_todo() {
+        let mut agent = test_agent(test_config()).await;
+
+        // /archive：刚写的消息不会被 30 天 cutoff 命中 → no-op 分支
+        //（真搬移语义由 sqlite::test_archive_messages_before 覆盖）
+        agent
+            .session_store
+            .append_message(agent.session_id, &Role::User, "fresh")
+            .unwrap();
+        let out = try_handle("/archive 30", &mut agent, None).await.unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("no messages older than 30 day(s)"), "{}", msg)
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        // 无参默认 30 天
+        let out = try_handle("/archive", &mut agent, None).await.unwrap();
+        assert!(
+            matches!(&out, SlashOutcome::Handled(m) if m.contains("no messages older than 30 day(s)")),
+            "{:?}",
+            out
+        );
+        // 参数越界 / 非数字 → usage，不碰存储
+        for bad in ["/archive 0", "/archive 9999", "/archive abc"] {
+            let out = try_handle(bad, &mut agent, None).await.unwrap();
+            assert!(
+                matches!(&out, SlashOutcome::Handled(m) if m.contains("usage: /archive")),
+                "{} -> {:?}",
+                bad,
+                out
+            );
+        }
+
+        // /clear 连带清 todo：换上带 workspace 的 TodoStore（生产装配即替换 registry.todo_store）
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = crate::agent::runner::ToolRegistry::new();
+        registry.todo_store =
+            std::sync::Arc::new(crate::tools::todo::TodoStore::new(dir.path().to_path_buf()));
+        agent.tools = std::sync::Arc::new(registry);
+        let uuid = agent
+            .session_store
+            .session_uuid(agent.session_id)
+            .unwrap()
+            .unwrap();
+        agent.tools.todo_store.set_current_session(&uuid);
+        agent.tools.todo_store.add("step one").unwrap();
+        assert!(!agent.tools.todo_store.list().unwrap().is_empty());
+        let out = try_handle("/clear", &mut agent, None).await.unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("todo list cleared"), "{}", msg)
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        assert!(agent.tools.todo_store.list().unwrap().is_empty());
+        assert!(!dir
+            .path()
+            .join("todos")
+            .join(format!("{uuid}.json"))
+            .exists());
     }
 
     async fn test_agent_with_provider(provider: Arc<dyn Provider>) -> Agent {

@@ -88,7 +88,7 @@ session 不持久化作用域，但 `/session close`/列表展示 origin/current
 3. 改名半径 → **命令面 rename + 保留 `/task` `/tasks` 别名**；`kind='task'` 值与内部命名（`ActiveTask`/`refresh_task_state`）**不动**（避免迁移与无效重构）；ADR-0031 追加修订节 + AGENTS.md/文档同步。
 4. 隐式 resume → `latest_session()` 加 `kind='main'`：重启恒回主线；任务线靠显式 `/session <名>`（回灌机制不变）。pi 的消失目录问询不引入（bound_path 非执行语义，无从消失）。
 5. cron 会话膨胀 → **保留为独立待办**，不在本 plan。
-6. `/new` → 维持现状（同线清上下文），不动。
+6. `/new` → ~~维持现状（同线清上下文）~~ **2026-09-11 重新定案：取消 `/new`**。原文与代码不符（`c244f70` 起 `/new` 即真建新会话），且「新建 main 行」与「主线恒一条」方向矛盾。「换一页」改由 `/archive N` + `/clear` 配对承担，`/clear` 同步清 todo；见 [plan.md](../plan.md)「会话线模型收口」与 ADR-0031 定案节。
 7. 锚概念 → **不引入**（"不要复杂化"直接否决）。
 8. 移动的历史语义 → 回灌天然满足"只改指针不重写"；对应性提示落在切线 notice 里（清单 4）。
 9. 审批池粒度 → 维持进程级 trusted_dirs 并集（"workspace 始终在并集"）。

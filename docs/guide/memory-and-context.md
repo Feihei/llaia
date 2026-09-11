@@ -44,8 +44,8 @@ LLAIA 的对策：由 LLM 从 SOUL+USER 自动提炼一份 ≤120 token 的关�
 
 ## 会话与压缩
 
-- 同一用户同一会话**跨频道接续**（Web UI / 终端 / QQ 等共用 session）。
-- `/new` 开新会话；上下文超阈值（默认 70%，可配 `[runtime].context_threshold`）时**自动压缩**：关键消息保留（SOUL/USER 永留、首条用户消息留、工具结果可丢），其余旧消息由 LLM 摘要替换。
+- 同一用户同一会话**跨频道接续**（Web UI / 终端 / QQ 等共用 session）；主线恒为一条（`/new` 已移除，「换一页」用 `/archive [days]` 归档旧消息 + `/clear` 清上下文）。
+- 上下文超阈值（默认 70%，可配 `[runtime].context_threshold`）时**自动压缩**：关键消息保留（SOUL/USER 永留、首条用户消息留、工具结果可丢），其余旧消息由 LLM 摘要替换。
 - 手动压缩：`/compact`。
 - 用更便宜的模型压缩：`[runtime].compact_model`。
 - 更聪明的压缩策略见 [ADR-0019](../adr/0019-smart-compaction.md)。

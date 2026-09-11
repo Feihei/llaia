@@ -146,3 +146,9 @@ ALTER TABLE sessions ADD COLUMN bound_path TEXT;                     -- 任务�
 4. **对应性提示矩阵**：`/session` 与 `/move` 的 notice 统一带 `[scope]` 状态行（bound·root·是否一致），失配给 `/move <dir> to align (optional)`、无绑定给 `/move 即绑定`、主线 /move 命中他线绑定给 `/session <名>` 切线 tip——框架摆事实，同步与否留给用户（软提示，不强制）。`Context.task_state` 注入同步带失配句。
 5. **fork pin 家目录**（独立缺口，与上同源）：`fork_for_isolated` 不再共享主线 `workspace_root` Arc，fork 持独立副本恒 pin agent 家目录——cron/委派不随主线 `/move` 漂移。
 6. 未决 3 的原「/move 不更新 bound_path」结论由第 3 条替代。
+
+## 未决 → 已定案（2026-09-10 提出，2026-09-11 定案）
+
+**`/new` 与主线的关系重审**：`/session` 上线后 `/new` 是否还需要？核实结论：`/new` 是**唯一能造 `kind='main'`**的命令（`/session` 只造 task 线；`/session` 无参只回最新 main）；但在「主线恒一条、始终活跃、不用命令切换」方向下，该能力反成矛盾源——每次 `/new` 造出的旧 main 行 `latest_session` 永不再选中、WebUI Sessions 列表却恒可见。**定案（2026-09-11）：`/new` 直接删除**（不做别名/弃用过渡），造线兜底由启动逻辑（`latest_session()` 为 None 即建）与 `switch_to_main` fallback 承担。「换一页」由新命令 **`/archive N`** 承担（与 WebUI `archive-older?days=N` 同一条 `archive_messages_before` 通路，无参默认 30 天；桶标题改为每次归档后更新到桶内最新一条消息的日期，主线标题恒不变）。归档与 `/clear` **职责正交、不绑定**：前者存储层（live context 零感知）、后者内存上下文，配对使用由用户自行组合，不设 `/reset` 聚合命令；`/clear` 同步清当前 session 的 todo 文件（todo 定位短期小计划，长期计划落文件）。N=0 的同秒竞态不修（`created_at < now` 天然排除同秒末尾，N≥1 是主用例）。
+
+前提被本方向推翻/改写的既有条目：本文「通用线维持现状（一条流水 + `/new` + 自动压缩）」以及 [plans/2026-09-07-task-to-session.md](../plans/2026-09-07-task-to-session.md) 处置 6「`/new` → 维持现状（同线清上下文）」（后者与代码不符，`c244f70` 起 `/new` 即真建新会话；已加注定案）。详见 [plan.md](../plan.md)「会话线模型收口」。

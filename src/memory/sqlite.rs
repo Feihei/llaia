@@ -439,18 +439,12 @@ END;
         let bucket_id: i64 = match existing {
             Some(id) => id,
             None => {
-                let cutoff_date: String = cutoff_rfc3339.chars().take(10).collect();
-                let label = format!(
-                    "archive of {} (older than {})",
-                    src_title.unwrap_or(src_channel),
-                    cutoff_date
-                );
                 let now = chrono::Utc::now().to_rfc3339();
                 tx.execute(
                     "INSERT INTO sessions (session_uuid, channel, created_at, last_activity,
                                            state, kind, title)
-                     VALUES (?1, ?2, ?3, ?3, 'archived', 'task', ?4)",
-                    rusqlite::params![uuid::Uuid::new_v4().to_string(), bucket_channel, now, label],
+                     VALUES (?1, ?2, ?3, ?3, 'archived', 'task', '')",
+                    rusqlite::params![uuid::Uuid::new_v4().to_string(), bucket_channel, now],
                 )?;
                 tx.last_insert_rowid()
             }
@@ -459,6 +453,29 @@ END;
             "UPDATE messages SET session_id = ?1 WHERE session_id = ?2 AND created_at < ?3",
             rusqlite::params![bucket_id, src_id, cutoff_rfc3339],
         )?;
+        // 桶标题随内容走（会话线模型收口 2026-09-11）：桶每源线一个、跨多次归档累加，
+        // 取桶内最新一条消息的日期作标签——旧实现首写死 cutoff，重复归档后标签失真
+        // （装着 09-20 的消息、写着 09-09）。hit>0 保证 moved>0，MAX 必有值，optional 兜底。
+        let latest: Option<String> = tx
+            .query_row(
+                "SELECT MAX(created_at) FROM messages WHERE session_id = ?1",
+                rusqlite::params![bucket_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if let Some(latest) = latest {
+            let through: String = latest.chars().take(10).collect();
+            let label = format!(
+                "archive of {} (through {})",
+                src_title.unwrap_or(src_channel),
+                through
+            );
+            tx.execute(
+                "UPDATE sessions SET title = ?2 WHERE id = ?1",
+                rusqlite::params![bucket_id, label],
+            )?;
+        }
         tx.commit()?;
         Ok(moved)
     }
@@ -589,7 +606,8 @@ END;
         Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
     }
 
-    /// 反查某会话的 channel（/new 新建会话时沿用当前会话的 channel）。
+    /// 反查某会话的 channel（需要新建会话时沿用当前 channel 的通路，如
+    /// `switch_to_main` 的无主线 fallback）。
     pub fn channel_of(&self, session_id: i64) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT channel FROM sessions WHERE id = ?1")?;
@@ -1627,11 +1645,14 @@ mod tests {
             .pop()
             .unwrap()
             .id;
+        // later 拨到 35 天前（比首批的 40 天新、仍在 30 天 cutoff 之前），
+        // 用于验证标题随桶内最新消息日期走（2026-09-11 动态标题）
+        let newer_old = (chrono::Utc::now() - chrono::Duration::days(35)).to_rfc3339();
         {
             let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute(
                 "UPDATE messages SET created_at = ?2 WHERE id = ?1",
-                rusqlite::params![later, old],
+                rusqlite::params![later, newer_old],
             )
             .unwrap();
             let n: i64 = conn
@@ -1641,6 +1662,13 @@ mod tests {
         }
         assert_eq!(store.archive_messages_before(src, &cutoff).unwrap(), 1);
         assert_eq!(store.messages_with_tool_calls(bucket).unwrap().len(), 4);
+        // 标题动态更新：桶内最新消息是 35 天前的 later → 标签日期跟着走，不再是首写死值
+        let info = store.session_kind(bucket).unwrap().unwrap();
+        let expected: String = newer_old.chars().take(10).collect();
+        assert_eq!(
+            info.title.unwrap(),
+            format!("archive of web (through {expected})")
+        );
     }
 
     #[test]

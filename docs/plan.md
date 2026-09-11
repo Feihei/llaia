@@ -85,6 +85,27 @@
 
 ---
 
+## 会话线模型收口（2026-09-10 定方向，2026-09-11 定案并交付）
+
+**状态**：✅ 已实现（2026-09-11）｜grill 2026-09-10 + 细节拍板 2026-09-11 + 同日实现
+
+**背景**：`/session` 上线后 `/new` 看似多余，核实后曾判"删不得"（全系统唯一能造 `kind='main'` 主线的命令）。**方向（2026-09-10 用户定案）**：主线恒为一条、始终活跃，不用命令切换；消息级归档（`archive_messages_before` 真搬移）承担"换一页"。"唯一造线命令"的顾虑随之消解——造线兜底已存在（启动 `latest_session()` 为 None 即建、`switch_to_main` fallback），且 `/new` 每按一次造出的僵尸 main 行（`latest_session` 永不再选中、WebUI 列表恒可见）在新模型下反成矛盾源。
+
+**定案与交付（2026-09-11）**：
+
+- [x] **`/new` 直接删除**（不做别名/弃用过渡）：handler（原 `slash.rs:197`）+ `/help` 文案 + 注释（`sqlite.rs::channel_of`、`todo.rs` 模块头）已清；WebUI 无 `/new` 入口零影响。
+- [x] **新增 `/archive [days]`**（`slash.rs`）：与 WebUI `archive-older?days=N` 同一条 `archive_messages_before` 通路；无参默认 30 天、钳制 1–3650（与 WebUI 一致）；0 命中回 no-op 提示。桶隔离性现成继承（`archive:` 前缀 + archived + kind='task' 三重过滤）；任务线上同样成立。
+- [x] **归档与 `/clear` 职责正交、不绑定**：`/archive` 纯存储层（live context 零感知）；"换一页并立即遗忘" = `/archive` + `/clear` 配对，不设 `/reset` 聚合命令。
+- [x] **`/clear` 同步清 todo**：`TodoStore::clear_current()`（内存置空 + 删 `todos/<uuid>.json`；无当前 session 静默跳过），todo 与内存上下文同生命周期。
+- [x] **桶标题动态更新**（`sqlite.rs::archive_messages_before`）：桶每源线一个、跨多次归档累加，标题随内容走——每次归档后更新为桶内最新一条消息的日期（`archive of <名> (through <YYYY-MM-DD>)`），替代旧的首写死 cutoff（重复归档后标签失真）。主线标题恒不变。
+- N=0 同秒竞态**不修**：`created_at < now` 天然排除同秒末尾，N≥1 是主用例。
+
+**测试**：`todo.rs::clear_current_*`（清空 + inert 两态）、`sqlite.rs::test_archive_messages_before` 扩动态标题断言、`slash.rs::test_archive_noop_and_clear_todo`（/archive 参数边界 + no-op + /clear 集成）。
+
+**文档已同步**：AGENTS.md（会话模型 + 斜杠命令清单）、guide/slash-commands.md（`/new` 移除、`/archive` 新条目、`/clear` 重写）、guide/memory-and-context.md、glossary.md、ADR-0024（todo 生命周期两处）、ADR-0031（未决节改定案节）、task-to-session plan（处置 6 加注）。
+
+---
+
 ## 遗留 backlog（主干体检·主动不做项，2026-08-26 起留档）
 
 影响小或需结构性前提，暂缓处理，需要时再评估：

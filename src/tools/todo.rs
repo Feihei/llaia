@@ -4,7 +4,8 @@
 //! - 单一 `todo` 工具（`action` = add/list/update/done），复用 P5-3 `search` 工具的
 //!   "单工具 + action 分发" 模式，而非 ADR 草稿里列的 4 个独立工具名。
 //! - 状态按 `session_uuid` 分桶，in-memory + 落盘 `workspace/todos/<uuid>.json`；
-//!   跨会话天然隔离（不串味），`/new` 后新会话空清单、旧会话文件仍保留。
+//!   跨会话天然隔离（不串味）；`/clear` 连同上下文一并清当前清单（2026-09-11），
+//!   孤儿文件由启动期 `gc_orphans` 回收。
 //! - `TodoStore` 挂在共享的 `ToolRegistry` 上：agent 每轮把"当前 session_uuid"
 //!   写入 `current_session`，todo 工具执行时按它路由；同时 agent 把当前清单文本注入
 //!   Runtime Context（每轮可见"还差哪几步"）。
@@ -289,6 +290,27 @@ impl TodoStore {
         self.update(id, TodoStatus::Done)
     }
 
+    /// 清空当前 session 的清单：内存置空 + 删除落盘文件。`/clear` 同步调用
+    /// （会话线模型收口 2026-09-11：主线 uuid 恒定，todo 若不随清则永生；
+    /// 定位短期小计划，与内存上下文同生命周期）。无当前 session 时静默跳过。
+    pub fn clear_current(&self) {
+        let uuid = {
+            let g = self.inner.read().unwrap();
+            match &g.current_session {
+                Some(u) => u.clone(),
+                None => return,
+            }
+        };
+        self.load_if_needed(&uuid);
+        {
+            let mut g = self.inner.write().unwrap();
+            g.lists.insert(uuid.clone(), Vec::new());
+        }
+        if let Some(p) = self.file_path(&uuid) {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
     /// 当前清单的展示文本（供 Runtime Context 注入）。无 session 或空清单返回空串。
     pub fn current_list_text(&self) -> String {
         let uuid = {
@@ -535,6 +557,27 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown action"));
+    }
+
+    /// `/clear` 通路：清单清空 + 落盘文件删除；无当前 session 时静默跳过不 panic。
+    #[test]
+    fn clear_current_empties_list_and_removes_file() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let s = TodoStore::new(ws.clone());
+        s.set_current_session("sess1");
+        s.add("step").unwrap();
+        let path = ws.join("todos").join("sess1.json");
+        assert!(path.exists());
+        s.clear_current();
+        assert!(s.list().unwrap().is_empty());
+        assert!(!path.exists(), "清单文件应随 /clear 删除");
+    }
+
+    #[test]
+    fn clear_current_without_session_is_inert() {
+        let s = store();
+        s.clear_current(); // 不 panic 即通过
     }
 
     /// 孤儿清单（会话已删）被清掉；存活会话的清单与非 json 文件不动。

@@ -36,7 +36,7 @@ todo_done(id)                           # 标记完成
 
 ### 3. 持久化（每会话一份）
 
-**每会话一份**：in-memory + 落盘 `workspace/todos/<session_uuid>.json`。`/new` 或切会话清空当前清单；首版不做跨会话持久（如需，后续加 `persistent` 开关）。**不**使用全局 `kv` 表（`kv` 无 session 隔离，会串味）。
+**每会话一份**：in-memory + 落盘 `workspace/todos/<session_uuid>.json`。`/clear` 或切会话清空当前清单（2026-09-11 修订：原为 `/new`，该命令已移除；todo 定位短期小计划，与内存上下文同生命周期）；首版不做跨会话持久（如需，后续加 `persistent` 开关）。**不**使用全局 `kv` 表（`kv` 无 session 隔离，会串味）。
 
 ### 4. 运行时注入
 
@@ -64,5 +64,5 @@ todo 列表每轮注入 Runtime Context（类似 goal_state），让模型始终
 
 - **工具形态采用单一 `todo` 工具 + `action` 分发**（add/list/update/done），而非 §2 草稿里列的 4 个独立工具名（`todo_add`/`todo_list`/`todo_update`/`todo_done`）。理由：复用 P5-3 `search` 工具的"单工具 + action"模式，与本项目 `cron` 工具约定一致，减少 prompt 内工具条目数。
 - **共享状态挂载点**：`TodoStore` 挂在共享的 `ToolRegistry` 上（`todo_store` 字段）。agent 每轮在 `handle_message_streaming` 起点把当前 `session_uuid` 写入 `current_session`，todo 工具据此路由；同时把当前清单文本写入 `Context.todo_state`，在 `to_messages` 尾部（Runtime Context 区，与 status_bar 同区）注入，每轮可见"还差哪几步"。未挂真实 workspace（`ToolRegistry::new()` 默认）时为禁用态（测试/降级用）。
-- **持久化**：每会话一份，落盘 `workspace/todos/<session_uuid>.json`，首次访问懒加载；`/new` 后新会话天然空清单、旧会话文件保留。
+- **持久化**：每会话一份，落盘 `workspace/todos/<session_uuid>.json`，首次访问懒加载；`/clear` 连带清当前清单（内存置空 + 删文件，2026-09-11），孤儿文件由启动期 `gc_orphans` 回收。
 - **WebUI**：`GET /api/todos` 只读返回当前清单；聊天页底部加了只读 todo 面板（5s 轮询）。点击勾选回传（plan mode / 可交互）留待后续。

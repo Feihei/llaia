@@ -70,7 +70,7 @@ schema 见 ADR-0004。上下文压缩时旧消息从内存移除但 sqlite 留�
 ### 会话（Session）
 一次连续对话。由 `session_uuid` 标识，跨频道共享上下文。
 同一用户同一会话——CLI 说的话 QQ 也能看到接续。
-手动 `/new` 开新会话，或上下文超阈值时自动压缩。
+主线恒为一条：「换一页」用 `/archive [days]` + `/clear` 配对；上下文超阈值时自动压缩。
 
 ### 上下文（Context）
 当前会话中拼给 provider 的消息序列。含 system prompt（SOUL/USER/MEMORY）+ 历史消息。
@@ -144,8 +144,8 @@ P2 引入工具白名单，按子 Agent 过滤可见工具。
 `llaia chat` 进入的交互式命令行。支持斜杠命令。
 
 ### 斜杠命令（Slash Command）
-REPL 内以 `/` 开头的指令。P1 清单：
-`/new` `/exit` `/compact` `/clear` `/remember` `/config` `/help`。
+REPL 内以 `/` 开头的指令。P1 清单（`/new` 已于 2026-09-11 移除，由 `/archive` + `/clear` 取代）：
+`/exit` `/compact` `/clear` `/remember` `/config` `/help`。
 
 ## CLI 子命令
 

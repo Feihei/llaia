@@ -6,11 +6,11 @@
 
 | 命令 | 作用 |
 |---|---|
-| `/new` | 开新会话（清空当前上下文）。 |
+| `/archive [days]` | 把当前会话 N 天前（默认 30，范围 1–3650）的消息搬进专属归档线（WebUI「Archive older」同款通路）。主线恒为一条：源线继续当活跃线用、上下文零感知，归档线可在 WebUI Sessions 列表浏览/导出。「换一页并立即遗忘」= `/archive` + `/clear` 配对。 |
 | `/exit` · `/quit` | 退出当前交互。 |
 | `/stop` | 停止当前生成（同退出语义视频道实现）。 |
 | `/compact` | 手动压缩上下文（需要已配 provider）。 |
-| `/clear` | 清空上下文（等同 `/new` 的清空效果）。 |
+| `/clear` | 清空内存上下文（历史仍在 sqlite 留底），并连带清空当前会话的 todo 清单（todo 定位短期小计划，与上下文同生命周期）。 |
 | `/stats` | 显示上下文统计：context_size、阈值、当前 token 占比（正文 + 工具 schema 分项）、历史条数、session id、摘要状态、工具分组计数、压缩用 provider。 |
 | `/remember <text>` | 往 `MEMORY.md` 追加一条记忆（等价 CLI `llaia remember`）。 |
 | `/provider` | 列出所有**已启用**模型，当前模型标 `*`。`enabled = false` 的模型不进列表、也不占 `<num>` 序号；若当前正在用的模型被隐藏了，列表末尾附一行说明（否则看起来像模型丢了）。 |
