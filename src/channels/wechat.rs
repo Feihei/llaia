@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 /// getupdates / get_qrcode_status 长轮询服务端超时（秒）
 const LONG_POLL_SECS: u64 = 35;
@@ -60,11 +60,28 @@ pub struct WechatState {
     pub owner_user_id: String,
 }
 
+/// WebUI 微信卡片的登录进度视图：频道登录循环是**唯一写入方**，
+/// `GET /api/channels/wechat/login` 只读转发。`started` 用来区分
+/// 「config 已开但频道还没随 serve 启动」（前端提示重启）与「正在等扫码」。
+#[derive(Debug, Clone, Default)]
+pub struct WechatLoginView {
+    /// waiting | qr | confirmed | error
+    pub status: String,
+    /// status=qr 时的二维码图片（data URL；非 base64 时按直链透传，img src 均可加载）
+    pub qr_image: String,
+    /// 人类可读说明（错误原因等）
+    pub message: String,
+    /// 频道登录流程是否至少跑过一次
+    pub started: bool,
+}
+
 pub struct WechatChannel {
     config: WechatConfig,
     state_dir: PathBuf,
     http: Client,
     state: Mutex<WechatState>,
+    /// WebUI 卡片登录进度（serve_cmd 注入共享 Arc；未注入时是无人读的默认值）
+    login_view: Arc<RwLock<WechatLoginView>>,
 }
 
 impl WechatChannel {
@@ -79,6 +96,7 @@ impl WechatChannel {
                 .build()
                 .expect("build wechat http client cannot fail with static config"),
             state: Mutex::new(WechatState::default()),
+            login_view: Arc::new(RwLock::new(WechatLoginView::default())),
         }
     }
 
@@ -115,6 +133,26 @@ impl WechatChannel {
     /// 当前状态快照
     pub async fn state_snapshot(&self) -> WechatState {
         self.state.lock().await.clone()
+    }
+
+    /// 注入共享登录视图（serve_cmd 把同一个 Arc 也给 WebChannel，WebUI 卡片据此渲染）
+    pub fn with_login_view(mut self, view: Arc<RwLock<WechatLoginView>>) -> Self {
+        self.login_view = view;
+        self
+    }
+
+    /// 共享视图的 Arc 克隆（接线 AppState 用）
+    pub fn login_view(&self) -> Arc<RwLock<WechatLoginView>> {
+        self.login_view.clone()
+    }
+
+    /// 登录进度的唯一写入点（顺带标记 started，供端点区分「未启动」与「等扫码」）
+    async fn set_login_view(&self, status: &str, qr_image: &str, message: &str) {
+        let mut v = self.login_view.write().await;
+        v.started = true;
+        v.status = status.to_string();
+        v.qr_image = qr_image.to_string();
+        v.message = message.to_string();
     }
 
     /// 统一 HTTP JSON 请求（带 ilink 特征头）
@@ -234,12 +272,17 @@ impl WechatChannel {
         .await
     }
 
-    /// 确保已登录（有 token 直接过；否则走扫码流程直到 confirmed）
-    async fn ensure_login(&self) -> Result<()> {
+    /// 确保已登录（有 token 直接过；否则走扫码流程直到 confirmed）。
+    /// pub：频道内部循环调用；集成测试经 mockito 直接驱动完整登录流程。
+    pub async fn ensure_login(&self) -> Result<()> {
         if !self.state.lock().await.token.is_empty() {
+            self.set_login_view("confirmed", "", "Logged in").await;
             return Ok(());
         }
         loop {
+            // 每次重新申请前先清掉旧码（expired/重试走这里），前端不会停留在废 QR
+            self.set_login_view("waiting", "", "Requesting QR code...")
+                .await;
             let (qrcode, img) = self.get_qrcode().await?;
             self.present_qrcode(&qrcode, &img).await;
 
@@ -266,6 +309,7 @@ impl WechatChannel {
                             .to_string();
                         drop(state);
                         self.save_state().await;
+                        self.set_login_view("confirmed", "", "Logged in").await;
                         tracing::info!("WeChat ClawBot login confirmed");
                         return Ok(());
                     }
@@ -283,8 +327,9 @@ impl WechatChannel {
         }
     }
 
-    /// 展示二维码：日志打印扫码 URL + 尝试把图片内容落盘供扫描
-    async fn present_qrcode(&self, qrcode: &str, img_content: &str) {
+    /// 展示二维码：写共享视图（WebUI 卡片）+ 日志打印 + 图片落盘兜底（终端用户）
+    /// pub：内部由 ensure_login 调用；测试直接喂两形态（裸 base64 / 直链）验证归一化。
+    pub async fn present_qrcode(&self, qrcode: &str, img_content: &str) {
         tracing::info!(
             qrcode = %qrcode,
             "WeChat ClawBot login: scan the QR code with WeChat (with the ClawBot plugin)"
@@ -294,6 +339,7 @@ impl WechatChannel {
             .split_once(";base64,")
             .map(|(_, d)| d)
             .unwrap_or(img_content);
+        let hint = "Scan with WeChat (ClawBot plugin)";
         match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
             Ok(bytes) => {
                 let path = self.state_dir.join("wechat_qr.png");
@@ -303,8 +349,14 @@ impl WechatChannel {
                     }
                     Err(e) => tracing::warn!(error = %e, "save qrcode image failed"),
                 }
+                self.set_login_view("qr", &format!("data:image/png;base64,{}", b64.trim()), hint)
+                    .await;
             }
-            Err(_) => tracing::info!(img = %img_content, "qrcode_img_content output as-is"),
+            Err(_) => {
+                tracing::info!(img = %img_content, "qrcode_img_content output as-is");
+                // 多半是图片直链，前端 img src 可直接加载，原样透传
+                self.set_login_view("qr", img_content, hint).await;
+            }
         }
     }
 
@@ -716,6 +768,8 @@ impl crate::channels::Channel for WechatChannel {
         let stop = Arc::new(Notify::new());
         loop {
             if let Err(e) = self.ensure_login().await {
+                // 网络/响应错误：卡片显示原因；30s 后重跑登录流程会回到 waiting/qr
+                self.set_login_view("error", "", &e.to_string()).await;
                 tracing::warn!(error = %e, "weixin login failed, retry in 30s");
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 continue;

@@ -650,6 +650,29 @@
                     </label>
                   </div>
                   <div class="channel-desc" x-text="card.desc"></div>
+                  <!-- WeChat login block: state polled from /api/channels/wechat/login (written by WechatChannel) -->
+                  <template x-if="card.key === 'wechat' && cfg.channels.wechat.enabled && wechatLogin.status !== 'disabled'">
+                    <div class="wechat-login">
+                      <template x-if="wechatLogin.status === 'restart_required'">
+                        <div class="wl-hint">Saved. This channel starts with the server — press <b>Restart Service</b> (About page) or re-run <code>llaia serve</code>.</div>
+                      </template>
+                      <template x-if="wechatLogin.status === 'waiting'">
+                        <div class="wl-hint">Requesting QR code...</div>
+                      </template>
+                      <template x-if="wechatLogin.status === 'qr'">
+                        <div class="wl-qr">
+                          <img :src="wechatLogin.qr_image" alt="WeChat login QR code">
+                          <div class="wl-hint">Scan with WeChat (ClawBot plugin). An expired code is refreshed automatically.</div>
+                        </div>
+                      </template>
+                      <template x-if="wechatLogin.status === 'confirmed'">
+                        <div class="wl-ok">Logged in — send the bot a message in WeChat to start chatting.</div>
+                      </template>
+                      <template x-if="wechatLogin.status === 'error'">
+                        <div class="wl-err" x-text="'Login failed: ' + (wechatLogin.message || 'unknown error') + ' (retrying...)'"></div>
+                      </template>
+                    </div>
+                  </template>
                   <template x-for="f in card.fields" :key="f.name">
                     <div>
                       <template x-if="f.type === 'checkbox'">

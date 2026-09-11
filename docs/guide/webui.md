@@ -17,6 +17,8 @@ llaia serve
 
 Web UI 的设置页可填 provider / model / runtime / channels 等，保存后写入 `config.toml` 并**热加载**——下一轮对话即生效，无需重启。例如改 `[runtime].timezone` 后状态栏时区立即更新（见 [ADR-0017](../adr/0017-timezone-injection.md)）。
 
+> 热加载覆盖 provider / runtime / skills / cron / mcp；**channel 随 serve 启动、不热启动**——新开启的频道需要重启（About 页 Restart Service，或终端 `Ctrl+C` 后重跑 `llaia serve`，后者日志可见）。微信卡片会自动显示「待重启」提示，重启后在同一张卡片上直接显示登录二维码（见 [channels](channels.md) 微信一节）。
+
 无 provider 时 `serve` 仍会启动，Web UI 配置功能可用，聊天降级提示——先把 provider 配好即可开聊。
 
 ## 对话

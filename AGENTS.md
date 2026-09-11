@@ -37,6 +37,8 @@ pub trait Channel: Send + Sync + 'static {
 
 - 当前实现：`CliChannel`（终端 REPL）、`WebChannel`（WebUI HTTP/WS，主交互界面）、`QqChannel`、`TelegramChannel`、`DingtalkChannel`、`WechatChannel`（微信 ClawBot）、`FeishuChannel`、`MailChannel`（IMAP/SMTP）
 
+> **微信登录二维码上 WebUI（2026-09-11）**：`serve_cmd` 先建 `Arc<RwLock<WechatLoginView>>` 共享槽，同时注入 `WechatChannel`（唯一写入方：登录循环写 waiting/qr/confirmed/error 四态 + 二维码 data URL，裸 base64 归一化、直链透传）与 `WebChannel`（同 `cron_scheduler` 槽位模式）。端点 `GET /api/channels/wechat/login` 只读转发，Config 页微信卡片 2.5s 轮询渲染二维码与状态。`restart_required` 是端点派生态（config 已 enabled 但 `view.started=false`——channel 不热启动是既有性质），前端引导用户重启。日志打印 + `wechat_qr.png` 落盘兜底原样保留；`ensure_login` / `present_qrcode` 提为 pub 供集成测试驱动。
+
 详见 [docs/adr/0009-qq-channel.md](docs/adr/0009-qq-channel.md)。
 
 详见 [docs/adr/0002-agent-architecture.md](docs/adr/0002-agent-architecture.md)。

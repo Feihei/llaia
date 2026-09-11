@@ -450,6 +450,8 @@ pub struct WebChannel {
     /// CronTool 实例（serve 构建时注入），热加载 cron 时用它重新指向新调度器。
     /// 与 AppState 同款 Arc<Mutex<Option>> 槽位。
     pub cron_tool: Arc<std::sync::Mutex<Option<Arc<CronTool>>>>,
+    /// 微信登录进度共享槽（serve_cmd 先于频道创建，WechatChannel 写、卡片端点读）
+    pub wechat_login: Arc<tokio::sync::RwLock<crate::channels::wechat::WechatLoginView>>,
 }
 
 impl WebChannel {
@@ -460,6 +462,7 @@ impl WebChannel {
         config_path: PathBuf,
         workspace: PathBuf,
         shutdown_signal: Arc<Notify>,
+        wechat_login: Arc<tokio::sync::RwLock<crate::channels::wechat::WechatLoginView>>,
     ) -> Self {
         let cron_path = config_path.with_file_name("cron.toml");
         Self {
@@ -474,6 +477,7 @@ impl WebChannel {
             mcp_registry: Arc::new(std::sync::Mutex::new(None)),
             shutdown_signal,
             cron_tool: Arc::new(std::sync::Mutex::new(None)),
+            wechat_login,
         }
     }
 
@@ -517,6 +521,7 @@ impl WebChannel {
             mcp_registry: self.mcp_registry.clone(),
             skills_dir: self.cron_path.with_file_name("skills"),
             cron_tool: self.cron_tool.clone(),
+            wechat_login: self.wechat_login.clone(),
         };
         // 系统级路由 + WS 路由，共享同一个 state
         build_system_routes()

@@ -26,7 +26,10 @@ function llaiaApp() {
     envError: '',
     doctorChecks: [],
     doctorRunning: false,
+    // 微信卡片登录进度（轮询 /api/channels/wechat/login；视图由 WechatChannel 写入）
+    wechatLogin: { status: '', qr_image: '', message: '' },
     _todoTimer: null,
+    _wechatTimer: null,
     ws: null,
     // config
     cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},telegram:{},dingtalk:{},wechat:{},mail:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{},tts:{}} },
@@ -67,7 +70,7 @@ function llaiaApp() {
       },
       {
         key: 'wechat', icon: '🟢', title: 'WeChat',
-        desc: 'WeChat ClawBot (ilink bot), QR login + long polling, no public callback needed.',
+        desc: 'WeChat ClawBot (ilink bot): enable, save, restart — the login QR appears on this card. Long polling, no public callback needed.',
         fields: [
           { name: 'allow_user_id', label: 'allow_user_id', placeholder: 'empty = no restriction' },
           { name: 'owner_user_id', label: 'owner_user_id', placeholder: 'optional cron push target' },
@@ -196,6 +199,9 @@ function llaiaApp() {
           this._questionTimer = setInterval(() => this.loadQuestions(), 5000);
           // 环境探测（P6）：变化低频，登录时加载一次 + 手动刷新
           this.loadEnv();
+          // 微信卡片：低频轮询登录进度（二维码只在等扫码期有意义；端点只读、开销极小）
+          this.pollWechatLogin();
+          this._wechatTimer = setInterval(() => this.pollWechatLogin(), 2500);
         }
       }
     },
@@ -222,6 +228,13 @@ function llaiaApp() {
           this.envError = 'reprobe failed: HTTP ' + r.status;
         }
       } catch (e) { this.envError = 'reprobe failed: ' + e; }
+    },
+    async pollWechatLogin() {
+      // 非致命：网络抖动/未登录时保持上一次状态（status 为空则卡片块整体隐藏）
+      try {
+        const r = await this.apiFetch('/api/channels/wechat/login');
+        if (r.ok) this.wechatLogin = await r.json();
+      } catch (e) { /* 静默跳过，下轮补上 */ }
     },
     async loadTodos() {
       try {

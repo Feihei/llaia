@@ -96,6 +96,9 @@ async fn build_state(tmp: &std::path::Path) -> AppState {
         mcp_registry: Arc::new(std::sync::Mutex::new(None)),
         skills_dir: config_dir.join("skills"),
         cron_tool: Arc::new(std::sync::Mutex::new(None)),
+        wechat_login: Arc::new(tokio::sync::RwLock::new(
+            llaia::channels::wechat::WechatLoginView::default(),
+        )),
     }
 }
 

@@ -171,3 +171,86 @@ async fn test_session_timeout_errcode_detected() {
     assert!(!WechatChannel::api_ok(&payload));
     assert_eq!(WechatChannel::api_errcode(&payload), -14);
 }
+
+// ---- WebUI 登录视图（WechatLoginView，Config 页微信卡片数据源） ----
+
+#[tokio::test]
+async fn test_login_view_bare_base64_becomes_data_url_and_saved_to_disk() {
+    bypass_proxy();
+    let server = Server::new_async().await;
+    let (wx, dir) = channel(&server, None).await;
+    wx.present_qrcode("qr_abc", "aW1nX2Jhc2U2NA==").await;
+    let v = wx.login_view().read().await.clone();
+    assert!(v.started);
+    assert_eq!(v.status, "qr");
+    assert_eq!(v.qr_image, "data:image/png;base64,aW1nX2Jhc2U2NA==");
+    // 落盘兜底路径同步维护（终端用户不看 WebUI 也能扫）
+    assert!(dir.path().join("wechat_qr.png").exists());
+}
+
+#[tokio::test]
+async fn test_login_view_data_url_input_normalized_same() {
+    bypass_proxy();
+    let server = Server::new_async().await;
+    let (wx, _dir) = channel(&server, None).await;
+    wx.present_qrcode("qr_abc", "data:image/png;base64,aW1nX2Jhc2U2NA==")
+        .await;
+    let v = wx.login_view().read().await.clone();
+    assert_eq!(v.qr_image, "data:image/png;base64,aW1nX2Jhc2U2NA==");
+}
+
+#[tokio::test]
+async fn test_login_view_url_passthrough() {
+    bypass_proxy();
+    let server = Server::new_async().await;
+    let (wx, _dir) = channel(&server, None).await;
+    // 非 base64 形态（直链）不解码、不写 PNG，原样透传给 img src
+    wx.present_qrcode("qr_abc", "https://example.com/qr.png")
+        .await;
+    let v = wx.login_view().read().await.clone();
+    assert_eq!(v.status, "qr");
+    assert_eq!(v.qr_image, "https://example.com/qr.png");
+}
+
+#[tokio::test]
+async fn test_ensure_login_full_flow_updates_view_and_persists_token() {
+    bypass_proxy();
+    let mut server = Server::new_async().await;
+    server
+        .mock("GET", "/ilink/bot/get_bot_qrcode")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(r#"{"qrcode":"qr_abc","qrcode_img_content":"aW1nX2Jhc2U2NA=="}"#)
+        .create_async()
+        .await;
+    server
+        .mock("GET", "/ilink/bot/get_qrcode_status")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(r#"{"status":"confirmed","bot_token":"tk_123","ilink_bot_id":"bot_9"}"#)
+        .create_async()
+        .await;
+
+    let (wx, dir) = channel(&server, None).await;
+    wx.ensure_login().await.unwrap();
+    let v = wx.login_view().read().await.clone();
+    assert!(v.started);
+    assert_eq!(v.status, "confirmed");
+    assert!(v.qr_image.is_empty(), "confirmed 后不应残留二维码");
+    assert_eq!(wx.state_snapshot().await.token, "tk_123");
+    // 登录态落盘：重启免扫码的前提
+    let saved = std::fs::read_to_string(dir.path().join("wechat_state.json")).unwrap();
+    assert!(saved.contains("tk_123"));
+}
+
+#[tokio::test]
+async fn test_ensure_login_existing_token_marks_confirmed_without_http() {
+    bypass_proxy();
+    // 空 server：任何请求都会 404——通过不了 mock，验证提前返回路径零 HTTP
+    let server = Server::new_async().await;
+    let (wx, _dir) = channel(&server, Some(logged_in_state())).await;
+    wx.ensure_login().await.unwrap();
+    let v = wx.login_view().read().await.clone();
+    assert!(v.started);
+    assert_eq!(v.status, "confirmed");
+}

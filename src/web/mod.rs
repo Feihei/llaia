@@ -47,6 +47,8 @@ pub struct AppState {
     /// CronTool 实例（热加载 cron 时用它重新指向新调度器）。
     /// 与 WebChannel 同款 Arc<Mutex<Option>> 槽位。
     pub cron_tool: Arc<std::sync::Mutex<Option<Arc<crate::tools::cron::CronTool>>>>,
+    /// 微信登录进度（WechatChannel 写；GET /api/channels/wechat/login 读，Config 页卡片渲染二维码）
+    pub wechat_login: Arc<RwLock<crate::channels::wechat::WechatLoginView>>,
 }
 
 /// 生成 32 字节随机 hex token
@@ -920,6 +922,36 @@ pub async fn shutdown_service(
 /// 容器环境探测：docker/podman 会建 /.dockerenv 或设 container 环境变量。
 fn in_container() -> bool {
     std::path::Path::new("/.dockerenv").exists() || std::env::var_os("container").is_some()
+}
+
+/// GET /api/channels/wechat/login → 微信卡片的登录进度（二维码 + 扫码状态）。
+/// 视图由 WechatChannel 登录循环写入（共享 Arc，唯一写入方）；本端点只读转发。
+/// status 四态之外的派生态：config 未启用 = disabled；已启用但频道没跑过登录 =
+/// restart_required（频道随 serve 启动、不热加载，提示用户重启）。
+pub async fn get_wechat_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let enabled = state.config.read().await.channels.wechat.enabled;
+    let view = state.wechat_login.read().await.clone();
+    let status = if !enabled {
+        "disabled"
+    } else if !view.started {
+        "restart_required"
+    } else {
+        view.status.as_str()
+    };
+    axum::Json(serde_json::json!({
+        "enabled": enabled,
+        "status": status,
+        "qr_image": view.qr_image,
+        "message": view.message,
+    }))
+    .into_response()
 }
 
 /// spawn 替代进程：Windows 用 cmd（ping 延时），Unix 用 sh（sleep 延时）。
@@ -2629,6 +2661,11 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/restart", axum::routing::post(restart_service))
         .route("/api/shutdown", axum::routing::post(shutdown_service))
         .route("/api/status", axum::routing::get(get_status))
+        // 微信卡片登录进度（二维码由 WechatChannel 共享视图透传）
+        .route(
+            "/api/channels/wechat/login",
+            axum::routing::get(get_wechat_login),
+        )
         // cron API
         .route("/api/cron", axum::routing::get(list_cron))
         .route(

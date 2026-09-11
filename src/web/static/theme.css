@@ -399,6 +399,16 @@ option { background: var(--bg-input); color: var(--text); }
 }
 #config-pane .channel-card .form-row label { width: 150px; }
 #config-pane .channel-card .form-row input { flex: 1; min-width: 0; }
+/* WeChat 卡片登录块：二维码必须白底（深色主题上不可扫），状态行复用主题色 */
+#config-pane .wechat-login { margin: 10px 0 4px; }
+#config-pane .wechat-login .wl-qr { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+#config-pane .wechat-login img {
+  width: 168px; height: 168px; object-fit: contain;
+  background: #fff; border: 1px solid var(--border-bright); border-radius: 8px; padding: 6px;
+}
+#config-pane .wechat-login .wl-hint { color: var(--text-dim); font-size: 12px; }
+#config-pane .wechat-login .wl-ok { color: var(--green); font-size: 13px; }
+#config-pane .wechat-login .wl-err { color: var(--red); font-size: 13px; }
 #config-pane .enable-toggle {
   display: inline-flex; align-items: center; gap: 6px;
   color: var(--text-dim); font-size: 12px; cursor: pointer;
