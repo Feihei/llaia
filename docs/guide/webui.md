@@ -23,6 +23,8 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 
 对话通过 WebSocket（`/ws`）进行，支持流式输出（见 [ADR-0010](../adr/0010-streaming-output.md)）。
 
+聊天页**左侧会话线列表**（`⌂ Main` 置顶，任务线显示线名 + 绑定目录，当前线高亮；窄屏 ≤900px 折到消息流上方）：点击即切换会话线（见 [slash-commands](slash-commands.md) 的 `/session`）——agent 上下文自动回灌目标线尾部，聊天流同步刷新为该线最近消息；切换时**工作目录一并切到该线的绑定目录**（回主线恢复家目录）。列表 15 秒自动刷新，回合内用 `/session <名>` 新建的线也会随即出现；Refresh 按钮手动刷新。归档线与 cron 线不在此列（归档线去 Sessions 页浏览）。
+
 聊天页**右侧状态栏**实时展示运行时状态（窄屏 ≤900px 时折到消息流下方）：
 
 - **TODO**：当前会话的任务清单（agent 用 `todo` 工具维护）。没有清单时该块不占位。
@@ -69,6 +71,8 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 | `GET /api/doctor` | 运行诊断检查 |
 | `GET /api/sessions` | 会话历史列表 / 详情 / 删除 / 导出 |
 | `POST /api/sessions/:uuid/archive-older?days=N` | 把该会话 N 天前的消息搬进 archived 接收线 |
+| `GET /api/session-lines` | 聊天左侧栏的活跃会话线（主线 + 未归档任务线 + 当前所在线） |
+| `POST /api/session-lines/switch` | 切换会话线（`{target: "main" \| uuid}`），同步切换绑定目录并回灌目标线尾部 |
 
 > 这些接口需要 Web UI 的 token 鉴权（与 `webui.token` 一致）。
 

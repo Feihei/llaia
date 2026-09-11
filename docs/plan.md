@@ -33,7 +33,7 @@
 | P5 | ✅ | Provider Compat / 记忆预算 / 统一搜索 / todo / ask_user / skill 自管 / goal / 剩余项 | [CHANGELOG.md](CHANGELOG.md)（§P5） |
 | P6 | ✅ | 稳定性修复 + 快赢 + WebUI 批次 + 任务线/侧问/插话/媒体作用域 + Generation Guard/首运行引导 | [CHANGELOG.md](CHANGELOG.md)（§v0.3.1、§v0.4.0） |
 | v0.4.0 | ✅ | P6 全量 + provider/compat 收口，2026-09-04 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.4.0）、[release-notes/v0.4.0.md](release-notes/v0.4.0.md) |
-| v0.5.0 | 🚧 | 发版版本（**攒发**；因含行为不兼容改动由原定的 v0.4.1 直升 minor）：H1–H4 止血 + T3/S1 terminal 安全收口 + 画像模板升级 + /session 改名 + 框架消息英文化 + todo GC + WebUI 归档卫生（代码全部落地，**未打 tag**，只欠 H6 发版动作） | [CHANGELOG.md](CHANGELOG.md)（§v0.5.0） |
+| v0.5.0 | 🚧 | 发版版本（**攒发**；因含行为不兼容改动由原定的 v0.4.1 直升 minor）：H1–H4 止血 + T3/S1 terminal 安全收口 + 画像模板升级 + /session 改名 + 框架消息英文化 + todo GC + WebUI 归档卫生 + chat 会话线侧栏（代码全部落地，**未打 tag**，只欠 H6 发版动作） | [CHANGELOG.md](CHANGELOG.md)（§v0.5.0） |
 
 > **P6 已全部交付并归档**：原 P6 节的完整勾选清单（WebUI W1/W2/W3、会话主题总结、provider 针对性优化、`memory_research`、启动优化 #11、主干代码体检、#A–#J 新增发现、Generation Guard、First-run Bootstrap 等）已随各项实现陆续迁入 [CHANGELOG.md](CHANGELOG.md) §v0.3.1 / §v0.4.0，本文件不再保留已交付明细。注意 CHANGELOG 里**没有独立的 §v0.3.2**：原按 0.3.2 攒的开发内容跨版本号当作 v0.4.0 发布，段标题已一并重定。v0.5.0 的三项同样已迁入 CHANGELOG，本文件只留索引与下一步。
 
@@ -81,7 +81,7 @@
 - **浏览器自动化**（2026-09-08）：方向是 agent 能操作真实浏览器（页面导航/填表/截图抓取）。待 grill：内嵌 headless（如 chromiumoxide）vs 驱动外部实例 vs MCP 外挂？审批面怎么划（浏览器能碰内网/登录态）？与 `web_fetch` 的分工边界？
 - **搜索增强**（2026-09-08）：方向是统一 search 的质量/覆盖提升。待 grill：多搜索 provider 扩容（doubao/baidu/brave 之外）？还是检索质量（多源聚合、rerank、结果去重）？成本与 API key 管理约定？
 - **原子工具优化增强**（2026-09-08）：方向是现有内置工具（file_*/terminal/search/…) 的参数、组合与输出打磨。待 grill：从实际使用痛点出发逐工具盘点（file_edit 容错、terminal 误报已由 H1/S1 打样）？新原子工具（如 diff/patch、json/yaml 查询）要不要进？
-- **WebUI chat 界面增强**（2026-09-09）：方向是把 chat 主界面从「单会话流水」升级为「会话可管理的工作台」。待 grill：① chat 页内嵌 session 列表（现有 Sessions 独立 tab 不够顺手？切线/回灌在 chat 页直接做？）；② bound path / 任务线状态的可视化列表（当前只有 `[scope]` 文本状态行，要不要图形化 + 一键 /move？）；③ 审批交互（`/ok` 现在走聊天流，要不要独立审批卡片/按钮？多端同时在线的审批归属？）；④ 运行状态提示（busy/工具调用/steer/todo 进度等在 chat 页的呈现优化）；⑤ 与既有 P6 WebUI 批次（Sessions tab、pane 布局）的关系——增强 or 重构？
+- **WebUI chat 界面增强**（2026-09-09）：方向是把 chat 主界面从「单会话流水」升级为「会话可管理的工作台」。待 grill：① ~~chat 页内嵌 session 列表（现有 Sessions 独立 tab 不够顺手？切线/回灌在 chat 页直接做？）~~ **已先行交付（2026-09-11，未走 grill，用户直接点名）**：chat 左侧活跃会话线列表 `session-rail`——主线置顶、点击切线（复用 `/session` 回灌通路 + bound_dir 一并切换、回主线恢复家目录），明细见 [CHANGELOG.md](CHANGELOG.md) §v0.5.0「chat 左侧活跃会话线列表」；剩余 ②③④⑤ 仍待 grill：② bound path / 任务线状态的可视化列表（当前只有 `[scope]` 文本状态行，要不要图形化 + 一键 /move？）；③ 审批交互（`/ok` 现在走聊天流，要不要独立审批卡片/按钮？多端同时在线的审批归属？）；④ 运行状态提示（busy/工具调用/steer/todo 进度等在 chat 页的呈现优化）；⑤ 与既有 P6 WebUI 批次（Sessions tab、pane 布局）的关系——增强 or 重构？
 
 ---
 

@@ -147,6 +147,16 @@ ALTER TABLE sessions ADD COLUMN bound_path TEXT;                     -- 任务�
 5. **fork pin 家目录**（独立缺口，与上同源）：`fork_for_isolated` 不再共享主线 `workspace_root` Arc，fork 持独立副本恒 pin agent 家目录——cron/委派不随主线 `/move` 漂移。
 6. 未决 3 的原「/move 不更新 bound_path」结论由第 3 条替代。
 
+## 修订（2026-09-11）：WebUI 左侧栏切线通路
+
+chat 界面加左侧活跃会话线列表（`session-rail`）：主线 `⌂ Main` 固定置顶、任务线列线名 + bound_path（排除 cron 线与归档线），当前线高亮。列表 `GET /api/session-lines`（与 `latest_main_session` 同一套过滤）；切换 `POST /api/session-lines/switch` → `slash.rs::switch_line_for_web`，**复用 `/session` 的 switch_session / switch_to_main 回灌通路，回灌语义零变化**。与命令通路的差异点（用户点名的显式意图）：
+
+1. **bound_dir 跟随**：切到任务线时同步把 `workspace_root` 切到该线 bound_path——该目录此前必经 `/move` 审批才落库，点击切换不二次审批；目录已消失仍切、notice 带 warning（不动 approval 语义：软对应关系矩阵不变，只是把「用户自己去 /move」变成「替用户走完这步」）。bound_path 为 None 的线不动 scope（对齐「无绑定附 /move 即绑定 tip」的软提示语义）。
+2. **回主线恢复家目录 scope**（对齐 `/move home` 语义）。
+3. 响应带回目标线尾部 user/assistant 消息（同批回灌内容），前端清空本地流后直接渲染——屏幕所见与 agent context 严格同源。
+
+回归测试：`test_web_line_switch_main_task_and_bound_dir`、`test_web_line_switch_moves_to_bound_dir`。
+
 ## 未决 → 已定案（2026-09-10 提出，2026-09-11 定案）
 
 **`/new` 与主线的关系重审**：`/session` 上线后 `/new` 是否还需要？核实结论：`/new` 是**唯一能造 `kind='main'`**的命令（`/session` 只造 task 线；`/session` 无参只回最新 main）；但在「主线恒一条、始终活跃、不用命令切换」方向下，该能力反成矛盾源——每次 `/new` 造出的旧 main 行 `latest_session` 永不再选中、WebUI Sessions 列表却恒可见。**定案（2026-09-11）：`/new` 直接删除**（不做别名/弃用过渡），造线兜底由启动逻辑（`latest_session()` 为 None 即建）与 `switch_to_main` fallback 承担。「换一页」由新命令 **`/archive N`** 承担（与 WebUI `archive-older?days=N` 同一条 `archive_messages_before` 通路，无参默认 30 天；桶标题改为每次归档后更新到桶内最新一条消息的日期，主线标题恒不变）。归档与 `/clear` **职责正交、不绑定**：前者存储层（live context 零感知）、后者内存上下文，配对使用由用户自行组合，不设 `/reset` 聚合命令；`/clear` 同步清当前 session 的 todo 文件（todo 定位短期小计划，长期计划落文件）。N=0 的同秒竞态不修（`created_at < now` 天然排除同秒末尾，N≥1 是主用例）。
