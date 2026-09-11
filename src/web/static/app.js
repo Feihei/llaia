@@ -246,6 +246,30 @@ function llaiaApp() {
     async switchChat() {
       this.tab = 'chat';
       this.loadSessionLines();
+      // 面板空（页面刚加载/刷新过）时回放当前线尾部，恢复思考块与工具信息
+      if (!this.messages.length) this.restoreChat();
+    },
+    // 页面（重）进入时回放当前线尾部：chat 面板本身是纯 live 流（WS 连接无历史回放），
+    // 离开再回来只剩新事件。这里拉 session 详情（含 reasoning + tool_calls + tool 结果）
+    // 渲染尾部 40 条；busy 时跳过（turn 中抢不到 agent 锁，请求会挂住）。
+    async restoreChat() {
+      if (this.busy || !this.authed || this.messages.length) return;
+      try {
+        const lr = await this.apiFetch('/api/session-lines');
+        if (!lr || !lr.ok) return;
+        const lj = await lr.json();
+        const uuid = lj.current && lj.current.session_uuid;
+        if (!uuid) return;
+        const r = await this.apiFetch('/api/sessions/' + encodeURIComponent(uuid));
+        if (!r.ok) return;
+        const j = await r.json();
+        for (const m of ((j.messages || []).slice(-40))) {
+          if (m.role === 'user') this.messages.push({ role: 'user', text: m.content });
+          else if (m.role === 'assistant') this.messages.push({ role: 'assistant', text: m.content, reasoning: m.reasoning_content || '', tool_calls: m.tool_calls || [], streaming: false });
+          else if (m.role === 'tool' && m.content) this.messages.push({ role: 'tool', text: 'tool', output: m.content });
+        }
+        this.scrollBottom();
+      } catch (e) { /* 非致命：回放失败保持空聊天流 */ }
     },
     async loadSessionLines() {
       // turn 中抢不到 agent 锁，请求会挂着：busy 时直接跳过（下一轮轮询补上）
@@ -275,11 +299,13 @@ function llaiaApp() {
         const j = await r.json().catch(() => ({}));
         if (!this.authed) return;
         if (r.ok) {
-          // 切线：本地消息流换成目标线尾部（后端已把同一批消息回灌进 agent 上下文）
+          // 切线：本地消息流换成目标线尾部（后端已把同一批消息回灌进 agent 上下文）。
+          // assistant 带 reasoning（思考折叠块），tool 行渲染成工具结果气泡（2026-09-11）。
           this.messages = [];
           for (const m of (j.backfill || [])) {
             if (m.role === 'user') this.messages.push({ role: 'user', text: m.content });
-            else if (m.role === 'assistant') this.messages.push({ role: 'assistant', text: m.content, streaming: false });
+            else if (m.role === 'assistant') this.messages.push({ role: 'assistant', text: m.content, reasoning: m.reasoning || '', streaming: false });
+            else if (m.role === 'tool' && m.content) this.messages.push({ role: 'tool', text: 'tool', output: m.content });
           }
           this.messages.push({ role: 'tool', text: j.notice || '[switched]' });
           this.lineMsg = '';
@@ -508,7 +534,8 @@ function llaiaApp() {
           this.forceLogin('WebSocket authentication failed, check token');
           break;
         case 'chunk':
-          if (this.messages.length === 0 || this.messages[this.messages.length-1].role !== 'assistant') {
+          // streaming 守卫：回放/切线恢复的历史 assistant 消息（streaming=false）不能被新 chunk 并入
+          if (this.messages.length === 0 || this.messages[this.messages.length-1].role !== 'assistant' || !this.messages[this.messages.length-1].streaming) {
             this.messages.push({ role: 'assistant', text: ev.delta, streaming: true });
           } else {
             this.messages[this.messages.length-1].text += ev.delta;
@@ -518,7 +545,7 @@ function llaiaApp() {
         case 'reasoning': {
           // 思考流：合并进当前 assistant 消息的 reasoning 字段，折叠块展示。
           // 流式期间该块自动展开（open===null 表示未手动点过），done 后收起。
-          if (this.messages.length === 0 || this.messages[this.messages.length-1].role !== 'assistant') {
+          if (this.messages.length === 0 || this.messages[this.messages.length-1].role !== 'assistant' || !this.messages[this.messages.length-1].streaming) {
             this.messages.push({ role: 'assistant', text: '', reasoning: ev.delta, streaming: true });
           } else {
             const last = this.messages[this.messages.length-1];

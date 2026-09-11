@@ -820,10 +820,11 @@ async fn resolve_approval(
         if approve { "approved" } else { "denied" },
         pending.tool_name
     );
-    Ok(Some(ApprovalOutcome::Resume {
-        notice,
-        message: result,
-    }))
+    // 裸结果会以 role='user' 落库，WebUI 会话回放里与真人发言无法区分（2026-09-11 用户反馈）。
+    // 带标记前缀：人看得出这是工具结果，模型也能识别"这是执行产物而非用户新指令"
+    // （与 /answer 的 "[The user answered ...]" 前缀同风格）。
+    let message = format!("[tool result: {}]\n{}", pending.tool_name, result);
+    Ok(Some(ApprovalOutcome::Resume { notice, message }))
 }
 
 /// 解析一条待回答问题：取出 pending question，把 text 作为用户回答，
@@ -965,8 +966,19 @@ async fn switch_session(agent: &mut Agent, session_id: i64, char_budget: usize) 
 pub struct WebLineSwitch {
     /// 切线 notice（含 [scope] 状态行），由前端以工具气泡展示。
     pub notice: String,
-    /// 目标线尾部的 user/assistant 消息（时间正序），供前端直接渲染对话气泡。
-    pub backfill: Vec<(String, String)>,
+    /// 目标线尾部消息（时间正序，user/assistant/tool），供前端直接渲染对话气泡。
+    /// assistant 带 reasoning（思考原文折叠块用）；tool 行是工具结果留底。
+    pub backfill: Vec<WebBackfillMsg>,
+}
+
+/// 切线回灌的单条消息。模型侧回灌仍走 `backfill_context`（只取 user/assistant 正文，
+/// 与此无关）；这里只服务前端回放，所以多带 reasoning 与 tool 行。
+#[derive(serde::Serialize)]
+pub struct WebBackfillMsg {
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// WebUI chat 左侧栏切线入口：`target` = `"main"` 或任务线 session_uuid。
@@ -1033,14 +1045,20 @@ pub async fn switch_line_for_web(agent: &mut Agent, target: &str) -> Result<WebL
             )),
         }
     }
-    // 切完线后读目标线尾部（时间正序），给前端直接渲染
+    // 切完线后读目标线尾部（时间正序），给前端直接渲染。
+    // 带 tool 行与 reasoning：此前只回 user/assistant 正文，切线后 chat 页丢思考/工具
+    // 信息（2026-09-11 用户反馈）；tool 结果落库是 Role::Tool 消息，直接透出即可。
     let backfill = agent
         .session_store
         .recent_messages_within_budget(agent.session_id, TASK_BACKFILL_CHAR_BUDGET)
         .unwrap_or_default()
         .into_iter()
-        .filter(|m| m.role == "user" || m.role == "assistant")
-        .map(|m| (m.role, m.content))
+        .filter(|m| m.role == "user" || m.role == "assistant" || m.role == "tool")
+        .map(|m| WebBackfillMsg {
+            role: m.role,
+            content: m.content,
+            reasoning: m.reasoning_content.filter(|r| !r.is_empty()),
+        })
         .collect();
     Ok(WebLineSwitch { notice, backfill })
 }
@@ -1707,14 +1725,7 @@ mod tests {
         assert_eq!(agent.session_id, main_sid);
         assert!(agent.active_task.is_none());
         assert!(r.notice.contains("[back to main line]"), "{}", r.notice);
-        let contents: Vec<&str> = r
-            .backfill
-            .iter()
-            .map(|(role, c)| {
-                let _ = role;
-                c.as_str()
-            })
-            .collect();
+        let contents: Vec<&str> = r.backfill.iter().map(|m| m.content.as_str()).collect();
         assert!(contents.contains(&"主线问题"));
         assert!(!contents.iter().any(|c| c.contains("任务内消息")));
 
@@ -1725,7 +1736,7 @@ mod tests {
         assert!(r.notice.contains("整理"), "{}", r.notice);
         // 任务线建在 home 上（无 bound dir）→ scope 不动
         assert!(r.notice.contains("has no bound dir"), "{}", r.notice);
-        assert!(r.backfill.iter().any(|(_, c)| c == "任务内消息"));
+        assert!(r.backfill.iter().any(|m| m.content == "任务内消息"));
 
         // 幂等：目标线不存在时报错；main 线 uuid 不能走任务线分支
         assert!(switch_line_for_web(&mut agent, "no-such-uuid")
@@ -1733,6 +1744,59 @@ mod tests {
             .is_err());
         let main_uuid = agent.session_store.session_uuid(main_sid).unwrap().unwrap();
         assert!(switch_line_for_web(&mut agent, &main_uuid).await.is_err());
+    }
+
+    /// /ok 批准后的工具结果必须带 "[tool result: <name>]" 标记：此前裸结果按 role='user'
+    /// 落库，WebUI 会话回放里与真人发言无法区分（2026-09-11 用户反馈）。
+    #[tokio::test]
+    async fn test_ok_approval_result_is_labeled() {
+        struct NoteTool;
+        #[async_trait::async_trait]
+        impl crate::tools::Tool for NoteTool {
+            fn name(&self) -> &str {
+                "note"
+            }
+            fn description(&self) -> &str {
+                "test tool"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _args: &serde_json::Value,
+                _channel: &str,
+            ) -> anyhow::Result<String> {
+                Ok("did the thing".into())
+            }
+        }
+        let mut agent = test_agent(test_config()).await;
+        agent.tools.register(std::sync::Arc::new(NoteTool));
+        // 裸 /ok 自动选最旧一条待审批，注册返回的 id 无需引用
+        let _id = agent
+            .approval_gate
+            .register(
+                "note",
+                &serde_json::json!({}),
+                "call-1",
+                "web",
+                "main",
+                true,
+            )
+            .await;
+        let out = try_handle("/ok", &mut agent, None).await.unwrap();
+        match out {
+            SlashOutcome::Resume { notice, message } => {
+                assert!(notice.contains("approved"), "{}", notice);
+                assert!(
+                    message.starts_with("[tool result: note]"),
+                    "message should carry the tool-result marker: {}",
+                    message
+                );
+                assert!(message.contains("did the thing"), "{}", message);
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
     }
 
     #[tokio::test]

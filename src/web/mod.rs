@@ -2120,7 +2120,7 @@ pub struct SwitchLineBody {
 /// POST /api/session-lines/switch → 切换到目标会话线（聊天左侧栏点击）。
 /// 复用 `/session` 的切线 + 回灌通路（`switch_line_for_web`）；差异点：点击是
 /// 显式意图，切线后同步把工作目录切到该线的 bound_path（回主线恢复家目录）。
-/// 返回 notice + 目标线尾部 user/assistant 消息（供前端直接渲染对话气泡）。
+/// 返回 notice + 目标线尾部消息（user/assistant/tool，assistant 带 reasoning；供前端直接渲染）。
 pub async fn switch_session_line(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2144,10 +2144,8 @@ pub async fn switch_session_line(
             let json = serde_json::json!({
                 "ok": true,
                 "notice": r.notice,
-                "backfill": r.backfill.iter().map(|(role, content)| serde_json::json!({
-                    "role": role,
-                    "content": content,
-                })).collect::<Vec<_>>(),
+                // WebBackfillMsg 自带 Serialize（role/content/reasoning）
+                "backfill": r.backfill,
                 "session_uuid": agent.session_store.session_uuid(agent.session_id).unwrap_or(None),
                 "workspace_root": root.display().to_string(),
             });

@@ -119,6 +119,21 @@
                   <div class="reasoning-body" x-show="open === null ? m.streaming : open" x-text="m.reasoning"></div>
                 </div>
               </template>
+              <!-- 回放（restoreChat/切线回灌）带出的工具调用：与 session 详情同款折叠块 -->
+              <template x-if="m.tool_calls && m.tool_calls.length">
+                <details class="tool-calls">
+                  <summary x-text="m.tool_calls.length + ' tool call(s)'"></summary>
+                  <template x-for="tc in m.tool_calls" :key="tc.tool_call_id">
+                    <div class="toolcall">
+                      <b x-text="tc.tool_name"></b> <span class="hint" x-text="tc.tool_call_id"></span>
+                      <pre x-text="tc.payload"></pre>
+                      <template x-if="tc.outcome !== null && tc.outcome !== undefined">
+                        <pre class="toolcall-outcome" x-text="tc.outcome"></pre>
+                      </template>
+                    </div>
+                  </template>
+                </details>
+              </template>
               <div x-html="renderMd(m.text)"></div></div></template>
             <template x-if="m.role==='tool' && m.output == null"><div><b>Tool:</b> <span x-text="m.text"></span></div></template>
             <template x-if="m.role==='tool' && m.output != null">

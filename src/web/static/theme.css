@@ -802,15 +802,18 @@ background: #0a0710; border: 1px solid var(--border);
 font-size: 12px; color: var(--text-dim);
 white-space: pre-wrap; word-break: break-word;
 }
-#sessions-pane .toolcall {
+#sessions-pane .toolcall, #chat-pane .toolcall {
   background: var(--bg-panel); border-left: 2px solid var(--cyan);
   padding: 6px 10px; margin: 6px 0;
 }
-#sessions-pane .toolcall pre {
+#sessions-pane .toolcall pre, #chat-pane .toolcall pre {
   margin: 4px 0 0; white-space: pre-wrap; word-break: break-word;
   color: var(--text-dim); font-size: 12px;
 }
-#sessions-pane .toolcall-outcome { color: var(--green); }
+#sessions-pane .toolcall-outcome, #chat-pane .toolcall-outcome { color: var(--green); }
+/* chat 回放的 tool_calls 折叠块外框（restoreChat / 切线回灌） */
+#chat-pane details.tool-calls { margin: 4px 0; font-size: 12px; color: var(--text-dim); }
+#chat-pane details.tool-calls summary { cursor: pointer; color: var(--cyan); user-select: none; }
 #sessions-pane .tool-result { margin: 6px 0 0 4px; padding-left: 6px; border-left: 1px dashed var(--border); }
 #sessions-pane .tool-result-head { cursor: pointer; color: var(--green); font-size: 12px; user-select: none; }
 #sessions-pane .tool-result-head:hover { color: var(--cyan); }
