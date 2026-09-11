@@ -263,7 +263,7 @@ option { background: var(--bg-input); color: var(--text); }
 
 .config-head {
   flex: none;
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  display: flex; align-items: center; justify-content: flex-start; gap: 16px;
   color: var(--green);
   border-bottom: 1px solid var(--border-bright);
   padding: 10px 24px 8px;
@@ -271,8 +271,10 @@ option { background: var(--bg-input); color: var(--text); }
   font-size: 13px;
   background: var(--bg);
 }
-.config-head span { color: var(--text-dim); }
+.config-head > span { color: var(--text-dim); }
 .config-head-actions { display: inline-flex; align-items: center; gap: 8px; letter-spacing: normal; }
+/* btn-add 自带的上下 margin 会撑高标题栏，顶栏内归零保证各 section 顶栏等高 */
+.config-head-actions .btn-add { margin: 0; }
 
 #config-pane h3 {
   color: var(--green);
