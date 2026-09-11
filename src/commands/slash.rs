@@ -961,6 +961,90 @@ async fn switch_session(agent: &mut Agent, session_id: i64, char_budget: usize) 
     Ok(n)
 }
 
+/// WebUI chat 左侧栏切线结果（ADR-0031 的 WebUI 侧通路）。
+pub struct WebLineSwitch {
+    /// 切线 notice（含 [scope] 状态行），由前端以工具气泡展示。
+    pub notice: String,
+    /// 目标线尾部的 user/assistant 消息（时间正序），供前端直接渲染对话气泡。
+    pub backfill: Vec<(String, String)>,
+}
+
+/// WebUI chat 左侧栏切线入口：`target` = `"main"` 或任务线 session_uuid。
+/// 复用 `/session` 的 switch_session / switch_to_main（上下文回灌逻辑完全一致）；
+/// 差异点：点击切换是显式用户意图，切线后**同步**把工作目录切到该线的 bound_path
+/// ——绑定目录此前必然经过 /move 审批才落库，这里无需二次审批；回主线则恢复
+/// 家目录 scope（对齐 /move home 语义）。绑定目录已不存在时仍切（提示，不阻断）。
+pub async fn switch_line_for_web(agent: &mut Agent, target: &str) -> Result<WebLineSwitch> {
+    let mut notice;
+    if target == "main" {
+        match switch_to_main(agent).await? {
+            SlashOutcome::Handled(m) => notice = m,
+            _ => notice = String::new(),
+        }
+        let home = agent.workspace.clone();
+        let root = agent.workspace_root.read().await.clone();
+        if root != home {
+            agent.set_workspace(home).await;
+            notice.push_str("\n[scope] restored to home workspace");
+        }
+    } else {
+        let Some((sid, row)) = agent.session_store.session_by_uuid(target).unwrap_or(None) else {
+            anyhow::bail!("session not found: {}", target);
+        };
+        if row.state == "archived" {
+            anyhow::bail!("session \"{}\" is archived and cannot be resumed", target);
+        }
+        let kind = agent
+            .session_store
+            .session_kind(sid)?
+            .ok_or_else(|| anyhow::anyhow!("session not found: {}", target))?;
+        if kind.kind != "task" {
+            anyhow::bail!(
+                "\"{}\" is a main line — use target \"main\" to switch to it",
+                target
+            );
+        }
+        let title = kind.title.clone().unwrap_or_else(|| target.to_string());
+        let n = switch_session(agent, sid, TASK_BACKFILL_CHAR_BUDGET).await?;
+        notice = format!(
+            "[switched to session \"{}\"] {} message(s) restored",
+            title, n
+        );
+        match &kind.bound_path {
+            Some(b) => {
+                let bound = std::path::PathBuf::from(b);
+                let root = agent.workspace_root.read().await.clone();
+                if root == bound {
+                    notice.push_str(&format!(
+                        "\n[scope] line \"{}\" bound to {} · current scope matches",
+                        title, b
+                    ));
+                } else {
+                    agent.set_workspace(bound).await;
+                    notice.push_str(&format!("\n[scope] moved to bound dir {}", b));
+                    if !std::path::Path::new(b).exists() {
+                        notice.push_str(" (warning: directory does not exist on disk)");
+                    }
+                }
+            }
+            None => notice.push_str(&format!(
+                "\n[scope] line \"{}\" has no bound dir · current scope unchanged",
+                title
+            )),
+        }
+    }
+    // 切完线后读目标线尾部（时间正序），给前端直接渲染
+    let backfill = agent
+        .session_store
+        .recent_messages_within_budget(agent.session_id, TASK_BACKFILL_CHAR_BUDGET)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .map(|m| (m.role, m.content))
+        .collect();
+    Ok(WebLineSwitch { notice, backfill })
+}
+
 /// 把 sqlite 消息行装回内存 context（回灌）。只取 user/assistant 正文：
 /// tool 消息的 tool_call_id 配对无法从 messages 表重建，硬塞会产生
 /// 孤儿 tool 消息违反 OpenAI 协议（严格端点 400）。返回回灌条数。
@@ -1593,6 +1677,99 @@ mod tests {
         assert_eq!(split_steer("/steered"), None);
         assert_eq!(split_steer("hello /steer"), None);
         assert_eq!(split_steer("/other"), None);
+    }
+
+    #[tokio::test]
+    async fn test_web_line_switch_main_task_and_bound_dir() {
+        let mut agent = test_agent(test_config()).await;
+        let main_sid = agent.session_id;
+        agent
+            .session_store
+            .append_message(main_sid, &Role::User, "主线问题")
+            .unwrap();
+        agent
+            .session_store
+            .append_message(main_sid, &Role::Assistant, "主线回答")
+            .unwrap();
+        agent.context.clear();
+
+        // 建任务线（/session 通路），并在任务线内落一条消息
+        let _ = try_handle("/session 整理", &mut agent, None).await.unwrap();
+        let task_sid = agent.session_id;
+        assert_ne!(task_sid, main_sid);
+        agent
+            .session_store
+            .append_message(task_sid, &Role::User, "任务内消息")
+            .unwrap();
+
+        // web 切回主线：回主线 + 回灌主线尾部（不含任务内消息）
+        let r = switch_line_for_web(&mut agent, "main").await.unwrap();
+        assert_eq!(agent.session_id, main_sid);
+        assert!(agent.active_task.is_none());
+        assert!(r.notice.contains("[back to main line]"), "{}", r.notice);
+        let contents: Vec<&str> = r
+            .backfill
+            .iter()
+            .map(|(role, c)| {
+                let _ = role;
+                c.as_str()
+            })
+            .collect();
+        assert!(contents.contains(&"主线问题"));
+        assert!(!contents.iter().any(|c| c.contains("任务内消息")));
+
+        // web 按 uuid 切回任务线：回灌任务线尾部 + 线名进 notice
+        let uuid = agent.session_store.session_uuid(task_sid).unwrap().unwrap();
+        let r = switch_line_for_web(&mut agent, &uuid).await.unwrap();
+        assert_eq!(agent.session_id, task_sid);
+        assert!(r.notice.contains("整理"), "{}", r.notice);
+        // 任务线建在 home 上（无 bound dir）→ scope 不动
+        assert!(r.notice.contains("has no bound dir"), "{}", r.notice);
+        assert!(r.backfill.iter().any(|(_, c)| c == "任务内消息"));
+
+        // 幂等：目标线不存在时报错；main 线 uuid 不能走任务线分支
+        assert!(switch_line_for_web(&mut agent, "no-such-uuid")
+            .await
+            .is_err());
+        let main_uuid = agent.session_store.session_uuid(main_sid).unwrap().unwrap();
+        assert!(switch_line_for_web(&mut agent, &main_uuid).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_web_line_switch_moves_to_bound_dir() {
+        let mut agent = test_agent(test_config()).await;
+        // 直接落一条带 bound_path 的任务线（目录真实存在）
+        let dir = tempfile::tempdir().unwrap();
+        let task_sid = agent
+            .session_store
+            .create_task_session(
+                "uuid-bound",
+                "web",
+                "绑定线",
+                Some(dir.path().to_string_lossy().as_ref()),
+            )
+            .unwrap();
+        agent
+            .session_store
+            .append_message(task_sid, &Role::User, "绑定线消息")
+            .unwrap();
+
+        let r = switch_line_for_web(&mut agent, "uuid-bound").await.unwrap();
+        assert_eq!(agent.session_id, task_sid);
+        assert!(r.notice.contains("moved to bound dir"), "{}", r.notice);
+        let root = agent.workspace_root.read().await.clone();
+        assert_eq!(root, dir.path());
+
+        // 回主线：scope 恢复家目录
+        let r = switch_line_for_web(&mut agent, "main").await.unwrap();
+        assert!(
+            r.notice.contains("restored to home workspace"),
+            "{}",
+            r.notice
+        );
+        let root = agent.workspace_root.read().await.clone();
+        assert_eq!(root, agent.workspace);
+        assert!(agent.active_task.is_none());
     }
 
     #[tokio::test]

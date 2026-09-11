@@ -2061,6 +2061,107 @@ pub async fn list_sessions_api(
         .into_response()
 }
 
+/// GET /api/session-lines → 聊天左侧栏的活跃会话线（ADR-0031 WebUI 侧通路）。
+/// 返回主线（前端固定置顶）+ 开放任务线（`state != 'archived'`，排除 cron 线）
+/// + 当前所在线。不经过归档接收线 / cron 会话——它们不属于「可切换的活跃线」。
+pub async fn list_session_lines(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    // 任务线：list_open_tasks 已按 state != 'archived' 过滤；cron 触发的会话线
+    // 是后台产物，不该出现在用户可点击的切换列表里
+    let tasks: Vec<crate::memory::sqlite::TaskSessionRow> = agent
+        .session_store
+        .list_open_tasks()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !t.channel.starts_with("cron:"))
+        .collect();
+    // 主线：与 latest_main_session 同一套过滤（kind='main' + 非 cron + 非归档），
+    // list_sessions 按 last_activity 降序，取第一条即最新主线
+    let main = agent
+        .session_store
+        .list_sessions(200, 0)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|s| s.kind == "main" && s.state != "archived" && !s.channel.starts_with("cron:"));
+    let current_uuid = agent
+        .session_store
+        .session_uuid(agent.session_id)
+        .unwrap_or(None);
+    let json = serde_json::json!({
+        "main": main,
+        "tasks": tasks,
+        "current": {
+            "session_uuid": current_uuid,
+            "title": agent.active_task.as_ref().map(|t| t.title.clone()),
+        },
+        "workspace_root": agent.workspace_root.read().await.display().to_string(),
+    });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SwitchLineBody {
+    /// "main" 或任务线 session_uuid
+    pub target: String,
+}
+
+/// POST /api/session-lines/switch → 切换到目标会话线（聊天左侧栏点击）。
+/// 复用 `/session` 的切线 + 回灌通路（`switch_line_for_web`）；差异点：点击是
+/// 显式意图，切线后同步把工作目录切到该线的 bound_path（回主线恢复家目录）。
+/// 返回 notice + 目标线尾部 user/assistant 消息（供前端直接渲染对话气泡）。
+pub async fn switch_session_line(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::Json(body): axum::Json<SwitchLineBody>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let target = body.target.trim().to_string();
+    if target.is_empty() {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "missing `target` (\"main\" or session uuid)",
+        );
+    }
+    let mut agent = state.registry.main.lock().await;
+    match crate::commands::slash::switch_line_for_web(&mut agent, &target).await {
+        Ok(r) => {
+            let root = agent.workspace_root.read().await.clone();
+            let json = serde_json::json!({
+                "ok": true,
+                "notice": r.notice,
+                "backfill": r.backfill.iter().map(|(role, content)| serde_json::json!({
+                    "role": role,
+                    "content": content,
+                })).collect::<Vec<_>>(),
+                "session_uuid": agent.session_store.session_uuid(agent.session_id).unwrap_or(None),
+                "workspace_root": root.display().to_string(),
+            });
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+                json.to_string(),
+            )
+                .into_response()
+        }
+        Err(e) => json_err(StatusCode::BAD_REQUEST, &format!("switch failed: {e}")),
+    }
+}
+
 /// GET /api/stats/tokens?days=N → token 用量聚合（plan.md W3）。
 /// N 缺省 7，线上 clamp 到 1..=30。单用户数据量小，直接单查询聚合即可。
 pub async fn stats_tokens(
@@ -2561,6 +2662,12 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/stats/tokens", axum::routing::get(stats_tokens))
         // 会话历史（P5 W1）：列表 / 详情 / 删除 / 导出；消息级归档（卫生工具）
         .route("/api/sessions", axum::routing::get(list_sessions_api))
+        // 聊天左侧栏活跃会话线（ADR-0031 WebUI 侧通路）：列表 + 切换
+        .route("/api/session-lines", axum::routing::get(list_session_lines))
+        .route(
+            "/api/session-lines/switch",
+            axum::routing::post(switch_session_line),
+        )
         .route(
             "/api/sessions/:uuid",
             axum::routing::get(get_session_detail).delete(delete_session_api),

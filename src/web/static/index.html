@@ -69,7 +69,7 @@
     <h1>Llaia (੭aᴗa)੭</h1>
     <div class="tabs">
       <div class="tab" :class="{active: tab==='config'}" @click="switchConfig()">Config</div>
-      <div class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">Chat</div>
+      <div class="tab" :class="{active: tab==='chat'}" @click="switchChat()">Chat</div>
       <div class="tab" :class="{active: tab==='sessions'}" @click="switchSessions()">Sessions</div>
       <div class="tab" :class="{active: tab==='stats'}" @click="switchStats()">Stats</div>
     </div>
@@ -77,6 +77,22 @@
   <main>
     <div id="chat-pane" class="pane" :class="{active: tab==='chat'}">
       <div class="chat-layout">
+        <!-- 左侧栏：活跃会话线（ADR-0031 WebUI 侧通路）。主线固定置顶，点击切换；
+             切换时后端同步把工作目录切到该线的 bound_path（回主线恢复家目录） -->
+        <aside class="session-rail">
+          <div class="session-rail-head">&#x276F; LINES <button class="inline-add" @click="loadSessionLines()">Refresh</button></div>
+          <div class="session-rail-item" :class="{active: currentLineKind === 'main'}" @click="switchLine('main')" title="Back to the main line">
+            <div class="line-title">&#8962; Main</div>
+          </div>
+          <template x-for="t in sessionLines" :key="t.session_uuid">
+            <div class="session-rail-item" :class="{active: currentLine === t.session_uuid}" @click="switchLine(t.session_uuid)" :title="t.bound_path || t.channel">
+              <div class="line-title" x-text="t.title"></div>
+              <div class="line-sub" x-text="t.bound_path || t.channel"></div>
+            </div>
+          </template>
+          <div class="hint" x-show="sessionLines.length === 0">No session lines yet. Type <code>/session &lt;name&gt;</code> in chat to start one.</div>
+          <div class="err" x-show="lineMsg" x-text="lineMsg"></div>
+        </aside>
         <div class="chat-main">
       <div class="messages" x-ref="messages">
         <template x-for="(m, i) in messages" :key="i">

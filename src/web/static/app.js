@@ -11,6 +11,11 @@ function llaiaApp() {
     inputText: '',
     busy: false,
     uploaded: [],
+    // 会话线（ADR-0031 WebUI 侧通路）：聊天左侧栏活跃线列表与当前所在线
+    sessionLines: [],
+    currentLine: null,
+    currentLineKind: 'main',
+    lineMsg: '',
     // WS 未就绪时的待发送帧队列（连上按序补发，见 flushOutbox）
     outbox: [],
     // todo (ADR-0024, read-only display; v1 no click-to-toggle from UI)
@@ -235,6 +240,57 @@ function llaiaApp() {
           this.questions = j.questions || [];
         }
       } catch (e) { /* 非致命：UI 静默跳过 */ }
+    },
+
+    // ---- 聊天左侧栏：活跃会话线（ADR-0031 WebUI 侧通路） ----
+    async switchChat() {
+      this.tab = 'chat';
+      this.loadSessionLines();
+    },
+    async loadSessionLines() {
+      // turn 中抢不到 agent 锁，请求会挂着：busy 时直接跳过（下一轮轮询补上）
+      if (this.busy) return;
+      try {
+        const r = await this.apiFetch('/api/session-lines');
+        if (!this.authed) return;
+        if (r.ok) {
+          const j = await r.json();
+          this.sessionLines = j.tasks || [];
+          this.currentLine = (j.current && j.current.session_uuid) || null;
+          this.currentLineKind = (j.current && j.current.title) ? 'task' : 'main';
+        }
+      } catch (e) { /* 非致命：左侧栏保持上次内容 */ }
+    },
+    async switchLine(target) {
+      if (this.busy) {
+        this.lineMsg = 'Agent turn in progress — wait for it to finish before switching lines.';
+        return;
+      }
+      try {
+        const r = await this.apiFetch('/api/session-lines/switch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!this.authed) return;
+        if (r.ok) {
+          // 切线：本地消息流换成目标线尾部（后端已把同一批消息回灌进 agent 上下文）
+          this.messages = [];
+          for (const m of (j.backfill || [])) {
+            if (m.role === 'user') this.messages.push({ role: 'user', text: m.content });
+            else if (m.role === 'assistant') this.messages.push({ role: 'assistant', text: m.content, streaming: false });
+          }
+          this.messages.push({ role: 'tool', text: j.notice || '[switched]' });
+          this.lineMsg = '';
+          this.scrollBottom();
+        } else {
+          this.lineMsg = j.error || ('switch failed: HTTP ' + r.status);
+        }
+      } catch (e) {
+        this.lineMsg = 'switch failed: ' + e.message;
+      }
+      this.loadSessionLines();
     },
 
     // ---- 会话历史（P5 W1） ----
@@ -494,6 +550,8 @@ function llaiaApp() {
           this.messages.forEach(m => { if (m.role === 'assistant') m.streaming = false; });
           if (ev.type === 'error') this.messages.push({ role: 'tool', text: `[error: ${ev.message}]` });
           if (ev.type === 'interrupted') this.messages.push({ role: 'tool', text: '[Interrupted]' });
+          // 回合结束立即刷左侧栏：回合内可能用 /session 新建/切换了会话线
+          this.loadSessionLines();
           break;
         case 'busy': alert(ev.reason); break;
         case 'side':

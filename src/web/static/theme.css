@@ -139,9 +139,40 @@ option { background: var(--bg-input); color: var(--text); }
 
 /* ---------- Chat ---------- */
 #chat-pane .messages { flex: 1; overflow-y: auto; padding: 16px; }
-/* chat 两栏：左侧消息流 + composer，右侧只读状态栏（todo / env） */
+/* chat 三栏：左侧会话线列表 + 中间消息流/composer + 右侧只读状态栏（todo / env） */
 #chat-pane .chat-layout { flex: 1; display: flex; min-height: 0; }
 #chat-pane .chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+/* 左侧栏：活跃会话线（主线置顶，点击切换并跟随 bound_dir） */
+#chat-pane .session-rail {
+  flex: 0 0 180px; width: 180px;
+  overflow-y: auto;
+  padding: 10px;
+  border-right: 1px solid var(--border-bright);
+  background: var(--bg-panel);
+}
+#chat-pane .session-rail-head {
+  display: flex; justify-content: space-between; align-items: center;
+  color: var(--green-bright); font-size: 12px; letter-spacing: .5px;
+  margin-bottom: 8px;
+}
+#chat-pane .session-rail-item {
+  padding: 6px 8px; margin-bottom: 4px;
+  border: 1px solid var(--border); border-left: 3px solid var(--border);
+  cursor: pointer; overflow: hidden;
+}
+#chat-pane .session-rail-item:hover { border-color: var(--border-bright); }
+#chat-pane .session-rail-item.active {
+  border-left-color: var(--green);
+  background: rgba(56, 224, 123, .07);
+}
+#chat-pane .session-rail-item .line-title {
+  font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#chat-pane .session-rail-item .line-sub {
+  font-size: 11px; color: var(--text-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 #chat-pane .side-panel {
   flex: 0 0 280px; width: 280px;
   overflow-y: auto;
@@ -150,9 +181,13 @@ option { background: var(--bg-input); color: var(--text); }
   background: var(--bg-panel);
 }
 #chat-pane .side-panel .todo-panel { margin: 0 0 10px; }
-/* 窄屏回退：侧栏折到消息流下方，限高防挤压 */
+/* 窄屏回退：两个侧栏折到消息流上/下方，限高防挤压 */
 @media (max-width: 900px) {
   #chat-pane .chat-layout { flex-direction: column; }
+  #chat-pane .session-rail {
+    flex: none; width: auto; max-height: 160px;
+    border-right: none; border-bottom: 1px solid var(--border-bright);
+  }
   #chat-pane .side-panel {
     flex: none; width: auto; max-height: 240px;
     border-left: none; border-top: 1px solid var(--border-bright);
