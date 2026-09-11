@@ -1480,6 +1480,23 @@ mod tests {
         assert!(dir.path().join("config.toml").exists());
     }
 
+    #[test]
+    fn prepare_startup_dir_works_when_state_dir_missing() {
+        // 回归：全新机器上 ~/.llaia 尚不存在，裸 `llaia serve` 首启动曾直接崩溃——
+        // migrate_if_needed 在无旧文件分支写 .migrated_v0.2 标记时父目录缺失，
+        // Windows 报 os error 3（ERROR_PATH_NOT_FOUND），Unix 报 ENOENT。
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join(".llaia");
+        assert!(!fresh.exists());
+
+        prepare_startup_dir(&fresh).unwrap();
+
+        assert!(fresh.join(".migrated_v0.2").exists());
+        assert!(fresh.join("config.toml").exists());
+        assert!(fresh.join("workspace/SOUL.md").exists());
+        assert!(fresh.join("logs").is_dir());
+    }
+
     #[tokio::test]
     async fn doctor_survives_unparsable_config_and_reports_it_as_error() {
         // 回归：config.toml 语法坏掉时 doctor 必须继续诊断（曾直接返回 Err 退出）

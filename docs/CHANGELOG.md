@@ -8,6 +8,9 @@
 
 ## v0.5.1 (Unreleased)
 
+**Bug fixes / 稳定性**
+- **startup**：全新机器上 `llaia serve` / `chat` 首启动直接崩溃「系统找不到指定的路径 (os error 3)」（v0.2 引入迁移逻辑起即坏，Windows ERROR_PATH_NOT_FOUND / Unix ENOENT）。根因：`prepare_startup_dir` 要求迁移先于模板补齐，但 `migrate_if_needed` 的「无旧文件」分支在 `~/.llaia` 尚不存在时就写 `.migrated_v0.2` 标记，`?` 上抛令 `init_scaffold` 的建目录逻辑永远到不了。修复：迁移入口先 `create_dir_all(config_dir)`，并补回归测试（对不存在的目录跑 `prepare_startup_dir`），坐实「裸 `llaia serve` 全新机器可直接跑」的文档承诺
+
 **Features**
 - **webui / wechat**：微信扫码登录的二维码**进了 WebUI 卡片**——此前首次开启微信必须翻启动日志或去文件管理器找 `wechat_qr.png`，是非技术用户的一面墙。实现走共享视图：`serve_cmd` 建 `WechatLoginView` 槽同时注入 WechatChannel（唯一写入方：waiting/qr/confirmed/error + 二维码 data URL，过期自动换码前端轮询自然刷新）与 WebChannel，新端点 `GET /api/channels/wechat/login` 只读转发。Config 页微信卡片按状态渲染：勾选保存后先提示「需重启」（enabled 但未启动是既有性质，不假装热生效），重启后直接出码，扫码成功提示「在微信里发一条消息」即完成闭环。日志 + 落盘兜底、`wechat_state.json` 免扫码续期、`-14` 重扫逻辑全部不变
 

@@ -52,6 +52,12 @@ fn refresh_one(path: &Path, legacy: &str, current: &str) -> Result<bool> {
 ///
 /// 返回 true 表示执行了迁移，false 表示无需迁移
 pub fn migrate_if_needed(config_dir: &Path) -> Result<bool> {
+    // 全新机器上状态目录可能尚不存在：先建目录，否则下面无旧文件分支写
+    // .migrated_v0.2 标记会因父目录缺失直接失败（Windows os error 3 / Unix ENOENT），
+    // 令裸 `llaia serve` 的首启动崩溃。建空目录不写任何模板，不破坏
+    // 「迁移先于模板补齐」的顺序约束。
+    std::fs::create_dir_all(config_dir)?;
+
     let marker = config_dir.join(".migrated_v0.2");
     if marker.exists() {
         return Ok(false);
