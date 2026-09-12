@@ -312,6 +312,11 @@ impl TodoStore {
     }
 
     /// 当前清单的展示文本（供 Runtime Context 注入）。无 session 或空清单返回空串。
+    ///
+    /// **只注入 actionable 项（pending/in_progress）**：done 项对模型——尤其弱模型——
+    /// 是强干扰源（2026-09-11 事故：全 [x] 的陈旧清单被读成"任务还挂着"，模型凭
+    /// 编号自行"续跑"早已完成的活儿）。全部完成时整段不注入，连编号锚点都不给。
+    /// store 与 WebUI 面板不受影响（完成记录保留到 /clear）。
     pub fn current_list_text(&self) -> String {
         let uuid = {
             let g = self.inner.read().unwrap();
@@ -332,14 +337,25 @@ impl TodoStore {
         if list.is_empty() {
             return String::new();
         }
+        let actionable: Vec<&TodoItem> = list
+            .iter()
+            .filter(|i| i.status != TodoStatus::Done)
+            .collect();
+        if actionable.is_empty() {
+            return String::new();
+        }
         let mut out = String::from("[Current todo list]\n");
-        for item in &list {
+        for item in &actionable {
             out.push_str(&format!(
                 "{} #{} {}\n",
                 item.status.mark(),
                 item.id,
                 item.task
             ));
+        }
+        let done = list.len() - actionable.len();
+        if done > 0 {
+            out.push_str(&format!("({done} of {} already done)", list.len()));
         }
         out
     }
@@ -510,15 +526,29 @@ mod tests {
     }
 
     #[test]
-    fn current_list_text_renders_marks() {
+    fn current_list_text_hides_done_items() {
         let s = store();
         s.set_current_session("sess1");
         let id = s.add("task a").unwrap();
         s.done(id).unwrap();
-        s.add("task b").unwrap();
+        let id2 = s.add("task b").unwrap();
+        s.update(id2, TodoStatus::InProgress).unwrap();
         let txt = s.current_list_text();
-        assert!(txt.contains("[x] #1 task a"));
-        assert!(txt.contains("[ ] #2 task b"));
+        // done 项不进注入（含任务文本与编号），actionable 项照常
+        assert!(!txt.contains("task a"));
+        assert!(!txt.contains("#1"));
+        assert!(txt.contains("[~] #2 task b"));
+        // 兜底计数行：无编号无任务文本，弱模型没有可锚定的素材
+        assert!(txt.contains("(1 of 2 already done)"));
+    }
+
+    #[test]
+    fn current_list_text_empty_when_all_done() {
+        let s = store();
+        s.set_current_session("sess1");
+        let id = s.add("task a").unwrap();
+        s.done(id).unwrap();
+        assert_eq!(s.current_list_text(), "");
     }
 
     #[tokio::test]
