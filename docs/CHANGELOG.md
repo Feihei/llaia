@@ -6,12 +6,16 @@
 
 ---
 
-## v0.5.1 (Unreleased)
+## v0.5.1 (2026-09-14)
 
 **Bug fixes / 稳定性**
+- **todo**：每轮注入的 todo 清单此前**连 `[x]` 完成项和编号一起回灌**，弱模型无视状态标记、把陈旧的全 done 清单读成"还有活没干"，一句问候就"续跑"几天前的任务并沿编号自我强化（2026-09-11 事故：模型坚称 #4–#7 未完成，还去核文件再加倍下注）。修复：注入只含 pending/in_progress 项；**全部完成时整段不注入**（不留编号锚点）；部分完成时附无编号的 `(N of M already done)` 提示。store / WebUI 面板 / 显式 `todo list` 输出全部不变
+- **path_guard**：段首 token 被无条件当"程序名"跳过路径校验，`/e/apps/blender.exe --version` 这类**绝对路径可执行文件**逃过全部防线——而同一条路径作参数（`ls /e/apps/...`）却必审，安全口径两套。修复：段首 token 若为路径形态照常纳入校验，裸程序名（`ls`/`git`）行为不变
 - **startup**：全新机器上 `llaia serve` / `chat` 首启动直接崩溃「系统找不到指定的路径 (os error 3)」（v0.2 引入迁移逻辑起即坏，Windows ERROR_PATH_NOT_FOUND / Unix ENOENT）。根因：`prepare_startup_dir` 要求迁移先于模板补齐，但 `migrate_if_needed` 的「无旧文件」分支在 `~/.llaia` 尚不存在时就写 `.migrated_v0.2` 标记，`?` 上抛令 `init_scaffold` 的建目录逻辑永远到不了。修复：迁移入口先 `create_dir_all(config_dir)`，并补回归测试（对不存在的目录跑 `prepare_startup_dir`），坐实「裸 `llaia serve` 全新机器可直接跑」的文档承诺
 
 **Features**
+- **tools**：受信目录**跨重启持久化**（`src/trusted_store.rs`）——`/move` 批准过的目录此前只存内存，每次重启 serve 清空、同一目录反复弹审批。现在写 `<config_dir>/trusted_dirs.json`：启动时加载并把 agent 家目录 workspace 种子进集合（`/move` 切走后 home 内操作依旧免审），`add_trusted_dir` 每次登记回写；写盘失败静默降级为会话级。**此前 v0.4.0 记录的「仅存内存、重启清空」就此翻篇**，`/move` 提示文案同步改为 "trusted; persists across restarts"
+- **webui**：chat 进入时**回放当前会话线尾部**（最近 40 条，含思考与工具调用行）——此前刷新/重进页面只剩空白，得翻 Sessions 页才能找回上下文；切线回灌同步带上思考与工具行。另一个「看起来像 bug 但不是」的坑一并收口：`/ok` 批准的工具结果持久化前加 `[tool result: <name>]` 前缀（`/deny`、`/answer` 早有标记，唯独批准路径漏了，会话回放里批准产物与真人发言无法区分）。流式标志位守住 chunk/reasoning 合并，新一轮输出绝不写进刚回放的消息
 - **webui / wechat**：微信扫码登录的二维码**进了 WebUI 卡片**——此前首次开启微信必须翻启动日志或去文件管理器找 `wechat_qr.png`，是非技术用户的一面墙。实现走共享视图：`serve_cmd` 建 `WechatLoginView` 槽同时注入 WechatChannel（唯一写入方：waiting/qr/confirmed/error + 二维码 data URL，过期自动换码前端轮询自然刷新）与 WebChannel，新端点 `GET /api/channels/wechat/login` 只读转发。Config 页微信卡片按状态渲染：勾选保存后先提示「需重启」（enabled 但未启动是既有性质，不假装热生效），重启后直接出码，扫码成功提示「在微信里发一条消息」即完成闭环。日志 + 落盘兜底、`wechat_state.json` 免扫码续期、`-14` 重扫逻辑全部不变
 
 ---
