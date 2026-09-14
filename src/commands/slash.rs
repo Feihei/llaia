@@ -739,11 +739,12 @@ async fn resolve_approval(
                     .unwrap_or(""),
             )?;
             agent.set_workspace(target.clone()).await;
-            // #B：批准过的目录登记为会话级受信目录——之后 /move home 切走再回来、
+            // #B：批准过的目录登记为受信目录——之后 /move home 切走再回来、
             // 或切换期间触碰该目录内路径，均免审批（逃出全部受信范围的仍需审批）。
+            // 持久化到 config_dir，重启后受信记录保留。
             agent.add_trusted_dir(target.clone()).await;
             let mut lines = vec![format!(
-                "[switched working directory to {}] (trusted for this session)",
+                "[switched working directory to {}] (trusted; persists across restarts)",
                 target.display()
             )];
             // /move 管 bound_dir：线上自动维护该线绑定（last-writer，覆盖不静默）；

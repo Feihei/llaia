@@ -382,7 +382,7 @@ pub fn format_approval_prompt(
 /// 格式化 /move 审批提示
 pub fn format_move_prompt(new_workspace: &Path) -> String {
     format!(
-        "\n🔀 Requesting approval to switch the working directory (workspace) to:\n   {}\n   ⚠️ After switching, file/terminal tools will only operate inside this directory; operations within it are approved by default (no per-step confirmation). Only paths touching outside the directory still require approval. The directory is remembered as trusted for this session, so switching back later keeps it auto-approved.\n   Reply `/ok` to confirm the switch or `/deny` to cancel.\n",
+        "\n🔀 Requesting approval to switch the working directory (workspace) to:\n   {}\n   ⚠️ After switching, file/terminal tools will only operate inside this directory; operations within it are approved by default (no per-step confirmation). Only paths touching outside the directory still require approval. The directory is remembered as trusted (persisted across restarts), so switching back later keeps it auto-approved.\n   Reply `/ok` to confirm the switch or `/deny` to cancel.\n",
         new_workspace.display(),
     )
 }

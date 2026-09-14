@@ -13,14 +13,14 @@
 
 用户定案方向（grill 2026-08-24）：**一条常驻通用 session + 按需显式开启的任务 session**。任务完成/用户关闭即归档，独享完整上下文，不污染通用线。
 
-与 `/move` 的耦合：移动到 workspace 外目录往往意味着「在该目录执行主线以外的任务」→ 可作为自动建议任务 session 的信号。#B 受信目录已落地（`Agent.trusted_dirs`，/move 批准即登记、会话内免审批），**任务 session ≈ 受信目录 + 独立上下文边界**，两者天然成一套。
+与 `/move` 的耦合：移动到 workspace 外目录往往意味着「在该目录执行主线以外的任务」→ 可作为自动建议任务 session 的信号。#B 受信目录已落地（`Agent.trusted_dirs`，/move 批准即登记、目录内免审批），**任务 session ≈ 受信目录 + 独立上下文边界**，两者天然成一套。
 
 ## 现状盘点（2026-09-01 核实）
 
 - `sessions` 表（`memory/sqlite.rs:165`）：`channel / created_at / last_activity / token_count / state('idle') / title`。**无类型字段**，所有 session 同质。
 - session 切换机制已有先例：`/new`（`slash.rs`）= `create_session` + 换 `agent.session_id` + `context.clear()`。任务线的「进出」可复用同一路径。
 - todo 工具（ADR-0024）：per-session 文件存储（`TodoStore::set_current_session`），是「当前会话内的步骤清单」，**无上下文边界、生命周期跟随会话**。
-- 受信目录（#B，本次交付）：`/move` 批准 → canonical 目录进 `Agent.trusted_dirs`，会话级内存，审批按 workspace_root ∪ trusted 判定。
+- 受信目录（#B，本次交付）：`/move` 批准 → canonical 目录进 `Agent.trusted_dirs`，审批按 workspace_root ∪ trusted 判定。2026-09-13 起持久化到 `<config_dir>/trusted_dirs.json`（agent 家目录 workspace 启动时种子在列），重启后受信记录保留。
 
 ## 决策分支（四个待决问题；grill 2026-09-01·3 全部拍板，定案见文末「grill 定案记录」）
 

@@ -99,9 +99,10 @@ pub struct Agent {
     pub workspace: std::path::PathBuf,
     /// 与文件/终端工具共享的工作区根（Arc<RwLock>），/move 一处更新、所有工具即时生效
     pub workspace_root: Arc<RwLock<std::path::PathBuf>>,
-    /// 会话级受信目录集合（#B）：/move 批准过的目标目录（canonical、过黑名单校验）。
+    /// 受信目录集合（#B）：/move 批准过的目标目录（canonical、过黑名单校验）。
     /// 审批判定「是否在 workspace 内」时与 workspace_root 同等对待，令这些目录内的
-    /// 操作免审批；仅存内存、随会话（Agent 生命周期）失效，重启后需重新 /move 批准。
+    /// 操作免审批；持久化到 `<config_dir>/trusted_dirs.json`（agent 家目录 workspace
+    /// 启动时种子进集合），重启后受信记录保留。
     pub trusted_dirs: Arc<RwLock<Vec<std::path::PathBuf>>>,
     /// 配置根目录（~/.llaia/），agent 工具不可访问，但用于推导路径
     pub config_dir: std::path::PathBuf,
@@ -338,7 +339,8 @@ impl Agent {
         self.reload_agents_md().await;
     }
 
-    /// 把 /move 批准过的目录登记为会话级受信目录（#B）：canonical 形态、去重。
+    /// 把 /move 批准过的目录登记为受信目录（#B）：canonical 形态、去重，
+    /// 并持久化到 `<config_dir>/trusted_dirs.json`（跨重启保留）。
     /// 调用方（slash `/move` 批准路径）须先经 `validate_move_target` 校验
     /// （canonicalize + 黑名单），此处不再重复校验。
     pub async fn add_trusted_dir(&self, dir: std::path::PathBuf) {
@@ -346,6 +348,7 @@ impl Agent {
         if !dirs.contains(&dir) {
             dirs.push(dir);
         }
+        crate::trusted_store::save(&self.config_dir, &dirs);
     }
 
     /// 投递一条 /steer 插话（plan.md #I）。channel 在 turn 持锁期间调用——

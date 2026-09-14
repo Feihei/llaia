@@ -18,4 +18,5 @@ pub mod skill;
 pub mod time;
 pub mod tool_call;
 pub mod tools;
+pub mod trusted_store;
 pub mod web;

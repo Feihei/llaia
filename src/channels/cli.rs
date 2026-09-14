@@ -357,9 +357,17 @@ pub async fn build_single_agent(
     std::fs::create_dir_all(&workspace).ok();
     // 与文件/终端工具共享的工作区根（P4-d /move 一处更新、所有工具即时生效）
     let workspace_root = Arc::new(RwLock::new(workspace.clone()));
-    // 会话级受信目录（plan.md #B）：/move 批准过的目录集合，与 Agent 及文件/终端
+    // 受信目录（plan.md #B）：/move 批准过的目录集合，与 Agent 及文件/终端
     // 工具共享同一 Arc——审批判定与执行校验都按 workspace ∪ 受信 放行。
-    let trusted_dirs: Arc<RwLock<Vec<std::path::PathBuf>>> = Arc::new(RwLock::new(Vec::new()));
+    // 持久化：启动时从 config_dir 加载上次会话的受信记录，agent 家目录
+    // workspace 默认在列（/move 切走后 home 内操作依旧免审）。
+    let trusted_dirs: Arc<RwLock<Vec<std::path::PathBuf>>> = Arc::new(RwLock::new({
+        let mut dirs = crate::trusted_store::load(config_dir);
+        if !dirs.contains(&workspace) {
+            dirs.insert(0, workspace.clone());
+        }
+        dirs
+    }));
 
     let soul_path = workspace.join("SOUL.md");
     let user_path = workspace.join("USER.md");

@@ -192,6 +192,8 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 
 > **Windows 执行器**：优先探测 Git Bash（白名单安装路径 + PATH，排除 WSL `System32`/`WindowsApps` 假 bash，`$MSYSTEM` 非空校验），以 `bash -s` 经 **stdin** 喂命令——绕开 MSVCRT argv 转义层，双引号 / `;` 链 / `$VAR` / 中文（UTF-8）按 bash 语义正确执行；无 Git Bash 时回退 `cmd /C` + `raw_arg` 原样传参（引号不再二次转义，但 `;`/`$VAR`/中文受 cmd 限制）。非 Windows 走 `sh -c`。
 
+> **受信目录持久化（2026-09-13）**：`/move` 批准过的目录此前仅存内存、重启即清，同一目录反复弹审批。现由 `trusted_store.rs` 持久化到 `<config_dir>/trusted_dirs.json`——启动时加载进共享 trusted\_dirs Arc 并把 agent 家目录 workspace 种子进集合（`/move` 切走后 home 内操作依旧免审），`Agent::add_trusted_dir` 时回写。写失败静默降级为会话级。另修 path\_guard 口径：段首程序名若本身是路径形态（`/e/apps/blender.exe --version`）照常纳入路径校验，不再被当程序名整体跳过（裸程序名 `ls`/`git` 不受影响）。
+
 ### 工具副作用标记
 
 `Tool` trait 提供 `requires_confirm()`（默认 `false`）。有副作用的工具（`file_write` / `file_edit` / `terminal` / `memory_write` 等）override 为 `true`，触发审批流。
