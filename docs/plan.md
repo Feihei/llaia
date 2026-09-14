@@ -52,17 +52,18 @@
 
 ## P7 — 下一步计划
 
-**状态**：⏳ 计划中（2026-09-09 立项；五项均为模糊记录，待 grill 逐项拷问后正式立项展开）
+**状态**：⏳ 计划中（2026-09-09 立项；六项均为模糊记录，待 grill 逐项拷问后正式立项展开）
 
 > **旧 P7 已收口归档**：P7 编号曾用于 terminal 脚本绕过防护专项（T1–T4 / S1–S2），2026-09-07 全部定案——T3（解释器内联载荷强制审批）、S1（命令拆分 + flag 级路径检查）、T2（无特权账户文档化）已交付，S2 / T1 / T4 定案不做；完整记录（含不做项评估）随 **v0.5.0 攒发**迁入 [CHANGELOG.md](CHANGELOG.md) §v0.5.0，本文件不再保留。
 
-> 下面五项只是想法落袋防忘，范围、边界、验收标准全部未定；立项前走 grill 工作流逐项拷问，定案一项就在本节展开一项的勾选清单。
+> 下面六项只是想法落袋防忘，范围、边界、验收标准全部未定；立项前走 grill 工作流逐项拷问，定案一项就在本节展开一项的勾选清单。
 
 - **RAG**（2026-09-08）：方向是本地知识库检索增强。待 grill：与 `memory_research`（FTS5 全文搜会话历史）的边界？语料源（文档目录 / 会话历史 / 网页剪藏）？嵌入与向量存储的选型（本地优先约束）？切片/召回质量的评估方式？
 - **浏览器自动化**（2026-09-08）：方向是 agent 能操作真实浏览器（页面导航/填表/截图抓取）。待 grill：内嵌 headless（如 chromiumoxide）vs 驱动外部实例 vs MCP 外挂？审批面怎么划（浏览器能碰内网/登录态）？与 `web_fetch` 的分工边界？
 - **搜索增强**（2026-09-08）：方向是统一 search 的质量/覆盖提升。待 grill：多搜索 provider 扩容（doubao/baidu/brave 之外）？还是检索质量（多源聚合、rerank、结果去重）？成本与 API key 管理约定？
 - **原子工具优化增强**（2026-09-08）：方向是现有内置工具（file_*/terminal/search/…) 的参数、组合与输出打磨。待 grill：从实际使用痛点出发逐工具盘点（file_edit 容错、terminal 误报已由 H1/S1 打样）？新原子工具（如 diff/patch、json/yaml 查询）要不要进？
 - **WebUI chat 界面增强**（2026-09-09）：方向是把 chat 主界面从「单会话流水」升级为「会话可管理的工作台」。待 grill：① ~~chat 页内嵌 session 列表（现有 Sessions 独立 tab 不够顺手？切线/回灌在 chat 页直接做？）~~ **已先行交付（2026-09-11，未走 grill，用户直接点名）**：chat 左侧活跃会话线列表 `session-rail`——主线置顶、点击切线（复用 `/session` 回灌通路 + bound_dir 一并切换、回主线恢复家目录），明细见 [CHANGELOG.md](CHANGELOG.md) §v0.5.0「chat 左侧活跃会话线列表」；剩余 ②③④⑤ 仍待 grill：② bound path / 任务线状态的可视化列表（当前只有 `[scope]` 文本状态行，要不要图形化 + 一键 /move？）；③ 审批交互（`/ok` 现在走聊天流，要不要独立审批卡片/按钮？多端同时在线的审批归属？）；④ 运行状态提示（busy/工具调用/steer/todo 进度等在 chat 页的呈现优化）；⑤ 与既有 P6 WebUI 批次（Sessions tab、pane 布局）的关系——增强 or 重构？
+- **MCP 2026-07-28 无状态规范跟进**（2026-09-12，已做一轮调研）：新 spec 删 initialize 握手 + `Mcp-Session-Id`（SEP-2567/2575），每请求自带 `_meta`（protocolVersion/clientInfo/capabilities），Streamable HTTP 须带 `Mcp-Method`/`Mcp-Name` 头（SEP-2243），另增可选 `server/discover`、list 响应 `ttlMs` 缓存提示（SEP-2549）；旧 server 可协商降级到 2025-11-25 继续用。对 llaia（ADR-0014 纯 client、协议层自实现）是利好——最难维护的 HTTP session 管理被协议层删掉了。**现状痛点**：`MCP_PROTOCOL_VERSION = "2024-11-05"` 偏旧且握手后不校验 server 协商结果；SSE transport 属旧版兼容（新 spec 已删 GET stream），留作 legacy 标记 deprecated。**调研倾向（待 grill 确认）**：双协议 auto 协商（`mcp.toml` 加 `protocol = "auto"|"legacy"|"stateless"`，HTTP 先发带 `_meta` 的无状态请求探路、4xx/要求 session 则回退 legacy 握手流；stdio 收 -32601 容忍降级）+ 版本集合升级为四档。**不做项**：MCP server 模式（纯 client 定位不变）、OAuth/CIMD、Tasks/MRTR/MCP Apps 扩展。待 grill：auto 探测的判定信号是否可靠（仅靠 4xx/`-32601` 会不会误判）？`tools/list` 缓存（ttlMs）接不接？验收要不要拉真实 server 做 P2 双端点验证（Cloudflare 新 SDK 无状态 + 老 npm server）？
 
 ---
 
