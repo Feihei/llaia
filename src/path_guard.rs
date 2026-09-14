@@ -409,7 +409,15 @@ pub fn extract_path_tokens(command: &str) -> Vec<String> {
                 }
                 prog_seen = true;
                 bare_rule = bare_arg_semantics(&t.to_ascii_lowercase());
-                continue; // 程序名本身不当路径
+                // 段首程序名若本身是路径形态（绝对/相对路径、~ 前缀、含分隔符），
+                // 照常纳入路径校验——裸程序名（ls/git）不是路径、跳过不变。
+                // 此前段首 token 被无条件当程序名整体跳过，`/e/apps/blender.exe
+                // --version` 的 workspace 外可执行文件路径逃过了全部校验（与同
+                // 路径写成 `ls /e/apps/...` 参数形式必审形成口径不一致）。
+                if looks_like_path(t) {
+                    out.push(t.to_string());
+                }
+                continue; // 程序名位置消费完毕（是否为路径已单独判定）
             }
             if skip_next {
                 skip_next = false;
@@ -1101,6 +1109,54 @@ mod tests {
             validate_command_paths(&cmd, ws.path(), None).is_ok(),
             "workspace 内 git bash 风格命令不应触发审批"
         );
+    }
+
+    /// 段首程序名是路径形态时仍纳入路径校验（回归：`/e/apps/blender.exe --version`
+    /// 的可执行文件路径此前被当程序名整体跳过，workspace 外二进制免审执行——
+    /// 与同路径写成 `ls /e/apps/...` 参数形式必审形成口径不一致）。
+    #[test]
+    fn test_absolute_path_program_name_is_validated() {
+        // 检出：裸写与引号包裹的绝对路径程序名都进 path token
+        for cmd in [
+            "/e/apps/blender.exe --version 2>&1 | head -3",
+            "\"/e/apps/blender.exe\" --version",
+        ] {
+            let tokens = extract_path_tokens(cmd);
+            assert!(
+                tokens.contains(&"/e/apps/blender.exe".to_string()),
+                "段首绝对路径程序名应被检出: {tokens:?} (cmd: {cmd})"
+            );
+        }
+        // 裸程序名不受影响（不是路径形态，跳过不变）
+        assert!(extract_path_tokens("git log --oneline").is_empty());
+        assert!(extract_path_tokens("ls -la").is_empty());
+
+        // 范围校验：workspace 外的可执行文件路径现在必挡
+        let ws = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let prog = outside
+            .path()
+            .join("tool.exe")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(
+            validate_command_paths_in_scope(&format!("{prog} --version"), ws.path(), &[], None)
+                .is_err(),
+            "workspace 外程序路径不应免审通过"
+        );
+        // workspace 内的程序路径照常放行
+        let in_ws = ws
+            .path()
+            .join("tool.exe")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(validate_command_paths_in_scope(
+            &format!("{in_ws} --version"),
+            ws.path(),
+            &[],
+            None
+        )
+        .is_ok());
     }
 
     #[test]
