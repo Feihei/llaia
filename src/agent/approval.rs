@@ -624,6 +624,35 @@ mod tests {
         ));
     }
 
+    /// 回归（2026-09-15 高危漏洞）：powershell/cmd 引号载荷对路径提取不可见，
+    /// default 档曾被判 within workspace 而静默执行越界删除——修复后 T3 闸门
+    /// 必须强制人审（用户 /ok 后仍可放行）。
+    #[test]
+    fn test_windows_shell_inline_forces_approval() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path();
+        for cmd in [
+            "powershell -Command \"Remove-Item C:\\Users\\me\\secret.txt\"",
+            "cmd /C \"del C:\\Users\\me\\f.txt\"",
+        ] {
+            match decision_for("terminal", cmd, ws, "default", true) {
+                ApprovalAction::NeedsApproval { .. } => {}
+                other => panic!("Windows shell inline must require approval: {cmd} -> {other:?}"),
+            }
+        }
+        // 闸门关闭时恢复旧判定（用户显式 interpret_inline = "off"）
+        assert!(matches!(
+            decision_for(
+                "terminal",
+                "powershell -Command \"Remove-Item x\"",
+                ws,
+                "default",
+                false
+            ),
+            ApprovalAction::Approved
+        ));
+    }
+
     #[test]
     fn test_t3_respects_yolo_and_readonly_profiles() {
         let dir = tempfile::tempdir().expect("tempdir");

