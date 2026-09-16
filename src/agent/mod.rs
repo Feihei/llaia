@@ -38,6 +38,9 @@ pub enum TurnEvent {
     ToolStart { id: String, name: String },
     /// 工具执行结果
     ToolResult { id: String, output: String },
+    /// 一次待审批操作已注册（QQ 频道据此在审批提示消息上附「通过/拒绝」按钮键盘）。
+    /// 仅在 NeedsApproval 分支发送，不改变 deferred 语义；默认 sink 忽略。
+    ApprovalRequested { id: String },
     /// 工具请求发送媒体给用户（channel 负责实际发送）
     MediaOutput { path: String, kind: MediaKind },
     /// 整轮结束（所有文本和工具调用完成）

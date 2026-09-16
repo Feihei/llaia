@@ -217,6 +217,10 @@ pub async fn execute_tool_calls(
                             delta: prompt.clone(),
                         })
                         .await;
+                    // 通知 channel 有待审批注册（QQ 频道据此在回合输出上附按钮键盘）
+                    let _ = tx
+                        .send(TurnEvent::ApprovalRequested { id: id.clone() })
+                        .await;
                 }
                 if let Some(a) = &audit {
                     let _ = a

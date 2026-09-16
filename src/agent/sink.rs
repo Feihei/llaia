@@ -13,6 +13,9 @@ pub trait OutputSink: Send {
     async fn on_tool_start(&mut self, name: &str);
     /// 工具执行结果（默认忽略，CLI override 打印预览）
     async fn on_tool_result(&mut self, _output: &str) {}
+    /// 一次待审批操作已注册（默认忽略；QQ 频道 override 记录 id，
+    /// 回合结束时在审批提示消息上附「通过/拒绝」按钮键盘）
+    async fn on_approval_request(&mut self, _id: &str) {}
     /// 长任务心跳：按墙钟每 KEEPALIVE_INTERVAL 回调一次，`elapsed` 为自本轮开始
     /// 的累计时长（默认忽略；交互聊天频道 override 发送 "still working" 提示，
     /// 避免用户误以为卡死）。与事件是否密集无关，保证长循环也会周期提示。
@@ -119,6 +122,7 @@ pub async fn run_turn(
                             TurnEvent::Reasoning { delta } => sink.on_reasoning(&delta).await,
                             TurnEvent::ToolStart { name, .. } => sink.on_tool_start(&name).await,
                             TurnEvent::ToolResult { output, .. } => sink.on_tool_result(&output).await,
+                            TurnEvent::ApprovalRequested { id } => sink.on_approval_request(&id).await,
                             TurnEvent::MediaOutput { path, kind } => sink.on_media(&path, kind).await,
                             TurnEvent::Done => break,
                             TurnEvent::Error { message } => {

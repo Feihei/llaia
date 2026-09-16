@@ -17,7 +17,8 @@ use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// 腾讯官方 API base URL
-const DEFAULT_API_BASE: &str = "https://api.sgroup.qq.com";
+/// 2026-08 官方变更记录：接口调用域名统一为 api.bot.qq.com（旧 api.sgroup.qq.com 仍可用）
+const DEFAULT_API_BASE: &str = "https://api.bot.qq.com";
 /// 腾讯官方鉴权服务 base URL（getAppAccessToken 在这里）
 const DEFAULT_AUTH_BASE: &str = "https://bots.qq.com";
 /// access_token 刷新提前量（秒），过期前 60 秒视为需要刷新
@@ -52,6 +53,29 @@ impl Attachment {
     pub fn is_image(&self) -> bool {
         self.content_type.starts_with("image/")
     }
+}
+
+/// 被动回复锚点：回复用户消息带 `msg_id`，响应互动事件（按钮点击）带 `event_id`，
+/// 二者互斥（官方发消息接口字段说明）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplyAnchor {
+    /// 回复用户消息（C2C_MESSAGE_CREATE 事件的 d.id）
+    Message(String),
+    /// 响应互动事件（INTERACTION_CREATE 事件的 d.id）
+    Event(String),
+}
+
+/// 从 WS payload 提取的按钮点击互动（INTERACTION_CREATE type=11 消息按钮回调）
+#[derive(Debug, Clone)]
+pub struct IncomingInteraction {
+    /// 互动事件 ID：用于 PUT /interactions/{id} 回应（同一 id 只能回应一次）
+    pub interaction_id: String,
+    /// 点击者 openid（仅单聊场景有值）
+    pub user_openid: String,
+    /// 按钮的 action.data（发送按钮时设置的回调数据）
+    pub button_data: String,
+    /// 按钮的 id 字段
+    pub button_id: String,
 }
 
 impl TokenState {
@@ -139,6 +163,77 @@ fn qq_hex(digest: &[u8]) -> String {
         s.push_str(&format!("{:02x}", b));
     }
     s
+}
+
+/// 解析审批按钮的 action.data。约定格式 `ap:ok:<id>` / `ap:deny:<id>`，
+/// 其余一律拒绝（键盘 data 也可能被旧客户端/平台注入其它内容）。
+/// 返回 (是否批准, 审批 id)。
+fn parse_approval_button_data(data: &str) -> Option<(bool, &str)> {
+    let mut parts = data.split(':');
+    match (parts.next()?, parts.next()?, parts.next()?, parts.next()) {
+        ("ap", "ok", id, None) if !id.is_empty() => Some((true, id)),
+        ("ap", "deny", id, None) if !id.is_empty() => Some((false, id)),
+        _ => None,
+    }
+}
+
+/// 键盘发送被 QQ「明确拒绝」（键盘/权限类校验错误，非网络类）才降级纯文本重发：
+/// 40034029 内联键盘行列超限、304062 订阅按钮数超限、40034127 无 markdown 模板权限。
+/// 网络类失败不做降级重发——首次请求可能已实际送达，换 msg_seq 重发会造成重复投递。
+fn is_keyboard_rejection(err: &str) -> bool {
+    err.contains("40034029") || err.contains("304062") || err.contains("40034127")
+}
+
+/// 构造审批按钮键盘（QQ 内嵌键盘自定义布局）。
+///
+/// - 每个待审批 id 一行：[✅ 通过 style=4] [❌ 拒绝 style=3]，label ≤10 字符
+/// - 两个按钮共享 `group_id`：点击其一后同组按钮变灰（仅 action.type=1 生效）
+/// - `permission.type=0` + `specify_user_ids` 锁定 owner，他人点击无效
+/// - 回调数据 `ap:ok:<id>` / `ap:deny:<id>`，点击后平台推送 INTERACTION_CREATE
+/// - `unsupport_tips`：旧客户端不渲染按钮时的提示文案
+fn approval_keyboard(approval_ids: &[String], owner_openid: &str) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = approval_ids
+        .iter()
+        .map(|id| {
+            let group = format!("ap-{id}");
+            let action = |data: String| {
+                serde_json::json!({
+                    "type": 1,
+                    "permission": {
+                        "type": 0,
+                        "specify_user_ids": [owner_openid],
+                    },
+                    "data": data,
+                    "unsupport_tips": "QQ 版本过低，请回复 /ok 或 /deny",
+                })
+            };
+            serde_json::json!({
+                "buttons": [
+                    {
+                        "id": format!("ok-{id}"),
+                        "render_data": {
+                            "label": "✅ 通过",
+                            "visited_label": "已批准",
+                            "style": 4,
+                        },
+                        "action": action(format!("ap:ok:{id}")),
+                        "group_id": group,
+                    },
+                    {
+                        "id": format!("deny-{id}"),
+                        "render_data": {
+                            "label": "❌ 拒绝",
+                            "visited_label": "已拒绝",
+                            "style": 3,
+                        },
+                        "action": action(format!("ap:deny:{id}")),
+                        "group_id": group,
+                    },
+                ]
+            })
+        })
+        .collect();
+    serde_json::json!({ "content": { "rows": rows } })
 }
 
 pub struct QqChannel {
@@ -403,25 +498,117 @@ impl QqChannel {
         })
     }
 
-    /// 通过 HTTPS API 发送 C2C 消息
-    /// 3 次指数退避：200ms / 400ms / 800ms
+    /// 从 WS payload 中提取按钮点击互动（INTERACTION_CREATE）。
+    /// 只处理 type=11（消息按钮回调）；其余互动类型（消息反馈/清空会话/授权等）
+    /// 与本 channel 的按钮无关，忽略。需 user_openid（单聊场景）与 button_data。
+    pub fn extract_interaction(payload: &serde_json::Value) -> Option<IncomingInteraction> {
+        let t = payload.get("t").and_then(|v| v.as_str())?;
+        if t != "INTERACTION_CREATE" {
+            return None;
+        }
+        let d = payload.get("d")?;
+        // 11 = 消息按钮回调（INLINE_KEYBOARD）
+        if d.get("type").and_then(|v| v.as_i64()) != Some(11) {
+            return None;
+        }
+        let interaction_id = d.get("id")?.as_str()?.to_string();
+        let user_openid = d.get("user_openid")?.as_str()?.to_string();
+        let resolved = d.get("data")?.get("resolved")?;
+        let button_data = resolved
+            .get("button_data")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let button_id = resolved
+            .get("button_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if button_data.is_empty() {
+            return None;
+        }
+        Some(IncomingInteraction {
+            interaction_id,
+            user_openid,
+            button_data,
+            button_id,
+        })
+    }
+
+    /// 通过 HTTPS API 发送 C2C 消息（msg_id 被动回复，无键盘）。
     pub async fn send_c2c_message(
         &self,
         user_openid: &str,
         content: &str,
         msg_id: Option<&str>,
     ) -> Result<()> {
-        let url = format!("{}/v2/users/{}/messages", self.api_base, user_openid);
-        let mut body = serde_json::json!({
-            "content": content,
-            "msg_type": 0,  // 0 = 文本
-        });
-        if let Some(id) = msg_id {
-            body["msg_id"] = serde_json::Value::String(id.to_string());
-            // 被动回复必须带递增 msg_seq，否则同一 msg_id 的后续回复被去重 (err_code 40054005)
-            body["msg_seq"] = serde_json::Value::from(self.next_msg_seq());
-        }
+        self.send_c2c_anchored(
+            user_openid,
+            content,
+            msg_id.map(|m| ReplyAnchor::Message(m.to_string())).as_ref(),
+            None,
+        )
+        .await
+    }
 
+    /// 全量发送入口：`anchor` 区分 msg_id（回复消息）/ event_id（响应互动事件）/
+    /// 无锚点（主动消息）三种形态，`keyboard` 附加内嵌按钮键盘（按钮审批用）。
+    ///
+    /// keyboard 被 QQ 以键盘/权限类错误码明确拒绝时自动降级纯文本重发一次
+    /// （按钮是增强，文本提示 + `/ok` `/deny` 命令始终兜底，审批不因按钮失败而阻断）。
+    pub async fn send_c2c_anchored(
+        &self,
+        user_openid: &str,
+        content: &str,
+        anchor: Option<&ReplyAnchor>,
+        keyboard: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let url = format!("{}/v2/users/{}/messages", self.api_base, user_openid);
+        // msg_seq 在本次调用内取一次：重试与键盘降级重发共用，
+        // 保证「同 msg_id + 同 msg_seq」的幂等去重语义不变（err_code 40054005）
+        let seq = match anchor {
+            Some(ReplyAnchor::Message(_)) => self.next_msg_seq(),
+            _ => 0,
+        };
+        let build_body = |kb: Option<&serde_json::Value>| {
+            let mut body = serde_json::json!({
+                "content": content,
+                "msg_type": 0,  // 0 = 文本
+            });
+            match anchor {
+                Some(ReplyAnchor::Message(id)) => {
+                    body["msg_id"] = serde_json::Value::String(id.clone());
+                    // 被动回复必须带递增 msg_seq，否则同一 msg_id 的后续回复被去重
+                    body["msg_seq"] = serde_json::Value::from(seq);
+                }
+                Some(ReplyAnchor::Event(id)) => {
+                    body["event_id"] = serde_json::Value::String(id.clone());
+                }
+                None => {}
+            }
+            if let Some(k) = kb {
+                body["keyboard"] = k.clone();
+            }
+            body
+        };
+
+        match self
+            .post_message_with_retries(&url, &build_body(keyboard))
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) if keyboard.is_some() && is_keyboard_rejection(&e.to_string()) => {
+                tracing::warn!(error = %e, "qq keyboard rejected, falling back to plain text");
+                self.post_message_with_retries(&url, &build_body(None))
+                    .await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// POST 消息体到 QQ 消息接口。3 次指数退避重试：200ms / 400ms / 800ms；
+    /// token 过期（code 11244）仅强制刷新一次，避免无限循环。
+    async fn post_message_with_retries(&self, url: &str, body: &serde_json::Value) -> Result<()> {
         let delays = [200u64, 400, 800];
         let mut last_err: Option<anyhow::Error> = None;
         // token 过期（code 11244）仅强制刷新一次，避免无限循环
@@ -431,15 +618,15 @@ impl QqChannel {
             let token = self.get_access_token().await?;
             let resp = self
                 .http
-                .post(&url)
+                .post(url)
                 .header("Authorization", format!("QQBot {}", token))
                 .header("Content-Type", "application/json")
-                .json(&body)
+                .json(body)
                 .send()
                 .await;
             match resp {
                 Ok(r) if r.status().is_success() => {
-                    tracing::debug!(attempt, user = %user_openid, "qq send ok");
+                    tracing::debug!(attempt, "qq send ok");
                     return Ok(());
                 }
                 Ok(r) => {
@@ -469,6 +656,52 @@ impl QqChannel {
             tokio::time::sleep(Duration::from_millis(*delay)).await;
         }
         Err(last_err.unwrap_or_else(|| anyhow!("unknown error")))
+    }
+
+    /// 响应互动事件（按钮点击）。INTERACTION_CREATE type=11/12 必须在 ~3 秒内回应，
+    /// 否则用户客户端一直 loading；同一 interaction_id 只能回应一次，超时失效。
+    /// code：0=成功 1=操作失败 2=操作频繁 3=重复操作 4=没有权限 5=仅管理员。
+    /// 单次尝试（3s 时限内重试无意义），失败仅返回 Err 由调用方决定是否兜底。
+    pub async fn ack_interaction(&self, interaction_id: &str, code: i32) -> Result<()> {
+        let url = format!("{}/interactions/{}", self.api_base, interaction_id);
+        let body = serde_json::json!({ "code": code });
+        let send = |token: String| {
+            self.http
+                .put(&url)
+                .header("Authorization", format!("QQBot {}", token))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+        };
+        let token = self.get_access_token().await?;
+        let resp = send(token).await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        // token 失效：刷新一次后重试（失败的回应不消费 interaction_id，重试合法）
+        if text.contains("token not exist or expire") || text.contains("11244") {
+            tracing::warn!("qq ack interaction rejected: token expired, retrying once");
+            self.invalidate_token().await;
+            let token = self.get_access_token().await?;
+            let resp = send(token).await?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                return Ok(());
+            }
+            return Err(anyhow!(
+                "ack interaction failed: status={}, body={}",
+                status,
+                text
+            ));
+        }
+        Err(anyhow!(
+            "ack interaction failed: status={}, body={}",
+            status,
+            text
+        ))
     }
 
     /// 向 QQ 用户发送媒体文件（图片或文件）。
@@ -953,107 +1186,15 @@ impl QqChannel {
 
         // 斜杠命令：在锁内处理，把输出发回用户（忽略附件）
         if text.trim().starts_with('/') {
-            // /btw（plan.md #H ①）：turn 运行中读不到上下文（锁被 turn 持有，
-            // 排队等锁会变成「turn 结束后才答」），明确拒绝优于静默延迟。
-            if text.trim().to_ascii_lowercase().starts_with("/btw")
-                && self.running_stops.lock().await.contains_key(user_openid)
-            {
-                let _ = self
-                    .send_c2c_message(
-                        user_openid,
-                        "[btw busy: a turn is running; ask again when idle]",
-                        Some(msg_id.as_str()),
-                    )
-                    .await;
-                return Ok(());
-            }
-            // /stop：中断当前正在执行的 turn（不需要 lock agent，避免被长任务阻塞）
-            if text.trim().eq_ignore_ascii_case("/stop") {
-                let notify = {
-                    let mut stops = self.running_stops.lock().await;
-                    stops.remove(user_openid)
-                };
-                if let Some(n) = notify {
-                    n.notify_one();
-                    let _ = self
-                        .send_c2c_message(
-                            user_openid,
-                            "[current task interrupted]",
-                            Some(msg_id.as_str()),
-                        )
-                        .await;
-                } else {
-                    let _ = self
-                        .send_c2c_message(
-                            user_openid,
-                            "[no task currently running]",
-                            Some(msg_id.as_str()),
-                        )
-                        .await;
-                }
-                return Ok(());
-            }
-            let outcome = {
-                let mut a = agent.lock().await;
-                crate::commands::slash::try_handle(text, &mut a, Some(registry.clone())).await?
-            };
-            match outcome {
-                crate::commands::slash::SlashOutcome::Exit => {
-                    // QQ 下忽略 /exit，不退出
-                    let _ = self
-                        .send_c2c_message(
-                            user_openid,
-                            "[/exit not available on QQ channel]",
-                            Some(msg_id.as_str()),
-                        )
-                        .await;
-                }
-                crate::commands::slash::SlashOutcome::Handled(msg) => {
-                    let _ = self
-                        .send_c2c_message(user_openid, &msg, Some(msg_id.as_str()))
-                        .await;
-                }
-                crate::commands::slash::SlashOutcome::NotSlash => {
-                    // 不会走到这里（已检查 starts_with '/'）
-                }
-                crate::commands::slash::SlashOutcome::Resume { notice, message } => {
-                    let _ = self
-                        .send_c2c_message(user_openid, &notice, Some(msg_id.as_str()))
-                        .await;
-                    let stop = Arc::new(Notify::new());
-                    {
-                        let mut stops = self.running_stops.lock().await;
-                        stops.insert(user_openid.to_string(), stop.clone());
-                    }
-                    let sink = Box::new(QqSink {
-                        qq: self.clone(),
-                        user_openid: user_openid.to_string(),
-                        msg_id: msg_id.to_string(),
-                        buffer: String::new(),
-                        tool_names: Vec::new(),
-                        notified_tools: false,
-                    });
-                    registry.set_delivery(
-                        self.clone()
-                            .pusher()
-                            .map(crate::tools::delegate::DeliveryTarget::Pusher),
-                    );
-                    let turn_result = run_turn(
-                        agent.clone(),
-                        crate::provider::ChatMessage::user(&message),
-                        "qq".into(),
-                        sink,
-                        stop,
-                    )
-                    .await;
-                    {
-                        let mut stops = self.running_stops.lock().await;
-                        stops.remove(user_openid);
-                    }
-                    turn_result?;
-                }
-            }
-            return Ok(());
+            return self
+                .handle_slash_text(
+                    agent,
+                    registry,
+                    user_openid,
+                    ReplyAnchor::Message(msg_id.clone()),
+                    text,
+                )
+                .await;
         }
 
         // 构造消息：有附件则下载并构造多模态，否则纯文本
@@ -1134,10 +1275,11 @@ impl QqChannel {
         let sink = Box::new(QqSink {
             qq: self.clone(),
             user_openid: user_openid.to_string(),
-            msg_id: msg_id.to_string(),
+            anchor: ReplyAnchor::Message(msg_id.to_string()),
             buffer: String::new(),
             tool_names: Vec::new(),
             notified_tools: false,
+            approval_ids: Vec::new(),
         });
 
         registry.set_delivery(
@@ -1156,6 +1298,186 @@ impl QqChannel {
         turn_result?;
         Ok(())
     }
+
+    /// 斜杠命令处理（普通 C2C 消息与按钮点击互动共用）。
+    /// `anchor` 决定回复锚点：消息回复带 msg_id，互动响应带 event_id；
+    /// Resume 续跑 turn 的 sink 也沿用同一锚点。
+    async fn handle_slash_text(
+        self: Arc<Self>,
+        agent: &Arc<Mutex<Agent>>,
+        registry: &Arc<AgentRegistry>,
+        user_openid: &str,
+        anchor: ReplyAnchor,
+        text: &str,
+    ) -> Result<()> {
+        // /btw（plan.md #H ①）：turn 运行中读不到上下文（锁被 turn 持有，
+        // 排队等锁会变成「turn 结束后才答」），明确拒绝优于静默延迟。
+        if text.trim().to_ascii_lowercase().starts_with("/btw")
+            && self.running_stops.lock().await.contains_key(user_openid)
+        {
+            let _ = self
+                .send_c2c_anchored(
+                    user_openid,
+                    "[btw busy: a turn is running; ask again when idle]",
+                    Some(&anchor),
+                    None,
+                )
+                .await;
+            return Ok(());
+        }
+        // /stop：中断当前正在执行的 turn（不需要 lock agent，避免被长任务阻塞）
+        if text.trim().eq_ignore_ascii_case("/stop") {
+            let notify = {
+                let mut stops = self.running_stops.lock().await;
+                stops.remove(user_openid)
+            };
+            if let Some(n) = notify {
+                n.notify_one();
+                let _ = self
+                    .send_c2c_anchored(
+                        user_openid,
+                        "[current task interrupted]",
+                        Some(&anchor),
+                        None,
+                    )
+                    .await;
+            } else {
+                let _ = self
+                    .send_c2c_anchored(
+                        user_openid,
+                        "[no task currently running]",
+                        Some(&anchor),
+                        None,
+                    )
+                    .await;
+            }
+            return Ok(());
+        }
+        let outcome = {
+            let mut a = agent.lock().await;
+            crate::commands::slash::try_handle(text, &mut a, Some(registry.clone())).await?
+        };
+        match outcome {
+            crate::commands::slash::SlashOutcome::Exit => {
+                // QQ 下忽略 /exit，不退出
+                let _ = self
+                    .send_c2c_anchored(
+                        user_openid,
+                        "[/exit not available on QQ channel]",
+                        Some(&anchor),
+                        None,
+                    )
+                    .await;
+            }
+            crate::commands::slash::SlashOutcome::Handled(msg) => {
+                let _ = self
+                    .send_c2c_anchored(user_openid, &msg, Some(&anchor), None)
+                    .await;
+            }
+            crate::commands::slash::SlashOutcome::NotSlash => {
+                // 不会走到这里（调用方已检查 starts_with '/'）
+            }
+            crate::commands::slash::SlashOutcome::Resume { notice, message } => {
+                let _ = self
+                    .send_c2c_anchored(user_openid, &notice, Some(&anchor), None)
+                    .await;
+                let stop = Arc::new(Notify::new());
+                {
+                    let mut stops = self.running_stops.lock().await;
+                    stops.insert(user_openid.to_string(), stop.clone());
+                }
+                let sink = Box::new(QqSink {
+                    qq: self.clone(),
+                    user_openid: user_openid.to_string(),
+                    anchor: anchor.clone(),
+                    buffer: String::new(),
+                    tool_names: Vec::new(),
+                    notified_tools: false,
+                    approval_ids: Vec::new(),
+                });
+                registry.set_delivery(
+                    self.clone()
+                        .pusher()
+                        .map(crate::tools::delegate::DeliveryTarget::Pusher),
+                );
+                let turn_result = run_turn(
+                    agent.clone(),
+                    crate::provider::ChatMessage::user(&message),
+                    "qq".into(),
+                    sink,
+                    stop,
+                )
+                .await;
+                {
+                    let mut stops = self.running_stops.lock().await;
+                    stops.remove(user_openid);
+                }
+                turn_result?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 处理按钮点击互动（INTERACTION_CREATE type=11，intent 1<<26）：
+    /// owner 校验（键盘 permission 之外的代码层双保险）→ 解析 button_data
+    /// （`ap:ok:<id>` / `ap:deny:<id>`）→ ack 互动 → 复用 /ok /deny 的
+    /// 审批解析与续跑通路。审批已被文本命令解决时按重复操作处理（幂等）。
+    async fn handle_interaction(
+        self: Arc<Self>,
+        agent: &Arc<Mutex<Agent>>,
+        registry: &Arc<AgentRegistry>,
+        inter: &IncomingInteraction,
+    ) -> Result<()> {
+        let owner = self.resolve_owner_openid().await;
+        if owner.as_deref() != Some(inter.user_openid.as_str()) {
+            tracing::warn!(
+                user = %inter.user_openid,
+                id = %inter.interaction_id,
+                "qq button click from non-owner, ignored"
+            );
+            let _ = self.ack_interaction(&inter.interaction_id, 4).await;
+            return Ok(());
+        }
+        let Some((approve, approval_id)) = parse_approval_button_data(&inter.button_data) else {
+            tracing::warn!(data = %inter.button_data, "unrecognized qq button_data");
+            let _ = self.ack_interaction(&inter.interaction_id, 1).await;
+            return Ok(());
+        };
+        // 幂等：pending 已被文本 /ok /deny 或 /cancel 处理 → code=3（重复操作），
+        // 提示文本走 event_id 被动回复，不再触发续跑
+        let exists = {
+            let a = agent.lock().await;
+            a.approval_gate
+                .list()
+                .await
+                .iter()
+                .any(|p| p.id == approval_id)
+        };
+        if !exists {
+            tracing::info!(id = %approval_id, "qq button click on already-resolved approval");
+            let _ = self.ack_interaction(&inter.interaction_id, 3).await;
+            let _ = self
+                .send_c2c_anchored(
+                    &inter.user_openid,
+                    &format!("[no pending approval {} — already resolved]", approval_id),
+                    Some(&ReplyAnchor::Event(inter.interaction_id.clone())),
+                    None,
+                )
+                .await;
+            return Ok(());
+        }
+        // ack 必须在 ~3s 内发出（否则客户端一直 loading），先 ack 再做耗时的审批解析
+        let _ = self.ack_interaction(&inter.interaction_id, 0).await;
+        let text = format!("/{} {}", if approve { "ok" } else { "deny" }, approval_id);
+        self.handle_slash_text(
+            agent,
+            registry,
+            &inter.user_openid,
+            ReplyAnchor::Event(inter.interaction_id.clone()),
+            &text,
+        )
+        .await
+    }
 }
 
 /// QQ 输出 sink：累积 chunk 后分片发送。
@@ -1164,12 +1486,16 @@ impl QqChannel {
 struct QqSink {
     qq: Arc<QqChannel>,
     user_openid: String,
-    msg_id: String,
+    /// 被动回复锚点：普通消息回复 msg_id，按钮审批续跑回复 event_id
+    anchor: ReplyAnchor,
     buffer: String,
     /// 本回合已调用的工具名（按序去重）
     tool_names: Vec<String>,
     /// 是否已发过工具通知（每回合最多一条）
     notified_tools: bool,
+    /// 本回合注册的待审批 id（on_approval_request 收集）；
+    /// on_done 时第一条消息附「通过/拒绝」按钮键盘
+    approval_ids: Vec<String>,
 }
 
 #[async_trait]
@@ -1183,7 +1509,7 @@ impl OutputSink for QqSink {
         if trimmed.starts_with("[error:") {
             let _ = self
                 .qq
-                .send_c2c_message(&self.user_openid, trimmed, Some(&self.msg_id))
+                .send_c2c_anchored(&self.user_openid, trimmed, Some(&self.anchor), None)
                 .await;
         }
     }
@@ -1192,10 +1518,11 @@ impl OutputSink for QqSink {
         let mins = elapsed.as_secs() / 60;
         let _ = self
             .qq
-            .send_c2c_message(
+            .send_c2c_anchored(
                 &self.user_openid,
                 &crate::channels::keepalive_notice(mins),
-                Some(&self.msg_id),
+                Some(&self.anchor),
+                None,
             )
             .await;
     }
@@ -1203,7 +1530,7 @@ impl OutputSink for QqSink {
     async fn on_auto_stopped(&mut self, reason: &str) {
         let _ = self
             .qq
-            .send_c2c_message(&self.user_openid, reason, Some(&self.msg_id))
+            .send_c2c_anchored(&self.user_openid, reason, Some(&self.anchor), None)
             .await;
     }
     async fn on_tool_start(&mut self, name: &str) {
@@ -1214,23 +1541,38 @@ impl OutputSink for QqSink {
             self.notified_tools = true;
             let _ = self
                 .qq
-                .send_c2c_message(&self.user_openid, "🔧 calling tools...", Some(&self.msg_id))
+                .send_c2c_anchored(
+                    &self.user_openid,
+                    "🔧 calling tools...",
+                    Some(&self.anchor),
+                    None,
+                )
                 .await;
         }
     }
+    // 待审批注册：记录 id，on_done 时附按钮键盘（runner 只在 NeedsApproval 分支发送）
+    async fn on_approval_request(&mut self, id: &str) {
+        self.approval_ids.push(id.to_string());
+    }
     async fn on_media(&mut self, path: &str, kind: MediaKind) {
+        // 富媒体接口只支持 msg_id 被动回复；event_id 锚点（按钮续跑）下发主动消息
+        let media_msg_id = match &self.anchor {
+            ReplyAnchor::Message(id) => Some(id.as_str()),
+            ReplyAnchor::Event(_) => None,
+        };
         if let Err(e) = self
             .qq
-            .send_media_to_user(&self.user_openid, path, kind, Some(&self.msg_id))
+            .send_media_to_user(&self.user_openid, path, kind, media_msg_id)
             .await
         {
             tracing::error!(error = %e, path = path, "failed to send media");
             let _ = self
                 .qq
-                .send_c2c_message(
+                .send_c2c_anchored(
                     &self.user_openid,
                     &format!("[failed to send media: {}]", e),
-                    Some(&self.msg_id),
+                    Some(&self.anchor),
+                    None,
                 )
                 .await;
         }
@@ -1262,17 +1604,34 @@ impl OutputSink for QqSink {
             total_len = reply.len(),
             "sending reply"
         );
+        // 审批键盘：本回合有 NeedsApproval 注册时，第一条消息附「通过/拒绝」按钮。
+        // 键盘 permission 锁定 owner openid；解析不到 owner 则跳过按钮（文本提示兜底）。
+        let keyboard = if self.approval_ids.is_empty() {
+            None
+        } else {
+            match self.qq.resolve_owner_openid().await {
+                Some(owner) => Some(approval_keyboard(&self.approval_ids, &owner)),
+                None => {
+                    tracing::warn!("approval buttons skipped: owner openid unknown");
+                    None
+                }
+            }
+        };
         for (i, chunk) in chunks.iter().enumerate() {
             if chunk.trim().is_empty() {
                 continue;
             }
-            // 只有第一片带 msg_id（被动回复），后续片用主动消息
-            let id = if i == 0 {
-                Some(self.msg_id.as_str())
+            // 只有第一片带锚点（被动回复）+ 按钮，后续片用主动消息
+            let (anchor, kb) = if i == 0 {
+                (Some(&self.anchor), keyboard.as_ref())
             } else {
-                None
+                (None, None)
             };
-            if let Err(e) = self.qq.send_c2c_message(&self.user_openid, chunk, id).await {
+            if let Err(e) = self
+                .qq
+                .send_c2c_anchored(&self.user_openid, chunk, anchor, kb)
+                .await
+            {
                 tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
             }
         }
@@ -1286,12 +1645,12 @@ impl OutputSink for QqSink {
         };
         let chunks = split_reply(&err_msg, 1800);
         for (i, chunk) in chunks.iter().enumerate() {
-            let id = if i == 0 {
-                Some(self.msg_id.as_str())
-            } else {
-                None
-            };
-            if let Err(e) = self.qq.send_c2c_message(&self.user_openid, chunk, id).await {
+            let anchor = if i == 0 { Some(&self.anchor) } else { None };
+            if let Err(e) = self
+                .qq
+                .send_c2c_anchored(&self.user_openid, chunk, anchor, None)
+                .await
+            {
                 tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
             }
         }
@@ -1399,7 +1758,8 @@ impl QqChannel {
                                     "op": 2,
                                     "d": {
                                         "token": format!("QQBot {}", access_token),
-                                        "intents": 1 << 25,  // C2C 消息
+                                        // C2C 消息 (1<<25) + 互动事件 (1<<26，按钮点击回调)
+                                        "intents": (1 << 25) | (1 << 26),
                                         "shard": [0, 1],
                                         "properties": {
                                             "$os": std::env::consts::OS,
@@ -1449,6 +1809,28 @@ impl QqChannel {
                                             .await
                                         {
                                             tracing::error!(error = %e, "handle_user_message failed");
+                                        }
+                                    });
+                                    continue;
+                                }
+
+                                // 按钮点击互动（intent 1<<26）：走按钮审批通路
+                                if let Some(inter) = Self::extract_interaction(&payload) {
+                                    let this = self.clone();
+                                    let agent = agent.clone();
+                                    let registry = registry.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = this
+                                            .clone()
+                                            .handle_interaction(&agent, &registry, &inter)
+                                            .await
+                                        {
+                                            tracing::error!(error = %e, "handle_interaction failed");
+                                            // 兜底 ack 避免客户端 loading 挂死
+                                            //（若已 ack 过则本调用失败，无副作用）
+                                            let _ = this
+                                                .ack_interaction(&inter.interaction_id, 1)
+                                                .await;
                                         }
                                     });
                                 }
@@ -1649,6 +2031,136 @@ pub fn split_reply(text: &str, max: usize) -> Vec<String> {
 impl crate::cron::ProactivePusher for QqChannel {
     async fn push(&self, message: &str) -> Result<()> {
         self.send_proactive(message).await
+    }
+}
+
+#[cfg(test)]
+mod button_approval_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_approval_button_data() {
+        assert_eq!(parse_approval_button_data("ap:ok:ap7"), Some((true, "ap7")));
+        assert_eq!(
+            parse_approval_button_data("ap:deny:ap1"),
+            Some((false, "ap1"))
+        );
+        // 非法格式一律拒绝（键盘 data 可能被平台/旧客户端注入其它内容）
+        assert_eq!(parse_approval_button_data("ap:ok"), None);
+        assert_eq!(parse_approval_button_data("ap:ok:"), None);
+        assert_eq!(parse_approval_button_data("x:ok:ap1"), None);
+        assert_eq!(parse_approval_button_data("ap:ok:ap1:extra"), None);
+        assert_eq!(parse_approval_button_data(""), None);
+    }
+
+    #[test]
+    fn test_is_keyboard_rejection() {
+        assert!(is_keyboard_rejection(
+            "status: 400 Bad Request, body: {\"code\":40034029}"
+        ));
+        assert!(is_keyboard_rejection("body contains 304062 somewhere"));
+        assert!(is_keyboard_rejection("body contains 40034127 somewhere"));
+        // 网络类/其它错误不降级重发（首次请求可能已实际送达，防重复投递）
+        assert!(!is_keyboard_rejection("status: 500, body: internal error"));
+        assert!(!is_keyboard_rejection("error sending request"));
+    }
+
+    #[test]
+    fn test_approval_keyboard_shape() {
+        let kb = approval_keyboard(&["ap3".to_string()], "OWNER_X");
+        let rows = kb["content"]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let buttons = rows[0]["buttons"].as_array().unwrap();
+        assert_eq!(buttons.len(), 2);
+        let (ok_btn, deny_btn) = (&buttons[0], &buttons[1]);
+        // 回调动作：type=1 回调按钮 + 约定 data 格式
+        assert_eq!(ok_btn["action"]["type"], 1);
+        assert_eq!(ok_btn["action"]["data"], "ap:ok:ap3");
+        assert_eq!(deny_btn["action"]["data"], "ap:deny:ap3");
+        // 同组互斥：点击其一后同组按钮变灰
+        assert_eq!(ok_btn["group_id"], "ap-ap3");
+        assert_eq!(deny_btn["group_id"], "ap-ap3");
+        // 权限锁定 owner
+        assert_eq!(ok_btn["action"]["permission"]["type"], 0);
+        assert_eq!(
+            ok_btn["action"]["permission"]["specify_user_ids"][0],
+            "OWNER_X"
+        );
+        // label ≤10 字符（QQ 上限）
+        for b in buttons {
+            let label = b["render_data"]["label"].as_str().unwrap();
+            assert!(label.chars().count() <= 10, "label too long: {}", label);
+        }
+    }
+
+    #[test]
+    fn test_approval_keyboard_multiple_rows() {
+        let ids = vec!["ap1".to_string(), "ap2".to_string()];
+        let kb = approval_keyboard(&ids, "O");
+        let rows = kb["content"]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["buttons"][0]["action"]["data"], "ap:ok:ap1");
+        assert_eq!(rows[1]["buttons"][1]["action"]["data"], "ap:deny:ap2");
+    }
+
+    #[test]
+    fn test_extract_interaction() {
+        // 正常按钮点击（单聊）
+        let payload = serde_json::json!({
+            "op": 0,
+            "t": "INTERACTION_CREATE",
+            "d": {
+                "id": "1b13d569-4610",
+                "type": 11,
+                "scene": "c2c",
+                "chat_type": 2,
+                "user_openid": "USER_A",
+                "data": {
+                    "type": 11,
+                    "resolved": { "button_data": "ap:ok:ap2", "button_id": "ok-ap2" }
+                }
+            }
+        });
+        let inter = QqChannel::extract_interaction(&payload).unwrap();
+        assert_eq!(inter.interaction_id, "1b13d569-4610");
+        assert_eq!(inter.user_openid, "USER_A");
+        assert_eq!(inter.button_data, "ap:ok:ap2");
+        assert_eq!(inter.button_id, "ok-ap2");
+
+        // 非按钮互动（type=13 消息反馈）不处理
+        let payload = serde_json::json!({
+            "t": "INTERACTION_CREATE",
+            "d": { "id": "x", "type": 13, "user_openid": "U", "data": { "resolved": {} } }
+        });
+        assert!(QqChannel::extract_interaction(&payload).is_none());
+
+        // 缺 user_openid（群聊场景）不处理
+        let payload = serde_json::json!({
+            "t": "INTERACTION_CREATE",
+            "d": {
+                "id": "x",
+                "type": 11,
+                "group_openid": "G",
+                "data": { "resolved": { "button_data": "ap:ok:ap1" } }
+            }
+        });
+        assert!(QqChannel::extract_interaction(&payload).is_none());
+
+        // 空 button_data 不处理
+        let payload = serde_json::json!({
+            "t": "INTERACTION_CREATE",
+            "d": {
+                "id": "x",
+                "type": 11,
+                "user_openid": "U",
+                "data": { "resolved": { "button_data": "" } }
+            }
+        });
+        assert!(QqChannel::extract_interaction(&payload).is_none());
+
+        // 非 INTERACTION_CREATE 事件不处理
+        let payload = serde_json::json!({ "t": "C2C_MESSAGE_CREATE", "d": {} });
+        assert!(QqChannel::extract_interaction(&payload).is_none());
     }
 }
 

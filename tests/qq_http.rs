@@ -395,6 +395,201 @@ async fn test_send_image_still_uses_base64_upload() {
     msg_mock.assert();
 }
 
+// ---------- 按钮审批（event_id 被动回复 / 键盘降级 / 互动 ack） ----------
+
+use llaia::channels::qq::ReplyAnchor;
+
+/// anchor=Event 的被动回复走 `event_id` 字段。
+/// 负向断言用守卫 mock：若 body 带 msg_id（字段用错），命中 500 使 unwrap 失败。
+#[tokio::test]
+async fn test_send_c2c_anchored_event_reply_uses_event_id() {
+    let mut server = Server::new_async().await;
+    let _token_mock = mock_access_token(&mut server).await;
+    let wrong_anchor = server
+        .mock("POST", "/v2/users/U9/messages")
+        .match_body(mockito::Matcher::PartialJsonString(
+            r#"{"msg_id":"i-123"}"#.to_string(),
+        ))
+        .with_status(500)
+        .create_async()
+        .await;
+    let send_mock = server
+        .mock("POST", "/v2/users/U9/messages")
+        .match_body(mockito::Matcher::PartialJsonString(
+            r#"{"event_id":"i-123","content":"[approved] terminal"}"#.to_string(),
+        ))
+        .with_status(200)
+        .with_body(r#"{"id":"m9"}"#)
+        .create_async()
+        .await;
+
+    let qq = QqChannel::new_with_api_base(test_config(), server.url());
+    qq.send_c2c_anchored(
+        "U9",
+        "[approved] terminal",
+        Some(&ReplyAnchor::Event("i-123".into())),
+        None,
+    )
+    .await
+    .unwrap();
+
+    send_mock.assert();
+    drop(wrong_anchor);
+}
+
+/// anchor=Message 保持 msg_id + msg_seq + content 形态
+/// （回归：重构不改变既有被动回复协议；首通道首个 seq 恒为 1）。
+#[tokio::test]
+async fn test_send_c2c_anchored_message_reply_uses_msg_id() {
+    let mut server = Server::new_async().await;
+    let _token_mock = mock_access_token(&mut server).await;
+    let wrong_anchor = server
+        .mock("POST", "/v2/users/UA0/messages")
+        .match_body(mockito::Matcher::PartialJsonString(
+            r#"{"event_id":"mid-77"}"#.to_string(),
+        ))
+        .with_status(500)
+        .create_async()
+        .await;
+    let send_mock = server
+        .mock("POST", "/v2/users/UA0/messages")
+        .match_body(mockito::Matcher::PartialJsonString(
+            r#"{"msg_id":"mid-77","msg_seq":1,"content":"hello"}"#.to_string(),
+        ))
+        .with_status(200)
+        .with_body(r#"{"id":"m0"}"#)
+        .create_async()
+        .await;
+
+    let qq = QqChannel::new_with_api_base(test_config(), server.url());
+    qq.send_c2c_anchored(
+        "UA0",
+        "hello",
+        Some(&ReplyAnchor::Message("mid-77".into())),
+        None,
+    )
+    .await
+    .unwrap();
+
+    send_mock.assert();
+    drop(wrong_anchor);
+}
+
+/// 键盘被键盘类错误码（40034029 行列超限）拒绝时降级纯文本重发；
+/// 文本兜底保证审批不因按钮失败而阻断。
+#[tokio::test]
+async fn test_keyboard_fallback_to_plain_text_on_rejection() {
+    let mut server = Server::new_async().await;
+    let _token_mock = mock_access_token(&mut server).await;
+    // 键盘请求：3 次重试全部被拒（PartialJsonString 要求 body 含 keyboard 键才命中）
+    let kb_mock = server
+        .mock("POST", "/v2/users/UA/messages")
+        .match_body(mockito::Matcher::PartialJsonString(
+            r#"{"keyboard":{"content":{"rows":[]}}}"#.to_string(),
+        ))
+        .with_status(400)
+        .with_body(r#"{"message":"inline keyboard rows/cols exceeded","code":40034029}"#)
+        .expect(3)
+        .create_async()
+        .await;
+    // 降级后的纯文本请求（无 keyboard 键，不命中上面的 mock）
+    let plain_mock = server
+        .mock("POST", "/v2/users/UA/messages")
+        .with_status(200)
+        .with_body(r#"{"id":"ok"}"#)
+        .create_async()
+        .await;
+
+    let qq = QqChannel::new_with_api_base(test_config(), server.url());
+    let kb = serde_json::json!({"content": {"rows": []}});
+    qq.send_c2c_anchored("UA", "prompt", None, Some(&kb))
+        .await
+        .unwrap();
+
+    kb_mock.assert();
+    plain_mock.assert();
+}
+
+/// 非键盘类失败（网络/500）不降级重发——首次请求可能已实际送达，防重复投递。
+#[tokio::test]
+async fn test_keyboard_no_fallback_on_generic_failure() {
+    let mut server = Server::new_async().await;
+    let _token_mock = mock_access_token(&mut server).await;
+    let send_mock = server
+        .mock("POST", "/v2/users/UB/messages")
+        .with_status(500)
+        .with_body("internal error")
+        .expect(3)
+        .create_async()
+        .await;
+
+    let qq = QqChannel::new_with_api_base(test_config(), server.url());
+    let kb = serde_json::json!({"content": {"rows": []}});
+    let result = qq.send_c2c_anchored("UB", "prompt", None, Some(&kb)).await;
+    assert!(result.is_err());
+
+    send_mock.assert();
+}
+
+/// 互动 ack：PUT /interactions/{id}，body {"code":0}。
+#[tokio::test]
+async fn test_ack_interaction_put() {
+    let mut server = Server::new_async().await;
+    let _token_mock = mock_access_token(&mut server).await;
+    let ack_mock = server
+        .mock("PUT", "/interactions/i-abc")
+        .match_body(mockito::Matcher::JsonString(r#"{"code":0}"#.to_string()))
+        .with_status(200)
+        .with_body("{}")
+        .create_async()
+        .await;
+
+    let qq = QqChannel::new_with_api_base(test_config(), server.url());
+    qq.ack_interaction("i-abc", 0).await.unwrap();
+
+    ack_mock.assert();
+}
+
+/// 键盘 + event_id 组合：按钮审批消息的实际形态（msg_type=0 文本 + keyboard）。
+#[tokio::test]
+async fn test_send_approval_reply_with_keyboard_and_event_anchor() {
+    let mut server = Server::new_async().await;
+    let _token_mock = mock_access_token(&mut server).await;
+    let kb = serde_json::json!({
+        "content": { "rows": [{ "buttons": [
+            { "id": "ok-ap2", "action": { "type": 1, "data": "ap:ok:ap2",
+              "permission": { "type": 0, "specify_user_ids": ["OWNER"] } },
+              "group_id": "ap-ap2" },
+            { "id": "deny-ap2", "action": { "type": 1, "data": "ap:deny:ap2",
+              "permission": { "type": 0, "specify_user_ids": ["OWNER"] } },
+              "group_id": "ap-ap2" }
+        ]}]}
+    });
+    let expected = serde_json::json!({
+        "event_id": "i-k",
+        "keyboard": kb,
+    });
+    let send_mock = server
+        .mock("POST", "/v2/users/UC/messages")
+        .match_body(mockito::Matcher::PartialJsonString(expected.to_string()))
+        .with_status(200)
+        .with_body(r#"{"id":"mc"}"#)
+        .create_async()
+        .await;
+
+    let qq = QqChannel::new_with_api_base(test_config(), server.url());
+    qq.send_c2c_anchored(
+        "UC",
+        "🔐 approval prompt",
+        Some(&ReplyAnchor::Event("i-k".into())),
+        Some(&kb),
+    )
+    .await
+    .unwrap();
+
+    send_mock.assert();
+}
+
 /// 图片 base64 上传被拒（如 500/850012）时降级分片上传重试。
 #[tokio::test]
 async fn test_send_image_falls_back_to_chunked_on_base64_failure() {
