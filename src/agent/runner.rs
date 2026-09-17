@@ -170,6 +170,7 @@ pub async fn execute_tool_calls(
             profile,
             channel,
             ctx.terminal_inline_gate,
+            ctx.terminal_delete_guard,
         ) {
             // 直接执行
             ApprovalAction::Approved => {}
@@ -337,6 +338,7 @@ mod tests {
                 audit: None,
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
+                terminal_delete_guard: false,
             },
             None,
         )
@@ -370,6 +372,7 @@ mod tests {
                 audit: None,
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
+                terminal_delete_guard: false,
             },
             None,
         )
@@ -425,6 +428,7 @@ mod tests {
                 audit: None,
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
+                terminal_delete_guard: false,
             },
             None,
         )
@@ -448,6 +452,7 @@ mod tests {
                 audit: None,
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
+                terminal_delete_guard: false,
             },
             None,
         )
@@ -470,6 +475,7 @@ mod tests {
                 audit: None,
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
+                terminal_delete_guard: false,
             },
             None,
         )

@@ -666,6 +666,14 @@ fn split_command_segments(command: &str) -> Vec<String> {
     segs
 }
 
+/// 引号感知 tokenize 的 `pub(crate)` 出口（terminal 删除护栏识别 `-f` 语义用）
+pub(crate) fn command_tokens(command: &str) -> Vec<String> {
+    tokenize_command(command)
+        .into_iter()
+        .map(|t| t.text)
+        .collect()
+}
+
 /// 段首 `VAR=value` 环境变量赋值前缀（如 `PYTHONPATH=. python -c ...`）
 fn is_env_assignment(token: &str) -> bool {
     match token.split_once('=') {
@@ -781,6 +789,119 @@ pub fn is_inline_interpreter_command(command: &str) -> bool {
         }
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Delete Guard：破坏性命令识别与目标提取（2026-09-17 定案，rm → .trash 回收站）
+//
+// 背景：default 档三层闸门（作用域审批 / T3 / 黑名单）均不覆盖 workspace 内的
+// 裸 `rm`——实测 `rm .trash-guard-test.txt` 静默硬删（audit.log 2026-09-17 09:12）。
+// 对策分三档：bound path 内删除转 .trash/ 免审可恢复；bound 外（含受信目录）
+// 强制审批；审批后（/ok）真删。受信目录不获得 trash 保护（trash 只属于当前
+// bound path，见 docs/plans/2026-09-17-delete-guard.md）。
+//
+// 已知边界（刻意接受，与 T3 同口径注释留档）：
+// - 只识别顶层段；`xargs rm` / `find -delete` / `git clean` 等间接形态不识别
+//   （`$()` / 反引号内的 rm 本就被 check_shell_wrappers 拒绝；xargs 属对抗性
+//   构造，单用户威胁模型不设防）；
+// - `mv` 覆盖、`>` 截断、`tee` 等间接破坏不在本期范围；
+// - 重定向目标（`rm x > log` 的 log）会被一并视作 rm 目标——保守方向：界内多
+//   移一个不存在的文件报错、界外多弹一次审批，均无害；
+// - heredoc 正文不逐段分析。
+// ---------------------------------------------------------------------------
+
+/// 会删除文件系统的命令（段首词，比较前经 `normalize_prog` 归一化 + 小写化）
+pub const DESTRUCTIVE_COMMANDS: &[&str] = &[
+    // POSIX（bash/sh）
+    "rm",
+    "unlink",
+    "rmdir",
+    // cmd（del/erase/rd；rmdir 两家同名，归一后统一匹配）
+    "del",
+    "erase",
+    "rd",
+    // PowerShell（rm/del 是其 alias，已在前捕获；归一化去 `.exe` 后缀）
+    "remove-item",
+];
+
+/// 值为删除目标的 flag（PowerShell `Remove-Item -Path x` 形态）
+const DESTRUCTIVE_PATH_FLAGS: &[&str] = &["path", "literalpath"];
+
+/// 提取命令中所有破坏性段的目标 token（引号感知）。
+///
+/// 返回 `None` 表示命令不含破坏性段；`Some(vec![])` 表示有破坏性段但抠不出目标
+/// （如 `rm -rf` 无目标，shell 自会报错，调用方按无目标放行）。
+/// 段内跳过：`-` 旗标（含组合 `-rf`）、`--` 终止符、cmd 风格 `/x` 单字符开关、
+/// `Remove-Item -Path/-LiteralPath` 的值（算目标）。
+pub fn destructive_targets(command: &str) -> Option<Vec<String>> {
+    let mut all: Vec<String> = Vec::new();
+    let mut found = false;
+    for seg in split_command_segments(command) {
+        let tokens = tokenize_command(&seg);
+        let mut idx = 0;
+        while idx < tokens.len() && is_env_assignment(&tokens[idx].text) {
+            idx += 1;
+        }
+        if idx >= tokens.len() {
+            continue;
+        }
+        let prog = normalize_prog(&tokens[idx].text).to_ascii_lowercase();
+        if !DESTRUCTIVE_COMMANDS.contains(&prog.as_str()) {
+            continue;
+        }
+        found = true;
+        // 段内目标提取
+        let mut i = idx + 1;
+        while i < tokens.len() {
+            let t = tokens[i].text.as_str();
+            if t == "--" {
+                // 选项终止符：其后全部是目标
+                for tok in &tokens[i + 1..] {
+                    all.push(tok.text.clone());
+                }
+                break;
+            }
+            if t.starts_with('-') && t.len() > 1 {
+                // -Path x / -LiteralPath x：值是目标
+                let name = t.trim_start_matches('-').to_ascii_lowercase();
+                if DESTRUCTIVE_PATH_FLAGS.contains(&name.as_str()) {
+                    if let Some(v) = tokens.get(i + 1) {
+                        all.push(v.text.clone());
+                        i += 2;
+                        continue;
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            // cmd 风格单字符开关（del /q /s）：Windows 排除口径与 looks_like_path 一致
+            #[cfg(windows)]
+            let cmd_switch = t.len() == 2 && t.starts_with('/');
+            #[cfg(not(windows))]
+            let cmd_switch = false;
+            if !cmd_switch {
+                all.push(t.to_string());
+            }
+            i += 1;
+        }
+    }
+    if found {
+        Some(all)
+    } else {
+        None
+    }
+}
+
+/// 所有破坏性目标是否都落在 bound path（workspace_root）内。
+///
+/// 复用 `validate_path`（与执行层同一套语义：MSYS 换算 / 词法规范化 / 祖先
+/// canonicalize 回溯），Ok 即界内。glob 字符（`*?[`）按字面参与判定——词法
+/// 规范化对含通配路径的界内/界外结论与展开语义一致且偏保守（`*/..` 形态判外）。
+/// 判外方向永远安全：误判界内→移进自家 .trash 可恢复；误判界外→多弹一次审批。
+pub fn destructive_all_within_bound(targets: &[String], workspace: &Path) -> bool {
+    targets
+        .iter()
+        .all(|t| validate_path(workspace, t, None).is_ok())
 }
 
 #[cfg(test)]
@@ -1273,5 +1394,88 @@ mod tests {
         let ws = tempdir().unwrap();
         // 命令引用黑名单路径
         assert!(validate_command_paths("cat /etc/passwd", ws.path(), None).is_err());
+    }
+
+    // ---------------- Delete Guard：破坏性命令识别与目标提取 ----------------
+
+    fn targets(cmd: &str) -> Option<Vec<String>> {
+        destructive_targets(cmd)
+    }
+
+    #[test]
+    fn test_destructive_targets_basic() {
+        assert_eq!(targets("rm file.txt"), Some(vec!["file.txt".to_string()]));
+        // 组合 flag 与多目标
+        assert_eq!(
+            targets("rm -rf dir1 dir2"),
+            Some(vec!["dir1".to_string(), "dir2".to_string()])
+        );
+        // `--` 终止符后全部是目标
+        assert_eq!(
+            targets("rm -- -weird-name"),
+            Some(vec!["-weird-name".to_string()])
+        );
+        // 引号路径剥引号
+        assert_eq!(
+            targets("rm \"my file.txt\""),
+            Some(vec!["my file.txt".to_string()])
+        );
+        // cmd/PowerShell 形态（`/q` 开关排除是 Windows 口径，与 looks_like_path 一致）
+        #[cfg(windows)]
+        assert_eq!(
+            targets("del /q file.txt"),
+            Some(vec!["file.txt".to_string()])
+        );
+        assert_eq!(
+            targets("Remove-Item -Path x -Recurse -Force"),
+            Some(vec!["x".to_string()])
+        );
+        assert_eq!(
+            targets("unlink a; rmdir b"),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_destructive_targets_none_and_empty() {
+        // 非破坏性命令
+        assert_eq!(targets("echo rm is a word"), None);
+        assert_eq!(targets("ls -la && cat f.txt"), None);
+        // 破坏性段但无目标（shell 自会报错）
+        assert_eq!(targets("rm -rf"), Some(vec![]));
+        // 复合命令只取破坏性段的目标
+        assert_eq!(
+            targets("echo hi && rm x.txt"),
+            Some(vec!["x.txt".to_string()])
+        );
+        // `grep rm` 的 rm 是参数不是段首词
+        assert_eq!(targets("grep rm file"), None);
+    }
+
+    #[test]
+    fn test_destructive_within_bound() {
+        let ws = tempdir().unwrap();
+        std::fs::write(ws.path().join("a.txt"), b"x").unwrap();
+
+        // 界内相对路径 / 绝对路径 / 不存在的界内路径（rm -f 常态）
+        let rel = vec!["a.txt".to_string()];
+        assert!(destructive_all_within_bound(&rel, ws.path()));
+        let missing = vec!["maybe-missing.log".to_string()];
+        assert!(destructive_all_within_bound(&missing, ws.path()));
+
+        // 界外：/tmp、上级目录、Windows 盘符绝对路径
+        let out = vec!["/tmp/x".to_string()];
+        assert!(!destructive_all_within_bound(&out, ws.path()));
+        let up = vec!["../escape.txt".to_string()];
+        assert!(!destructive_all_within_bound(&up, ws.path()));
+
+        // glob：静态前缀在界内 → 界内；跨出界 → 界外
+        let glob_in = vec!["*.log".to_string()];
+        assert!(destructive_all_within_bound(&glob_in, ws.path()));
+        let glob_out = vec!["../*.log".to_string()];
+        assert!(!destructive_all_within_bound(&glob_out, ws.path()));
+
+        // 空目标视为界内（调用方按无目标放行）
+        assert!(destructive_all_within_bound(&[], ws.path()));
     }
 }

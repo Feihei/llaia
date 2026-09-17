@@ -1423,6 +1423,7 @@ impl Agent {
                 audit: self.audit.clone(),
                 ask_user_timeout_secs: self.config.runtime.ask_user_timeout_secs as u64,
                 terminal_inline_gate: self.config.tools.terminal.interpret_inline != "off",
+                terminal_delete_guard: self.config.tools.terminal.delete_guard != "off",
             };
             let (tool_msgs, deferred) =
                 execute_tool_calls(&self.tools, &calls, channel, &ctx, Some(&event_tx)).await?;

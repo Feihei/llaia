@@ -19,6 +19,9 @@ pub struct Terminal {
     /// skills 目录（<config_dir>/skills）：terminal 读/执行 skill 目录内脚本、资产时放行。
     /// None 时不对 skills 目录做额外放行（与旧行为一致）。
     skills_dir: Option<PathBuf>,
+    /// 删除护栏（rm → .trash，2026-09-17）：开启时 bound path 内破坏性命令转
+    /// `.trash/` 可恢复，界外由审批层强制人审。构造自 `[tools.terminal].delete_guard != "off"`。
+    delete_guard: bool,
     /// Windows 上探测到的 Git Bash 路径；None 表示未找到，执行回退到 `cmd /C`。
     #[cfg(windows)]
     bash_path: Option<PathBuf>,
@@ -31,6 +34,7 @@ impl Terminal {
         workspace: Arc<RwLock<PathBuf>>,
         trusted: Arc<RwLock<Vec<PathBuf>>>,
         skills_dir: Option<PathBuf>,
+        delete_guard: bool,
     ) -> Self {
         Self {
             command_policy,
@@ -38,6 +42,7 @@ impl Terminal {
             workspace,
             trusted,
             skills_dir,
+            delete_guard,
             #[cfg(windows)]
             bash_path: detect_bash(),
         }
@@ -195,25 +200,25 @@ impl Tool for Terminal {
     fn requires_confirm(&self) -> bool {
         true
     }
-    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
-        self.run(args, false).await
+    async fn execute(&self, args: &Value, channel: &str) -> Result<String> {
+        self.run(args, false, channel).await
     }
 
     /// 批准豁免（ADR-0020）：`/ok` 后跳过 workspace 白名单（用户已看到完整命令并
     /// 批准），shell 包装/路径白名单不再拦截；命令策略（黑名单档含灾难命令表）与
-    /// 危险路径前缀黑名单兜底仍保留。
+    /// 危险路径前缀黑名单兜底仍保留。删除护栏不再接管——审批后真删（人已批准）。
     async fn execute_approved(
         &self,
         args: &Value,
         _channel: &str,
         _event_tx: Option<&tokio::sync::mpsc::Sender<crate::agent::TurnEvent>>,
     ) -> Result<String> {
-        self.run(args, true).await
+        self.run(args, true, "").await
     }
 }
 
 impl Terminal {
-    async fn run(&self, args: &Value, approved: bool) -> Result<String> {
+    async fn run(&self, args: &Value, approved: bool, channel: &str) -> Result<String> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -235,6 +240,18 @@ impl Terminal {
                     anyhow::bail!("path {:?} matches dangerous blacklist prefix", token);
                 }
             }
+        }
+
+        // 删除护栏（rm → .trash，2026-09-17）：bound path 内破坏性命令先转回收站，
+        // 再照常执行原命令——非破坏段不受影响，rm 段对已移走文件自然 no-op
+        // （-f 静默 / 无 -f 报 No such file，诚实可见）。失败不降级真删：
+        // rename 出错直接整条报错（已移动部分留档 manifest）。
+        let mut guard_notice = String::new();
+        if !approved && self.delete_guard {
+            guard_notice = self
+                .trash_destructive(command, &workspace, channel)
+                .await?
+                .unwrap_or_default();
         }
 
         #[cfg(windows)]
@@ -260,8 +277,225 @@ impl Terminal {
                 output.status.code().unwrap_or(-1)
             ));
         }
+        if !guard_notice.is_empty() {
+            combined = format!("{}\n{}", guard_notice, combined);
+        }
         Ok(combined)
     }
+
+    /// 删除护栏执行体：命令含破坏性段且目标全在 bound path 内时，把目标移入
+    /// `<workspace>/.trash/<ts>/` 并返回告知文案；否则返回 None（照常跑 shell）。
+    async fn trash_destructive(
+        &self,
+        command: &str,
+        workspace: &Path,
+        channel: &str,
+    ) -> Result<Option<String>> {
+        let targets = match path_guard::destructive_targets(command) {
+            Some(t) if !t.is_empty() => t,
+            _ => return Ok(None), // 无破坏段 / 无目标：shell 自行处理
+        };
+        if !path_guard::destructive_all_within_bound(&targets, workspace) {
+            // 界外（含受信目录）：审批层已强制人审，/ok 后走真删
+            return Ok(None);
+        }
+
+        // rm 的 -f 语义：目标不存在时静默跳过（组合 flag -rf 同样命中）
+        let force = tokenize_tokens(command).iter().any(|t| {
+            (t.starts_with('-') && !t.starts_with("--") && t.contains('f')) || t == "--force"
+        });
+
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%3f").to_string();
+        let trash_dir = workspace.join(".trash").join(&ts);
+        let mut moved: Vec<String> = Vec::new();
+        let mut originals: Vec<String> = Vec::new();
+        for raw in &targets {
+            let expanded = expand_target(workspace, raw, force)?;
+            for target in expanded {
+                if target == workspace {
+                    anyhow::bail!("[delete-guard] refusing to move the workspace root itself");
+                }
+                let rel = target
+                    .strip_prefix(workspace)
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|_| target.clone());
+                if rel.starts_with(".trash") {
+                    anyhow::bail!(
+                        "[delete-guard] refusing to trash .trash contents (restore via mv instead): {}",
+                        rel.display()
+                    );
+                }
+                // rm 的 -f 语义：字面目标不存在时静默跳过（无 -f 则报错，与 shell 一致）
+                if !target.exists() {
+                    if force {
+                        continue;
+                    }
+                    anyhow::bail!("[delete-guard] no such file: {}", target.display());
+                }
+                let dest = trash_dir.join(&rel);
+                if let Some(parent) = dest.parent() {
+                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                        anyhow!("[delete-guard] create_dir_all {}: {}", dest.display(), e)
+                    })?;
+                }
+                tokio::fs::rename(&target, &dest).await.map_err(|e| {
+                    anyhow!(
+                        "[delete-guard] failed to move {} into trash: {} (already-moved paths remain in .trash, see manifest)",
+                        target.display(),
+                        e
+                    )
+                })?;
+                moved.push(rel.to_string_lossy().replace('\\', "/"));
+                originals.push(target.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        if moved.is_empty() {
+            return Ok(None); // 全部目标不存在且带 -f：与 shell 行为一致，无事发生
+        }
+
+        // manifest 追加一行，供恢复/审计（原路径绝对形态）
+        tokio::fs::create_dir_all(&trash_dir).await?;
+        let entry = serde_json::json!({
+            "ts": ts,
+            "channel": channel,
+            "trash_dir": format!(".trash/{}", ts),
+            "targets": originals,
+        });
+        use tokio::io::AsyncWriteExt;
+        let mut manifest = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(workspace.join(".trash").join("manifest.jsonl"))
+            .await?;
+        manifest
+            .write_all(format!("{}\n", entry).as_bytes())
+            .await?;
+        manifest.flush().await?;
+
+        let mut notice = format!(
+            "[delete-guard] moved {} path(s) to .trash/{}/ instead of deleting (restorable; manifest: .trash/manifest.jsonl):",
+            moved.len(),
+            ts
+        );
+        for m in &moved {
+            notice.push_str(&format!("\n- {}", m));
+        }
+        Ok(Some(notice))
+    }
+}
+
+/// 解析单个删除目标：经 `validate_path` 归一（MSYS 换算 / `~` / 词法规范化），
+/// glob 字符（`*?[`）时展开为实际存在的路径集合。展开为空：带 -f 静默、否则报错
+/// （与 shell `rm` 行为一致）。
+fn expand_target(workspace: &Path, raw: &str, force: bool) -> Result<Vec<std::path::PathBuf>> {
+    let base = path_guard::validate_path(workspace, raw, None)?;
+    if !raw.contains('*') && !raw.contains('?') && !raw.contains('[') {
+        return Ok(vec![base]);
+    }
+    let hits = expand_glob(&base);
+    if hits.is_empty() {
+        if force {
+            return Ok(vec![]);
+        }
+        anyhow::bail!("[delete-guard] glob matched nothing: {}", raw);
+    }
+    Ok(hits)
+}
+
+/// 对归一化后的路径做 glob 展开：从最长已存在目录前缀起，逐组件匹配 `*`/`?`。
+/// 无新依赖（项目惯例避免新增 crate），匹配器只支持单组件内通配。
+fn expand_glob(base: &Path) -> Vec<std::path::PathBuf> {
+    let comps: Vec<std::ffi::OsString> = base
+        .components()
+        .map(|c| c.as_os_str().to_os_string())
+        .collect();
+    // 找最长已存在的目录前缀（从根开始逐级下探）
+    let mut anchor = std::path::PathBuf::new();
+    let mut idx = 0;
+    for (i, c) in comps.iter().enumerate() {
+        let next = if anchor.as_os_str().is_empty() {
+            std::path::PathBuf::from(c)
+        } else {
+            anchor.join(c)
+        };
+        if next.is_dir() {
+            anchor = next;
+            idx = i + 1;
+        } else {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    glob_walk(&anchor, &comps[idx..], &mut out);
+    out.sort();
+    out
+}
+
+fn glob_walk(dir: &Path, comps: &[std::ffi::OsString], out: &mut Vec<std::path::PathBuf>) {
+    if comps.is_empty() {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    let comp = comps[0].to_string_lossy().to_string();
+    let has_glob = comp.contains('*') || comp.contains('?');
+    if !has_glob {
+        let next = dir.join(&comps[0]);
+        if comps.len() == 1 {
+            if next.exists() {
+                out.push(next);
+            }
+        } else if next.is_dir() {
+            glob_walk(&next, &comps[1..], out);
+        }
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if glob_match(&comp, &name) {
+            let next = dir.join(entry.file_name());
+            if comps.len() == 1 {
+                out.push(next);
+            } else if next.is_dir() {
+                glob_walk(&next, &comps[1..], out);
+            }
+        }
+    }
+}
+
+/// 单组件通配匹配：`*` 任意串、`?` 单字符（经典双指针回溯）
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0usize, 0usize);
+    let (mut star, mut backtrack) = (usize::MAX, 0usize);
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = pi;
+            backtrack = ni;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            backtrack += 1;
+            ni = backtrack;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// 引号感知 tokenize 的薄封装（复用 path_guard 私有解析， pub(crate) 供 terminal 测 -f 语义）
+fn tokenize_tokens(command: &str) -> Vec<String> {
+    path_guard::command_tokens(command)
 }
 
 #[cfg(test)]
@@ -284,6 +518,18 @@ mod tests {
             Arc::new(RwLock::new(ws)),
             Arc::new(RwLock::new(Vec::new())),
             None,
+            false,
+        )
+    }
+
+    fn term_guard(policy: &str, ws: PathBuf) -> Terminal {
+        Terminal::new(
+            policy.into(),
+            vec![],
+            Arc::new(RwLock::new(ws)),
+            Arc::new(RwLock::new(Vec::new())),
+            None,
+            true,
         )
     }
 
@@ -305,6 +551,7 @@ mod tests {
             Arc::new(RwLock::new(ws)),
             Arc::new(RwLock::new(Vec::new())),
             None,
+            false,
         );
         assert!(t.check_command_policy("ls -la").is_ok());
         assert!(t.check_command_policy("rm foo").is_err());
@@ -349,6 +596,7 @@ mod tests {
             Arc::new(RwLock::new(ws.clone())),
             Arc::new(RwLock::new(Vec::new())),
             Some(skills_root.path().to_path_buf()),
+            false,
         );
         assert!(t
             .check_path_safety(&format!("python {}", skill_script), &ws, &[])
@@ -462,5 +710,165 @@ mod tests {
             .await
             .unwrap();
         assert!(result.contains("中文测试"), "got: {}", result);
+    }
+
+    // ---------------- Delete Guard：rm → .trash ----------------
+
+    #[tokio::test]
+    async fn test_delete_guard_trashes_workspace_file() {
+        let (_g, ws) = make_workspace();
+        std::fs::write(ws.join("victim.txt"), b"x").unwrap();
+        let t = term_guard("none", ws.clone());
+
+        let out = t
+            .execute(&serde_json::json!({"command": "rm victim.txt"}), "test")
+            .await
+            .unwrap();
+        assert!(out.contains("[delete-guard]"), "got: {}", out);
+        assert!(!ws.join("victim.txt").exists(), "原文件应已移走");
+
+        // 落进 .trash/<ts>/，manifest 留档原路径
+        let trash = ws.join(".trash");
+        let ts_dir = std::fs::read_dir(&trash)
+            .unwrap()
+            .find(|e| e.as_ref().unwrap().file_name().to_string_lossy() != "manifest.jsonl")
+            .unwrap()
+            .unwrap();
+        assert!(ts_dir.path().join("victim.txt").exists());
+        let manifest = std::fs::read_to_string(trash.join("manifest.jsonl")).unwrap();
+        assert!(manifest.contains("victim.txt"), "manifest: {}", manifest);
+        assert!(
+            manifest.contains("\"channel\":\"test\""),
+            "manifest: {}",
+            manifest
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_guard_composite_command_keeps_other_segments() {
+        let (_g, ws) = make_workspace();
+        std::fs::write(ws.join("gone.txt"), b"x").unwrap();
+        let t = term_guard("none", ws.clone());
+
+        let out = t
+            .execute(
+                &serde_json::json!({"command": "echo alive && rm gone.txt"}),
+                "test",
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("alive"), "非破坏段应照常执行: {}", out);
+        assert!(out.contains("[delete-guard]"), "got: {}", out);
+        assert!(!ws.join("gone.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_delete_guard_glob_expansion() {
+        let (_g, ws) = make_workspace();
+        std::fs::write(ws.join("a.log"), b"1").unwrap();
+        std::fs::write(ws.join("b.log"), b"2").unwrap();
+        std::fs::write(ws.join("keep.txt"), b"3").unwrap();
+        let t = term_guard("none", ws.clone());
+
+        let out = t
+            .execute(&serde_json::json!({"command": "rm *.log"}), "test")
+            .await
+            .unwrap();
+        assert!(out.contains("[delete-guard]"), "got: {}", out);
+        assert!(!ws.join("a.log").exists());
+        assert!(!ws.join("b.log").exists());
+        assert!(ws.join("keep.txt").exists(), "非匹配文件不应受影响");
+    }
+
+    #[tokio::test]
+    async fn test_delete_guard_missing_target_with_force_is_noop() {
+        let (_g, ws) = make_workspace();
+        let t = term_guard("none", ws.clone());
+
+        // rm -f 不存在的目标：与 shell 语义一致，静默无事发生
+        let out = t
+            .execute(
+                &serde_json::json!({"command": "rm -f maybe-missing.log"}),
+                "test",
+            )
+            .await
+            .unwrap();
+        assert!(!out.contains("[delete-guard]"), "got: {}", out);
+        assert!(!ws.join(".trash").exists(), "不应产生 trash 目录");
+    }
+
+    #[tokio::test]
+    async fn test_delete_guard_missing_target_without_force_errors() {
+        let (_g, ws) = make_workspace();
+        let t = term_guard("none", ws.clone());
+
+        // 无 -f 时与 shell 一致报错，且不降级真删
+        let result = t
+            .execute(
+                &serde_json::json!({"command": "rm maybe-missing.log"}),
+                "test",
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_guard_refuses_trash_self_and_workspace_root() {
+        let (_g, ws) = make_workspace();
+        std::fs::create_dir_all(ws.join(".trash").join("t0")).unwrap();
+        let t = term_guard("none", ws.clone());
+
+        // rm -rf .trash：拒绝（恢复通道本身不得被删）
+        let result = t
+            .execute(&serde_json::json!({"command": "rm -rf .trash"}), "test")
+            .await;
+        assert!(result.is_err());
+        assert!(ws.join(".trash").join("t0").exists(), ".trash 不应被动");
+
+        // rm . ：拒绝移动 workspace 根自身
+        let result = t
+            .execute(&serde_json::json!({"command": "rm -rf ."}), "test")
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_guard_outside_bound_not_intercepted_here() {
+        let (_g, ws) = make_workspace();
+        let t = term_guard("none", ws.clone());
+
+        // 界外目标：护栏放行（审批层强制人审），执行层 path 校验直接拒绝
+        let result = t
+            .execute(
+                &serde_json::json!({"command": "rm -f /tmp/llaia-guard-test"}),
+                "test",
+            )
+            .await;
+        assert!(result.is_err(), "界外路径应被三层路径防御拦截");
+    }
+
+    #[tokio::test]
+    async fn test_delete_guard_off_keeps_old_behavior() {
+        let (_g, ws) = make_workspace();
+        std::fs::write(ws.join("plain.txt"), b"x").unwrap();
+        let t = term("none", ws.clone()); // delete_guard = false
+
+        let out = t
+            .execute(&serde_json::json!({"command": "rm plain.txt"}), "test")
+            .await
+            .unwrap();
+        assert!(!out.contains("[delete-guard]"), "got: {}", out);
+        assert!(!ws.join("plain.txt").exists(), "旧行为：真删");
+        assert!(!ws.join(".trash").exists());
+    }
+
+    #[test]
+    fn test_glob_match_basic() {
+        assert!(glob_match("*", "anything.log"));
+        assert!(glob_match("*.log", "a.log"));
+        assert!(!glob_match("*.log", "a.txt"));
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "ac"));
+        assert!(glob_match("a*c", "abbbc"));
     }
 }

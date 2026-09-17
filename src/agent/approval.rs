@@ -193,6 +193,10 @@ pub struct ApprovalContext {
     /// 落在 workspace / 受信目录内）。delegate 频道与 yolo 档不受影响（见
     /// `approval_decision` 内注释）。
     pub terminal_inline_gate: bool,
+    /// 删除护栏（rm → .trash），构造自 `[tools.terminal].delete_guard != "off"`：
+    /// 开启时 terminal 破坏性命令走三档语义（bound 内免审转 trash / 界外强制
+    /// 人审），见 `approval_decision` 内注释与 docs/plans/2026-09-17-delete-guard.md。
+    pub terminal_delete_guard: bool,
 }
 
 /// 是否交互式频道（能等待用户 /ok /deny /answer）
@@ -247,6 +251,8 @@ pub enum ApprovalAction {
 }
 
 /// 根据权限档位 + 工具副作用 + workspace/受信目录范围，决定一次工具调用是否需要审批
+// 参数随闸门演进增长（T3 第 7 参、Delete Guard 第 8 参），结构化收编留待下次重审。
+#[allow(clippy::too_many_arguments)]
 pub fn approval_decision(
     tool: &dyn Tool,
     args: &Value,
@@ -255,6 +261,7 @@ pub fn approval_decision(
     profile: &str,
     channel: &str,
     terminal_inline_gate: bool,
+    terminal_delete_guard: bool,
 ) -> ApprovalAction {
     // 子 agent 委派：不受审批拦截（与 P2-a 一致，channel 固定为 "delegate"）。
     // T3 边界（注释留档）：delegate 通道的解释器内联载荷同样绕过审批——
@@ -283,6 +290,26 @@ pub fn approval_decision(
         if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
             if crate::path_guard::is_inline_interpreter_command(cmd) {
                 required = true;
+            }
+        }
+    }
+    // Delete Guard（2026-09-17，rm → .trash）：破坏性命令三档语义——
+    // ① 目标全在 bound path 内：执行层转 .trash/ 可恢复，default 档免审批
+    //   （可恢复所以不打扰；read-only 档仍不放行——移入 trash 也是变更）；
+    // ② 目标越出 bound path（含受信目录内！）：强制人审，审批后真删。
+    //   受信目录不获得 trash 保护也不沿用「受信=免审」（否则受信目录内的 rm
+    //   仍是静默硬删，洞还在）；
+    // ③ yolo / delegate 已在前置分支直通，不受本闸门影响。
+    if terminal_delete_guard && tool.name() == "terminal" {
+        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+            if let Some(targets) = crate::path_guard::destructive_targets(cmd) {
+                if crate::path_guard::destructive_all_within_bound(&targets, workspace) {
+                    if profile != "read-only" {
+                        return ApprovalAction::Approved;
+                    }
+                } else {
+                    required = true;
+                }
             }
         }
     }
@@ -534,7 +561,14 @@ mod tests {
 
     // ---------------- T3：解释器内联载荷强制人审 ----------------
 
-    fn decision_for(tool: &str, cmd: &str, ws: &Path, profile: &str, gate: bool) -> ApprovalAction {
+    fn decision_for(
+        tool: &str,
+        cmd: &str,
+        ws: &Path,
+        profile: &str,
+        gate: bool,
+        delete_guard: bool,
+    ) -> ApprovalAction {
         let tool_stub = ToolStub { name: tool };
         approval_decision(
             &tool_stub,
@@ -544,6 +578,7 @@ mod tests {
             profile,
             "cli",
             gate,
+            delete_guard,
         )
     }
 
@@ -580,7 +615,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let ws = dir.path();
         // workspace 内的 python -c：default 档本应免审批，T3 开启时强制人审
-        match decision_for("terminal", "python -c \"print(1)\"", ws, "default", true) {
+        match decision_for(
+            "terminal",
+            "python -c \"print(1)\"",
+            ws,
+            "default",
+            true,
+            false,
+        ) {
             ApprovalAction::NeedsApproval { within_workspace } => {
                 assert!(within_workspace, "命令落在 workspace 内，提示应标注 within");
             }
@@ -588,7 +630,7 @@ mod tests {
         }
         // 管道喂裸解释器同样命中
         assert!(matches!(
-            decision_for("terminal", "echo x | python", ws, "default", true),
+            decision_for("terminal", "echo x | python", ws, "default", true, false),
             ApprovalAction::NeedsApproval { .. }
         ));
     }
@@ -599,16 +641,30 @@ mod tests {
         let ws = dir.path();
         // 闸门关闭：同命令恢复 default 档的免审批
         assert!(matches!(
-            decision_for("terminal", "python -c \"print(1)\"", ws, "default", false),
+            decision_for(
+                "terminal",
+                "python -c \"print(1)\"",
+                ws,
+                "default",
+                false,
+                false
+            ),
             ApprovalAction::Approved
         ));
         // 闸门开启：跑脚本文件不拦（T3 只拦内联）
         assert!(matches!(
-            decision_for("terminal", "python script.py", ws, "default", true),
+            decision_for("terminal", "python script.py", ws, "default", true, false),
             ApprovalAction::Approved
         ));
         assert!(matches!(
-            decision_for("terminal", "python -m pytest -q", ws, "default", true),
+            decision_for(
+                "terminal",
+                "python -m pytest -q",
+                ws,
+                "default",
+                true,
+                false
+            ),
             ApprovalAction::Approved
         ));
         // 非 terminal 工具不受 T3 影响（memory_write 走兜底分支：视为 workspace 内）
@@ -618,7 +674,8 @@ mod tests {
                 "python -c \"print(1)\"",
                 ws,
                 "default",
-                true
+                true,
+                false
             ),
             ApprovalAction::Approved
         ));
@@ -635,7 +692,7 @@ mod tests {
             "powershell -Command \"Remove-Item C:\\Users\\me\\secret.txt\"",
             "cmd /C \"del C:\\Users\\me\\f.txt\"",
         ] {
-            match decision_for("terminal", cmd, ws, "default", true) {
+            match decision_for("terminal", cmd, ws, "default", true, false) {
                 ApprovalAction::NeedsApproval { .. } => {}
                 other => panic!("Windows shell inline must require approval: {cmd} -> {other:?}"),
             }
@@ -647,6 +704,7 @@ mod tests {
                 "powershell -Command \"Remove-Item x\"",
                 ws,
                 "default",
+                false,
                 false
             ),
             ApprovalAction::Approved
@@ -659,13 +717,109 @@ mod tests {
         let ws = dir.path();
         // yolo 显式弃权所有审批：T3 不例外
         assert!(matches!(
-            decision_for("terminal", "python -c \"print(1)\"", ws, "yolo", true),
+            decision_for(
+                "terminal",
+                "python -c \"print(1)\"",
+                ws,
+                "yolo",
+                true,
+                false
+            ),
             ApprovalAction::Approved
         ));
         // read-only 档本就全审，T3 不改变结果
         assert!(matches!(
-            decision_for("terminal", "python -c \"print(1)\"", ws, "read-only", true),
+            decision_for(
+                "terminal",
+                "python -c \"print(1)\"",
+                ws,
+                "read-only",
+                true,
+                false
+            ),
             ApprovalAction::NeedsApproval { .. }
         ));
+    }
+
+    // ---------------- Delete Guard：破坏性命令三档语义 ----------------
+
+    #[test]
+    fn test_delete_guard_bound_path_rm_approved_for_trash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path();
+        std::fs::write(ws.join("a.txt"), b"x").unwrap();
+
+        // bound path 内 rm：trash 接管可恢复 → default 档免审批
+        assert!(matches!(
+            decision_for("terminal", "rm a.txt", ws, "default", true, true),
+            ApprovalAction::Approved
+        ));
+        // 复合命令中目标全在界内同样免审
+        assert!(matches!(
+            decision_for("terminal", "echo hi && rm a.txt", ws, "default", true, true),
+            ApprovalAction::Approved
+        ));
+        // read-only 档不放行（移入 trash 也是变更）
+        assert!(matches!(
+            decision_for("terminal", "rm a.txt", ws, "read-only", true, true),
+            ApprovalAction::NeedsApproval { .. }
+        ));
+        // 闸门关闭恢复旧行为：界内免审（trash 不接管）
+        assert!(matches!(
+            decision_for("terminal", "rm a.txt", ws, "default", true, false),
+            ApprovalAction::Approved
+        ));
+    }
+
+    #[test]
+    fn test_delete_guard_outside_bound_forces_approval_even_trusted() {
+        let trusted_dir = tempfile::tempdir().expect("tempdir");
+        let ws_dir = tempfile::tempdir().expect("tempdir");
+        let ws = ws_dir.path();
+        let trusted = validate_move_target(trusted_dir.path().to_str().unwrap()).unwrap();
+
+        // 旧逻辑下受信目录内 terminal 命令免审；Delete Guard 下 rm 强制人审
+        let cmd = format!("rm {}", trusted.join("victim.txt").display());
+        let decision = approval_decision(
+            &ToolStub { name: "terminal" },
+            &json!({ "command": cmd }),
+            ws,
+            std::slice::from_ref(&trusted),
+            "default",
+            "cli",
+            false,
+            true,
+        );
+        assert!(
+            matches!(decision, ApprovalAction::NeedsApproval { .. }),
+            "受信目录内的 rm 应强制审批，实际 {decision:?}"
+        );
+
+        // 界外（非受信）rm 同样强制人审
+        let decision = approval_decision(
+            &ToolStub { name: "terminal" },
+            &json!({ "command": "rm -f /tmp/whatever" }),
+            ws,
+            &[],
+            "default",
+            "cli",
+            false,
+            true,
+        );
+        assert!(matches!(decision, ApprovalAction::NeedsApproval { .. }));
+
+        // 对照：非破坏性命令不受 Delete Guard 影响（受信目录内照旧免审）
+        let cmd = format!("ls {}", trusted.display());
+        let decision = approval_decision(
+            &ToolStub { name: "terminal" },
+            &json!({ "command": cmd }),
+            ws,
+            std::slice::from_ref(&trusted),
+            "default",
+            "cli",
+            false,
+            true,
+        );
+        assert!(matches!(decision, ApprovalAction::Approved));
     }
 }

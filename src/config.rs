@@ -739,6 +739,11 @@ pub struct TerminalToolConfig {
     /// 命中即强制人审，即使落在 workspace 内）/ off（关闭该闸门）
     #[serde(default = "default_interpret_inline")]
     pub interpret_inline: String,
+    /// 删除护栏（2026-09-17）：trash（默认，bound path 内 rm/del/Remove-Item 等破坏性
+    /// 命令转 .trash/ 免审可恢复，界外仍强制审批）/ off（关闭，旧行为：受信目录内
+    /// 静默真删——不建议）
+    #[serde(default = "default_delete_guard")]
+    pub delete_guard: String,
 }
 
 impl Default for TerminalToolConfig {
@@ -749,6 +754,7 @@ impl Default for TerminalToolConfig {
             command_policy: default_command_policy(),
             command_whitelist: default_command_whitelist(),
             interpret_inline: default_interpret_inline(),
+            delete_guard: default_delete_guard(),
         }
     }
 }
@@ -773,6 +779,10 @@ fn default_command_policy() -> String {
 
 fn default_interpret_inline() -> String {
     "approval".into()
+}
+
+fn default_delete_guard() -> String {
+    "trash".into()
 }
 
 fn default_command_whitelist() -> Vec<String> {

@@ -514,6 +514,7 @@ pub async fn build_single_agent(
             workspace_root.clone(),
             trusted_dirs.clone(),
             Some(skills_dir.clone()),
+            config.tools.terminal.delete_guard != "off",
         )),
         Arc::new({
             // web_fetch 正文抽取：若启用且配置了 Tavily key，则复用其做服务端抽取。
