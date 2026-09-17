@@ -61,15 +61,19 @@ impl Attachment {
 pub enum ReplyAnchor {
     /// 回复用户消息（C2C_MESSAGE_CREATE 事件的 d.id）
     Message(String),
-    /// 响应互动事件（INTERACTION_CREATE 事件的 d.id）
+    /// 响应互动事件（INTERACTION_CREATE 的 WS dispatch 外层 payload id；
+    /// 事件体 d.id 仅用于 PUT /interactions/{id} 回应——单聊实测 d.id 作
+    /// event_id 会被判 40034025「请求参数event_id无效」）
     Event(String),
 }
 
 /// 从 WS payload 提取的按钮点击互动（INTERACTION_CREATE type=11 消息按钮回调）
 #[derive(Debug, Clone)]
 pub struct IncomingInteraction {
-    /// 互动事件 ID：用于 PUT /interactions/{id} 回应（同一 id 只能回应一次）
+    /// 互动 ID（事件体 d.id）：用于 PUT /interactions/{id} 回应（同一 id 只能回应一次）
     pub interaction_id: String,
+    /// 事件 ID（WS dispatch 外层 payload id）：用于被动消息 event_id 锚点
+    pub event_id: String,
     /// 点击者 openid（仅单聊场景有值）
     pub user_openid: String,
     /// 按钮的 action.data（发送按钮时设置的回调数据）
@@ -252,6 +256,10 @@ pub struct QqChannel {
     owner_openid: Arc<Mutex<Option<String>>>,
     /// 主 agent workspace（用于读 USER.md 解析 owner openid 兜底）
     workspace: Option<PathBuf>,
+    /// 审批 id → 注册时回合的回复锚点（通常是原用户消息 msg_id）。
+    /// 按钮点击续跑时优先用它锚定回复：msg_id 被动回复窗口 60 分钟/4 次，
+    /// 实测可靠；event_id（INTERACTION_CREATE 外层 id）作无登记时兜底。
+    approval_anchors: Mutex<HashMap<String, ReplyAnchor>>,
 }
 
 impl QqChannel {
@@ -266,6 +274,7 @@ impl QqChannel {
             running_stops: Arc::new(Mutex::new(HashMap::new())),
             owner_openid: Arc::new(Mutex::new(None)),
             workspace: None,
+            approval_anchors: Mutex::new(HashMap::new()),
         }
     }
 
@@ -281,7 +290,23 @@ impl QqChannel {
             running_stops: Arc::new(Mutex::new(HashMap::new())),
             owner_openid: Arc::new(Mutex::new(None)),
             workspace: None,
+            approval_anchors: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 登记审批 id 与注册时回合的回复锚点（QqSink::on_approval_request 调用）。
+    /// 同 id 重复登记以后写为准。
+    async fn remember_approval_anchor(&self, approval_id: &str, anchor: ReplyAnchor) {
+        self.approval_anchors
+            .lock()
+            .await
+            .insert(approval_id.to_string(), anchor);
+    }
+
+    /// 取走审批的登记锚点（按钮点击续跑时调用，取后即删）。
+    /// 无登记（如 serve 重启后点击旧按钮）返回 None。
+    async fn take_approval_anchor(&self, approval_id: &str) -> Option<ReplyAnchor> {
+        self.approval_anchors.lock().await.remove(approval_id)
     }
 
     /// 注入主 agent workspace（用于 cron 主动推送时读 channel_state.json / USER.md 解析 owner openid）。
@@ -512,6 +537,14 @@ impl QqChannel {
             return None;
         }
         let interaction_id = d.get("id")?.as_str()?.to_string();
+        // 被动消息 event_id 用 WS dispatch 外层 payload id（官方 Payload 通用结构的
+        // "id 事件id"）；事件体 d.id 实测只被互动回调接口认，发消息会判 40034025。
+        // 外层 id 缺失（异常 payload）时退回 d.id 兜底。
+        let event_id = payload
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(interaction_id.as_str())
+            .to_string();
         let user_openid = d.get("user_openid")?.as_str()?.to_string();
         let resolved = d.get("data")?.get("resolved")?;
         let button_data = resolved
@@ -529,6 +562,7 @@ impl QqChannel {
         }
         Some(IncomingInteraction {
             interaction_id,
+            event_id,
             user_openid,
             button_data,
             button_id,
@@ -1469,11 +1503,15 @@ impl QqChannel {
         if !exists {
             tracing::info!(id = %approval_id, "qq button click on already-resolved approval");
             let _ = self.ack_interaction(&inter.interaction_id, 3).await;
+            let anchor = self
+                .take_approval_anchor(approval_id)
+                .await
+                .unwrap_or_else(|| ReplyAnchor::Event(inter.event_id.clone()));
             let _ = self
                 .send_c2c_anchored(
                     &inter.user_openid,
                     &format!("[no pending approval {} — already resolved]", approval_id),
-                    Some(&ReplyAnchor::Event(inter.interaction_id.clone())),
+                    Some(&anchor),
                     None,
                 )
                 .await;
@@ -1482,14 +1520,14 @@ impl QqChannel {
         // ack 必须在 ~3s 内发出（否则客户端一直 loading），先 ack 再做耗时的审批解析
         let _ = self.ack_interaction(&inter.interaction_id, 0).await;
         let text = format!("/{} {}", if approve { "ok" } else { "deny" }, approval_id);
-        self.handle_slash_text(
-            agent,
-            registry,
-            &inter.user_openid,
-            ReplyAnchor::Event(inter.interaction_id.clone()),
-            &text,
-        )
-        .await
+        // 续跑回复锚点：优先登记的原消息 msg_id（60 分钟/4 次被动窗口，实测可靠），
+        // 无登记（serve 重启等）退回 event_id（INTERACTION_CREATE 外层 id）
+        let anchor = self
+            .take_approval_anchor(approval_id)
+            .await
+            .unwrap_or_else(|| ReplyAnchor::Event(inter.event_id.clone()));
+        self.handle_slash_text(agent, registry, &inter.user_openid, anchor, &text)
+            .await
     }
 }
 
@@ -1563,9 +1601,13 @@ impl OutputSink for QqSink {
                 .await;
         }
     }
-    // 待审批注册：记录 id，on_done 时附按钮键盘（runner 只在 NeedsApproval 分支发送）
+    // 待审批注册：记录 id，on_done 时附按钮键盘（runner 只在 NeedsApproval 分支发送）；
+    // 同时把本回合锚点（原用户消息 msg_id）登记给按钮点击续跑用
     async fn on_approval_request(&mut self, id: &str) {
         self.approval_ids.push(id.to_string());
+        self.qq
+            .remember_approval_anchor(id, self.anchor.clone())
+            .await;
     }
     async fn on_media(&mut self, path: &str, kind: MediaKind) {
         // 富媒体接口只支持 msg_id 被动回复；event_id 锚点（按钮续跑）下发主动消息
@@ -2122,6 +2164,7 @@ mod button_approval_tests {
         let payload = serde_json::json!({
             "op": 0,
             "t": "INTERACTION_CREATE",
+            "id": "EVENT_WS_OUTER_ID",
             "d": {
                 "id": "1b13d569-4610",
                 "type": 11,
@@ -2136,9 +2179,23 @@ mod button_approval_tests {
         });
         let inter = QqChannel::extract_interaction(&payload).unwrap();
         assert_eq!(inter.interaction_id, "1b13d569-4610");
+        assert_eq!(inter.event_id, "EVENT_WS_OUTER_ID");
         assert_eq!(inter.user_openid, "USER_A");
         assert_eq!(inter.button_data, "ap:ok:ap2");
         assert_eq!(inter.button_id, "ok-ap2");
+
+        // 外层 id 缺失（异常 payload）→ event_id 退回 d.id
+        let payload = serde_json::json!({
+            "t": "INTERACTION_CREATE",
+            "d": {
+                "id": "1b13d569-4610",
+                "type": 11,
+                "user_openid": "USER_A",
+                "data": { "resolved": { "button_data": "ap:ok:ap2" } }
+            }
+        });
+        let inter = QqChannel::extract_interaction(&payload).unwrap();
+        assert_eq!(inter.event_id, "1b13d569-4610");
 
         // 非按钮互动（type=13 消息反馈）不处理
         let payload = serde_json::json!({
