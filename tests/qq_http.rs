@@ -550,7 +550,8 @@ async fn test_ack_interaction_put() {
     ack_mock.assert();
 }
 
-/// 键盘 + event_id 组合：按钮审批消息的实际形态（msg_type=0 文本 + keyboard）。
+/// 键盘 + event_id 组合：按钮审批消息的实际形态（msg_type=2 markdown + keyboard，
+/// QQ 平台要求 keyboard 必须挂在 markdown 消息上，纯文本会静默丢弃键盘）。
 #[tokio::test]
 async fn test_send_approval_reply_with_keyboard_and_event_anchor() {
     let mut server = Server::new_async().await;

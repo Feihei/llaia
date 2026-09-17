@@ -553,6 +553,8 @@ impl QqChannel {
 
     /// 全量发送入口：`anchor` 区分 msg_id（回复消息）/ event_id（响应互动事件）/
     /// 无锚点（主动消息）三种形态，`keyboard` 附加内嵌按钮键盘（按钮审批用）。
+    /// 带 keyboard 时消息自动升级为 msg_type=2 markdown（QQ 平台要求键盘必须
+    /// 挂在 markdown 消息上，纯文本会被静默丢弃）。
     ///
     /// keyboard 被 QQ 以键盘/权限类错误码明确拒绝时自动降级纯文本重发一次
     /// （按钮是增强，文本提示 + `/ok` `/deny` 命令始终兜底，审批不因按钮失败而阻断）。
@@ -571,10 +573,21 @@ impl QqChannel {
             _ => 0,
         };
         let build_body = |kb: Option<&serde_json::Value>| {
-            let mut body = serde_json::json!({
-                "content": content,
-                "msg_type": 0,  // 0 = 文本
-            });
+            // QQ 平台约束：keyboard 只能挂在 markdown 消息上。msg_type=0 纯文本 +
+            // keyboard 时 QQ 不报错但直接丢弃键盘（按钮不渲染、无错误可降级），
+            // 因此带键盘的消息必须走 msg_type=2 + markdown.content
+            // （2026-08 官方确认单聊/群聊自定义 markdown 已对所有机器人开放）。
+            let mut body = if kb.is_some() {
+                serde_json::json!({
+                    "msg_type": 2,
+                    "markdown": { "content": content },
+                })
+            } else {
+                serde_json::json!({
+                    "content": content,
+                    "msg_type": 0,  // 0 = 文本
+                })
+            };
             match anchor {
                 Some(ReplyAnchor::Message(id)) => {
                     body["msg_id"] = serde_json::Value::String(id.clone());
