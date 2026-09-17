@@ -30,6 +30,9 @@ docs/issues
 # 参考项目代码
 .ref/
 
+# Ardot 设计文件目录
+.arts/
+
 # 敏感凭据（.env 由 llaia init 生成，config.toml 用 ${VAR} 引用）
 .env
 .env.*
