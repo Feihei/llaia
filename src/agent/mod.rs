@@ -1208,7 +1208,9 @@ impl Agent {
                             .await;
                         return Err(anyhow::anyhow!(message));
                     }
-                    StreamOutcome::Degenerate { reason } => {
+                    StreamOutcome::Degenerate { reason, reasoning } => {
+                        // 每次退化尝试的思考流都留底（含重试尝试，各次内容不同）
+                        self.persist_degenerate_reasoning(&reason, reasoning.as_ref());
                         if attempt < guard.max_retries {
                             attempt += 1;
                             self.guard_retry_prep(&event_tx).await?;
@@ -1247,10 +1249,18 @@ impl Agent {
                                 );
                             }
                             if attempt < guard.max_retries {
+                                self.persist_degenerate_reasoning(
+                                    "empty output (no text, no tool calls)",
+                                    reasoning.as_ref(),
+                                );
                                 attempt += 1;
                                 self.guard_retry_prep(&event_tx).await?;
                                 continue;
                             }
+                            self.persist_degenerate_reasoning(
+                                "empty output (no text, no tool calls)",
+                                reasoning.as_ref(),
+                            );
                             break (
                                 text,
                                 reasoning.unwrap_or_default(),
@@ -1571,6 +1581,30 @@ impl Agent {
     /// guard 重试前置：通知用户 + 注入 `[guard]` 提示（持久化进 sqlite/context，
     /// 模型下一尝试可见）。退化产物本身不落库不进 context（见主循环注释），
     /// 会话记录里只留提示与最终结果。
+    /// 退化思考流留底：截断快照（头部 500 字符 + 总长度）作为带标记的
+    /// assistant 消息写入 sqlite，**不进 context**——退化产物回灌会让下一轮
+    /// 模仿发疯输出，但留底让失控内容可审计（2026-09-17 死循环事故回查需求）。
+    fn persist_degenerate_reasoning(&self, reason: &str, reasoning: Option<&String>) {
+        let Some(r) = reasoning else {
+            return;
+        };
+        if r.trim().is_empty() {
+            return;
+        }
+        let total = r.chars().count();
+        let head: String = r.chars().take(500).collect();
+        let record = format!(
+            "[guard] degenerate output preserved for forensics (truncated, kept out of \
+             context) reason=\"{reason}\" total_chars={total} head:\n{head}"
+        );
+        if let Err(e) =
+            self.session_store
+                .append_message(self.session_id, &Role::Assistant, &record)
+        {
+            tracing::warn!(error = %e, "failed to persist degenerate reasoning");
+        }
+    }
+
     async fn guard_retry_prep(&mut self, event_tx: &mpsc::Sender<TurnEvent>) -> Result<()> {
         let _ = event_tx
             .send(TurnEvent::Chunk {
@@ -1587,9 +1621,9 @@ impl Agent {
     ///
     /// - 用户中止（tx closed）与流错误沿用旧语义：保存部分输出后由调用方收尾；
     /// - guard 启用时逐 TextDelta 检查三个信号：思考流长度（`<think>` 内容被
-    ///   parser 剥离但对框架不可见是退化盲区，按累计值超限即中止）、思考线重复、
-    ///   可见文本线重复（滑动窗口字符 n-gram）；命中即中止（drop 流即断连，
-    ///   本地服务端随之停止生成）；
+    ///   parser 剥离但对框架不可见是退化盲区，按累计值超限即中止；原生思考线
+    ///   ReasoningDelta 同口径计入）、思考线重复、可见文本线重复（滑动窗口
+    ///   字符 n-gram）；命中即中止（drop 流即断连，本地服务端随之停止生成）；
     /// - parser.finish() 残留照常 flush 为可见文本。
     async fn consume_stream_guarded(
         &mut self,
@@ -1598,27 +1632,36 @@ impl Agent {
         guard: &GuardConfig,
     ) -> Result<StreamOutcome> {
         let mut parser = crate::tool_call::ToolCallStreamParser::new();
-        // 双线检测器：思考线（挂进 parser，InThink 逐字符喂）、可见文本线
-        let (think_monitor, mut visible_monitor) = if guard.enabled && guard.repeat_threshold > 0 {
-            let think = Some(crate::agent::guard::RepetitionDetector::new(
-                guard.repeat_window,
-                guard.repeat_gram,
-                guard.repeat_threshold,
-            ));
-            let visible = Some(crate::agent::guard::RepetitionDetector::new(
-                guard.repeat_window,
-                guard.repeat_gram,
-                guard.repeat_threshold,
-            ));
-            (think, visible)
-        } else {
-            (None, None)
-        };
+        // 三线检测器：思考线（挂进 parser，InThink 逐字符喂）、可见文本线、
+        // 原生思考线（ReasoningDelta，native reasoning_content 通路）
+        let (think_monitor, mut visible_monitor, mut reasoning_monitor) =
+            if guard.enabled && guard.repeat_threshold > 0 {
+                let think = Some(crate::agent::guard::RepetitionDetector::new(
+                    guard.repeat_window,
+                    guard.repeat_gram,
+                    guard.repeat_threshold,
+                ));
+                let visible = Some(crate::agent::guard::RepetitionDetector::new(
+                    guard.repeat_window,
+                    guard.repeat_gram,
+                    guard.repeat_threshold,
+                ));
+                let reasoning = Some(crate::agent::guard::RepetitionDetector::new(
+                    guard.repeat_window,
+                    guard.repeat_gram,
+                    guard.repeat_threshold,
+                ));
+                (think, visible, reasoning)
+            } else {
+                (None, None, None)
+            };
         parser.set_think_monitor(think_monitor);
         let mut iter_text = String::new();
         // P0 留存：思考流增量收集（provider 层 ReasoningDelta；折回通路不发此事件）。
         // 只落 sqlite/留存，不向用户流式输出。
         let mut iter_reasoning = String::new();
+        // 原生思考线累计字符数（guard 长度检查用，避免每次全量重数）
+        let mut reasoning_len: usize = 0;
         let mut calls: Vec<crate::provider::ToolCall> = Vec::new();
         // 本次请求（尝试）累计的 token 用量：Usage 事件可能在流中多次出现，合并成一条
         let mut iter_usage: Option<crate::provider::Usage> = None;
@@ -1668,11 +1711,15 @@ impl Agent {
                                     "thinking exceeded {} chars without closing",
                                     guard.thinking_cap
                                 ),
+                                reasoning: (!iter_reasoning.is_empty())
+                                    .then(|| iter_reasoning.clone()),
                             });
                         }
                         if parser.think_degenerate() {
                             return Ok(StreamOutcome::Degenerate {
                                 reason: "repetitive loop in thinking stream".to_string(),
+                                reasoning: (!iter_reasoning.is_empty())
+                                    .then(|| iter_reasoning.clone()),
                             });
                         }
                         if let Some(m) = visible_monitor.as_ref() {
@@ -1683,6 +1730,8 @@ impl Agent {
                                 );
                                 return Ok(StreamOutcome::Degenerate {
                                     reason: "repetitive loop in visible text".to_string(),
+                                    reasoning: (!iter_reasoning.is_empty())
+                                        .then(|| iter_reasoning.clone()),
                                 });
                             }
                         }
@@ -1695,7 +1744,36 @@ impl Agent {
                 // Reasoning 帧是旁路：仅 WebUI（及未来支持的频道）消费，
                 // CLI/IM 频道的 sink 默认忽略。
                 StreamEvent::ReasoningDelta(d) => {
+                    reasoning_len += d.chars().count();
+                    // 先攒进快照再检测：退化中止时留底产物包含当前增量
+                    //（WebUI 少收到最后一个思考 delta 无妨，回合反正被中止）。
                     iter_reasoning.push_str(&d);
+                    // guard：原生思考线（reasoning_content/thinking）与 <think> 文本线
+                    // 同口径——长度上限 + 重复检测。此前 ReasoningDelta 只收集不检测，
+                    // 思考失控只能等 provider 层截流（固定 cap，重试收紧无效），每次
+                    // 尝试烧满整帽才判「empty output」（2026-09-17 modelscope 事故）。
+                    if guard.enabled {
+                        if guard.thinking_cap > 0
+                            && parser.think_chars() + reasoning_len >= guard.thinking_cap
+                        {
+                            return Ok(StreamOutcome::Degenerate {
+                                reason: format!(
+                                    "thinking exceeded {} chars without closing",
+                                    guard.thinking_cap
+                                ),
+                                reasoning: Some(iter_reasoning.clone()),
+                            });
+                        }
+                        if let Some(m) = reasoning_monitor.as_mut() {
+                            m.feed(&d);
+                            if m.is_degenerate() {
+                                return Ok(StreamOutcome::Degenerate {
+                                    reason: "repetitive loop in reasoning stream".to_string(),
+                                    reasoning: Some(iter_reasoning.clone()),
+                                });
+                            }
+                        }
+                    }
                     let _ = event_tx.send(TurnEvent::Reasoning { delta: d }).await;
                 }
                 StreamEvent::Usage(u) => match iter_usage.as_mut() {
@@ -1766,8 +1844,12 @@ enum StreamOutcome {
         /// 有效 finish_reason（含 compat 推断）；D3 用它分流预算耗尽
         finish_reason: Option<String>,
     },
-    /// guard 判定退化：流已中止，产物丢弃（不落库不进 context）
-    Degenerate { reason: String },
+    /// guard 判定退化：流已中止。可见产物与 context 丢弃；思考流截断留底
+    /// sqlite（`persist_degenerate_reasoning`，头部 500 字符 + 总长度，不进 context）
+    Degenerate {
+        reason: String,
+        reasoning: Option<String>,
+    },
     /// 用户中止（tx closed）：部分输出（含思考留存）已保存
     Aborted { text: String },
     /// 流错误：部分输出（含思考留存）已保存
@@ -2141,6 +2223,116 @@ mod tests {
             .unwrap();
         assert_eq!(t3, "ok");
         assert_eq!(agent.guard_streak, 0, "healthy turn resets the streak");
+    }
+
+    #[tokio::test]
+    async fn test_guard_native_reasoning_cap_triggers_retry() {
+        // native reasoning_content 通路（ReasoningDelta）此前不参与 guard 检测，
+        // 思考失控只能等 provider 层截流 →「empty output」+ 重试收紧无效
+        //（2026-09-17 modelscope 事故）。现在原生思考线同口径计入思考帽，
+        // 超限即判退化并重试。
+        let rounds = vec![
+            vec![
+                StreamEvent::ReasoningDelta("让我重新整理一下思路。".repeat(30)),
+                StreamEvent::Done,
+            ],
+            vec![
+                StreamEvent::TextDelta("recovered answer".into()),
+                StreamEvent::Done,
+            ],
+        ];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_with_config(true, rounds, seen.clone(), |c| {
+            c.runtime.guard_thinking_cap = 100;
+        })
+        .await;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "recovered answer");
+        assert_eq!(seen.lock().unwrap().len(), 2, "retry must fire");
+
+        // [guard] 提示在 context；原生思考内容不进 context（退化产物不落库）
+        assert!(agent
+            .context
+            .history
+            .iter()
+            .any(|m| m.content.as_text().starts_with("[guard]")));
+        assert!(!agent
+            .context
+            .history
+            .iter()
+            .any(|m| m.content.as_text().contains("让我重新整理")));
+    }
+
+    #[tokio::test]
+    async fn test_guard_degenerate_reasoning_persisted_but_not_in_context() {
+        // 退化思考流留底：sqlite 里应有带 [guard] 标记的截断快照（头部 500 字符
+        // + 总长度），供事后回查失控内容；context 不得带入（防下一轮模仿）。
+        let reasoning = "让我重新整理一下思路。".repeat(100); // 1100 chars > cap 100
+        let rounds = vec![
+            vec![
+                StreamEvent::ReasoningDelta(reasoning.clone()),
+                StreamEvent::Done,
+            ],
+            vec![
+                StreamEvent::TextDelta("recovered answer".into()),
+                StreamEvent::Done,
+            ],
+        ];
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut agent = make_agent_with_config(true, rounds, seen.clone(), |c| {
+            c.runtime.guard_thinking_cap = 100;
+        })
+        .await;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result = agent
+            .handle_message_streaming(ChatMessage::user("start"), "cli", tx)
+            .await
+            .unwrap();
+        assert_eq!(result, "recovered answer");
+
+        // sqlite 留底：标记行 + 总长度 + 头部 500 字符（不超）
+        let rows = agent
+            .session_store
+            .recent_messages(agent.session_id, 50)
+            .unwrap();
+        let preserved = rows
+            .iter()
+            .find(|m| m.content.contains("[guard] degenerate output preserved"))
+            .expect("degenerate reasoning must be persisted to session");
+        assert!(preserved.role == "assistant");
+        assert!(
+            preserved
+                .content
+                .contains("reason=\"thinking exceeded 100 chars without closing\""),
+            "marker must carry the degenerate reason: {}",
+            preserved.content
+        );
+        assert!(preserved.content.contains("total_chars=1100"));
+        assert!(
+            preserved
+                .content
+                .contains(&"让我重新整理一下思路。".repeat(40)),
+            "head snapshot must be present"
+        );
+        assert!(
+            !preserved
+                .content
+                .contains(&"让我重新整理一下思路。".repeat(51)),
+            "head must be truncated at 500 chars"
+        );
+
+        // 不进 context
+        assert!(!agent
+            .context
+            .history
+            .iter()
+            .any(|m| m.content.as_text().contains("degenerate output preserved")));
     }
 
     #[tokio::test]
