@@ -6,6 +6,21 @@
 
 ---
 
+## v0.5.2 (2026-09-17)
+
+**Features**
+- **tools**：**Delete Guard**——bound path 内的破坏性命令（rm/unlink/rmdir/del/erase/rd/Remove-Item）执行前在 Rust 层拦截，目标移入 `.trash/<ts>/`（manifest.jsonl 留档），可恢复即免审批；bound 外（含受信目录）仍审批后真删，yolo/delegate 不变。glob 展开、拒移 workspace 根与 `.trash` 自身、失败不降级真删。`[tools.terminal] delete_guard = "trash" | "off"`（默认 trash）。[plan](plans/2026-09-17-delete-guard.md)
+- **qq**：审批提示**内联按钮**（✅/❌）替代手打 `/ok`/`/deny`；permission 锁 owner openid、双按钮互斥，keyboard 被拒自动降级纯文本。复用 `ApprovalGate` 零 agent-core 改动。**此前误记入 v0.5.1 小节，实际随本版发布**
+
+**Bug fixes / 稳定性**
+- **qq**：按钮回复被拒 40034025「event_id无效」——此前误用事件体 `d.id`（仅 ack 接口认）作 C2C 锚点；改用 dispatch 外层 payload id，审批续跑优先原消息 msg_id、event_id 兜底
+- **qq**：键盘挂纯文本被静默丢弃（平台要求挂 markdown）——带键盘改发 `msg_type=2`，无降级日志的坑收口
+- **guard**：原生思考流（reasoning_content）绕过全部检测——现计入思考帽（重试收紧生效）并挂独立重复检测（GLM-5.3-Flash@modelscope 2026-09-17 事故）
+- **guard**：退化思考流截断留底——sqlite 写入标记行（reason + total_chars + 头部 500 字），不进 context
+- **path_guard**：powershell/cmd 内联载荷强制审批（T3 扩展，同 `python -c`）
+
+---
+
 ## v0.5.1 (2026-09-14)
 
 **Bug fixes / 稳定性**
@@ -17,7 +32,6 @@
 - **tools**：受信目录**跨重启持久化**（`src/trusted_store.rs`）——`/move` 批准过的目录此前只存内存，每次重启 serve 清空、同一目录反复弹审批。现在写 `<config_dir>/trusted_dirs.json`：启动时加载并把 agent 家目录 workspace 种子进集合（`/move` 切走后 home 内操作依旧免审），`add_trusted_dir` 每次登记回写；写盘失败静默降级为会话级。**此前 v0.4.0 记录的「仅存内存、重启清空」就此翻篇**，`/move` 提示文案同步改为 "trusted; persists across restarts"
 - **webui**：chat 进入时**回放当前会话线尾部**（最近 40 条，含思考与工具调用行）——此前刷新/重进页面只剩空白，得翻 Sessions 页才能找回上下文；切线回灌同步带上思考与工具行。另一个「看起来像 bug 但不是」的坑一并收口：`/ok` 批准的工具结果持久化前加 `[tool result: <name>]` 前缀（`/deny`、`/answer` 早有标记，唯独批准路径漏了，会话回放里批准产物与真人发言无法区分）。流式标志位守住 chunk/reasoning 合并，新一轮输出绝不写进刚回放的消息
 - **webui / wechat**：微信扫码登录的二维码**进了 WebUI 卡片**——此前首次开启微信必须翻启动日志或去文件管理器找 `wechat_qr.png`，是非技术用户的一面墙。实现走共享视图：`serve_cmd` 建 `WechatLoginView` 槽同时注入 WechatChannel（唯一写入方：waiting/qr/confirmed/error + 二维码 data URL，过期自动换码前端轮询自然刷新）与 WebChannel，新端点 `GET /api/channels/wechat/login` 只读转发。Config 页微信卡片按状态渲染：勾选保存后先提示「需重启」（enabled 但未启动是既有性质，不假装热生效），重启后直接出码，扫码成功提示「在微信里发一条消息」即完成闭环。日志 + 落盘兜底、`wechat_state.json` 免扫码续期、`-14` 重扫逻辑全部不变
-- **qq**：工具审批提示带**内联按钮**（✅ 批准 / ❌ 拒绝）——此前 QQ 频道用户须手打 `/ok <id>` 或 `/deny <id>`，在手机端复制 id 尤为痛苦。现走 QQ Bot callback keyboard：`group_id` 互斥（点一个另一个灰掉）、按钮 `permission` 锁定 `owner_openid`（他人点击无效）、点击触发 `INTERACTION_CREATE` 事件（intent `1<<26`）经 `PUT /interactions/{id}` 3s 内 ack。复用既有 `ApprovalGate` / `resolve_approval` 通路，零 agent-core 改动；keyboard 被端点拒收（304062 / 40034029 / 40034127）自动降级一条纯文本提示，行为与旧版一致
 
 ---
 
