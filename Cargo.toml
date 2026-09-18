@@ -41,8 +41,8 @@ sysinfo = "0.39"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 base64 = "0.23"
 mime_guess = "2"
-axum = { version = "0.7", features = ["ws", "macros", "multipart"] }
-tower-http = { version = "0.5", features = ["fs"] }
+axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
+tower-http = { version = "0.7", features = ["fs"] }
 rust-embed = "8"
 rand = "0.8"
 tokio-cron-scheduler = "0.15"
@@ -77,7 +77,7 @@ url = "2"
 [dev-dependencies]
 mockito = "1"
 tempfile = "3"
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 
 # Strip release binaries at link time via the Rust toolchain's bundled
 # `llvm-strip` (multi-architecture aware). This replaces the per-platform

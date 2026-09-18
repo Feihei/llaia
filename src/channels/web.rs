@@ -189,7 +189,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     // 发 auth_ok
     let _ = ws_sink
         .send(Message::Text(
-            serde_json::to_string(&WebEvent::AuthOk).unwrap(),
+            serde_json::to_string(&WebEvent::AuthOk).unwrap().into(),
         ))
         .await;
 
@@ -200,7 +200,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            if ws_sink.send(Message::Text(json)).await.is_err() {
+            if ws_sink.send(Message::Text(json.into())).await.is_err() {
                 break;
             }
         }

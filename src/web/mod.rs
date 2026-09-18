@@ -2645,7 +2645,7 @@ pub async fn probe_model(
 pub fn build_system_routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/", axum::routing::get(serve_index))
-        .route("/static/*path", axum::routing::get(serve_static))
+        .route("/static/{*path}", axum::routing::get(serve_static))
         .route("/upload", axum::routing::post(upload))
         .route("/file", axum::routing::get(serve_file))
         .route(
@@ -2672,14 +2672,14 @@ pub fn build_system_routes() -> axum::Router<AppState> {
             axum::routing::get(get_cron_raw).put(put_cron_raw),
         )
         .route("/api/cron/history", axum::routing::get(cron_history))
-        .route("/api/cron/:id/trigger", axum::routing::post(trigger_cron))
+        .route("/api/cron/{id}/trigger", axum::routing::post(trigger_cron))
         // MCP API
         .route("/api/mcp", axum::routing::get(list_mcp).put(save_mcp))
         .route(
             "/api/mcp/raw",
             axum::routing::get(get_mcp_raw).put(put_mcp_raw),
         )
-        .route("/api/mcp/:id/test", axum::routing::post(test_mcp))
+        .route("/api/mcp/{id}/test", axum::routing::post(test_mcp))
         // Skills API
         .route(
             "/api/skills",
@@ -2703,38 +2703,38 @@ pub fn build_system_routes() -> axum::Router<AppState> {
             axum::routing::post(switch_session_line),
         )
         .route(
-            "/api/sessions/:uuid",
+            "/api/sessions/{uuid}",
             axum::routing::get(get_session_detail).delete(delete_session_api),
         )
         .route(
-            "/api/sessions/:uuid/messages",
+            "/api/sessions/{uuid}/messages",
             axum::routing::delete(delete_session_messages),
         )
         .route(
-            "/api/sessions/:uuid/archive-older",
+            "/api/sessions/{uuid}/archive-older",
             axum::routing::post(archive_session_older),
         )
         .route(
-            "/api/sessions/:uuid/export",
+            "/api/sessions/{uuid}/export",
             axum::routing::get(export_session),
         )
-        // 模型探测（P5 W2）：POST /api/providers/:id/models
+        // 模型探测（P5 W2）：POST /api/providers/{id}/models
         .route(
-            "/api/providers/:id/models",
+            "/api/providers/{id}/models",
             axum::routing::post(probe_models),
         )
-        // 单个 model 可用性探测：POST /api/providers/:id/models/:alias/probe
+        // 单个 model 可用性探测：POST /api/providers/{id}/models/{alias}/probe
         .route(
-            "/api/providers/:id/models/:alias/probe",
+            "/api/providers/{id}/models/{alias}/probe",
             axum::routing::post(probe_model),
         )
-        .route("/api/skills/:name", axum::routing::delete(delete_skill))
+        .route("/api/skills/{name}", axum::routing::delete(delete_skill))
         .route(
-            "/api/skills/:name/active",
+            "/api/skills/{name}/active",
             axum::routing::put(set_skill_active),
         )
         .route(
-            "/api/skills/:name/content",
+            "/api/skills/{name}/content",
             axum::routing::get(get_skill_content).put(put_skill_content),
         )
 }
