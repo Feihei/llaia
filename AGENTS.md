@@ -347,8 +347,8 @@ CI 在 `push` / PR 时对 `main` 跑三道门：`cargo fmt --check` → `cargo c
 
   ```bash
   # 1. 打 tag 前先在 docs/release-notes/vX.Y.Z.md 写好简短英文 changelog
-  #    （release.yml 的 release-notes job 会自动把该文件写入 GitHub release body，
-  #     不会重复）
+  #    （release.yml 的 publish job 会自动把该文件写入 GitHub release body，
+  #     并生成单一 sha256sums.txt，不会逐产物生成 .sha256）
   git tag -a v0.3.2 -m "chore: release 0.3.2"
   git push origin main
   git push origin v0.3.2
