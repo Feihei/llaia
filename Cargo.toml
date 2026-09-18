@@ -17,15 +17,16 @@ toml = "0.8"
 # 结构化配置保存（PUT /api/config）时做定点合并，保留未改动段落的注释。
 # 版本须与 toml 0.8 内部依赖的 toml_edit 一致（0.22.x），避免重复编译。
 toml_edit = "0.22"
-serde_yaml = "0.9"
+# serde_yaml 0.9 is upstream-deprecated; serde_yaml_ng is the maintained drop-in fork
+serde_yaml_ng = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive"] }
 regex = "1"
-dirs = "5"
+dirs = "7"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 # IANA tz database for [runtime].timezone. Already in the tree transitively via
@@ -36,9 +37,9 @@ shellexpand = "3"
 tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 async-stream = "0.3"
-sysinfo = "0.30"
+sysinfo = "0.39"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
-base64 = "0.22"
+base64 = "0.23"
 mime_guess = "2"
 axum = { version = "0.7", features = ["ws", "macros", "multipart"] }
 tower-http = { version = "0.5", features = ["fs"] }
@@ -49,8 +50,7 @@ dotenvy = "0.15"
 aes = "0.8"
 md-5 = "0.10"
 # QQ 富媒体分片上传要求整文件 SHA1 校验值（与 md-5 同属 RustCrypto digest 0.10 系）
-sha1 = "0.10"
-# default features pull in `aws-lc-rs`, which conflicts with the `ring`
+sha1 = "0.10"# default features pull in `aws-lc-rs`, which conflicts with the `ring`
 # provider already selected transitively by reqwest/hyper-rustls and
 # tokio-tungstenite/tokio-rustls. Having both enabled makes rustls 0.23
 # unable to auto-pick a default CryptoProvider and panic on first TLS use.
@@ -65,7 +65,7 @@ async-imap = { version = "0.11", default-features = false, features = ["runtime-
 # so exactly one rustls CryptoProvider is compiled.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 # 飞书/Lark 长连接 WS 使用 protobuf 二进制帧（pbbp2.proto），运行时编解码事件帧
-prost = "0.13"
+prost = "0.14"
 # web_fetch 正文抽取：readability 取主内容（新闻/文章场景），html2text 作全页兜底。
 # readability 默认 features 含 reqwest 0.11（from_url 便利方法），本仓库自带 reqwest 0.12 且
 # 自己抓页面，故关掉 default-features 去掉那条冗余依赖链。

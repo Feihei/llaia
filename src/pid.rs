@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
-use sysinfo::{Pid, ProcessRefreshKind, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// PID 文件管理：用于检测是否有另一个 llaia 实例正在运行。
 ///
@@ -70,9 +70,14 @@ impl PidFile {
 
     fn is_process_alive(&self, pid: u32) -> bool {
         let mut sys = System::new();
-        // 只刷新目标进程，避免全量扫描
-        sys.refresh_process_specifics(Pid::from_u32(pid), ProcessRefreshKind::new());
-        sys.process(Pid::from_u32(pid)).is_some()
+        let pid = Pid::from_u32(pid);
+        // 只刷新目标进程，避免全量扫描（nothing() 够了：判断存活只需进程存在）
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        sys.process(pid).is_some()
     }
 }
 

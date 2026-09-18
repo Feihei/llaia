@@ -72,7 +72,7 @@ pub fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 
 /// 解析 frontmatter YAML。解析失败返回 Err（调用方决定回退策略）。
 pub fn parse_frontmatter(yaml: &str) -> Result<Frontmatter> {
-    serde_yaml::from_str(yaml).map_err(|e| anyhow!("parse frontmatter: {}", e))
+    serde_yaml_ng::from_str(yaml).map_err(|e| anyhow!("parse frontmatter: {}", e))
 }
 
 /// 校验 SKILL.md 内容可用作 skill 定义：frontmatter 存在且可解析，name/description 非空、

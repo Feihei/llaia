@@ -6,7 +6,6 @@ use axum::body::Body;
 use axum::extract::{Multipart, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use rand::Rng;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,7 +52,7 @@ pub struct AppState {
 
 /// 生成 32 字节随机 hex token
 pub fn generate_token() -> String {
-    let bytes: [u8; 32] = rand::thread_rng().gen();
+    let bytes: [u8; 32] = rand::random();
     hex_encode(&bytes)
 }
 
