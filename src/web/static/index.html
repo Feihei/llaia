@@ -523,7 +523,7 @@
                       <input type="number" placeholder="max_tokens" title="single-response token cap (per-model)" x-model.number="m.max_tokens" style="width:84px">
                       <button type="button" class="collapse-toggle" @click="toggleThinking(pid, alias)"
                               title="[provider.<id>.<alias>.thinking] — per-model thinking capability (values from wire probes, off by default)">
-                        <span x-text="m.thinking ? '▾' : '▸'"></span> thinking
+                        <span x-text="thinkingOpen[pid + '.' + alias] ? '▾' : '▸'"></span> thinking
                         <span class="hint" x-show="thinkingConfigured(m)">configured</span>
                       </button>
                       <button type="button" class="inline-add probebtn"
@@ -535,8 +535,9 @@
                     </button>
                     <button class="btn-delete" @click="deleteModel(pid, alias)">×</button>
                   </div>
-                  <!-- 模型级 thinking 能力声明（P2-12）：值必须来自 wire 实测，全空 = 未声明 -->
-                  <template x-if="m.thinking">
+                  <!-- 模型级 thinking 能力声明（P2-12）：值必须来自 wire 实测，全空 = 未声明。
+                       开合走 thinkingOpen（与配置段解耦）：已配置的模型也能折叠，配置不丢。 -->
+                  <template x-if="m.thinking && thinkingOpen[pid + '.' + alias]">
                     <div class="compat-body" style="margin:2px 0 6px 22px">
                       <div class="hint">[thinking] capability for this model — dialects must come from wire probes (see thinking-capability plan); all-unset = no [thinking] section, requests stay byte-identical to legacy.</div>
                       <label class="switch">default level:

@@ -34,6 +34,9 @@ function llaiaApp() {
     // config
     cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},telegram:{},dingtalk:{},wechat:{},mail:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{},tts:{}} },
     compatOpen: {},
+    // thinking 面板开合状态（pid.alias → bool），与 m.thinking 配置段存在性解耦：
+    // 已配置的模型也能折叠面板而不丢配置（旧实现把两者绑死，配置过的模型永远收不起来）。
+    thinkingOpen: {},
     configSection: 'runtime',
     // 支持的 channel 卡片元数据（参数表单由这些字段驱动渲染）。
     // 顺序即展示顺序；WebUI 另有独立卡片、永远排在最前。
@@ -734,6 +737,8 @@ function llaiaApp() {
             if (k !== 'type' && k !== 'base_url' && k !== 'api_key' && k !== 'model' && k !== 'compat') {
               p.model[k] = p[k];
               delete p[k];
+              // thinking 面板初始开合：已配置（任一字段非 null）默认展开，未配置默认收起
+              this.thinkingOpen[pid + '.' + k] = this.thinkingConfigured(p.model[k]);
               // enabled 走 serde skip_serializing_if（true 时省略），所以 GET 回来的
               // 启用模型不带该键。不归一化的话 checkbox 会把「启用」显示成未勾选。
               if (p.model[k].enabled === undefined) p.model[k].enabled = true;
@@ -854,12 +859,13 @@ function llaiaApp() {
     toggleThinking(pid, alias) {
       const m = this.cfg.provider[pid].model[alias];
       if (!m) return;
-      if (!m.thinking) {
-        // 全 null = 未设置：保存时整段丢弃，等价于不写 [thinking]
+      const key = pid + '.' + alias;
+      // 首次展开且尚无配置段时补一个全 null 存根（保存时全空段被丢弃，等价于不写 [thinking]）。
+      // 开合本身只翻 thinkingOpen，不碰配置——已配置的模型折叠后配置原样保留。
+      if (!m.thinking && !this.thinkingOpen[key]) {
         m.thinking = { default: null, level_wire: null, off_wire: null, preserve: null };
-      } else if (Object.values(m.thinking).every(v => v === null)) {
-        delete m.thinking;
       }
+      this.thinkingOpen[key] = !this.thinkingOpen[key];
     },
     thinkingConfigured(m) {
       return m.thinking && Object.values(m.thinking).some(v => v !== null);
@@ -867,6 +873,7 @@ function llaiaApp() {
     deleteModel(pid, alias) {
       if (!confirm('Delete model ' + pid + '.' + alias + '?')) return;
       delete this.cfg.provider[pid].model[alias];
+      delete this.thinkingOpen[pid + '.' + alias];
     },
 
     // ---- 模型探测（P5 W2） ----
