@@ -19,7 +19,7 @@ toml = "0.8"
 toml_edit = "0.22"
 # serde_yaml 0.9 is upstream-deprecated; serde_yaml_ng is the maintained drop-in fork
 serde_yaml_ng = "0.10"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
