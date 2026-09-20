@@ -1213,7 +1213,7 @@ impl Agent {
                         self.persist_degenerate_reasoning(&reason, reasoning.as_ref());
                         if attempt < guard.max_retries {
                             attempt += 1;
-                            self.guard_retry_prep(&event_tx).await?;
+                            self.guard_retry_prep(&event_tx, &reason).await?;
                             continue;
                         }
                         break (
@@ -1254,7 +1254,11 @@ impl Agent {
                                     reasoning.as_ref(),
                                 );
                                 attempt += 1;
-                                self.guard_retry_prep(&event_tx).await?;
+                                self.guard_retry_prep(
+                                    &event_tx,
+                                    "empty output (no text, no tool calls)",
+                                )
+                                .await?;
                                 continue;
                             }
                             self.persist_degenerate_reasoning(
@@ -1605,10 +1609,14 @@ impl Agent {
         }
     }
 
-    async fn guard_retry_prep(&mut self, event_tx: &mpsc::Sender<TurnEvent>) -> Result<()> {
+    async fn guard_retry_prep(
+        &mut self,
+        event_tx: &mpsc::Sender<TurnEvent>,
+        reason: &str,
+    ) -> Result<()> {
         let _ = event_tx
             .send(TurnEvent::Chunk {
-                delta: guard::RETRY_NOTICE.to_string(),
+                delta: guard::retry_notice(reason),
             })
             .await;
         self.session_store

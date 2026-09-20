@@ -810,8 +810,11 @@ async fn resolve_approval(
     } else {
         // 拒绝：明确要求模型停止当前任务，而不是仅中性告知"被拒绝"。
         // 幂等提示词，防止模型换工具/换方案继续同一任务（见 /deny 反馈 bug）。
+        // 不要求"静默结束回合"：听话的模型输出空回复会撞 Generation Guard 的
+        // 空输出判退化，重试 hint 又与停止指令矛盾（2026-09-20 /deny 假阳性
+        // 实测）。改为一句话确认收尾——合规响应非空，guard 不触发。
         format!(
-            "The user denied execution of `{}`. This is an explicit stop signal: immediately stop the current task and do NOT retry this operation, attempt an alternative approach, or take any further steps. End this turn and wait for the user's new instructions.",
+            "The user denied execution of `{}`. This is an explicit stop signal: immediately stop the current task and do NOT retry this operation, attempt an alternative approach, or take any further steps. Reply with a one-sentence acknowledgment that the operation was cancelled, then wait for the user's new instructions.",
             pending.tool_name
         )
     };
