@@ -225,7 +225,23 @@ pub async fn run_agent_mode(
     };
 
     match result {
-        Ok(reply) => {
+        Ok(text) => {
+            // 推送只取最终回复：`handle_input` 的返回值是整个 turn 的 Chunk 拼接
+            // （工具循环每迭代的可见叙述都会发 Chunk），直接推送会把调工具前的
+            // 叙述（如 "I'll pull the skill first…"）拼进简讯开头。turn 结束后
+            // 从 sqlite 取本会话最后一条 assistant 消息（= 最终答案）推送；
+            // 查询失败或缺失时退回拼接串兜底。
+            let reply = forked
+                .session_store
+                .recent_messages(session_id, 1)
+                .ok()
+                .and_then(|msgs| {
+                    msgs.into_iter()
+                        .last()
+                        .filter(|m| m.role == "assistant" && !m.content.trim().is_empty())
+                        .map(|m| m.content)
+                })
+                .unwrap_or(text);
             if let Err(e) = pusher.push(&reply).await {
                 tracing::warn!(error = %e, task = %task.id, "push agent reply failed");
             }
