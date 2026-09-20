@@ -275,7 +275,7 @@ impl DingtalkChannel {
                 "SYSTEM" | "EVENT" | "CALLBACK" => {
                     // 先 ACK（钉钉要求及时确认，否则会重推）
                     let ack = Self::ack_frame(&message_id);
-                    if let Err(e) = write.send(Message::Text(ack.to_string())).await {
+                    if let Err(e) = write.send(Message::Text(ack.to_string().into())).await {
                         return Err(anyhow!("ws ack send failed: {}", e));
                     }
                     if frame_type != "SYSTEM" {

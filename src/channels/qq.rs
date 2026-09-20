@@ -1819,7 +1819,7 @@ impl QqChannel {
                                         }
                                     }
                                 });
-                                let _ = write.send(Message::Text(identify.to_string())).await;
+                                let _ = write.send(Message::Text(identify.to_string().into())).await;
                                 // 安排首次心跳
                                 next_heartbeat = Some(Instant::now() + Duration::from_millis(heartbeat_interval));
                                 continue;
@@ -1909,7 +1909,7 @@ impl QqChannel {
                             None => serde_json::Value::Null,
                         };
                         let hb = serde_json::json!({ "op": 1, "d": d });
-                        if let Err(e) = write.send(Message::Text(hb.to_string())).await {
+                        if let Err(e) = write.send(Message::Text(hb.to_string().into())).await {
                             tracing::error!(error = %e, "failed to send heartbeat");
                             break;
                         }
