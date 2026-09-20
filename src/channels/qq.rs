@@ -192,10 +192,12 @@ fn is_keyboard_rejection(err: &str) -> bool {
 ///
 /// - 每个待审批 id 一行：[✅ 通过 style=4] [❌ 拒绝 style=3]，label ≤10 字符
 /// - 两个按钮共享 `group_id`：点击其一后同组按钮变灰（仅 action.type=1 生效）
-/// - `permission.type=0` + `specify_user_ids` 锁定 owner，他人点击无效
+/// - `permission.type=2`（所有人可点）：`type=0`+`specify_user_ids` 的客户端本地
+///   权限校验跨端不一致——iOS 不认 C2C openid、本地拦截"无权限操作"且不发回调
+///   （2026-09-19 实测）；点击者身份由 handle_interaction 的服务端 owner 校验兜底
 /// - 回调数据 `ap:ok:<id>` / `ap:deny:<id>`，点击后平台推送 INTERACTION_CREATE
 /// - `unsupport_tips`：旧客户端不渲染按钮时的提示文案
-fn approval_keyboard(approval_ids: &[String], owner_openid: &str) -> serde_json::Value {
+fn approval_keyboard(approval_ids: &[String]) -> serde_json::Value {
     let rows: Vec<serde_json::Value> = approval_ids
         .iter()
         .map(|id| {
@@ -204,8 +206,7 @@ fn approval_keyboard(approval_ids: &[String], owner_openid: &str) -> serde_json:
                 serde_json::json!({
                     "type": 1,
                     "permission": {
-                        "type": 0,
-                        "specify_user_ids": [owner_openid],
+                        "type": 2,
                     },
                     "data": data,
                     "unsupport_tips": "QQ 版本过低，请回复 /ok 或 /deny",
@@ -1660,17 +1661,12 @@ impl OutputSink for QqSink {
             "sending reply"
         );
         // 审批键盘：本回合有 NeedsApproval 注册时，第一条消息附「通过/拒绝」按钮。
-        // 键盘 permission 锁定 owner openid；解析不到 owner 则跳过按钮（文本提示兜底）。
+        // 键盘 permission=所有人可点（iOS 对 specify_user_ids 本地拦截），点击者身份
+        // 由 handle_interaction 的服务端 owner 校验兜底，无需在此解析 owner。
         let keyboard = if self.approval_ids.is_empty() {
             None
         } else {
-            match self.qq.resolve_owner_openid().await {
-                Some(owner) => Some(approval_keyboard(&self.approval_ids, &owner)),
-                None => {
-                    tracing::warn!("approval buttons skipped: owner openid unknown");
-                    None
-                }
-            }
+            Some(approval_keyboard(&self.approval_ids))
         };
         for (i, chunk) in chunks.iter().enumerate() {
             if chunk.trim().is_empty() {
@@ -2122,7 +2118,7 @@ mod button_approval_tests {
 
     #[test]
     fn test_approval_keyboard_shape() {
-        let kb = approval_keyboard(&["ap3".to_string()], "OWNER_X");
+        let kb = approval_keyboard(&["ap3".to_string()]);
         let rows = kb["content"]["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         let buttons = rows[0]["buttons"].as_array().unwrap();
@@ -2135,12 +2131,11 @@ mod button_approval_tests {
         // 同组互斥：点击其一后同组按钮变灰
         assert_eq!(ok_btn["group_id"], "ap-ap3");
         assert_eq!(deny_btn["group_id"], "ap-ap3");
-        // 权限锁定 owner
-        assert_eq!(ok_btn["action"]["permission"]["type"], 0);
-        assert_eq!(
-            ok_btn["action"]["permission"]["specify_user_ids"][0],
-            "OWNER_X"
-        );
+        // permission=所有人可点（iOS 对 specify_user_ids 本地拦截），身份由服务端校验
+        assert_eq!(ok_btn["action"]["permission"]["type"], 2);
+        assert!(ok_btn["action"]["permission"]
+            .get("specify_user_ids")
+            .is_none());
         // label ≤10 字符（QQ 上限）
         for b in buttons {
             let label = b["render_data"]["label"].as_str().unwrap();
@@ -2151,7 +2146,7 @@ mod button_approval_tests {
     #[test]
     fn test_approval_keyboard_multiple_rows() {
         let ids = vec!["ap1".to_string(), "ap2".to_string()];
-        let kb = approval_keyboard(&ids, "O");
+        let kb = approval_keyboard(&ids);
         let rows = kb["content"]["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["buttons"][0]["action"]["data"], "ap:ok:ap1");
