@@ -319,12 +319,12 @@
 
     <div id="config-pane" class="pane" :class="{active: tab==='config'}">
       <div class="sidebar">
-        <div :class="{active: configSection==='runtime'}" @click="configSection='runtime'">Runtime</div>
-        <div :class="{active: configSection==='log'}" @click="configSection='log'">Log</div>
-        <div :class="{active: configSection==='provider'}" @click="configSection='provider'">Provider</div>
-        <div :class="{active: configSection==='agent'}" @click="configSection='agent'">Agent</div>
-        <div :class="{active: configSection==='channels'}" @click="configSection='channels'">Channels</div>
-        <div :class="{active: configSection==='tools'}" @click="configSection='tools'">Tools</div>
+        <div :class="{active: configSection==='runtime'}" @click="switchConfigSection('runtime')">Runtime</div>
+        <div :class="{active: configSection==='log'}" @click="switchConfigSection('log')">Log</div>
+        <div :class="{active: configSection==='provider'}" @click="switchConfigSection('provider')">Provider</div>
+        <div :class="{active: configSection==='agent'}" @click="switchConfigSection('agent')">Agent</div>
+        <div :class="{active: configSection==='channels'}" @click="switchConfigSection('channels')">Channels</div>
+        <div :class="{active: configSection==='tools'}" @click="switchConfigSection('tools')">Tools</div>
         <div :class="{active: configSection==='cron'}" @click="switchCron()">Cron</div>
         <div :class="{active: configSection==='mcp'}" @click="switchMcp()">MCP</div>
         <div :class="{active: configSection==='skills'}" @click="switchSkills()">Skills</div>

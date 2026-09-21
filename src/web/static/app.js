@@ -147,6 +147,7 @@ function llaiaApp() {
     mcpRawMsg: '',
     mcpTesting: null,
     _mcpEditor: null,
+    _rawGens: {},
     // skills
     skills: [],
     skillMsg: '',
@@ -260,6 +261,7 @@ function llaiaApp() {
 
     // ---- 聊天左侧栏：活跃会话线（ADR-0031 WebUI 侧通路） ----
     async switchChat() {
+      if (!this.confirmLeaveRawActive()) return;
       this.tab = 'chat';
       this.loadSessionLines();
       // 面板空（页面刚加载/刷新过）时回放当前线尾部，恢复思考块与工具信息
@@ -337,6 +339,7 @@ function llaiaApp() {
 
     // ---- 会话历史（P5 W1） ----
     async switchSessions() {
+      if (!this.confirmLeaveRawActive()) return;
       this.tab = 'sessions';
       if (this.sessions.length === 0) await this.loadSessions();
     },
@@ -719,7 +722,8 @@ function llaiaApp() {
     scrollBottom() { this.$nextTick(() => { const el = this.$refs.messages; if (el) el.scrollTop = el.scrollHeight; }); },
 
     // ---- config ----
-    async switchConfig() {
+    async switchConfig(skipRawGuard) {
+      if (!skipRawGuard && !this.confirmLeaveRawActive()) return;
       this.tab = 'config';
       const r = await this.apiFetch('/api/config');
       if (!this.authed) return;
@@ -769,13 +773,42 @@ function llaiaApp() {
     initEditor() {
       // x-if destroys the editor DOM on section switch; drop stale detached instances
       if (this._editor && !this._editor.getWrapperElement().isConnected) this._editor = null;
-      if (this._editor) { this._editor.setValue(this.rawToml); return; }
+      if (this._editor) { this._editor.setValue(this.rawToml); this.markRawClean('config'); return; }
       if (this.$refs.rawEditor && window.CodeMirror) {
         this._editor = CodeMirror.fromTextArea(this.$refs.rawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
         this._editor.setValue(this.rawToml);
+        this.markRawClean('config');
       }
     },
+    // plain sections of the config sidebar (inline x-model-free navigation)
+    switchConfigSection(name) {
+      if (name === this.configSection) return;
+      if (!this.confirmLeaveRawActive()) return;
+      this.configSection = name;
+    },
+    // ---- raw editor unsaved-changes guard ----
+    // x-if discards the editor DOM on navigation and re-entry reloads overwrite
+    // in-editor edits, so track a change generation per raw editor and ask
+    // before switching away with unsaved changes.
+    markRawClean(key) {
+      const ed = key === 'config' ? this._editor : key === 'cron' ? this._cronEditor : this._mcpEditor;
+      if (ed) this._rawGens[key] = ed.changeGeneration(true);
+    },
+    confirmLeaveRaw(key) {
+      const ed = key === 'config' ? this._editor : key === 'cron' ? this._cronEditor : this._mcpEditor;
+      const gen = this._rawGens[key];
+      if (!ed || !ed.getWrapperElement().isConnected || gen === undefined || ed.isClean(gen)) return true;
+      return confirm('There are unsaved changes in this raw editor.\nLeaving now will discard them. Leave anyway?');
+    },
+    confirmLeaveRawActive() {
+      if (this.tab !== 'config') return true;
+      if (this.configSection === 'raw') return this.confirmLeaveRaw('config');
+      if (this.configSection === 'cron' && this.cronSection === 'raw') return this.confirmLeaveRaw('cron');
+      if (this.configSection === 'mcp' && this.mcpSection === 'raw') return this.confirmLeaveRaw('mcp');
+      return true;
+    },
     switchRaw() {
+      if (!this.confirmLeaveRawActive()) return;
       this.configSection = 'raw';
       // 等待 x-if 渲染出 textarea 后再初始化编辑器
       this.$nextTick(() => this.initEditor());
@@ -816,7 +849,7 @@ function llaiaApp() {
       let j;
       try { j = await r.json(); } catch { j = {}; }
       console.log('PUT /api/config response:', r.status, j);
-      if (r.ok) { alert('Saved ✓\n\n' + (j.note || 'Configuration applied (hot-reloaded).')); this.switchConfig(); } else { alert('Save failed: ' + (j.error||r.status)); }
+      if (r.ok) { alert('Saved ✓\n\n' + (j.note || 'Configuration applied (hot-reloaded).')); this.switchConfig(true); } else { alert('Save failed: ' + (j.error||r.status)); }
     },
     // ---- provider/agent CRUD ----
     addProvider() {
@@ -1042,12 +1075,13 @@ function llaiaApp() {
       if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
-      if (r.ok) { alert('Saved ✓\n\n' + (j.note || 'Configuration applied (hot-reloaded).')); this.switchConfig(); }
+      if (r.ok) { this.markRawClean('config'); alert('Saved ✓\n\n' + (j.note || 'Configuration applied (hot-reloaded).')); this.switchConfig(); }
       else { alert('Save failed: ' + (j.error || r.status) + (j.line ? '\nPosition (char offset): ' + j.line : '')); }
     },
 
     // ---- cron ----
     async switchCron() {
+      if (!this.confirmLeaveRawActive()) return;
       this.tab = 'config';
       this.configSection = 'cron';
       if (this.cronSection === 'tasks') await this.loadCron();
@@ -1055,6 +1089,7 @@ function llaiaApp() {
       else if (this.cronSection === 'raw') { await this.loadCronRaw(); this.$nextTick(() => this.initCronEditor()); }
     },
     async switchCronSection(name) {
+      if (!this.confirmLeaveRawActive()) return;
       this.cronSection = name;
       if (name === 'tasks') await this.loadCron();
       else if (name === 'history') await this.loadCronHistory();
@@ -1081,10 +1116,11 @@ function llaiaApp() {
     initCronEditor() {
       // x-if destroys the editor DOM on section switch; drop stale detached instances
       if (this._cronEditor && !this._cronEditor.getWrapperElement().isConnected) this._cronEditor = null;
-      if (this._cronEditor) { this._cronEditor.setValue(this.cronRaw); return; }
+      if (this._cronEditor) { this._cronEditor.setValue(this.cronRaw); this.markRawClean('cron'); return; }
       if (this.$refs.cronRawEditor && window.CodeMirror) {
         this._cronEditor = CodeMirror.fromTextArea(this.$refs.cronRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
         this._cronEditor.setValue(this.cronRaw);
+        this.markRawClean('cron');
       }
     },
     async saveCronRaw() {
@@ -1093,7 +1129,7 @@ function llaiaApp() {
       if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
-      if (r.ok) { this.cronRawMsg = '✓ ' + (j.note || 'Saved (hot-reloaded).'); }
+      if (r.ok) { this.cronRawMsg = '✓ ' + (j.note || 'Saved (hot-reloaded).'); this.markRawClean('cron'); }
       else { this.cronRawMsg = '✗ ' + (j.error || r.status) + (j.line ? ' (char: ' + j.line + ')' : ''); }
     },
     async triggerCron(id) {
@@ -1106,12 +1142,14 @@ function llaiaApp() {
 
     // ---- mcp ----
     async switchMcp() {
+      if (!this.confirmLeaveRawActive()) return;
       this.tab = 'config';
       this.configSection = 'mcp';
       if (this.mcpSection === 'servers') await this.loadMcp();
       else if (this.mcpSection === 'raw') { await this.loadMcpRaw(); this.$nextTick(() => this.initMcpEditor()); }
     },
     async switchMcpSection(name) {
+      if (!this.confirmLeaveRawActive()) return;
       this.mcpSection = name;
       if (name === 'servers') await this.loadMcp();
       else if (name === 'raw') { await this.loadMcpRaw(); this.$nextTick(() => this.initMcpEditor()); }
@@ -1147,10 +1185,11 @@ function llaiaApp() {
     initMcpEditor() {
       // x-if destroys the editor DOM on section switch; drop stale detached instances
       if (this._mcpEditor && !this._mcpEditor.getWrapperElement().isConnected) this._mcpEditor = null;
-      if (this._mcpEditor) { this._mcpEditor.setValue(this.mcpRaw); return; }
+      if (this._mcpEditor) { this._mcpEditor.setValue(this.mcpRaw); this.markRawClean('mcp'); return; }
       if (this.$refs.mcpRawEditor && window.CodeMirror) {
         this._mcpEditor = CodeMirror.fromTextArea(this.$refs.mcpRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
         this._mcpEditor.setValue(this.mcpRaw);
+        this.markRawClean('mcp');
       }
     },
     async saveMcpRaw() {
@@ -1159,7 +1198,7 @@ function llaiaApp() {
       if (!this.authed) return;
       let j;
       try { j = await r.json(); } catch { j = {}; }
-      if (r.ok) { this.mcpRawMsg = '✓ ' + (j.note || 'Saved (hot-reloaded).'); }
+      if (r.ok) { this.mcpRawMsg = '✓ ' + (j.note || 'Saved (hot-reloaded).'); this.markRawClean('mcp'); }
       else { this.mcpRawMsg = '✗ ' + (j.error || r.status); }
     },
     async testMcp(id) {
@@ -1183,6 +1222,7 @@ function llaiaApp() {
 
     // ---- skills ----
     async switchSkills() {
+      if (!this.confirmLeaveRawActive()) return;
       this.configSection = 'skills';
       this.tab = 'config';
       await this.loadSkills();
@@ -1240,6 +1280,7 @@ function llaiaApp() {
 
     // ---- doctor（P6） ----
     async switchDoctor() {
+      if (!this.confirmLeaveRawActive()) return;
       this.tab = 'config';
       this.configSection = 'doctor';
     },
@@ -1261,6 +1302,7 @@ function llaiaApp() {
 
     // ---- about ----
     async switchAbout() {
+      if (!this.confirmLeaveRawActive()) return;
       this.tab = 'config';
       this.configSection = 'about';
       const r = await this.apiFetch('/api/status');
@@ -1340,6 +1382,7 @@ function llaiaApp() {
     formatBytes(n) { if (n < 1024) return n + ' B'; if (n < 1048576) return (n/1024).toFixed(1)+' KB'; return (n/1048576).toFixed(1)+' MB'; },
     // ---- Stats (plan.md W3) ----
     switchStats() {
+      if (!this.confirmLeaveRawActive()) return;
       this.tab = 'stats';
       if (!this.stats) this.loadStats();
     },
