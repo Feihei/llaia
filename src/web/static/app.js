@@ -767,6 +767,8 @@ function llaiaApp() {
       if (rr.ok) { this.rawToml = await rr.text(); this.$nextTick(() => this.initEditor()); }
     },
     initEditor() {
+      // x-if destroys the editor DOM on section switch; drop stale detached instances
+      if (this._editor && !this._editor.getWrapperElement().isConnected) this._editor = null;
       if (this._editor) { this._editor.setValue(this.rawToml); return; }
       if (this.$refs.rawEditor && window.CodeMirror) {
         this._editor = CodeMirror.fromTextArea(this.$refs.rawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
@@ -1077,6 +1079,8 @@ function llaiaApp() {
       if (r.ok) { const j = await r.json(); this.cronRaw = j.raw || ''; this.cronRawMsg = ''; }
     },
     initCronEditor() {
+      // x-if destroys the editor DOM on section switch; drop stale detached instances
+      if (this._cronEditor && !this._cronEditor.getWrapperElement().isConnected) this._cronEditor = null;
       if (this._cronEditor) { this._cronEditor.setValue(this.cronRaw); return; }
       if (this.$refs.cronRawEditor && window.CodeMirror) {
         this._cronEditor = CodeMirror.fromTextArea(this.$refs.cronRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
@@ -1141,6 +1145,8 @@ function llaiaApp() {
       if (r.ok) { const j = await r.json(); this.mcpRaw = j.raw || ''; this.mcpRawMsg = ''; }
     },
     initMcpEditor() {
+      // x-if destroys the editor DOM on section switch; drop stale detached instances
+      if (this._mcpEditor && !this._mcpEditor.getWrapperElement().isConnected) this._mcpEditor = null;
       if (this._mcpEditor) { this._mcpEditor.setValue(this.mcpRaw); return; }
       if (this.$refs.mcpRawEditor && window.CodeMirror) {
         this._mcpEditor = CodeMirror.fromTextArea(this.$refs.mcpRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
