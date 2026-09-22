@@ -1,3 +1,10 @@
+// CodeMirror instances must live OUTSIDE the Alpine component data: Alpine
+// deep-proxies reactive objects, and method calls through the proxy seed
+// proxied references into CodeMirror's internal chunk tree, which breaks its
+// identity assumptions (lines get detached from their leaf) and corrupts the
+// document on the next edit (duplicated lines that cannot be deleted).
+const cmCache = { config: null, cron: null, mcp: null, gens: {} };
+
 function llaiaApp() {
   return {
     tab: 'config',
@@ -137,7 +144,6 @@ function llaiaApp() {
     cronRaw: '',
     cronMsg: '',
     cronRawMsg: '',
-    _cronEditor: null,
     // mcp
     mcpSection: 'servers',
     mcpServers: [],
@@ -146,8 +152,6 @@ function llaiaApp() {
     mcpMsg: '',
     mcpRawMsg: '',
     mcpTesting: null,
-    _mcpEditor: null,
-    _rawGens: {},
     // skills
     skills: [],
     skillMsg: '',
@@ -772,11 +776,11 @@ function llaiaApp() {
     },
     initEditor() {
       // x-if destroys the editor DOM on section switch; drop stale detached instances
-      if (this._editor && !this._editor.getWrapperElement().isConnected) this._editor = null;
-      if (this._editor) { this._editor.setValue(this.rawToml); this.markRawClean('config'); return; }
+      if (cmCache.config && !cmCache.config.getWrapperElement().isConnected) cmCache.config = null;
+      if (cmCache.config) { cmCache.config.setValue(this.rawToml); this.markRawClean('config'); return; }
       if (this.$refs.rawEditor && window.CodeMirror) {
-        this._editor = CodeMirror.fromTextArea(this.$refs.rawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
-        this._editor.setValue(this.rawToml);
+        cmCache.config = CodeMirror.fromTextArea(this.$refs.rawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
+        cmCache.config.setValue(this.rawToml);
         this.markRawClean('config');
       }
     },
@@ -791,12 +795,12 @@ function llaiaApp() {
     // in-editor edits, so track a change generation per raw editor and ask
     // before switching away with unsaved changes.
     markRawClean(key) {
-      const ed = key === 'config' ? this._editor : key === 'cron' ? this._cronEditor : this._mcpEditor;
-      if (ed) this._rawGens[key] = ed.changeGeneration(true);
+      const ed = cmCache[key];
+      if (ed) cmCache.gens[key] = ed.changeGeneration(true);
     },
     confirmLeaveRaw(key) {
-      const ed = key === 'config' ? this._editor : key === 'cron' ? this._cronEditor : this._mcpEditor;
-      const gen = this._rawGens[key];
+      const ed = cmCache[key];
+      const gen = cmCache.gens[key];
       if (!ed || !ed.getWrapperElement().isConnected || gen === undefined || ed.isClean(gen)) return true;
       return confirm('There are unsaved changes in this raw editor.\nLeaving now will discard them. Leave anyway?');
     },
@@ -1063,14 +1067,14 @@ function llaiaApp() {
       delete this.cfg.agent[alias];
     },
     async validateRaw() {
-      const toml = this._editor ? this._editor.getValue() : this.rawToml;
+      const toml = cmCache.config ? cmCache.config.getValue() : this.rawToml;
       const r = await this.apiFetch('/api/config/validate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ toml }) });
       if (!this.authed) return;
       const j = await r.json();
       this.rawMsg = j.ok ? '✓ Valid' : '✗ ' + j.error;
     },
     async saveRaw() {
-      const toml = this._editor ? this._editor.getValue() : this.rawToml;
+      const toml = cmCache.config ? cmCache.config.getValue() : this.rawToml;
       const r = await this.apiFetch('/api/config/raw', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ toml }) });
       if (!this.authed) return;
       let j;
@@ -1115,16 +1119,16 @@ function llaiaApp() {
     },
     initCronEditor() {
       // x-if destroys the editor DOM on section switch; drop stale detached instances
-      if (this._cronEditor && !this._cronEditor.getWrapperElement().isConnected) this._cronEditor = null;
-      if (this._cronEditor) { this._cronEditor.setValue(this.cronRaw); this.markRawClean('cron'); return; }
+      if (cmCache.cron && !cmCache.cron.getWrapperElement().isConnected) cmCache.cron = null;
+      if (cmCache.cron) { cmCache.cron.setValue(this.cronRaw); this.markRawClean('cron'); return; }
       if (this.$refs.cronRawEditor && window.CodeMirror) {
-        this._cronEditor = CodeMirror.fromTextArea(this.$refs.cronRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
-        this._cronEditor.setValue(this.cronRaw);
+        cmCache.cron = CodeMirror.fromTextArea(this.$refs.cronRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
+        cmCache.cron.setValue(this.cronRaw);
         this.markRawClean('cron');
       }
     },
     async saveCronRaw() {
-      const toml = this._cronEditor ? this._cronEditor.getValue() : this.cronRaw;
+      const toml = cmCache.cron ? cmCache.cron.getValue() : this.cronRaw;
       const r = await this.apiFetch('/api/cron/raw', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ raw: toml }) });
       if (!this.authed) return;
       let j;
@@ -1184,16 +1188,16 @@ function llaiaApp() {
     },
     initMcpEditor() {
       // x-if destroys the editor DOM on section switch; drop stale detached instances
-      if (this._mcpEditor && !this._mcpEditor.getWrapperElement().isConnected) this._mcpEditor = null;
-      if (this._mcpEditor) { this._mcpEditor.setValue(this.mcpRaw); this.markRawClean('mcp'); return; }
+      if (cmCache.mcp && !cmCache.mcp.getWrapperElement().isConnected) cmCache.mcp = null;
+      if (cmCache.mcp) { cmCache.mcp.setValue(this.mcpRaw); this.markRawClean('mcp'); return; }
       if (this.$refs.mcpRawEditor && window.CodeMirror) {
-        this._mcpEditor = CodeMirror.fromTextArea(this.$refs.mcpRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
-        this._mcpEditor.setValue(this.mcpRaw);
+        cmCache.mcp = CodeMirror.fromTextArea(this.$refs.mcpRawEditor, { mode: 'toml', theme: 'material-darker', lineNumbers: true });
+        cmCache.mcp.setValue(this.mcpRaw);
         this.markRawClean('mcp');
       }
     },
     async saveMcpRaw() {
-      const toml = this._mcpEditor ? this._mcpEditor.getValue() : this.mcpRaw;
+      const toml = cmCache.mcp ? cmCache.mcp.getValue() : this.mcpRaw;
       const r = await this.apiFetch('/api/mcp/raw', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ raw: toml }) });
       if (!this.authed) return;
       let j;
