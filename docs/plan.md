@@ -54,17 +54,20 @@
 
 ## P7 — 下一步计划
 
-**状态**：⏳ 计划中（2026-09-09 立项；MCP 项 2026-09-22 grill 定案展开，其余五项仍为模糊记录待拷问）
+**状态**：⏳ 计划中（2026-09-09 立项；2026-09-22 grill 六项全部定案：MCP stdio 兜底已交付、WebUI 审批卡片立项展开，其余四项不做/留观/撤项，触发条件留档）
 
 > **旧 P7 已收口归档**：P7 编号曾用于 terminal 脚本绕过防护专项（T1–T4 / S1–S2），2026-09-07 全部定案——T3（解释器内联载荷强制审批）、S1（命令拆分 + flag 级路径检查）、T2（无特权账户文档化）已交付，S2 / T1 / T4 定案不做；完整记录（含不做项评估）随 **v0.5.0 攒发**迁入 [CHANGELOG.md](CHANGELOG.md) §v0.5.0，本文件不再保留。
 
-> 下面六项只是想法落袋防忘，范围、边界、验收标准全部未定；立项前走 grill 工作流逐项拷问，定案一项就在本节展开一项的勾选清单。
+> 六项已全部过 grill（2026-09-22）：一项立项展开（WebUI 审批卡片），三项不做/留观（触发条件留档，触发后重新评估再立项），一项撤项并入既有流程；MCP 项早前同日定案并已交付。「想法落袋防忘」阶段结束，本节不再有未拷问条目。
 
-- **RAG**（2026-09-08）：方向是本地知识库检索增强。待 grill：与 `memory_research`（FTS5 全文搜会话历史）的边界？语料源（文档目录 / 会话历史 / 网页剪藏）？嵌入与向量存储的选型（本地优先约束）？切片/召回质量的评估方式？
-- **浏览器自动化**（2026-09-08）：方向是 agent 能操作真实浏览器（页面导航/填表/截图抓取）。待 grill：内嵌 headless（如 chromiumoxide）vs 驱动外部实例 vs MCP 外挂？审批面怎么划（浏览器能碰内网/登录态）？与 `web_fetch` 的分工边界？
-- **搜索增强**（2026-09-08）：方向是统一 search 的质量/覆盖提升。待 grill：多搜索 provider 扩容（doubao/baidu/brave 之外）？还是检索质量（多源聚合、rerank、结果去重）？成本与 API key 管理约定？
-- **原子工具优化增强**（2026-09-08）：方向是现有内置工具（file_*/terminal/search/…) 的参数、组合与输出打磨。待 grill：从实际使用痛点出发逐工具盘点（file_edit 容错、terminal 误报已由 H1/S1 打样）？新原子工具（如 diff/patch、json/yaml 查询）要不要进？
-- **WebUI chat 界面增强**（2026-09-09）：方向是把 chat 主界面从「单会话流水」升级为「会话可管理的工作台」。待 grill：① ~~chat 页内嵌 session 列表（现有 Sessions 独立 tab 不够顺手？切线/回灌在 chat 页直接做？）~~ **已先行交付（2026-09-11，未走 grill，用户直接点名）**：chat 左侧活跃会话线列表 `session-rail`——主线置顶、点击切线（复用 `/session` 回灌通路 + bound_dir 一并切换、回主线恢复家目录），明细见 [CHANGELOG.md](CHANGELOG.md) §v0.5.0「chat 左侧活跃会话线列表」；剩余 ②③④⑤ 仍待 grill：② bound path / 任务线状态的可视化列表（当前只有 `[scope]` 文本状态行，要不要图形化 + 一键 /move？）；③ 审批交互（`/ok` 现在走聊天流，要不要独立审批卡片/按钮？多端同时在线的审批归属？）；④ 运行状态提示（busy/工具调用/steer/todo 进度等在 chat 页的呈现优化）；⑤ 与既有 P6 WebUI 批次（Sessions tab、pane 布局）的关系——增强 or 重构？
+- **RAG → 留观**（2026-09-22 grill 定案）：现有记忆栈三层已覆盖——MEMORY.md（事实 + 预算裁剪 + 压缩）、`memory_research`（P5，FTS5 跨会话关键词召回）、sqlite 留底。RAG 的真实增量只有语义召回（关键词失配时）与非会话语料库（文档目录），单用户痛点未出现；届时嵌入（Ollama 本地）+ sqlite-vec 契合 sqlite-first 架构，纯加法不迟。**触发条件：出现一批反复被查询的本地文档语料，且 `memory_research` 关键词召回不满意。**
+- **浏览器自动化 → 不自建**（2026-09-22 grill 定案）：原三选项（内嵌 chromiumoxide / 驱动外部实例 / MCP 外挂）裁决 MCP 外挂完胜——MCP 基础设施已建成在用（blender/sketchup-mcp），`McpTool` 默认 `requires_confirm=true`（仅 `safe_tools` 白名单免确认，浏览器工具**绝不进白名单**——能碰登录态/内网），playwright-mcp 是现成维护中 server。内嵌方案 = 几百行新维护面 + 沙箱/审批从零设计。**触发动作：需要时改 mcp.toml 接 playwright-mcp，零代码零立项。**
+- **搜索增强 → 不做**（2026-09-22 grill 定案）：多源聚合/rerank 要高频搜索才摊得平成本（每查多倍 API 调用 + 去重逻辑），单用户频率撑不起；tavily/baidu/brave 三路由已交付够用。**触发条件：搜索质量真实卡住任务且换 provider 解决不了。**
+- **原子工具优化增强 → 撤项**（2026-09-22 grill 定案）：方向本身是「从实际使用痛点出发逐工具盘点」——没有痛点清单就没有项目，预先立项违背「没有具体用例就不写」的编码约定。既有两条通路承接：H 系列止血窗口（file_edit 自纠错即 H1 打样）+ 定期主干体检（例行项）；diff/patch、json/yaml 查询等新原子工具无使用证据不写，痛点出现时随用随修走 H 系列。
+- **WebUI chat 界面增强 → ③ 立项，②④ 留观，⑤ 删除**（2026-09-09 记录，2026-09-22 grill 定案）：① session-rail 已先行交付（2026-09-11，见 [CHANGELOG.md](CHANGELOG.md) §v0.5.0「chat 左侧活跃会话线列表」）；⑤ 与 P6 WebUI 批次的关系是伪问题（P6 已交付归档），删除；② bound path/任务线可视化——session-rail + `[scope]` 文本行已覆盖，留观（触发条件：图形化需求实际出现）；④ 运行状态提示（busy/工具调用/steer/todo 进度呈现）——UX 润色，留观（触发条件：日常使用中实际造成困扰）。③ 审批卡片立项展开（唯一实候选：QQ 侧 v0.5.2 已有内联审批按钮先例，WebUI 主界面还在聊天流打 `/ok`）：
+  - [ ] **AC1 · 后端审批状态端点**：GET 待审批列表（id、工具名、参数摘要）+ POST 批准/拒绝，复用 `/ok` `/deny` 处理通路
+  - [ ] **AC2 · 前端审批卡片**：聊天流内渲染待审批项为卡片（批准/拒绝按钮），结果回灌聊天流标注（对齐 QQ 内联按钮先例）；`/ok` 文本命令保留为兜底
+  - [ ] **AC3 · 实现前过一遍 approval 通路**（ApprovalContext / confirm 流 / QQ 内联按钮实现），端点形态与卡片交互细节以通路实况为准，必要时回写本清单修订
 - **MCP 新 spec 兼容——已拆 A/B**（2026-09-12 调研，2026-09-22 grill 定案）：新 spec（2026-07-28）删 initialize 握手 + `Mcp-Session-Id`（SEP-2567/2575），每请求自带 `_meta`（protocolVersion/clientInfo/capabilities），Streamable HTTP 须带 `Mcp-Method`/`Mcp-Name` 头（SEP-2243），另增可选 `server/discover`、list 响应 `ttlMs` 缓存提示（SEP-2549）。**背景修正（grill 2026-09-22）**：原「HTTP session 管理被删对 llaia 是利好」前提不成立——`HttpTransport` 已是 Streamable HTTP（2025-06-18 风格），session 管理仅 ~40 行且工作正常；真实暴露面在 **stdio**：新 SDK（Python mcp 2.0 起）上的 server 可能对 `initialize` 回 -32601，现 `client.rs::handshake` 失败即 server dead。在用 server（blender-mcp / sketchup-mcp）均为 stdio；sketchup-mcp 已遇 SDK 2.0 破碎（`--with mcp==1.3.0` pin 缓解——属 server 侧 Python API 破碎，非协议层，llama 无感）。**定案：以旧协议为主，只做 stdio 兜底（A）；HTTP 双协议（B）留观**。
   - [x] **A1 · stdio `-32601` 容忍降级**（2026-09-22，`mcp/client.rs::handshake` + `mcp/transport.rs::TransportError::JsonRpc`）：`initialize` 收 -32601 → log warn（一行）→ 跳过握手直接发 `tools/list`；降级后所有 JSON-RPC 请求带 `_meta`（protocolVersion = 新 spec 档 + clientInfo，`McpServer::with_stateless_meta`）；`notifications/initialized` 不发；旧协议握手主路径不动
   - [x] **A2 · 协商版本记录 + 校验**（2026-09-22，`McpServer::record_negotiated_version` + `negotiated_version` 字段）：initialize 成功路径不再丢弃响应——记录 server 协商的 `protocolVersion`，不在支持集合 → warn，不静默
