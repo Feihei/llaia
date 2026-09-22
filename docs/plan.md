@@ -35,6 +35,7 @@
 | v0.4.0 | ✅ | P6 全量 + provider/compat 收口，2026-09-04 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.4.0）、[release-notes/v0.4.0.md](release-notes/v0.4.0.md) |
 | v0.5.0 | ✅ | 发版版本（因含行为不兼容改动由原定的 v0.4.1 直升 minor）：H1–H4 止血 + T3/S1 terminal 安全收口 + 画像模板升级 + /session 改名 + 框架消息英文化 + todo GC + WebUI 归档卫生 + chat 会话线侧栏，2026-09-11 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.5.0）、[release-notes/v0.5.0.md](release-notes/v0.5.0.md) |
 | v0.5.1 | ✅ | 补丁版：全新机器启动崩溃修复 + todo 注入弱化（done 项不再回灌）+ path_guard 段首路径程序名校验 + 受信目录持久化 + chat 历史回放/审批结果标注 + 微信登录二维码上卡，2026-09-14 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.5.1）、[release-notes/v0.5.1.md](release-notes/v0.5.1.md) |
+| v0.5.2 | ✅ | 补丁版：Delete Guard（破坏性命令进 .trash）+ QQ 审批内联按钮（msg_type=2）+ 思考流 guard 补漏 + path_guard 内联载荷扩面，2026-09-17 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.5.2）、[release-notes/v0.5.2.md](release-notes/v0.5.2.md) |
 
 > **P6 已全部交付并归档**：原 P6 节的完整勾选清单（WebUI W1/W2/W3、会话主题总结、provider 针对性优化、`memory_research`、启动优化 #11、主干代码体检、#A–#J 新增发现、Generation Guard、First-run Bootstrap 等）已随各项实现陆续迁入 [CHANGELOG.md](CHANGELOG.md) §v0.3.1 / §v0.4.0，本文件不再保留已交付明细。注意 CHANGELOG 里**没有独立的 §v0.3.2**：原按 0.3.2 攒的开发内容跨版本号当作 v0.4.0 发布，段标题已一并重定。v0.5.0 的三项同样已迁入 CHANGELOG，本文件只留索引与下一步。
 
@@ -53,7 +54,7 @@
 
 ## P7 — 下一步计划
 
-**状态**：⏳ 计划中（2026-09-09 立项；六项均为模糊记录，待 grill 逐项拷问后正式立项展开）
+**状态**：⏳ 计划中（2026-09-09 立项；MCP 项 2026-09-22 grill 定案展开，其余五项仍为模糊记录待拷问）
 
 > **旧 P7 已收口归档**：P7 编号曾用于 terminal 脚本绕过防护专项（T1–T4 / S1–S2），2026-09-07 全部定案——T3（解释器内联载荷强制审批）、S1（命令拆分 + flag 级路径检查）、T2（无特权账户文档化）已交付，S2 / T1 / T4 定案不做；完整记录（含不做项评估）随 **v0.5.0 攒发**迁入 [CHANGELOG.md](CHANGELOG.md) §v0.5.0，本文件不再保留。
 
@@ -64,28 +65,13 @@
 - **搜索增强**（2026-09-08）：方向是统一 search 的质量/覆盖提升。待 grill：多搜索 provider 扩容（doubao/baidu/brave 之外）？还是检索质量（多源聚合、rerank、结果去重）？成本与 API key 管理约定？
 - **原子工具优化增强**（2026-09-08）：方向是现有内置工具（file_*/terminal/search/…) 的参数、组合与输出打磨。待 grill：从实际使用痛点出发逐工具盘点（file_edit 容错、terminal 误报已由 H1/S1 打样）？新原子工具（如 diff/patch、json/yaml 查询）要不要进？
 - **WebUI chat 界面增强**（2026-09-09）：方向是把 chat 主界面从「单会话流水」升级为「会话可管理的工作台」。待 grill：① ~~chat 页内嵌 session 列表（现有 Sessions 独立 tab 不够顺手？切线/回灌在 chat 页直接做？）~~ **已先行交付（2026-09-11，未走 grill，用户直接点名）**：chat 左侧活跃会话线列表 `session-rail`——主线置顶、点击切线（复用 `/session` 回灌通路 + bound_dir 一并切换、回主线恢复家目录），明细见 [CHANGELOG.md](CHANGELOG.md) §v0.5.0「chat 左侧活跃会话线列表」；剩余 ②③④⑤ 仍待 grill：② bound path / 任务线状态的可视化列表（当前只有 `[scope]` 文本状态行，要不要图形化 + 一键 /move？）；③ 审批交互（`/ok` 现在走聊天流，要不要独立审批卡片/按钮？多端同时在线的审批归属？）；④ 运行状态提示（busy/工具调用/steer/todo 进度等在 chat 页的呈现优化）；⑤ 与既有 P6 WebUI 批次（Sessions tab、pane 布局）的关系——增强 or 重构？
-- **MCP 2026-07-28 无状态规范跟进**（2026-09-12，已做一轮调研）：新 spec 删 initialize 握手 + `Mcp-Session-Id`（SEP-2567/2575），每请求自带 `_meta`（protocolVersion/clientInfo/capabilities），Streamable HTTP 须带 `Mcp-Method`/`Mcp-Name` 头（SEP-2243），另增可选 `server/discover`、list 响应 `ttlMs` 缓存提示（SEP-2549）；旧 server 可协商降级到 2025-11-25 继续用。对 llaia（ADR-0014 纯 client、协议层自实现）是利好——最难维护的 HTTP session 管理被协议层删掉了。**现状痛点**：`MCP_PROTOCOL_VERSION = "2024-11-05"` 偏旧且握手后不校验 server 协商结果；SSE transport 属旧版兼容（新 spec 已删 GET stream），留作 legacy 标记 deprecated。**调研倾向（待 grill 确认）**：双协议 auto 协商（`mcp.toml` 加 `protocol = "auto"|"legacy"|"stateless"`，HTTP 先发带 `_meta` 的无状态请求探路、4xx/要求 session 则回退 legacy 握手流；stdio 收 -32601 容忍降级）+ 版本集合升级为四档。**不做项**：MCP server 模式（纯 client 定位不变）、OAuth/CIMD、Tasks/MRTR/MCP Apps 扩展。待 grill：auto 探测的判定信号是否可靠（仅靠 4xx/`-32601` 会不会误判）？`tools/list` 缓存（ttlMs）接不接？验收要不要拉真实 server 做 P2 双端点验证（Cloudflare 新 SDK 无状态 + 老 npm server）？
-
----
-
-## 会话线模型收口（2026-09-10 定方向，2026-09-11 定案并交付）
-
-**状态**：✅ 已实现（2026-09-11）｜grill 2026-09-10 + 细节拍板 2026-09-11 + 同日实现
-
-**背景**：`/session` 上线后 `/new` 看似多余，核实后曾判"删不得"（全系统唯一能造 `kind='main'` 主线的命令）。**方向（2026-09-10 用户定案）**：主线恒为一条、始终活跃，不用命令切换；消息级归档（`archive_messages_before` 真搬移）承担"换一页"。"唯一造线命令"的顾虑随之消解——造线兜底已存在（启动 `latest_session()` 为 None 即建、`switch_to_main` fallback），且 `/new` 每按一次造出的僵尸 main 行（`latest_session` 永不再选中、WebUI 列表恒可见）在新模型下反成矛盾源。
-
-**定案与交付（2026-09-11）**：
-
-- [x] **`/new` 直接删除**（不做别名/弃用过渡）：handler（原 `slash.rs:197`）+ `/help` 文案 + 注释（`sqlite.rs::channel_of`、`todo.rs` 模块头）已清；WebUI 无 `/new` 入口零影响。
-- [x] **新增 `/archive [days]`**（`slash.rs`）：与 WebUI `archive-older?days=N` 同一条 `archive_messages_before` 通路；无参默认 30 天、钳制 1–3650（与 WebUI 一致）；0 命中回 no-op 提示。桶隔离性现成继承（`archive:` 前缀 + archived + kind='task' 三重过滤）；任务线上同样成立。
-- [x] **归档与 `/clear` 职责正交、不绑定**：`/archive` 纯存储层（live context 零感知）；"换一页并立即遗忘" = `/archive` + `/clear` 配对，不设 `/reset` 聚合命令。
-- [x] **`/clear` 同步清 todo**：`TodoStore::clear_current()`（内存置空 + 删 `todos/<uuid>.json`；无当前 session 静默跳过），todo 与内存上下文同生命周期。
-- [x] **桶标题动态更新**（`sqlite.rs::archive_messages_before`）：桶每源线一个、跨多次归档累加，标题随内容走——每次归档后更新为桶内最新一条消息的日期（`archive of <名> (through <YYYY-MM-DD>)`），替代旧的首写死 cutoff（重复归档后标签失真）。主线标题恒不变。
-- N=0 同秒竞态**不修**：`created_at < now` 天然排除同秒末尾，N≥1 是主用例。
-
-**测试**：`todo.rs::clear_current_*`（清空 + inert 两态）、`sqlite.rs::test_archive_messages_before` 扩动态标题断言、`slash.rs::test_archive_noop_and_clear_todo`（/archive 参数边界 + no-op + /clear 集成）。
-
-**文档已同步**：AGENTS.md（会话模型 + 斜杠命令清单）、guide/slash-commands.md（`/new` 移除、`/archive` 新条目、`/clear` 重写）、guide/memory-and-context.md、glossary.md、ADR-0024（todo 生命周期两处）、ADR-0031（未决节改定案节）、task-to-session plan（处置 6 加注）。
+- **MCP 新 spec 兼容——已拆 A/B**（2026-09-12 调研，2026-09-22 grill 定案）：新 spec（2026-07-28）删 initialize 握手 + `Mcp-Session-Id`（SEP-2567/2575），每请求自带 `_meta`（protocolVersion/clientInfo/capabilities），Streamable HTTP 须带 `Mcp-Method`/`Mcp-Name` 头（SEP-2243），另增可选 `server/discover`、list 响应 `ttlMs` 缓存提示（SEP-2549）。**背景修正（grill 2026-09-22）**：原「HTTP session 管理被删对 llaia 是利好」前提不成立——`HttpTransport` 已是 Streamable HTTP（2025-06-18 风格），session 管理仅 ~40 行且工作正常；真实暴露面在 **stdio**：新 SDK（Python mcp 2.0 起）上的 server 可能对 `initialize` 回 -32601，现 `client.rs::handshake` 失败即 server dead。在用 server（blender-mcp / sketchup-mcp）均为 stdio；sketchup-mcp 已遇 SDK 2.0 破碎（`--with mcp==1.3.0` pin 缓解——属 server 侧 Python API 破碎，非协议层，llama 无感）。**定案：以旧协议为主，只做 stdio 兜底（A）；HTTP 双协议（B）留观**。
+  - [x] **A1 · stdio `-32601` 容忍降级**（2026-09-22，`mcp/client.rs::handshake` + `mcp/transport.rs::TransportError::JsonRpc`）：`initialize` 收 -32601 → log warn（一行）→ 跳过握手直接发 `tools/list`；降级后所有 JSON-RPC 请求带 `_meta`（protocolVersion = 新 spec 档 + clientInfo，`McpServer::with_stateless_meta`）；`notifications/initialized` 不发；旧协议握手主路径不动
+  - [x] **A2 · 协商版本记录 + 校验**（2026-09-22，`McpServer::record_negotiated_version` + `negotiated_version` 字段）：initialize 成功路径不再丢弃响应——记录 server 协商的 `protocolVersion`，不在支持集合 → warn，不静默
+  - [x] **A3 · 版本集合**（2026-09-22，`mcp/protocol.rs`）：`MCP_PROTOCOL_VERSION`（2024-11-05）保留为握手默认档，`MCP_SUPPORTED_PROTOCOL_VERSIONS` 五档（含 `MCP_STATELESS_PROTOCOL_VERSION = "2026-07-28"`）
+  - [x] **A4 · 测试**（2026-09-22，`mcp::client::tests`）：mock stdio transport（不 spawn 真实子进程）两态（完整握手 / initialize 回 -32601）+ 降级后 tools/list 与 tools/call 的 `_meta` 断言 + 协商版本越界 warn 不拒连 + 非 -32601 错误仍失败
+  - **B 留观（不定案、无勾选）**：HTTP 无状态/auto/legacy 双协议协商、四档版本集合、SSE transport 标记 deprecated。触发条件：真要接 HTTP server，或想用的 server 只发新 spec HTTP。届时先拍 auto 判定信号（白名单：400 缺 session / 404 session 不存在 / -32601；**401/403、5xx、超时一律不回退**——auth 配错与 server 挂了都不是协议不匹配）再实施。
+  - **不做项（留档）**：MCP server 模式（纯 client 定位不变）、OAuth/CIMD、Tasks/MRTR/MCP Apps 扩展、ttlMs tools/list 缓存（工具列表握手后缓存到重连即可，中途变化极罕见，过期刷新的时序问题配不上收益）、WebUI 降级状态位（用户定 2026-09-22：log warn 足够）。
 
 ---
 

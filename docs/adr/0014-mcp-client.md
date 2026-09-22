@@ -274,3 +274,22 @@ pub struct McpRegistry {
   - Q2: stdio 子进程 workspace 边界不管，信任用户配置
   - Q3: MCP 工具路径参数完全放行 + audit.log 全记录（只内置工具走路径防御）
   - Q4: HTTP 鉴权仅支持环境变量插值，不支持 OAuth
+
+## 修订（2026-09-22）：stdio 新 spec 无状态降级（P7 MCP A1–A4）
+
+背景：MCP 2026-07-28 新 spec 删掉了 initialize 握手，新 SDK（Python mcp 2.0 起）上的 server
+会对 `initialize` 回 -32601。原实现握手失败即 server dead。grill 定案（plan.md P7 MCP 条目）：
+**以旧协议为主，只做 stdio 兜底**——HTTP 双协议协商（B）留观，触发条件是真正接入 HTTP server。
+
+- `TransportError` 新增 `JsonRpc { code, message }` 变体：JSON-RPC 错误从字符串 `Other` 升级为
+  结构化错误，code 可编程判别（仅此一处消费 -32601；`Closed`/`StaleSession` 重连判定不变）
+- `handshake()` 三态：① 旧协议正常握手（主路径，逐字节不变）；② initialize 收 -32601 →
+  warn 一行 + `stateless` 置位 + 跳过握手（不发 `notifications/initialized`）；③ 其余错误原样上抛
+- 降级后所有请求 params 注入 `_meta`（`MCP_STATELESS_PROTOCOL_VERSION = "2026-07-28"` +
+  clientInfo），见 `McpServer::with_stateless_meta`
+- initialize 成功路径不再丢弃响应：记录 server 协商的 `protocolVersion`
+  （`McpServer::negotiated_version`），支持集
+  （`MCP_SUPPORTED_PROTOCOL_VERSIONS`，五档：2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 /
+  2026-07-28）之外 warn 不拒连（线上用法只有 tools/list + tools/call，跨版本容忍安全）
+- 测试：mock transport（不 spawn 真实子进程）覆盖两态握手 + 降级后 _meta 断言 + 越界版本 +
+  非 -32601 错误仍失败（`mcp::client::tests`）

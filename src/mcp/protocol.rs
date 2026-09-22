@@ -5,7 +5,21 @@
 use serde::{Deserialize, Serialize};
 
 pub const JSONRPC_VERSION: &str = "2.0";
+/// Handshake default (legacy spec): the `protocolVersion` carried by `initialize`
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+/// New-spec (2026-07-28 stateless) version: carried as `params._meta.protocolVersion`
+/// on every request in downgraded (handshake-skipped) mode
+pub const MCP_STATELESS_PROTOCOL_VERSION: &str = "2026-07-28";
+/// Protocol versions this client understands. A server negotiating a version
+/// outside this set triggers a warning (not a connection failure — our wire
+/// usage is only tools/list + tools/call, tolerant across versions).
+pub const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25",
+    "2026-07-28",
+];
 
 /// 标准 JSON-RPC 2.0 错误码
 pub const METHOD_NOT_FOUND: i32 = -32601;
@@ -147,5 +161,9 @@ mod tests {
     #[test]
     fn protocol_version_constant() {
         assert_eq!(MCP_PROTOCOL_VERSION, "2024-11-05");
+        assert_eq!(MCP_STATELESS_PROTOCOL_VERSION, "2026-07-28");
+        // 支持集合必须覆盖握手默认档与 stateless 档
+        assert!(MCP_SUPPORTED_PROTOCOL_VERSIONS.contains(&MCP_PROTOCOL_VERSION));
+        assert!(MCP_SUPPORTED_PROTOCOL_VERSIONS.contains(&MCP_STATELESS_PROTOCOL_VERSION));
     }
 }

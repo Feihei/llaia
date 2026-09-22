@@ -20,6 +20,10 @@ pub enum TransportError {
     StaleSession(String),
     #[error("transport timeout: {0}")]
     Timeout(String),
+    /// Server 回了 JSON-RPC error（结构化错误，code 可编程判别——
+    /// 如 -32601 method not found 驱动 stdio 无状态降级）
+    #[error("JSON-RPC error {code}: {message}")]
+    JsonRpc { code: i32, message: String },
     #[error("{0}")]
     Other(String),
 }
