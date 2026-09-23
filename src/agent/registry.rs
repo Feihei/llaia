@@ -45,6 +45,10 @@ pub struct AgentRegistry {
     /// 主线 /steer 插话缓冲（plan.md #I）：与 main Agent 持同一 Arc，
     /// channel 在 turn 持锁期间经它投递（不取 Agent 锁）。
     pub steer_buffer: Arc<Mutex<std::collections::VecDeque<String>>>,
+    /// 实例注册表（ADR-0032）：main 实例在 build_agent 时注册；任务实例由
+    /// `/session` 切线或 WebUI 面板按需 spawn。Channel 签名零改动——实例层
+    /// 跟着既有的 AgentRegistry 一起注入。
+    pub instances: crate::agent::instances::InstanceRegistry,
 }
 
 impl AgentRegistry {
@@ -58,6 +62,7 @@ impl AgentRegistry {
             background_tasks: Arc::new(Mutex::new(HashMap::new())),
             delivery: Arc::new(Mutex::new(None)),
             steer_buffer: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            instances: crate::agent::instances::InstanceRegistry::new(),
         }
     }
 

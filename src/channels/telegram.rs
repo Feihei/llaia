@@ -231,17 +231,30 @@ impl TelegramChannel {
             return Ok(());
         }
 
-        // 斜杠命令
-        if text.starts_with('/') {
-            if text.trim().eq_ignore_ascii_case("/stop") {
-                stop.notify_waiters();
-                let _ = self.send_text(chat_id, "[stop signal sent]").await;
-                return Ok(());
-            }
-            let outcome = {
-                let mut a = agent.lock().await;
-                crate::commands::slash::try_handle(text, &mut a, Some(registry.clone())).await?
-            };
+            // 斜杠命令
+            if text.starts_with('/') {
+                if text.trim().eq_ignore_ascii_case("/stop") {
+                    stop.notify_waiters();
+                    let _ = self.send_text(chat_id, "[stop signal sent]").await;
+                    return Ok(());
+                }
+                // ADR-0032 T3：/session 家族在实例层接管（锁前拦截，busy 判定用 try_lock）
+                if let Some(outcome) =
+                    crate::commands::slash::try_session_command(text, registry, "telegram").await
+                {
+                    match outcome? {
+                        crate::commands::slash::SlashOutcome::Handled(m) => {
+                            let _ = self.send_text(chat_id, &m).await;
+                        }
+                        _ => {}
+                    }
+                    return Ok(());
+                }
+                let outcome = {
+                    let mut a = agent.lock().await;
+                    crate::commands::slash::try_handle(text, &mut a, Some(registry.clone()))
+                        .await?
+                };
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
                     let _ = self
@@ -306,7 +319,6 @@ impl TelegramChannel {
 #[async_trait]
 impl crate::channels::Channel for TelegramChannel {
     async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
-        let agent = registry.main.clone();
         if self.config.bot_token.is_empty() {
             anyhow::bail!("telegram enabled but bot_token is empty");
         }
@@ -320,6 +332,8 @@ impl crate::channels::Channel for TelegramChannel {
                 Ok(updates) => {
                     for u in &updates {
                         offset = u.update_id + 1;
+                        // ADR-0032：每条 update 动态解析频道附着的实例（切线后生效）
+                        let agent = registry.instances.attached("telegram").await.agent.clone();
                         if let Err(e) = self.handle_update(u, &agent, &stop, &registry).await {
                             tracing::error!(update_id = u.update_id, error = %e, "handle update failed");
                         }

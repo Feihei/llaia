@@ -56,7 +56,6 @@ impl Channel for MailChannel {
         Some(self as Arc<dyn crate::cron::ProactivePusher>)
     }
     async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
-        let agent = registry.main.clone();
         tracing::info!(
             server = %self.config.imap_server,
             mailbox = %self.config.mailbox,
@@ -64,7 +63,10 @@ impl Channel for MailChannel {
         );
         let poll = self.config.poll_interval_secs.max(5);
         // 轮询循环：单轮出错只 log 不退出，避免把整个 serve 进程拖垮。
+        // （ADR-0032：每轮动态解析频道附着的实例——mail 无 slash 入口，切线
+        // 由其它频道完成，这里只跟随）
         loop {
+            let agent = registry.instances.attached("mail").await.agent.clone();
             if let Err(e) = self.clone().poll_once(&agent, &registry).await {
                 tracing::error!(error = %e, "mail poll failed, will retry");
             }

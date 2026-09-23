@@ -167,6 +167,18 @@ impl DingtalkChannel {
                 let _ = self.send_markdown(&webhook, "[stop signal sent]").await;
                 return Ok(());
             }
+            // ADR-0032 T3：/session 家族在实例层接管（锁前拦截，busy 判定用 try_lock）
+            if let Some(outcome) =
+                crate::commands::slash::try_session_command(&text, registry, "dingtalk").await
+            {
+                match outcome? {
+                    crate::commands::slash::SlashOutcome::Handled(m) => {
+                        let _ = self.send_markdown(&webhook, &m).await;
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
             let outcome = {
                 let mut a = agent.lock().await;
                 crate::commands::slash::try_handle(&text, &mut a, Some(registry.clone())).await?
@@ -234,7 +246,6 @@ impl DingtalkChannel {
     /// 单次连接生命周期：注册 → WS 建连 → 帧循环 → 断开返回 Err
     async fn run_connection(
         self: &Arc<Self>,
-        agent: &Arc<Mutex<crate::agent::Agent>>,
         stop: &Arc<Notify>,
         registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
@@ -279,7 +290,9 @@ impl DingtalkChannel {
                         return Err(anyhow!("ws ack send failed: {}", e));
                     }
                     if frame_type != "SYSTEM" {
-                        if let Err(e) = self.handle_message(&frame, agent, stop, registry).await {
+                        // ADR-0032：每条消息动态解析频道附着的实例（切线后生效）
+                        let agent = registry.instances.attached("dingtalk").await.agent.clone();
+                        if let Err(e) = self.handle_message(&frame, &agent, stop, registry).await {
                             tracing::error!(error = %e, "handle dingtalk message failed");
                         }
                     }
@@ -294,13 +307,12 @@ impl DingtalkChannel {
 #[async_trait]
 impl crate::channels::Channel for DingtalkChannel {
     async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
-        let agent = registry.main.clone();
         if self.config.client_id.is_empty() || self.config.client_secret.is_empty() {
             anyhow::bail!("dingtalk enabled but client_id/client_secret is empty");
         }
         let stop = Arc::new(Notify::new());
         loop {
-            if let Err(e) = self.run_connection(&agent, &stop, &registry).await {
+            if let Err(e) = self.run_connection(&stop, &registry).await {
                 // 网络抖动/凭证失效/gateway 踢连接：等 5s 重连
                 tracing::warn!(error = %e, "dingtalk connection lost, reconnect in 5s");
                 tokio::time::sleep(Duration::from_secs(5)).await;

@@ -363,9 +363,9 @@ impl WechatChannel {
     // ---- 收消息 ----
 
     /// 长轮询一轮。返回 Err 表示需要重建登录态（session 超时）或发生错误。
+    /// （ADR-0032：agent 不缓存——每条消息动态解析频道附着的实例）
     async fn poll_once(
         self: &Arc<Self>,
-        agent: &Arc<Mutex<crate::agent::Agent>>,
         stop: &Arc<Notify>,
         registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
@@ -389,8 +389,10 @@ impl WechatChannel {
             .cloned()
             .unwrap_or_default();
         for msg in &msgs {
+            // ADR-0032：每条消息动态解析频道附着的实例（切线后生效）
+            let agent = registry.instances.attached("wechat").await.agent.clone();
             if let Err(e) = self
-                .handle_message(msg, agent, stop, registry.clone())
+                .handle_message(msg, &agent, stop, registry.clone())
                 .await
             {
                 tracing::error!(error = %e, "handle wechat message failed");
@@ -506,6 +508,18 @@ impl WechatChannel {
             if text.trim().eq_ignore_ascii_case("/stop") {
                 stop.notify_waiters();
                 let _ = self.send_text(&from_user_id, "[stop signal sent]").await;
+                return Ok(());
+            }
+            // ADR-0032 T3：/session 家族在实例层接管（锁前拦截，busy 判定用 try_lock）
+            if let Some(outcome) =
+                crate::commands::slash::try_session_command(&text, &registry, "wechat").await
+            {
+                match outcome? {
+                    crate::commands::slash::SlashOutcome::Handled(m) => {
+                        let _ = self.send_text(&from_user_id, &m).await;
+                    }
+                    _ => {}
+                }
                 return Ok(());
             }
             let outcome = {
@@ -763,7 +777,6 @@ impl WechatChannel {
 #[async_trait]
 impl crate::channels::Channel for WechatChannel {
     async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
-        let agent = registry.main.clone();
         self.load_state().await;
         let stop = Arc::new(Notify::new());
         loop {
@@ -774,7 +787,7 @@ impl crate::channels::Channel for WechatChannel {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 continue;
             }
-            match self.poll_once(&agent, &stop, &registry).await {
+            match self.poll_once(&stop, &registry).await {
                 Ok(()) => {}
                 Err(e) => {
                     let msg = e.to_string();

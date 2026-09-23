@@ -1200,11 +1200,10 @@ impl QqChannel {
                         )
                         .await;
                 } else {
-                    registry
-                        .steer_buffer
-                        .lock()
-                        .unwrap()
-                        .push_back(rest.to_string());
+                    // ADR-0032：steer 投给频道当前附着的实例（turn 持 agent 锁，
+                    // 经 InstanceHandle 缓存的 steer Arc 投递，不取 Agent 锁）
+                    let steer = registry.instances.attached("qq").await.steer_buffer.clone();
+                    steer.lock().unwrap().push_back(rest.to_string());
                     let _ = self
                         .send_c2c_message(
                             user_openid,
@@ -1398,6 +1397,21 @@ impl QqChannel {
                         None,
                     )
                     .await;
+            }
+            return Ok(());
+        }
+        // ADR-0032 T3：/session 家族在实例层接管（切线 = 换绑附着，不原地改写
+        // agent）。在取 agent 锁之前拦截——busy 判定（try_lock）要求此刻未持锁。
+        if let Some(outcome) =
+            crate::commands::slash::try_session_command(text, registry, "qq").await
+        {
+            match outcome? {
+                crate::commands::slash::SlashOutcome::Handled(msg) => {
+                    let _ = self
+                        .send_c2c_anchored(user_openid, &msg, Some(&anchor), None)
+                        .await;
+                }
+                _ => {}
             }
             return Ok(());
         }
@@ -1719,12 +1733,11 @@ impl Channel for QqChannel {
         Some(self as Arc<dyn crate::cron::ProactivePusher>)
     }
     async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
-        let agent = registry.main.clone();
         tracing::info!(app_id = %self.config.app_id, "QqChannel starting");
 
         // 外层重连循环：ws 断开后等待 5 秒重连，避免 serve 进程退出
         loop {
-            match self.clone().run_connection(&agent, &registry).await {
+            match self.clone().run_connection(&registry).await {
                 Ok(()) => tracing::warn!("qq ws connection closed, will reconnect"),
                 Err(e) => {
                     tracing::error!(error = %e, "qq ws connection ended with error, will reconnect")
@@ -1738,9 +1751,9 @@ impl Channel for QqChannel {
 
 impl QqChannel {
     /// 单次连接的完整生命周期：建连 → IDENTIFY → 消息/心跳循环 → 断开
+    /// （ADR-0032：agent 不再缓存——每条消息/互动动态解析频道附着的实例）
     async fn run_connection(
         self: Arc<Self>,
-        agent: &Arc<Mutex<Agent>>,
         registry: &Arc<AgentRegistry>,
     ) -> Result<()> {
         let ws_url = self.get_ws_url().await?;
@@ -1853,7 +1866,9 @@ impl QqChannel {
                                     // 持久化到 USER.md，重启后 cron 主动推送仍可解析
                                     self.persist_owner_openid(&user_openid).await;
                                     let this = self.clone();
-                                    let agent = agent.clone();
+                                    // ADR-0032：每条消息动态解析频道附着的实例
+                                    let agent =
+                                        registry.instances.attached("qq").await.agent.clone();
                                     let registry = registry.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = this
@@ -1869,7 +1884,10 @@ impl QqChannel {
                                 // 按钮点击互动（intent 1<<26）：走按钮审批通路
                                 if let Some(inter) = Self::extract_interaction(&payload) {
                                     let this = self.clone();
-                                    let agent = agent.clone();
+                                    // ADR-0032：审批 pending 会阻塞切线（busy 守卫），
+                                    // 所以按钮到达时频道必然仍附着在注册该审批的实例上
+                                    let agent =
+                                        registry.instances.attached("qq").await.agent.clone();
                                     let registry = registry.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = this

@@ -1398,9 +1398,201 @@ fn persist_agent_model(config_path: &std::path::Path, alias: &str, model_ref: &s
     Ok(())
 }
 
+// ---- ADR-0032 T3：/session 家族的实例层接管 ----
+
+/// `/session` 切线 = 频道附着换绑（idle 检查 + spawn/复用 + 旧实例 dormant 化），
+/// 不再原地改写当前 agent 的 session_id/context——实例的 Agent 与 session 线
+/// 一一钉死，切线即换实例。`/sessions` 列实例（活跃 + dormant 线标注）。
+///
+/// 在各 channel 的 slash 分发点、**取 agent 锁之前**调用（busy 判定用 try_lock，
+/// 持锁后调用会误判 busy）。返回 `None` 表示本命令不归实例层管——非 /session
+/// 家族，或实例层未激活（无 main 实例：旧测试与 WebUI T7 前的通路）——调用方
+/// 继续走 `try_handle` 的原地切线语义。
+pub async fn try_session_command(
+    line: &str,
+    registry: &Arc<AgentRegistry>,
+    channel: &str,
+) -> Option<Result<SlashOutcome>> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let (cmd, args) = match trimmed.split_once(' ') {
+        Some((c, a)) => (c, a.trim()),
+        None => (trimmed, ""),
+    };
+    let cmd = cmd.to_ascii_lowercase();
+    if !matches!(cmd.as_str(), "/session" | "/task" | "/sessions" | "/tasks") {
+        return None;
+    }
+    // 实例层未激活（main 实例未注册）→ 退回 try_handle 原地切线
+    if registry.instances.get("main").await.is_none() {
+        return None;
+    }
+    Some(session_instance_command(&cmd, args, registry, channel).await)
+}
+
+/// /session 切走后处理旧实例：task 实例尝试 dormant 化（此刻本频道已换绑走；
+/// busy / 有 WebUI 订阅 / 仍被其它频道附着时保留存活，不阻塞切线）。
+/// 返回附加到 notice 的说明行。
+async fn detach_instance(
+    registry: &Arc<AgentRegistry>,
+    cur: &Arc<crate::agent::instances::InstanceHandle>,
+) -> String {
+    if cur.kind != crate::agent::instances::InstanceKind::Task {
+        return String::new();
+    }
+    match registry.instances.dormantize(&cur.name).await {
+        Ok(()) => format!("\n[instance \"{}\" released]", cur.name),
+        Err(e) => format!("\n[instance \"{}\" kept alive: {}]", cur.name, e),
+    }
+}
+
+async fn session_instance_command(
+    cmd: &str,
+    args: &str,
+    registry: &Arc<AgentRegistry>,
+    channel: &str,
+) -> Result<SlashOutcome> {
+    use crate::agent::instances::InstanceKind;
+    let cur = registry.instances.attached(channel).await;
+    match cmd {
+        // /sessions：列活跃实例（main 置顶、标注 idle/busy 与附着）+ dormant 线
+        "/sessions" | "/tasks" => {
+            let instances = registry.instances.list().await;
+            let open = registry.main.lock().await.session_store.list_open_tasks()?;
+            let mut out = String::from("instances:\n");
+            for h in &instances {
+                let state = if h.is_idle().await { "idle" } else { "busy" };
+                let mark = if h.name == cur.name { " *" } else { "" };
+                let bound = h
+                    .bound_path
+                    .as_ref()
+                    .map(|p| format!(" · bound {}", p.display()))
+                    .unwrap_or_default();
+                let kind = match h.kind {
+                    InstanceKind::Main => "main",
+                    InstanceKind::Task => "task",
+                };
+                out.push_str(&format!(
+                    "- ({kind}) {name}{mark} — {state}{bound}\n",
+                    kind = kind,
+                    name = h.name,
+                    mark = mark,
+                    state = state,
+                    bound = bound
+                ));
+            }
+            let mut dormant = Vec::new();
+            for t in open {
+                if registry.instances.get(&t.title).await.is_none() {
+                    dormant.push(t);
+                }
+            }
+            if !dormant.is_empty() {
+                out.push_str("dormant session lines (use /session <name> to spawn):\n");
+                for t in dormant {
+                    out.push_str(&format!(
+                        "- {} — bound {} · last activity {}\n",
+                        t.title,
+                        t.bound_path.as_deref().unwrap_or("-"),
+                        t.last_activity
+                    ));
+                }
+            }
+            Ok(SlashOutcome::Handled(out))
+        }
+        _ => {
+            match args {
+                // 无参 = 回 main 实例
+                "" => {
+                    if cur.kind == InstanceKind::Main {
+                        return Ok(SlashOutcome::Handled(
+                            "[already on the main instance] usage: /session <name> to enter a session line"
+                                .into(),
+                        ));
+                    }
+                    registry.instances.attach(channel, "main").await?;
+                    let extra = detach_instance(registry, &cur).await;
+                    Ok(SlashOutcome::Handled(format!(
+                        "[back to main instance]{}",
+                        extra
+                    )))
+                }
+                // close = 归档当前任务线 + 回 main + dormant
+                "close" => {
+                    if cur.kind == InstanceKind::Main {
+                        return Ok(SlashOutcome::Handled(
+                            "[not in a session line] usage: /session <name> | /session close | /session (back to main)"
+                                .into(),
+                        ));
+                    }
+                    if let Some(reason) = cur.busy_reason().await {
+                        return Ok(SlashOutcome::Handled(format!(
+                            "[busy: instance \"{}\" is {} — finish it or /stop, /cancel before closing]",
+                            cur.name, reason
+                        )));
+                    }
+                    registry
+                        .main
+                        .lock()
+                        .await
+                        .session_store
+                        .archive_session(cur.session_id)?;
+                    registry.instances.attach(channel, "main").await?;
+                    let extra = detach_instance(registry, &cur).await;
+                    Ok(SlashOutcome::Handled(format!(
+                        "[session \"{}\" archived]\n[back to main instance]{}",
+                        cur.name, extra
+                    )))
+                }
+                name => {
+                    if name == cur.name {
+                        return Ok(SlashOutcome::Handled(format!(
+                            "[already in session \"{}\"]",
+                            name
+                        )));
+                    }
+                    // 当前实例必须 idle（try_lock 判定：运行中 / 等回答 / 等审批都拒切）
+                    if let Some(reason) = cur.busy_reason().await {
+                        return Ok(SlashOutcome::Handled(format!(
+                            "[busy: instance \"{}\" is {} — finish it or /stop, /cancel before switching]",
+                            cur.name, reason
+                        )));
+                    }
+                    // 目标实例已存在且 busy → 拒绝（它正在被别的频道/面板使用）
+                    if let Some(t) = registry.instances.get(name).await {
+                        if let Some(reason) = t.busy_reason().await {
+                            return Ok(SlashOutcome::Handled(format!(
+                                "[busy: instance \"{}\" is {} — try again later]",
+                                name, reason
+                            )));
+                        }
+                    }
+                    // spawn（幂等：已活跃直接复用）→ 换绑 → 旧实例 dormant
+                    let (h, backfilled) = {
+                        let main_g = registry.main.lock().await;
+                        crate::agent::instances::spawn_task_instance(
+                            &main_g,
+                            &registry.instances,
+                            name,
+                        )
+                        .await?
+                    };
+                    registry.instances.attach(channel, name).await?;
+                    let extra = detach_instance(registry, &cur).await;
+                    Ok(SlashOutcome::Handled(format!(
+                        "[switched to instance \"{}\"] {} message(s) restored from this line{}",
+                        h.name, backfilled, extra
+                    )))
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests {    use super::*;
     use crate::agent::Agent;
     use crate::config::{AgentConfig, ModelConfig, ProviderConfig};
     use crate::memory::sqlite::SessionStore;
@@ -2149,5 +2341,194 @@ mod tests {
         assert!(calls[1].contains("Q: 第一问"));
         assert!(calls[1].contains("主线话题"));
         assert!(calls[1].contains("第二问"));
+    }
+
+    // ---- ADR-0032 T3：/session 实例层接管 ----
+
+    use crate::agent::instances::InstanceKind;
+
+    /// 构造激活实例层的 registry（main 包装为 Main 实例）。
+    async fn test_instance_registry() -> Arc<AgentRegistry> {
+        let agent = test_agent(test_config()).await;
+        let sid = agent.session_id;
+        let ws = agent.workspace.clone();
+        let registry = Arc::new(AgentRegistry::new(
+            Arc::new(tokio::sync::Mutex::new(agent)),
+            ws,
+        ));
+        registry.instances.register_main(registry.main.clone(), sid).await;
+        registry
+    }
+
+    #[tokio::test]
+    async fn test_session_switch_rejected_when_not_idle() {
+        let registry = test_instance_registry().await;
+
+        // 先正常切到 foo
+        let out = try_session_command("/session foo", &registry, "cli")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(out, SlashOutcome::Handled(_)));
+        assert_eq!(registry.instances.attached("cli").await.name, "foo");
+
+        // foo 的 gate 挂 pending question → 切线必须被拒
+        let gate = registry
+            .instances
+            .get("foo")
+            .await
+            .unwrap()
+            .agent
+            .lock()
+            .await
+            .approval_gate
+            .clone();
+        gate.register_question("q?", None, "cli", "foo", 0).await;
+
+        let out = try_session_command("/session bar", &registry, "cli")
+            .await
+            .unwrap()
+            .unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("[busy:"), "拒绝提示应含 busy 标记: {}", msg);
+                assert!(msg.contains("waiting for an answer"), "{}", msg);
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        // 附着不变
+        assert_eq!(registry.instances.attached("cli").await.name, "foo");
+    }
+
+    #[tokio::test]
+    async fn test_session_switch_rebinds_attachment() {
+        let registry = test_instance_registry().await;
+
+        // idle → /session foo：spawn + 换绑
+        let out = try_session_command("/session foo", &registry, "cli")
+            .await
+            .unwrap()
+            .unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("switched to instance \"foo\""), "{}", msg);
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        let foo = registry.instances.get("foo").await.unwrap();
+        assert_eq!(foo.kind, InstanceKind::Task);
+        // main 不被 dormant
+        assert!(registry.instances.get("main").await.is_some());
+
+        // 回 main：旧实例 dormant 化（无订阅者、无其它附着）
+        let out = try_session_command("/session", &registry, "cli")
+            .await
+            .unwrap()
+            .unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("back to main instance"), "{}", msg);
+                assert!(msg.contains("released"), "{}", msg);
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        assert_eq!(registry.instances.attached("cli").await.name, "main");
+        assert!(registry.instances.get("foo").await.is_none(), "dormant 后句柄应移除");
+        // session 线留在 sqlite，可重新 spawn
+        assert!(registry.main.lock().await.session_store.find_open_task("foo").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_session_close_archives_and_dormants() {
+        let registry = test_instance_registry().await;
+
+        try_session_command("/session foo", &registry, "cli")
+            .await
+            .unwrap()
+            .unwrap();
+        let foo_sid = registry.instances.get("foo").await.unwrap().session_id;
+
+        let out = try_session_command("/session close", &registry, "cli")
+            .await
+            .unwrap()
+            .unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("archived"), "{}", msg);
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        assert_eq!(registry.instances.attached("cli").await.name, "main");
+        assert!(registry.instances.get("foo").await.is_none());
+        // 线已归档：find_open_task 不再命中
+        assert!(registry.main.lock().await.session_store.find_open_task("foo").unwrap().is_none());
+        let _ = foo_sid;
+    }
+
+    #[tokio::test]
+    async fn test_session_busy_guard_blocks_close() {
+        let registry = test_instance_registry().await;
+        try_session_command("/session foo", &registry, "cli")
+            .await
+            .unwrap()
+            .unwrap();
+        // 模拟 in-flight 回合：持有 foo 的 agent 锁
+        let foo = registry.instances.get("foo").await.unwrap();
+        let _g = foo.agent.lock().await;
+        let out = try_session_command("/session close", &registry, "cli")
+            .await
+            .unwrap()
+            .unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("[busy:"), "{}", msg);
+                assert!(msg.contains("running a turn"), "{}", msg);
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+        // 附着不变（close 被拒后仍附着 foo）
+        assert_eq!(registry.instances.attached("cli").await.name, "foo");
+    }
+
+    #[tokio::test]
+    async fn test_sessions_lists_instances_and_dormant_lines() {
+        let registry = test_instance_registry().await;
+        // 预置一条 dormant 线（sqlite 有、实例无）
+        registry
+            .main
+            .lock()
+            .await
+            .session_store
+            .create_task_session("uuid-dormant", "web", "sleepy", None)
+            .unwrap();
+
+        let out = try_session_command("/sessions", &registry, "cli")
+            .await
+            .unwrap()
+            .unwrap();
+        match out {
+            SlashOutcome::Handled(msg) => {
+                assert!(msg.contains("(main) main"), "{}", msg);
+                assert!(msg.contains("dormant session lines"), "{}", msg);
+                assert!(msg.contains("sleepy"), "{}", msg);
+            }
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+    }
+
+    /// 非实例层场景（无 main 实例）→ try_session_command 返回 None，退回 try_handle。
+    #[tokio::test]
+    async fn test_session_command_falls_back_without_instance_layer() {
+        let agent = test_agent(test_config()).await;
+        let sid = agent.session_id;
+        let ws = agent.workspace.clone();
+        let registry = Arc::new(AgentRegistry::new(
+            Arc::new(tokio::sync::Mutex::new(agent)),
+            ws,
+        ));
+        // 未 register_main：实例层未激活
+        let r = try_session_command("/session foo", &registry, "cli").await;
+        assert!(r.is_none(), "实例层未激活必须返回 None");
+        let _ = sid;
     }
 }

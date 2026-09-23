@@ -645,6 +645,18 @@ impl FeishuChannel {
                     .await;
                 return Ok(());
             }
+            // ADR-0032 T3：/session 家族在实例层接管（锁前拦截，busy 判定用 try_lock）
+            if let Some(outcome) =
+                crate::commands::slash::try_session_command(&text, registry, "feishu").await
+            {
+                match outcome? {
+                    SlashOutcome::Handled(m) => {
+                        let _ = self.reply(&inbound.reply_target, &m).await;
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
             let outcome = {
                 let mut a = agent.lock().await;
                 try_handle(&text, &mut a, Some(registry.clone())).await?
@@ -716,7 +728,6 @@ impl FeishuChannel {
 #[async_trait]
 impl crate::channels::Channel for FeishuChannel {
     async fn run(self: Arc<Self>, registry: Arc<crate::agent::AgentRegistry>) -> Result<()> {
-        let agent = registry.main.clone();
         if self.config.app_id.is_empty() || self.config.app_secret.is_empty() {
             anyhow::bail!("feishu enabled but app_id/app_secret is empty");
         }
@@ -724,13 +735,14 @@ impl crate::channels::Channel for FeishuChannel {
         let (tx, mut rx) = mpsc::channel::<InboundMessage>(32);
 
         // 消费任务：与 WS 读循环解耦，避免 agent 思考阻塞 ACK 帧
+        // （ADR-0032：agent 不缓存——每条消息动态解析频道附着的实例）
         let consumer = {
             let self_clone = self.clone();
-            let agent = agent.clone();
             let stop = stop.clone();
             let registry = registry.clone();
             tokio::spawn(async move {
                 while let Some(msg) = rx.recv().await {
+                    let agent = registry.instances.attached("feishu").await.agent.clone();
                     if let Err(e) = self_clone
                         .handle_message(&agent, &stop, msg, &registry)
                         .await

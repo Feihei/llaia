@@ -86,15 +86,9 @@ impl CliChannel {
 #[async_trait]
 impl Channel for CliChannel {
     async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
-        let agent = registry.main.clone();
-        // 缓存 workspace 路径，用于解析 @path 图片引用的相对路径
-        let workspace = {
-            let a = agent.lock().await;
-            a.workspace.clone()
-        };
-        // /steer 插话缓冲（plan.md #I）：与 main Agent 同一 Arc 的克隆，
-        // turn 持锁期间也能投递（不经 Agent 锁）。
-        let steer_buf = registry.steer_buffer.clone();
+        // 家目录对所有实例共享（ADR-0032：实例 = 任务线运行时形态，家目录固定），
+        // 只用于 @path 图片引用解析；实例 Agent 每条输入动态解析（切线后生效）。
+        let workspace = registry.main.lock().await.workspace.clone();
         // 欢迎 billboard 与 serve 共用同一份文案（见 crate::banner）
         print!("{}", crate::banner::billboard());
 
@@ -157,6 +151,12 @@ impl Channel for CliChannel {
                 continue;
             }
 
+            // ADR-0032：每条输入动态解析频道当前附着的实例（/session 切线后生效）。
+            // steer 缓冲取实例自己的那份（turn 持锁期间投递，不经 Agent 锁）。
+            let inst = registry.instances.attached("cli").await;
+            let agent = inst.agent.clone();
+            let steer_buf = inst.steer_buffer.clone();
+
             // /steer（plan.md #I）：空闲态降级为普通消息（对齐 OpenClaw）——
             // 剥前缀后走正常输入路径，不进 slash 分支（那里没有 /steer 命令）。
             let line = match crate::commands::slash::split_steer(&line) {
@@ -170,6 +170,18 @@ impl Channel for CliChannel {
 
             // 斜杠命令（非 /stop）：同步处理
             if line.starts_with('/') {
+                // ADR-0032 T3：/session 家族在实例层接管（切线 = 换绑附着，
+                // 不原地改写 agent）；返回 None（非 /session 家族或实例层未激活）
+                // 才落回 try_handle 旧通路。
+                if let Some(outcome) =
+                    crate::commands::slash::try_session_command(&line, &registry, "cli").await
+                {
+                    match outcome? {
+                        SlashOutcome::Handled(msg) => println!("{}", msg),
+                        _ => {}
+                    }
+                    continue;
+                }
                 let outcome = {
                     let mut a = agent.lock().await;
                     try_handle(&line, &mut a, Some(registry.clone())).await?
@@ -835,6 +847,14 @@ pub async fn build_agent(
         registry.register_sub_agent(alias, agent);
     }
     let registry = Arc::new(registry);
+
+    // 实例层（ADR-0032）：main 也是实例。serve 与 chat 共用此构造点，
+    // 之后各 channel 经 `registry.instances.attached(<channel>)` 取当前实例；
+    // 任务实例由 /session 切线或 WebUI 面板按需 spawn（重启不自动拉起）。
+    {
+        let sid = registry.main.lock().await.session_id;
+        registry.instances.register_main(registry.main.clone(), sid).await;
+    }
 
     // 注入 registry 给 delegate 工具（OnceCell 延迟注入）
     if let Some(d) = delegate_tool {

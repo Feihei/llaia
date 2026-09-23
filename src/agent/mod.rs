@@ -677,7 +677,10 @@ impl Agent {
             max_iterations: self.max_iterations,
             tool_result_cap: self.tool_result_cap,
             confirm_mode: self.confirm_mode.clone(),
-            approval_gate: self.approval_gate.clone(),
+            // 审批门独立（ADR-0032）：实例/cron/委派副本各自持门——实例 idle 判定
+            // （gate 空 = 等用户输入）要求按实例隔离；cron/delegate 频道非交互式，
+            // 本就不注册 pending，行为不变。
+            approval_gate: crate::agent::approval::ApprovalGate::new(),
             permission_profile: self.permission_profile.clone(),
             workspace: self.workspace.clone(),
             workspace_root: Arc::new(tokio::sync::RwLock::new(pin_root)),

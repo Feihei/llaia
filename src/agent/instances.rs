@@ -14,10 +14,10 @@
 
 use crate::agent::Agent;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, RwLock};
 
 /// 实例类别：main 永驻；task 实例可 dormant 化。
@@ -39,16 +39,35 @@ pub struct InstanceHandle {
     /// WebUI 面板订阅计数（T3/T7）：面板 open +1 / close -1。
     /// dormantize 要求计数为 0——防误杀仍被 WebUI 订阅的实例。
     pub subscribers: AtomicUsize,
+    /// /steer 插话缓冲的 Arc 缓存：turn 持 agent 锁期间 channel 投递插话
+    /// 不能取 agent 锁，与 main 的 `registry.steer_buffer` 同理，实例侧在此缓存。
+    pub steer_buffer: Arc<StdMutex<VecDeque<String>>>,
 }
 
 impl InstanceHandle {
+    /// busy 原因（None = idle）：
+    /// - agent Mutex 被（回合）持有 → "running a turn"
+    /// - gate 有 pending Question → "waiting for an answer"
+    /// - gate 有 pending Approval → "waiting for approval"
+    /// 频道在拦截点调用本方法时**未持** agent 锁，try_lock 语义成立。
+    pub async fn busy_reason(&self) -> Option<&'static str> {
+        let Ok(agent) = self.agent.try_lock() else {
+            return Some("running a turn");
+        };
+        if agent.approval_gate.is_empty().await {
+            return None;
+        }
+        if !agent.approval_gate.questions().await.is_empty() {
+            Some("waiting for an answer")
+        } else {
+            Some("waiting for approval")
+        }
+    }
+
     /// idle = 无 in-flight 回合（agent Mutex 未被持有）且无未决 ask_user/审批。
     /// 频道内消息串行处理，无并发竞态。
     pub async fn is_idle(&self) -> bool {
-        let Ok(agent) = self.agent.try_lock() else {
-            return false;
-        };
-        agent.approval_gate.is_empty().await
+        self.busy_reason().await.is_none()
     }
 
     pub fn subscribers_now(&self) -> usize {
@@ -79,6 +98,7 @@ impl InstanceRegistry {
 
     /// 包装 main agent 为 Main 实例并注册（宿主启动时调用一次）。
     pub async fn register_main(&self, main: Arc<Mutex<Agent>>, session_id: i64) {
+        let steer = main.lock().await.steer_buffer.clone();
         let h = Arc::new(InstanceHandle {
             name: "main".into(),
             kind: InstanceKind::Main,
@@ -86,6 +106,7 @@ impl InstanceRegistry {
             session_id,
             bound_path: None,
             subscribers: AtomicUsize::new(0),
+            steer_buffer: steer,
         });
         self.register(h).await;
     }
@@ -105,8 +126,8 @@ impl InstanceRegistry {
         v
     }
 
-    /// dormant 化（非 main、且 idle、且无 WebUI 订阅者）：移除 handle，Agent 随之 drop。
-    /// session 线留 sqlite，之后可重新 spawn（回灌该线尾部）。
+    /// dormant 化（非 main、且 idle、且无 WebUI 订阅者、且无频道附着）：移除 handle，
+    /// Agent 随之 drop。session 线留 sqlite，之后可重新 spawn（回灌该线尾部）。
     pub async fn dormantize(&self, name: &str) -> Result<()> {
         let h = self
             .get(name)
@@ -124,6 +145,16 @@ impl InstanceRegistry {
                 name,
                 h.subscribers_now()
             );
+        }
+        if let Some(ch) = self
+            .attachments
+            .read()
+            .await
+            .iter()
+            .find(|(_, v)| v.as_str() == name)
+            .map(|(k, _)| k.clone())
+        {
+            anyhow::bail!("instance \"{}\" is still attached by channel {}", name, ch);
         }
         self.instances.write().await.remove(name);
         Ok(())
@@ -159,16 +190,17 @@ impl InstanceRegistry {
 /// 从 main agent 派生任务实例：fork 原语（共享 provider/store）+ 指定 session 线
 /// + 回灌（复用 slash 切线同一通路）+ bound_path 对齐 WebUI 切线语义。
 ///
-/// 目标线已注册为实例 → 直接复用句柄（幂等）；sqlite 无该线 → 新建任务线。
+/// 目标线已注册为实例 → 直接复用句柄（幂等，回灌数为 0）；sqlite 无该线 → 新建任务线。
+/// 返回 `(句柄, 回灌消息条数)`。
 /// pin_root：先 pin 家目录（fork 原语默认），线有 bound_path 则切过去——
 /// 与 WebUI 切线的「bound_dir 跟随」语义一致。
 pub async fn spawn_task_instance(
     main: &Agent,
     registry: &InstanceRegistry,
     name: &str,
-) -> Result<Arc<InstanceHandle>> {
+) -> Result<(Arc<InstanceHandle>, usize)> {
     if let Some(h) = registry.get(name).await {
-        return Ok(h);
+        return Ok((h, 0));
     }
     let session_id = match main.session_store.find_open_task(name)? {
         Some(id) => id,
@@ -204,18 +236,19 @@ pub async fn spawn_task_instance(
             crate::commands::slash::TASK_BACKFILL_CHAR_BUDGET,
         )
         .unwrap_or_default();
-    crate::commands::slash::backfill_context(&mut fork, msgs);
+    let backfilled = crate::commands::slash::backfill_context(&mut fork, msgs);
     fork.refresh_task_state().await;
     let h = Arc::new(InstanceHandle {
         name: name.to_string(),
         kind: InstanceKind::Task,
+        steer_buffer: fork.steer_buffer.clone(),
         agent: Arc::new(Mutex::new(fork)),
         session_id,
         bound_path: bound,
         subscribers: AtomicUsize::new(0),
     });
     registry.register(h.clone()).await;
-    Ok(h)
+    Ok((h, backfilled))
 }
 
 #[cfg(test)]
@@ -262,6 +295,7 @@ mod tests {
             session_id: 1,
             bound_path: None,
             subscribers: AtomicUsize::new(0),
+            steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
         })
     }
 
@@ -363,7 +397,10 @@ mod tests {
             .append_message(task_id, &Role::Assistant, "earlier assistant msg")
             .unwrap();
 
-        let h = spawn_task_instance(&agent, &registry, "foo").await.unwrap();
+        let (h, backfilled) = spawn_task_instance(&agent, &registry, "foo")
+            .await
+            .unwrap();
+        assert_eq!(backfilled, 2, "两条历史消息都应回灌");
         assert_eq!(h.name, "foo");
         assert_eq!(h.kind, InstanceKind::Task);
         assert_eq!(h.session_id, task_id);
@@ -410,9 +447,10 @@ mod tests {
         let agent = make_main_agent().await;
         let registry = InstanceRegistry::new();
 
-        let h = spawn_task_instance(&agent, &registry, "brand-new")
+        let (h, backfilled) = spawn_task_instance(&agent, &registry, "brand-new")
             .await
             .unwrap();
+        assert_eq!(backfilled, 0, "新建线无历史可回灌");
         assert!(h.bound_path.is_none(), "新建线无绑定目录");
         let sid = h.session_id;
         // find_open_task 能找到新建的线
@@ -422,9 +460,10 @@ mod tests {
         );
 
         // 幂等：同名再 spawn 返回同一句柄（同一 session）
-        let h2 = spawn_task_instance(&agent, &registry, "brand-new")
+        let (h2, backfilled2) = spawn_task_instance(&agent, &registry, "brand-new")
             .await
             .unwrap();
+        assert_eq!(backfilled2, 0, "幂等 spawn 不重复回灌");
         assert_eq!(h2.session_id, sid);
         assert!(Arc::ptr_eq(&h, &h2), "重复 spawn 必须复用同一实例句柄");
     }
