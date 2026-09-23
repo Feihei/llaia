@@ -69,14 +69,17 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 | `POST /api/cron/:id/trigger` | 手动触发某个任务 |
 | `GET /api/mcp` · `POST /api/mcp` · `DELETE /api/mcp` | 列出 / 增 / 删 MCP server |
 | `GET|POST|PUT|DELETE /api/skills/:name` | 技能管理 |
-| `GET /api/todos` · `GET /api/questions` | 只读面板数据源 |
-| `GET /api/approvals` | 待审批操作列表（审批卡片的状态恢复；批准/拒绝走 WS `approval` 帧，非本端点） |
+| `GET /api/todos` · `GET /api/questions` | 只读面板数据源（questions 跨实例聚合，每条带 `instance`） |
+| `GET /api/approvals` | 待审批操作列表（跨实例聚合、每条带 `instance`；审批卡片的状态恢复，批准/拒绝走 WS `approval` 帧，非本端点） |
 | `GET /api/env` · `POST /api/env/refresh` | 环境探测缓存 / 重探 |
 | `GET /api/doctor` | 运行诊断检查 |
 | `GET /api/sessions` | 会话历史列表 / 详情 / 删除 / 导出 |
 | `POST /api/sessions/:uuid/archive-older?days=N` | 把该会话 N 天前的消息搬进 archived 接收线 |
-| `GET /api/session-lines` | 聊天左侧栏的活跃会话线（主线 + 未归档任务线 + 当前所在线） |
+| `GET /api/instances` | chat 左侧实例 rail 数据（活跃实例 + dormant 任务线合成，busy 三态） |
+| `GET /api/session-lines` | 活跃会话线列表（CLI `/sessions` 同源；前端实例 rail 上线后已不依赖） |
 | `POST /api/session-lines/switch` | 切换会话线（`{target: "main" \| uuid}`），同步切换绑定目录并回灌目标线尾部 |
+
+> WebUI 的并行入口是**实例 rail**（[ADR-0032](../adr/0032-instance-architecture.md)）：每实例独立消息桶与并行 turn，点 dormant 线即按需 spawn 唤醒；`/session` 文本命令在 web 被拦截为提示，切线一律走面板切换。
 
 > 这些接口需要 Web UI 的 token 鉴权（与 `webui.token` 一致）。
 

@@ -6,6 +6,14 @@
 
 ---
 
+## v0.5.3 (unreleased)
+
+**Features**
+- **instances**：**实例化架构落地**（[ADR-0032](adr/0032-instance-architecture.md)，T0–T9）——任务线升级为可并行执行的 Agent 实例，serve 退化为宿主、main 也是实例。`InstanceRegistry`（`src/agent/instances.rs`）管理 main + 任务实例（每实例独立 `Arc<Mutex<Agent>>`，进程内虚拟实例）；IM/CLI 频道 per-channel 附着串行路由，`/session <名>` 切线 = idle 检查（try_lock + gate 空判定，busy 三态提示）+ 换绑 + 旧实例 dormantize；实例 spawn 幂等（fork 原语 + 实例私有 MEMORY 段 + bound_path 对齐 + 6000 字符回灌）。memory 分层：实例 `memory_write` 写 `workspace/instances/<名>/MEMORY.md`（runner 按 `ApprovalContext.instance_memory_path` 拦截路由，ToolRegistry 被 fork 共享故不做工具级区分）；任务实例对 home 工作区只读（`forbidden_home` 守卫）。`fork_for_isolated` 参数化 pin_root 且改持独立 `ApprovalGate`（否则 main 的 pending 污染实例 idle 判定）
+- **webui**：**多实例并行面板**——同一条 WS 连接可同时跑多个实例的 turn（per-instance turns 表），事件按 `WebEvent::Instance` 封装分桶（main 不封装向后兼容）；左侧栏升级 **INSTANCES rail**（`GET /api/instances`：活跃实例 + dormant 任务线合成，busy 三态实时显示），dormant 线点击发 `open` 帧唤醒（幂等 spawn）、空面板回放该线尾部历史；`/api/approvals` `/api/questions` 跨实例聚合（每条带 `instance` 归属面板）；web 的 `/session` 文本命令拦截为提示（切线入口 = 面板切换）。v1 取舍：单面板显示 + 多桶并行（多实例真并行不阻塞，同屏平铺留给前端迭代）；subscriber 计数暂缓（dormantize 由非 main + idle + 无附着三道门兜底）
+
+---
+
 ## v0.5.2 (2026-09-17)
 
 **Features**

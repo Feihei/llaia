@@ -1,6 +1,6 @@
 # ADR-0032: 实例化架构——任务线即实例，serve 退化为宿主
 
-- 状态：Accepted（设计定案 2026-09-23，待实现）
+- 状态：Accepted → Implemented（2026-09-23 设计定案并当日实现完成，T0–T9，实现记录见文末）
 - 日期：2026-09-23
 - 关联：修订 [ADR-0031](0031-task-session-model.md)（推翻「明确不做：并行双任务线」「全局单活跃」两条）；[ADR-0002](0002-agent-architecture.md)（主控 Agent 定位）；[ADR-0022](0022-ask-user-suspend-resume.md)（ask_user 挂起）；[ADR-0025](0025-system-prompt-memory-budget.md)（MEMORY trim，缓存需 per-instance 化）
 
@@ -94,3 +94,26 @@
 **结构保证**：只有 in-flight 回合才可能新产生 ask_user/审批，idle 检查通过后不存在「切走后才冒出挂起项」的竞态——问题在结构上不存在，而非被机制善后。delegate 异步任务不受影响：实例转 idle 后切线，异步子任务完成走既有单向通知通路回频道（不需要用户应答，无交错）。原「切线立即生效 + 后台跑完通知」机制不再需要（delegate 异步通知保持不变）。
 
 **兜底通路（全部既有机制）**：长任务中想问别的 → `/btw` 侧问或 WebUI 并行面板；任务卡住 → `/stop` 中止回合后再切；ask_user / 审批挂着 → 回答、`/ok` `/deny`，或 **`/cancel <id>` 放弃**（已存在于 `slash.rs`，question 与审批两类挂起一次覆盖，取消后不跑 continuation——文档命令清单需补记）。**已核实 `/stop` 不能中止 suspended 态**：ask_user 挂起时本轮 turn 已结束（`deferred` 即返回），`/stop` 只中断 in-flight 生成，空闲态下是 no-op——idle 检查因此必须显式查 ApprovalGate 非空，不能只查有无 in-flight turn（另：question 超时是惰性判定，仅在用户下一条消息到达时触发，无后台定时器，`timeout_secs=0` 永不超时）。
+
+## 实现记录（2026-09-23，T0–T9）
+
+按 `docs/plans/2026-09-23-instance-architecture.md` 实施，全部落地。关键落点：
+
+- **实例层** `src/agent/instances.rs`：`InstanceHandle`（agent Arc + session_id + bound_path + subscribers + steer 缓冲 Arc）+ `InstanceRegistry`（instances + per-channel attachments 两张表）；`busy_reason()` = try_lock 失败 → in-flight，gate 空 → idle；`spawn_task_instance()` 幂等（fork 原语 + 实例 MEMORY 段装配 + bound_path 对齐 + 回灌）。
+- **fork 参数化**：`fork_for_isolated(session_id, disable_thinking, pin_root: PathBuf)` 由调用方指定 pin 目录（cron 传家目录）；fork 改持**独立 `ApprovalGate`**（原 clone main 的 gate 会污染实例 idle 判定；cron/delegate 非交互本就不注册 pending，行为不变）。
+- **频道**（T3/T4）：每条消息动态 `registry.instances.attached(<channel>)` 取实例；`try_session_command` 在 slash 分发**前**拦截 `/session` 家族（避开自锁：持当前实例锁时 try_lock 必失败）；dormantize 门 = 非 main + idle + subscribers==0 + 无附着。
+- **T5/T6**：`ApprovalContext` 增加 `instance_memory_path` / `forbidden_home` / `timezone`，由 runner 在工具调用处拦截路由（`ToolRegistry` 被 fork 共享，无法按工具构造区分实例——这是把路由放 runner 拦截层的原因）；memory 抽出 `write_memory_entry()` 复用（进程级写锁保留）。
+- **T7 WebUI**：`WebEvent::Instance { instance, event }` 封装（main 不封装，向后兼容）；`WebSink::for_instance` 打标；`TurnEndSignal(实例名)`；`handle_ws` 用 per-instance turns 表（`HashMap<名, (JoinHandle, Notify)>`）支持同连接多实例并行 turn；`GET /api/instances`（活跃实例 + dormant 线合成，busy 用 try_lock 不挂）；`/api/approvals` `/api/questions` 跨实例聚合（每条带 `instance`）；前端实例桶（`buckets` + `activeInstance` + `routingInstance` 派发路由）+ 实例 rail（dormant 线点 `open` 帧唤醒）；web 入向实例名走 `valid_instance_name` 门禁（名字会拼 `instances/<name>/` 路径）。
+- **T8**：delegate 实际委派给启动时预构建的 sub-agent（独立 workspace），**不从调用方 fork**——计划前提有误，无需代码改动，原 worker 语义即满足「与调用方作用域解耦」。
+
+### 两条计划级简化（对 ADR 字面的偏离）
+
+1. **SessionStore 共享不拆分**：v1 全部实例共享现有单个 `Mutex<Connection>`（进程内 Mutex 已串行化写入）；「每实例独立连接 + busy_timeout」留给真进程载体。上文修订 2 的 WAL 多连接方案**未实施**——单进程内无并发连接，无竞争可言。
+2. **busy 判定免新增标志**：不引入 `turn_active: AtomicBool`，`try_lock` 失败即 in-flight + gate 空判定，语义等价且少一份状态。
+
+### 实现期追加偏离
+
+3. **WebUI subscriber 计数暂缓**：`InstanceHandle.subscribers` 字段保留，但前端面板 open/close 不再增减计数（v1 面板无独立生命周期事件；dormantize 的 subscribers==0 门等于常 0 通过）。WebUI 侧的实例退出 = dormantize 的其余门（非 main + idle + 无附着），误杀风险由「idle 才可 dormantize」兜底。
+4. **WebUI `/session` 命令拦截为提示**：web 的切线入口 = 实例 rail（面板切换），文本 `/session` 在 web 返回 Side 提示而非走 CLI 通路，避免与 per-instance 路由语义打架；CLI/IM 频道 `/session` 完整保留。
+5. **dormant 线唤醒时机**：rail 点击发 `open` 帧 → 后端 `resolve_instance` 按需 spawn（幂等）；**首次 chat 帧也会隐式 spawn**——两处同走 `spawn_task_instance`，不依赖点击。
+6. **WebUI v1 单面板显示 + 多桶并行**：多实例 turn 服务端真并行、事件按实例分桶累积；同屏平铺多面板（计划 Step 4 的「同屏平铺可折叠」）未做——切换显示已满足「并行不阻塞」，多面板 UI 留给前端迭代。
