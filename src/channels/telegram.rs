@@ -231,30 +231,26 @@ impl TelegramChannel {
             return Ok(());
         }
 
-            // 斜杠命令
-            if text.starts_with('/') {
-                if text.trim().eq_ignore_ascii_case("/stop") {
-                    stop.notify_waiters();
-                    let _ = self.send_text(chat_id, "[stop signal sent]").await;
-                    return Ok(());
+        // 斜杠命令
+        if text.starts_with('/') {
+            if text.trim().eq_ignore_ascii_case("/stop") {
+                stop.notify_waiters();
+                let _ = self.send_text(chat_id, "[stop signal sent]").await;
+                return Ok(());
+            }
+            // ADR-0032 T3：/session 家族在实例层接管（锁前拦截，busy 判定用 try_lock）
+            if let Some(outcome) =
+                crate::commands::slash::try_session_command(text, registry, "telegram").await
+            {
+                if let crate::commands::slash::SlashOutcome::Handled(m) = outcome? {
+                    let _ = self.send_text(chat_id, &m).await;
                 }
-                // ADR-0032 T3：/session 家族在实例层接管（锁前拦截，busy 判定用 try_lock）
-                if let Some(outcome) =
-                    crate::commands::slash::try_session_command(text, registry, "telegram").await
-                {
-                    match outcome? {
-                        crate::commands::slash::SlashOutcome::Handled(m) => {
-                            let _ = self.send_text(chat_id, &m).await;
-                        }
-                        _ => {}
-                    }
-                    return Ok(());
-                }
-                let outcome = {
-                    let mut a = agent.lock().await;
-                    crate::commands::slash::try_handle(text, &mut a, Some(registry.clone()))
-                        .await?
-                };
+                return Ok(());
+            }
+            let outcome = {
+                let mut a = agent.lock().await;
+                crate::commands::slash::try_handle(text, &mut a, Some(registry.clone())).await?
+            };
             match outcome {
                 crate::commands::slash::SlashOutcome::Exit => {
                     let _ = self

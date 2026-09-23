@@ -1405,13 +1405,10 @@ impl QqChannel {
         if let Some(outcome) =
             crate::commands::slash::try_session_command(text, registry, "qq").await
         {
-            match outcome? {
-                crate::commands::slash::SlashOutcome::Handled(msg) => {
-                    let _ = self
-                        .send_c2c_anchored(user_openid, &msg, Some(&anchor), None)
-                        .await;
-                }
-                _ => {}
+            if let crate::commands::slash::SlashOutcome::Handled(msg) = outcome? {
+                let _ = self
+                    .send_c2c_anchored(user_openid, &msg, Some(&anchor), None)
+                    .await;
             }
             return Ok(());
         }
@@ -1752,10 +1749,7 @@ impl Channel for QqChannel {
 impl QqChannel {
     /// 单次连接的完整生命周期：建连 → IDENTIFY → 消息/心跳循环 → 断开
     /// （ADR-0032：agent 不再缓存——每条消息/互动动态解析频道附着的实例）
-    async fn run_connection(
-        self: Arc<Self>,
-        registry: &Arc<AgentRegistry>,
-    ) -> Result<()> {
+    async fn run_connection(self: Arc<Self>, registry: &Arc<AgentRegistry>) -> Result<()> {
         let ws_url = self.get_ws_url().await?;
         tracing::info!(url = %ws_url, "connecting to QQ gateway");
 

@@ -162,6 +162,51 @@ pub async fn execute_tool_calls(
             }
         }
 
+        // memory 分层（ADR-0032 T5）：任务实例的 memory_write 路由到实例私有
+        // MEMORY（`<home>/workspace/instances/<n>/MEMORY.md`），不落主 MEMORY；
+        // main（instance_memory_path = None）走共享 MemoryWrite 工具，现状不变。
+        if call.name == "memory_write" {
+            if let Some(mem_path) = &ctx.instance_memory_path {
+                let out = match crate::tools::memory::write_memory_entry(
+                    mem_path,
+                    ctx.timezone.as_deref(),
+                    &call.arguments,
+                )
+                .await
+                {
+                    Ok(s) => s,
+                    Err(e) => format!("[error: {}]", e),
+                };
+                results.push(ChatMessage::tool(out, &call.id));
+                continue;
+            }
+        }
+
+        // 人格主权守卫（ADR-0032 T6）：任务实例禁写家目录 workspace——
+        // SOUL/USER/主 MEMORY 的人格主权归 main 实例。读不受限（SOUL/USER
+        // 本就进系统提示词）；实例自己的目录（memory 工具路由）与 bound_path
+        // 作用域不受影响。main（forbidden_home = None）守卫关闭。
+        if matches!(call.name.as_str(), "file_write" | "file_edit") {
+            if let Some(home) = &ctx.forbidden_home {
+                let target = call
+                    .arguments
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !target.is_empty()
+                    && crate::path_guard::validate_path_in_scope(home, &[], target, None).is_ok()
+                {
+                    tracing::warn!(agent = %agent_alias, target, "task instance blocked from writing home workspace");
+                    results.push(ChatMessage::tool(
+                        "[error: home workspace is read-only for task instances] personality files (SOUL/USER/MEMORY) are owned by the main instance; write inside the instance's bound directory instead."
+                            .to_string(),
+                        &call.id,
+                    ));
+                    continue;
+                }
+            }
+        }
+
         match approval_decision(
             tool.as_ref(),
             &call.arguments,
@@ -348,6 +393,9 @@ mod tests {
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
                 terminal_delete_guard: false,
+                instance_memory_path: None,
+                forbidden_home: None,
+                timezone: None,
             },
             None,
         )
@@ -382,6 +430,9 @@ mod tests {
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
                 terminal_delete_guard: false,
+                instance_memory_path: None,
+                forbidden_home: None,
+                timezone: None,
             },
             None,
         )
@@ -438,6 +489,9 @@ mod tests {
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
                 terminal_delete_guard: false,
+                instance_memory_path: None,
+                forbidden_home: None,
+                timezone: None,
             },
             None,
         )
@@ -462,6 +516,9 @@ mod tests {
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
                 terminal_delete_guard: false,
+                instance_memory_path: None,
+                forbidden_home: None,
+                timezone: None,
             },
             None,
         )
@@ -485,6 +542,9 @@ mod tests {
                 ask_user_timeout_secs: 0,
                 terminal_inline_gate: false,
                 terminal_delete_guard: false,
+                instance_memory_path: None,
+                forbidden_home: None,
+                timezone: None,
             },
             None,
         )
@@ -492,5 +552,118 @@ mod tests {
         .unwrap();
         assert!(!deferred);
         assert_eq!(msgs[0].content.as_text(), "executed");
+    }
+
+    // ---- ADR-0032 T5/T6：memory 分层路由 + 家目录只读守卫 ----
+
+    #[tokio::test]
+    async fn test_memory_write_routes_to_instance_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_mem = dir.path().join("MEMORY.md");
+        let inst_mem = dir.path().join("instances").join("foo").join("MEMORY.md");
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(crate::tools::memory::MemoryWrite::new(
+            main_mem.clone(),
+            dir.path().join("USER.md"),
+            true,
+        )));
+
+        let ctx = ApprovalContext {
+            profile: "default".into(),
+            workspace: dir.path().to_path_buf(),
+            trusted: vec![],
+            gate: ApprovalGate::new(),
+            agent_alias: "main".into(),
+            audit: None,
+            ask_user_timeout_secs: 0,
+            terminal_inline_gate: false,
+            terminal_delete_guard: false,
+            instance_memory_path: Some(inst_mem.clone()),
+            forbidden_home: None,
+            timezone: None,
+        };
+        let calls = vec![ToolCall {
+            id: "c1".into(),
+            name: "memory_write".into(),
+            arguments: json!({"entry": "instance fact"}),
+        }];
+        let (msgs, deferred) = execute_tool_calls(&registry, &calls, "cli", &ctx, None)
+            .await
+            .unwrap();
+        assert!(!deferred);
+        assert!(
+            msgs[0]
+                .content
+                .as_text()
+                .contains("remembered: instance fact"),
+            "{}",
+            msgs[0].content.as_text()
+        );
+        // 写进实例私有文件（目录自动创建）
+        let inst = tokio::fs::read_to_string(&inst_mem).await.unwrap();
+        assert!(inst.contains("instance fact"), "instance memory: {}", inst);
+        // 主 MEMORY 不被触碰
+        assert!(!main_mem.exists(), "main MEMORY must stay untouched");
+    }
+
+    #[tokio::test]
+    async fn test_task_instance_cannot_write_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(crate::tools::file::FileWrite::new(
+            Arc::new(tokio::sync::RwLock::new(home.clone())),
+            Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            true,
+        )));
+
+        let base_ctx = ApprovalContext {
+            profile: "default".into(),
+            workspace: dir.path().to_path_buf(),
+            trusted: vec![],
+            gate: ApprovalGate::new(),
+            agent_alias: "main".into(),
+            audit: None,
+            ask_user_timeout_secs: 0,
+            terminal_inline_gate: false,
+            terminal_delete_guard: false,
+            instance_memory_path: None,
+            forbidden_home: Some(home.clone()),
+            timezone: None,
+        };
+        let soul = home.join("SOUL.md");
+        let calls = vec![ToolCall {
+            id: "c1".into(),
+            name: "file_write".into(),
+            arguments: json!({"path": soul.to_string_lossy(), "content": "evil overwrite"}),
+        }];
+        let (msgs, _) = execute_tool_calls(&registry, &calls, "cli", &base_ctx, None)
+            .await
+            .unwrap();
+        let out = msgs[0].content.as_text();
+        assert!(
+            out.contains("read-only for task instances"),
+            "守卫必须拒绝: {}",
+            out
+        );
+        assert!(!soul.exists(), "SOUL.md 不得被实例写入");
+
+        // main（forbidden_home = None）写家目录 → 正常放行
+        let main_ctx = ApprovalContext {
+            forbidden_home: None,
+            ..base_ctx
+        };
+        let (msgs, _) = execute_tool_calls(&registry, &calls, "cli", &main_ctx, None)
+            .await
+            .unwrap();
+        assert!(
+            !msgs[0].content.as_text().starts_with("[error"),
+            "main 写家目录不应被拦: {}",
+            msgs[0].content.as_text()
+        );
+        assert!(soul.exists(), "main 写 SOUL.md 应成功");
     }
 }

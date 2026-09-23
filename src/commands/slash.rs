@@ -405,7 +405,18 @@ pub async fn try_handle(
                     }
                 },
             };
-            let memory_path = agent.workspace.join("MEMORY.md");
+            // 操作对象跟随当前 agent 的写入目标（ADR-0032 T5）：任务实例压缩
+            // 自己的实例 MEMORY，main 压缩主 MEMORY。
+            let memory_path = match &agent.instance_name {
+                Some(n) => {
+                    let p = agent.workspace.join("instances").join(n).join("MEMORY.md");
+                    if let Some(parent) = p.parent() {
+                        tokio::fs::create_dir_all(parent).await.ok();
+                    }
+                    p
+                }
+                None => agent.workspace.join("MEMORY.md"),
+            };
             let backup_dir = agent.workspace.join("backups");
             let tz = agent.timezone().await;
             match compress_memory(&memory_path, provider.as_ref(), &backup_dir, &tz).await {
@@ -1426,9 +1437,7 @@ pub async fn try_session_command(
         return None;
     }
     // 实例层未激活（main 实例未注册）→ 退回 try_handle 原地切线
-    if registry.instances.get("main").await.is_none() {
-        return None;
-    }
+    registry.instances.get("main").await.as_ref()?;
     Some(session_instance_command(&cmd, args, registry, channel).await)
 }
 
@@ -1592,7 +1601,8 @@ async fn session_instance_command(
 }
 
 #[cfg(test)]
-mod tests {    use super::*;
+mod tests {
+    use super::*;
     use crate::agent::Agent;
     use crate::config::{AgentConfig, ModelConfig, ProviderConfig};
     use crate::memory::sqlite::SessionStore;
@@ -2356,7 +2366,10 @@ mod tests {    use super::*;
             Arc::new(tokio::sync::Mutex::new(agent)),
             ws,
         ));
-        registry.instances.register_main(registry.main.clone(), sid).await;
+        registry
+            .instances
+            .register_main(registry.main.clone(), sid)
+            .await;
         registry
     }
 
@@ -2433,9 +2446,19 @@ mod tests {    use super::*;
             other => panic!("unexpected outcome: {:?}", other),
         }
         assert_eq!(registry.instances.attached("cli").await.name, "main");
-        assert!(registry.instances.get("foo").await.is_none(), "dormant 后句柄应移除");
+        assert!(
+            registry.instances.get("foo").await.is_none(),
+            "dormant 后句柄应移除"
+        );
         // session 线留在 sqlite，可重新 spawn
-        assert!(registry.main.lock().await.session_store.find_open_task("foo").unwrap().is_some());
+        assert!(registry
+            .main
+            .lock()
+            .await
+            .session_store
+            .find_open_task("foo")
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -2461,7 +2484,14 @@ mod tests {    use super::*;
         assert_eq!(registry.instances.attached("cli").await.name, "main");
         assert!(registry.instances.get("foo").await.is_none());
         // 线已归档：find_open_task 不再命中
-        assert!(registry.main.lock().await.session_store.find_open_task("foo").unwrap().is_none());
+        assert!(registry
+            .main
+            .lock()
+            .await
+            .session_store
+            .find_open_task("foo")
+            .unwrap()
+            .is_none());
         let _ = foo_sid;
     }
 

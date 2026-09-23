@@ -49,6 +49,7 @@ impl InstanceHandle {
     /// - agent Mutex 被（回合）持有 → "running a turn"
     /// - gate 有 pending Question → "waiting for an answer"
     /// - gate 有 pending Approval → "waiting for approval"
+    ///
     /// 频道在拦截点调用本方法时**未持** agent 锁，try_lock 语义成立。
     pub async fn busy_reason(&self) -> Option<&'static str> {
         let Ok(agent) = self.agent.try_lock() else {
@@ -219,6 +220,29 @@ pub async fn spawn_task_instance(
     };
     let mut fork = main.fork_for_isolated(session_id, false, main.workspace.clone());
     fork.instance_name = Some(name.to_string());
+    // T5：实例私有 MEMORY 段——读 `<home>/workspace/instances/<n>/MEMORY.md`，
+    // 独立 trim（同主 MEMORY 预算参数、spawn 时不带 provider 走硬截断兜底），
+    // 拼进 system prompt。主 MEMORY 段已在 fork 的 system_prompt_base 里（共享读）。
+    let inst_mem = main
+        .workspace
+        .join("instances")
+        .join(name)
+        .join("MEMORY.md");
+    if let Ok(raw) = tokio::fs::read_to_string(&inst_mem).await {
+        if !raw.trim().is_empty() {
+            let budget = main
+                .config
+                .agent
+                .get("main")
+                .map(|c| c.memory_token_budget)
+                .unwrap_or_else(crate::config::default_memory_token_budget);
+            let trimmed = crate::memory::trim::trim_memory_to_budget(&raw, budget, None).await;
+            fork.set_instance_memory_prompt(format!(
+                "## Task Memory (instance: {})\n\n{}",
+                name, trimmed
+            ));
+        }
+    }
     // bound_path：sqlite 读快照；有绑定则把 fork 作用域切过去（对齐 WebUI 切线语义）
     let bound = main
         .session_store
@@ -397,9 +421,7 @@ mod tests {
             .append_message(task_id, &Role::Assistant, "earlier assistant msg")
             .unwrap();
 
-        let (h, backfilled) = spawn_task_instance(&agent, &registry, "foo")
-            .await
-            .unwrap();
+        let (h, backfilled) = spawn_task_instance(&agent, &registry, "foo").await.unwrap();
         assert_eq!(backfilled, 2, "两条历史消息都应回灌");
         assert_eq!(h.name, "foo");
         assert_eq!(h.kind, InstanceKind::Task);

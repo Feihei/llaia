@@ -514,11 +514,8 @@ impl WechatChannel {
             if let Some(outcome) =
                 crate::commands::slash::try_session_command(&text, &registry, "wechat").await
             {
-                match outcome? {
-                    crate::commands::slash::SlashOutcome::Handled(m) => {
-                        let _ = self.send_text(&from_user_id, &m).await;
-                    }
-                    _ => {}
+                if let crate::commands::slash::SlashOutcome::Handled(m) = outcome? {
+                    let _ = self.send_text(&from_user_id, &m).await;
                 }
                 return Ok(());
             }

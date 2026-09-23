@@ -171,11 +171,8 @@ impl DingtalkChannel {
             if let Some(outcome) =
                 crate::commands::slash::try_session_command(&text, registry, "dingtalk").await
             {
-                match outcome? {
-                    crate::commands::slash::SlashOutcome::Handled(m) => {
-                        let _ = self.send_markdown(&webhook, &m).await;
-                    }
-                    _ => {}
+                if let crate::commands::slash::SlashOutcome::Handled(m) = outcome? {
+                    let _ = self.send_markdown(&webhook, &m).await;
                 }
                 return Ok(());
             }

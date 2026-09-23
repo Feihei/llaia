@@ -203,6 +203,16 @@ pub struct ApprovalContext {
     /// 开启时 terminal 破坏性命令走三档语义（bound 内免审转 trash / 界外强制
     /// 人审），见 `approval_decision` 内注释与 docs/plans/2026-09-17-delete-guard.md。
     pub terminal_delete_guard: bool,
+    /// 实例私有 MEMORY 路径（ADR-0032 T5）：仅任务实例 Some——runner 据此把
+    /// memory_write 路由到 `<home>/workspace/instances/<n>/MEMORY.md`；
+    /// main 为 None（走共享 MemoryWrite 工具写主 MEMORY，现状不变）。
+    pub instance_memory_path: Option<PathBuf>,
+    /// 人格主权守卫（ADR-0032 T6）：仅任务实例 Some（= 家目录 workspace）——
+    /// file_write/file_edit 目标落入其内即拒绝（SOUL/USER/主 MEMORY 归 main 主权）；
+    /// main 为 None（守卫关闭）。
+    pub forbidden_home: Option<PathBuf>,
+    /// `[runtime].timezone`（实例 memory 路由的条目日期用；随 live_config 读）。
+    pub timezone: Option<String>,
 }
 
 /// 是否交互式频道（能等待用户 /ok /deny /answer）

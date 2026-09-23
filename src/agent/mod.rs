@@ -149,6 +149,10 @@ pub struct Agent {
     /// 上次热加载的 skills 系统提示词段。set_workspace 重建 system 需要它在场
     /// （reload_skills 只在我们这边缓存、不再另外持参），否则 /move 会把 skills 段挤掉。
     skills_prompt_cache: String,
+    /// 任务实例的私有 MEMORY 段（ADR-0032 T5）：spawn 时读
+    /// `<home>/workspace/instances/<n>/MEMORY.md` 独立 trim 后拼装；main 恒为空串。
+    /// 进 rebuild_system 组合，位于 base 之后、AGENTS.md/skills 之前。
+    instance_memory_prompt: String,
     /// cron 等自动化任务关闭模型「深度思考」：推理模型（Qwen3 等）在结构化
     /// 合成任务上思考纯属浪费且撑爆超时。置位后请求带 `ThinkingIntent::None`，
     /// 由 provider 按 off_wire/能力声明收口成出站参数。
@@ -333,6 +337,7 @@ impl Agent {
             system_has_tool_instructions: false,
             agents_md_prompt: String::new(),
             skills_prompt_cache: String::new(),
+            instance_memory_prompt: String::new(),
             disable_thinking: false,
             thinking_intent: ThinkingIntent::Auto,
             steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
@@ -563,6 +568,13 @@ impl Agent {
         self.system_has_tool_instructions = has_tool_instructions;
     }
 
+    /// 设置任务实例的私有 MEMORY 提示词段（ADR-0032 T5，spawn 时调用一次）并重建
+    /// system。main 实例不调用（恒为空串）。空段 = 实例尚无私有记忆。
+    pub fn set_instance_memory_prompt(&mut self, segment: String) {
+        self.instance_memory_prompt = segment;
+        self.rebuild_system();
+    }
+
     /// 热加载 runtime 参数（permission / context_threshold / max_iterations / guard）。
     /// 时区由 live_config 通道已即时生效，这里只覆盖其余 runtime 字段。
     pub async fn reload_runtime(&mut self, config: &Config) {
@@ -588,6 +600,10 @@ impl Agent {
     /// 保证任一处改动都不会把另一段的注入挤掉。
     fn rebuild_system(&mut self) {
         let mut sys = self.system_prompt_base.clone();
+        if !self.instance_memory_prompt.is_empty() {
+            sys.push_str("\n\n");
+            sys.push_str(&self.instance_memory_prompt);
+        }
         if !self.agents_md_prompt.is_empty() {
             sys.push_str("\n\n");
             sys.push_str(&self.agents_md_prompt);
@@ -700,6 +716,8 @@ impl Agent {
             system_has_tool_instructions: self.system_has_tool_instructions,
             agents_md_prompt: self.agents_md_prompt.clone(),
             skills_prompt_cache: self.skills_prompt_cache.clone(),
+            // 实例谱系跟随派生源；spawn_task_instance 会按实例 MEMORY 重设本段
+            instance_memory_prompt: self.instance_memory_prompt.clone(),
             // steer 独立空缓冲：cron/委派 turn 不消费用户给主线的插话（plan.md #I）
             steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
             active_task: None,
@@ -1465,6 +1483,13 @@ impl Agent {
                 ask_user_timeout_secs: self.config.runtime.ask_user_timeout_secs as u64,
                 terminal_inline_gate: self.config.tools.terminal.interpret_inline != "off",
                 terminal_delete_guard: self.config.tools.terminal.delete_guard != "off",
+                // ADR-0032 T5/T6：实例路由字段——仅任务实例 Some
+                instance_memory_path: self
+                    .instance_name
+                    .as_ref()
+                    .map(|n| self.workspace.join("instances").join(n).join("MEMORY.md")),
+                forbidden_home: self.instance_name.as_ref().map(|_| self.workspace.clone()),
+                timezone: self.live_config.read().await.runtime.timezone.clone(),
             };
             let (tool_msgs, deferred) =
                 execute_tool_calls(&self.tools, &calls, channel, &ctx, Some(&event_tx)).await?;

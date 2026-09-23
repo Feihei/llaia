@@ -649,11 +649,8 @@ impl FeishuChannel {
             if let Some(outcome) =
                 crate::commands::slash::try_session_command(&text, registry, "feishu").await
             {
-                match outcome? {
-                    SlashOutcome::Handled(m) => {
-                        let _ = self.reply(&inbound.reply_target, &m).await;
-                    }
-                    _ => {}
+                if let SlashOutcome::Handled(m) = outcome? {
+                    let _ = self.reply(&inbound.reply_target, &m).await;
                 }
                 return Ok(());
             }

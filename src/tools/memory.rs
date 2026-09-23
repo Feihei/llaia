@@ -5,12 +5,64 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
 /// 工具侧硬上限：单次最多返回 20 条命中（plan.md）。
 const MAX_RESULTS: i64 = 20;
 /// 单条命中正文最多返回的字符数（含截断标记）。
 const SNIPPET_MAX: usize = 200;
+
+/// 进程级 memory 写锁：memory_write 可能经两条通路写盘（共享工具实例 / runner
+/// 的实例路由直写），用同一把锁串行化，避免并发追加互相覆盖。
+static MEMORY_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn write_lock() -> &'static Mutex<()> {
+    MEMORY_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// 追加一条记忆到指定 MEMORY 文件（ADR-0032 T5 抽出）：
+/// main 走共享 MemoryWrite 工具；任务实例由 runner 按实例私有路径直调本函数。
+/// 目录不存在自动创建（实例首次写记忆时 `<home>/workspace/instances/<n>/` 尚不存在）。
+pub async fn write_memory_entry(
+    memory_path: &PathBuf,
+    timezone: Option<&str>,
+    args: &Value,
+) -> Result<String> {
+    let entry = args
+        .get("entry")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing 'entry'"))?;
+
+    let _g = write_lock().lock().await;
+    let today = crate::time::now(&timezone.map(|s| s.to_string())).ymd();
+    // MEMORY.md 的契约是一行一条：折叠 entry 内部换行，避免写出解析不了的裸行
+    let entry = entry
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let line = format!("- [{}] {}\n", today, entry);
+
+    if let Some(parent) = memory_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| anyhow!("create memory dir: {}", e))?;
+    }
+    let mut content = tokio::fs::read_to_string(memory_path)
+        .await
+        .unwrap_or_default();
+    // 缺尾换行时先补一个，否则新条目会粘在最后一条记忆的同一行上，两条一起报废
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&line);
+    crate::memory::write_memory_atomic(memory_path, &content)
+        .await
+        .map_err(|e| anyhow!("write memory: {}", e))?;
+    Ok(format!("remembered: {}", entry))
+}
 
 pub struct MemoryWrite {
     pub memory_path: PathBuf,
@@ -62,11 +114,6 @@ impl Tool for MemoryWrite {
         true
     }
     async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
-        let entry = args
-            .get("entry")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing 'entry'"))?;
-
         // 子 agent 不允许写 USER.md（身份绑定统一在主 agent 管理）
         // memory_write 本身写 MEMORY.md，但检查 is_main 防止子 agent 误用
         if !self.is_main {
@@ -76,7 +123,10 @@ impl Tool for MemoryWrite {
         let _g = self.lock.lock().await;
         let today = crate::time::now(&self.timezone).ymd();
         // MEMORY.md 的契约是一行一条：折叠 entry 内部换行，避免写出解析不了的裸行
-        let entry = entry
+        let entry = args
+            .get("entry")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing 'entry'"))?
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())

@@ -176,9 +176,8 @@ impl Channel for CliChannel {
                 if let Some(outcome) =
                     crate::commands::slash::try_session_command(&line, &registry, "cli").await
                 {
-                    match outcome? {
-                        SlashOutcome::Handled(msg) => println!("{}", msg),
-                        _ => {}
+                    if let SlashOutcome::Handled(msg) = outcome? {
+                        println!("{}", msg);
                     }
                     continue;
                 }
@@ -853,7 +852,10 @@ pub async fn build_agent(
     // 任务实例由 /session 切线或 WebUI 面板按需 spawn（重启不自动拉起）。
     {
         let sid = registry.main.lock().await.session_id;
-        registry.instances.register_main(registry.main.clone(), sid).await;
+        registry
+            .instances
+            .register_main(registry.main.clone(), sid)
+            .await;
     }
 
     // 注入 registry 给 delegate 工具（OnceCell 延迟注入）
