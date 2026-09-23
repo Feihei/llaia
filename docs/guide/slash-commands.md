@@ -19,6 +19,7 @@
 | `/reasoning [auto\|none\|low\|medium\|high\|max]` | 思考档位（进程级，跨频道共享，重启失效，不写 config）。`auto`（默认）不发任何参数；`none` 要求关思考；`low`–`max` 调档位。能否关/能否调由该模型 `[provider.<id>.<model>.thinking]` 能力声明决定：不支持的档位/方言**拒收并报错**，不静默降级；能力未配置时 `none` 走 legacy 兜底（对 llama.cpp 等支持 `chat_template_kwargs` 的端点有效）。`on`/`off` 仍作 `auto`/`none` 的别名。生效态每回合注入尾部上下文，`/provider` 切换时重估并提示。 |
 | `/ok <id>` | 批准一个待确认的操作（交互式审批）。 |
 | `/deny <id>` | 拒绝一个待确认的操作。 |
+| `/cancel <id>` | 取消一个 pending 的 question / 审批（`/ok` `/deny` 通吃的放弃入口），agent 收到取消结果后继续。 |
 | `/move [<path>\|home]` · `/cd` | 切换工作目录；无参数 / `home` / `~` / `-` 恢复到原始 workspace；其它路径需 `/ok` 确认。在会话线内时，批准即自动把该线的绑定目录改写为新目录（回显 `was`）；回 `home` 则解绑。重启后作用域恢复家目录（不持久）。 |
 | `/session [<名>\|close]`（别名 `/task`） | 开/切/归档**会话线**：无参回通用线，`名`不存在则新建（回灌通用线尾部当 brief），存在则切回并回灌该线尾部；`close` 归档不可续写。注意：会话线只管历史与上下文，目录作用域归 `/move` 管；切线 notice 的 `[scope]` 行会提示两者是否对应（软提示，不强制同步）。WebUI 里有等价图形入口：chat 左侧栏点线即切换，且**工作目录一并切到该线绑定目录**（回主线恢复家目录），见 [Web UI](webui.md)。 |
 | `/sessions`（名 `/tasks`） | 列出未归档会话线（名、绑定目录、频道、最后活动），`*` 标当前。WebUI chat 左侧栏是同一份活跃线列表的可视化。 |
