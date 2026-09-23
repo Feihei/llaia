@@ -1,5 +1,6 @@
+use crate::agent::instances::{spawn_task_instance, InstanceHandle};
 use crate::agent::sink::{run_turn, OutputSink};
-use crate::agent::{AgentRegistry, MediaKind};
+use crate::agent::{Agent, AgentRegistry, MediaKind};
 use crate::channels::Channel;
 use crate::commands::slash::{try_handle, SlashOutcome};
 use crate::config::{Config, WebUiConfig};
@@ -16,9 +17,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Notify, RwLock};
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 
 /// WS 出向事件：扁平化 JSON，与 TurnEvent 一一对应 + 协议层事件
 #[derive(Debug, Clone, serde::Serialize)]
@@ -73,98 +75,135 @@ pub enum WebEvent {
     Proactive {
         message: String,
     },
+    /// 实例面板路由封装（ADR-0032 T7）：把 turn 事件投给指定实例的聊天桶。
+    /// `instance == "main"` 的事件**不封装**（保持既有协议形态，向后兼容）；
+    /// 任务实例的 turn 事件全部包在这一层里，前端解包后按实例分桶渲染。
+    Instance {
+        instance: String,
+        event: Box<WebEvent>,
+    },
 }
 
-/// turn 结束信号：on_done/on_error/on_interrupted 三个终态都发送
-#[derive(Debug, Clone, Copy)]
-pub struct TurnEndSignal;
+/// turn 结束信号：on_done/on_error/on_interrupted 三个终态都发送。
+/// 携带实例名（ADR-0032 T7）：一条连接可同时跑多个实例的 turn，
+/// WS 主循环据此从 per-instance turns 表里清掉对应条目。
+#[derive(Debug, Clone)]
+pub struct TurnEndSignal(pub String);
 
 /// Web 输出 sink：把 OutputSink 回调转成 WebEvent 推到 mpsc，WS 写 task 消费。
 /// 持有 turn-end sender 让 WS handler 主循环感知 turn 结束以清理 current_turn。
+/// `instance` 非 main 时事件包一层 `WebEvent::Instance`（前端按实例分桶）。
 pub struct WebSink {
     tx: mpsc::Sender<WebEvent>,
     turn_end_tx: mpsc::Sender<TurnEndSignal>,
+    instance: String,
 }
 
 impl WebSink {
     pub fn new(tx: mpsc::Sender<WebEvent>, turn_end_tx: mpsc::Sender<TurnEndSignal>) -> Self {
-        Self { tx, turn_end_tx }
+        Self {
+            tx,
+            turn_end_tx,
+            instance: "main".into(),
+        }
+    }
+
+    /// 指定实例的 sink（ADR-0032 T7）：该实例的 turn 事件打实例标。
+    pub fn for_instance(
+        tx: mpsc::Sender<WebEvent>,
+        turn_end_tx: mpsc::Sender<TurnEndSignal>,
+        instance: &str,
+    ) -> Self {
+        Self {
+            tx,
+            turn_end_tx,
+            instance: instance.to_string(),
+        }
+    }
+
+    async fn send_event(&self, ev: WebEvent) {
+        if self.instance == "main" {
+            let _ = self.tx.send(ev).await;
+        } else {
+            let _ = self
+                .tx
+                .send(WebEvent::Instance {
+                    instance: self.instance.clone(),
+                    event: Box::new(ev),
+                })
+                .await;
+        }
     }
 }
 
 #[async_trait]
 impl OutputSink for WebSink {
     async fn on_chunk(&mut self, delta: &str) {
-        let _ = self
-            .tx
-            .send(WebEvent::Chunk {
-                delta: delta.into(),
-            })
-            .await;
+        self.send_event(WebEvent::Chunk {
+            delta: delta.into(),
+        })
+        .await;
     }
     async fn on_reasoning(&mut self, delta: &str) {
-        let _ = self
-            .tx
-            .send(WebEvent::Reasoning {
-                delta: delta.into(),
-            })
-            .await;
+        self.send_event(WebEvent::Reasoning {
+            delta: delta.into(),
+        })
+        .await;
     }
     async fn on_tool_start(&mut self, name: &str) {
-        let _ = self
-            .tx
-            .send(WebEvent::ToolStart {
-                id: String::new(),
-                name: name.into(),
-            })
-            .await;
+        self.send_event(WebEvent::ToolStart {
+            id: String::new(),
+            name: name.into(),
+        })
+        .await;
     }
     async fn on_tool_result(&mut self, output: &str) {
-        let _ = self
-            .tx
-            .send(WebEvent::ToolResult {
-                id: String::new(),
-                output: output.into(),
-            })
-            .await;
+        self.send_event(WebEvent::ToolResult {
+            id: String::new(),
+            output: output.into(),
+        })
+        .await;
     }
     async fn on_media(&mut self, path: &str, kind: MediaKind) {
-        let _ = self
-            .tx
-            .send(WebEvent::Media {
-                path: path.into(),
-                kind,
-            })
-            .await;
+        self.send_event(WebEvent::Media {
+            path: path.into(),
+            kind,
+        })
+        .await;
     }
     async fn on_approval_request(&mut self, req: &crate::agent::sink::ApprovalRequest<'_>) {
-        let _ = self
-            .tx
-            .send(WebEvent::Approval {
-                id: req.id.into(),
-                tool_name: req.tool_name.into(),
-                summary: req.summary.into(),
-                within_workspace: req.within_workspace,
-            })
-            .await;
+        self.send_event(WebEvent::Approval {
+            id: req.id.into(),
+            tool_name: req.tool_name.into(),
+            summary: req.summary.into(),
+            within_workspace: req.within_workspace,
+        })
+        .await;
     }
     async fn on_done(&mut self) {
-        let _ = self.tx.send(WebEvent::Done).await;
-        let _ = self.turn_end_tx.send(TurnEndSignal).await;
+        self.send_event(WebEvent::Done).await;
+        let _ = self
+            .turn_end_tx
+            .send(TurnEndSignal(self.instance.clone()))
+            .await;
     }
     async fn on_error(&mut self, message: &str) {
+        self.send_event(WebEvent::Error {
+            message: message.into(),
+        })
+        .await;
         let _ = self
-            .tx
-            .send(WebEvent::Error {
-                message: message.into(),
-            })
+            .turn_end_tx
+            .send(TurnEndSignal(self.instance.clone()))
             .await;
-        let _ = self.turn_end_tx.send(TurnEndSignal).await;
     }
     async fn on_interrupted(&mut self) {
         // 与 QqSink 一致：只 log，不回推 WS 帧（前端按钮状态本身体现中断）
         tracing::info!("web turn interrupted");
-        let _ = self.turn_end_tx.send(TurnEndSignal).await;
+        let _ = self
+            .turn_end_tx
+            .send(TurnEndSignal(self.instance.clone()))
+            .await;
     }
 }
 
@@ -195,6 +234,8 @@ pub struct ChatIn {
     pub id: Option<String>,
     /// kind == "approval" 时是批准(true)还是拒绝(false)
     pub approve: Option<bool>,
+    /// 目标实例（ADR-0032 T7）：缺省 main；未知实例按需 spawn（幂等）
+    pub instance: Option<String>,
 }
 
 async fn handle_ws(socket: WebSocket, state: AppState) {
@@ -233,11 +274,10 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         let a = agent.lock().await;
         a.workspace.clone()
     };
-    // /steer 插话缓冲（plan.md #I）：与 main Agent 同一 Arc 的克隆，
-    // turn 持锁期间也能投递（不经 Agent 锁）。
-    let steer_buf = state.registry.steer_buffer.clone();
-    let stop: Arc<Notify> = Arc::new(Notify::new());
-    let mut current_turn: Option<tokio::task::JoinHandle<()>> = None;
+    // ADR-0032 T7：per-instance 并行 turn 表（实例名 → JoinHandle + stop 通知）。
+    // main 与任务实例同等对待：同一条连接里多个实例的 turn 可同时跑，
+    // 事件经 WebSink::for_instance 打实例标，前端按实例分桶渲染。
+    let mut turns: HashMap<String, (tokio::task::JoinHandle<()>, Arc<Notify>)> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -248,9 +288,28 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                         let chat: Option<ChatIn> = serde_json::from_str(&s).ok();
                         match chat.as_ref().map(|c| c.kind.as_str()) {
                             Some("ping") => { let _ = tx.send(WebEvent::Pong).await; }
+                            Some("open") => {
+                                // 实例 rail 点 dormant 线的唤醒帧（ADR-0032 T7）：
+                                // 只解析/按需 spawn，不开 turn；幂等，重复点无害。
+                                let chat: ChatIn = match serde_json::from_str(&s) {
+                                    Ok(c) => c,
+                                    Err(_) => continue,
+                                };
+                                let inst_name = chat.instance.clone().unwrap_or_else(|| "main".into());
+                                let reply = match resolve_instance(&state, &agent, &inst_name).await {
+                                    Ok(_) => format!("[instance \"{}\" ready]", inst_name),
+                                    Err(e) => format!("[error: {}]", e),
+                                };
+                                route_event(&tx, &inst_name, WebEvent::Side { text: reply }).await;
+                            }
                             Some("stop") => {
-                                if current_turn.is_some() {
-                                    stop.notify_one();
+                                let target = chat
+                                    .as_ref()
+                                    .and_then(|c| c.instance.as_deref())
+                                    .unwrap_or("main")
+                                    .to_string();
+                                if let Some((_, stop_n)) = turns.get(&target) {
+                                    stop_n.notify_one();
                                 }
                             }
                             Some("chat") | Some("approval") => {
@@ -261,9 +320,26 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                         continue;
                                     }
                                 };
+                                // T7：帧目标实例（缺省 main，旧前端不带该字段仍照常工作）。
+                                // 未知实例按需 spawn（幂等）：实例 rail 点击即开面板即跑。
+                                let inst_name = chat
+                                    .instance
+                                    .clone()
+                                    .unwrap_or_else(|| "main".into());
+                                let inst = match resolve_instance(&state, &agent, &inst_name).await {
+                                    Ok(i) => i,
+                                    Err(e) => {
+                                        route_event(&tx, &inst_name, WebEvent::Side {
+                                            text: format!("[error: {}]", e),
+                                        })
+                                        .await;
+                                        continue;
+                                    }
+                                };
                                 // 审批卡片按钮不新增解析逻辑：翻译成用户本来就会敲的
                                 // `/ok <id>` / `/deny <id>`，完整复用 slash → Resume 续跑
-                                // 通路（含"已解析/无此 pending"的既有提示）。
+                                // 通路（含"已解析/无此 pending"的既有提示）。审批注册在
+                                // 哪个实例的 gate 上，按钮就带哪个实例名回哪个实例。
                                 let mut text = match chat.kind.as_str() {
                                     "approval" => match (chat.id.as_deref(), chat.approve) {
                                         (Some(id), Some(approve)) if !id.is_empty() => {
@@ -281,24 +357,43 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                     _ => chat.text.clone().unwrap_or_default(),
                                 };
 
-                                // /steer（plan.md #I）：turn 运行中非阻塞投递（不经
-                                // Agent 锁，缓冲与 registry 共享 Arc）；空闲降级为普通
-                                // 消息（剥前缀继续走正常 chat 流程）。
+                                // /session 家族在 web 由 instance rail 取代（ADR-0032 T7）：
+                                // 切线 = 点面板，避免文本命令与 per-instance 路由语义打架。
+                                // CLI 频道仍走 try_session_command 的完整切线通路。
+                                {
+                                    let lower = text.trim().to_ascii_lowercase();
+                                    let is_session_cmd = lower == "/session"
+                                        || lower == "/sessions"
+                                        || lower == "/task"
+                                        || lower == "/tasks"
+                                        || lower.starts_with("/session ")
+                                        || lower.starts_with("/task ");
+                                    if is_session_cmd {
+                                        route_event(&tx, &inst_name, WebEvent::Side {
+                                            text: "[switch or create task instances from the rail on the left; /session is a CLI command]".into(),
+                                        }).await;
+                                        continue;
+                                    }
+                                }
+
+                                // /steer（plan.md #I）：投到目标实例自己的缓冲——
+                                // InstanceHandle.steer_buffer 与实例 agent 共享同一 Arc，
+                                // turn 持锁期间也能投递（不经 Agent 锁）。
                                 if let Some(rest) = crate::commands::slash::split_steer(&text) {
-                                    if current_turn.is_some() {
+                                    if turns.contains_key(&inst_name) {
                                         if rest.is_empty() {
-                                            let _ = tx.send(WebEvent::Side { text: "usage: /steer <message>".into() }).await;
+                                            route_event(&tx, &inst_name, WebEvent::Side { text: "usage: /steer <message>".into() }).await;
                                         } else {
-                                            steer_buf.lock().unwrap().push_back(rest.to_string());
-                                            let _ = tx.send(WebEvent::Side {
+                                            inst.steer_buffer.lock().unwrap().push_back(rest.to_string());
+                                            route_event(&tx, &inst_name, WebEvent::Side {
                                                 text: format!("[steer queued: {}]", rest),
                                             }).await;
                                         }
                                         // 不发 Done：turn 仍在运行，前端 busy 状态保持
                                         continue;
                                     } else if rest.is_empty() {
-                                        let _ = tx.send(WebEvent::Side { text: "usage: /steer <message>".into() }).await;
-                                        let _ = tx.send(WebEvent::Done).await;
+                                        route_event(&tx, &inst_name, WebEvent::Side { text: "usage: /steer <message>".into() }).await;
+                                        route_event(&tx, &inst_name, WebEvent::Done).await;
                                         continue;
                                     } else {
                                         // 空闲降级：剥前缀当普通消息跑（对齐 OpenClaw）
@@ -306,14 +401,14 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                     }
                                 }
 
-                                if current_turn.is_some() {
-                                    let _ = tx.send(WebEvent::Busy { reason: "another turn running".into() }).await;
+                                if turns.contains_key(&inst_name) {
+                                    route_event(&tx, &inst_name, WebEvent::Busy { reason: "another turn running".into() }).await;
                                 } else {
-                                    tracing::info!(text = %text, images = chat.images.as_ref().map(|v| v.len()).unwrap_or(0), "web received message");
+                                    tracing::info!(instance = %inst_name, text = %text, images = chat.images.as_ref().map(|v| v.len()).unwrap_or(0), "web received message");
 
-                                    // /btw（plan.md #H）：侧问走独立单轮调用，答案以
-                                    // Side 事件独立样式呈现，不进 turn 流、不污染上下文。
-                                    // （busy 情形已被上方 current_turn 分支拦成 Busy。）
+                                    // /btw（plan.md #H）：侧问走目标实例的 agent（独立单轮
+                                    // 调用，答案以 Side 事件独立样式呈现，不进 turn 流、
+                                    // 不污染该实例上下文）。
                                     if text.starts_with('/') && text.trim().to_ascii_lowercase().starts_with("/btw") {
                                         let q = text
                                             .trim()
@@ -325,57 +420,66 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                         let answer = if q.is_empty() {
                                             Err(anyhow::anyhow!("usage: /btw <question>"))
                                         } else {
-                                            let mut a = agent.lock().await;
+                                            let mut a = inst.agent.lock().await;
                                             crate::commands::slash::run_btw(&mut a, &q).await
                                         };
                                         let out = match answer {
                                             Ok(ans) => ans,
                                             Err(e) => format!("[btw failed: {}]", e),
                                         };
-                                        let _ = tx.send(WebEvent::Side { text: out }).await;
-                                        let _ = tx.send(WebEvent::Done).await;
+                                        route_event(&tx, &inst_name, WebEvent::Side { text: out }).await;
+                                        route_event(&tx, &inst_name, WebEvent::Done).await;
                                         continue;
                                     }
 
-                                    // 斜杠命令拦截（P4-d）：与其它频道一致地走审批/续跑流。
-                                    // web 用 type:"stop" 中断（见上面 "stop" 分支），不认 /stop，故排除之。
+                                    // 斜杠命令拦截（P4-d）：在目标实例的 agent 上执行，
+                                    // 与其它频道一致地走审批/续跑流。web 用 type:"stop"
+                                    // 中断（见上面 "stop" 分支），不认 /stop，故排除之。
                                     let slash_outcome = if text.starts_with('/') && !text.trim().eq_ignore_ascii_case("/stop") {
-                                        let mut a = agent.lock().await;
+                                        let mut a = inst.agent.lock().await;
                                         Some(try_handle(&text, &mut a, Some(state.registry.clone())).await)
                                     } else {
                                         None
                                     };
                                     match slash_outcome {
                                         Some(Ok(SlashOutcome::Handled(msg))) => {
-                                            let _ = tx.send(WebEvent::Chunk { delta: msg }).await;
-                                            let _ = tx.send(WebEvent::Done).await;
+                                            route_event(&tx, &inst_name, WebEvent::Chunk { delta: msg }).await;
+                                            route_event(&tx, &inst_name, WebEvent::Done).await;
                                         }
                                         Some(Ok(SlashOutcome::Resume { notice, message })) => {
                                             // 先回显结果摘要，再跑 continuation turn 让模型基于工具结果继续
-                                            let _ = tx.send(WebEvent::Chunk { delta: notice }).await;
-                                            let sink = Box::new(WebSink::new(tx.clone(), end_tx.clone()));
-                                            let stop_clone = stop.clone();
-                                            let agent_clone = agent.clone();
-                                            current_turn = Some(tokio::spawn(async move {
+                                            route_event(&tx, &inst_name, WebEvent::Chunk { delta: notice }).await;
+                                            let sink = Box::new(WebSink::for_instance(tx.clone(), end_tx.clone(), &inst_name));
+                                            let stop_n = Arc::new(Notify::new());
+                                            let stop_clone = stop_n.clone();
+                                            let agent_clone = inst.agent.clone();
+                                            let name = inst_name.clone();
+                                            let h = tokio::spawn(async move {
                                                 let _ = run_turn(agent_clone, ChatMessage::user(&message), "web".into(), sink, stop_clone).await;
-                                            }));
+                                            });
+                                            turns.insert(name, (h, stop_n));
                                         }
                                         Some(Ok(SlashOutcome::Exit)) => {
                                             // web 常驻连接，/exit 无意义，忽略
                                         }
                                         Some(Ok(SlashOutcome::NotSlash)) | None => {
-                                            // 普通消息：构造并跑一轮 agent turn
+                                            // 普通消息：构造并跑一轮 agent turn。上传图固定
+                                            // 解析到 main 家目录的 uploads/（/upload 只落那里，
+                                            // 与实例的 workspace_root 无关）。
                                             let user_msg = build_user_message(&text, chat.images.as_deref(), &workspace);
-                                            let sink = Box::new(WebSink::new(tx.clone(), end_tx.clone()));
-                                            let stop_clone = stop.clone();
-                                            let agent_clone = agent.clone();
-                                            current_turn = Some(tokio::spawn(async move {
+                                            let sink = Box::new(WebSink::for_instance(tx.clone(), end_tx.clone(), &inst_name));
+                                            let stop_n = Arc::new(Notify::new());
+                                            let stop_clone = stop_n.clone();
+                                            let agent_clone = inst.agent.clone();
+                                            let name = inst_name.clone();
+                                            let h = tokio::spawn(async move {
                                                 let _ = run_turn(agent_clone, user_msg, "web".into(), sink, stop_clone).await;
-                                            }));
+                                            });
+                                            turns.insert(name, (h, stop_n));
                                         }
                                         Some(Err(e)) => {
-                                            let _ = tx.send(WebEvent::Error { message: e.to_string() }).await;
-                                            let _ = tx.send(WebEvent::Done).await;
+                                            route_event(&tx, &inst_name, WebEvent::Error { message: e.to_string() }).await;
+                                            route_event(&tx, &inst_name, WebEvent::Done).await;
                                         }
                                     }
                                 }
@@ -387,18 +491,20 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     _ => {}
                 }
             }
-            // turn 结束信号
-            _ = end_rx.recv() => {
-                if let Some(h) = current_turn.take() {
-                    let _ = h.await;
+            // turn 结束信号：按实例名清理并行 turn 表
+            sig = end_rx.recv() => {
+                if let Some(TurnEndSignal(name)) = sig {
+                    if let Some((h, _)) = turns.remove(&name) {
+                        let _ = h.await;
+                    }
                 }
             }
         }
     }
 
-    // 清理
-    if let Some(h) = current_turn.take() {
-        stop.notify_one();
+    // 清理：停掉所有还在跑的实例 turn
+    for (_, (h, stop_n)) in turns {
+        stop_n.notify_one();
         let _ = h.await;
     }
     // 从 active_ws 注销（避免向已关闭连接广播）
@@ -412,6 +518,53 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 /// 一旦有人在这里加了新分支，测试会立刻发现两条通路已经分叉。
 fn approval_frame_command(id: &str, approve: bool) -> String {
     format!("/{} {}", if approve { "ok" } else { "deny" }, id)
+}
+
+/// 手写事件的路由规则：main 直发（向后兼容协议形态），任务实例包一层
+/// `WebEvent::Instance`。与 `WebSink::send_event` 必须保持同一规则——
+/// WS 循环里直接构造的 Side/Busy/Done 与 sink 产生的事件要落进同一个桶。
+async fn route_event(tx: &mpsc::Sender<WebEvent>, instance: &str, ev: WebEvent) {
+    if instance == "main" {
+        let _ = tx.send(ev).await;
+    } else {
+        let _ = tx
+            .send(WebEvent::Instance {
+                instance: instance.to_string(),
+                event: Box::new(ev),
+            })
+            .await;
+    }
+}
+
+/// 解析帧目标实例：已注册直接复用句柄；未注册且非 main 则按需 spawn
+/// （幂等，同名重复请求拿到同一句柄）。main 缺失属宿主装配错误，报错不造。
+async fn resolve_instance(
+    state: &AppState,
+    main: &Arc<Mutex<Agent>>,
+    name: &str,
+) -> anyhow::Result<Arc<InstanceHandle>> {
+    if let Some(h) = state.registry.instances.get(name).await {
+        return Ok(h);
+    }
+    if name == "main" {
+        anyhow::bail!("main instance is not registered (host setup error)");
+    }
+    if !valid_instance_name(name) {
+        anyhow::bail!("invalid instance name: 1-64 chars, no path separators or leading dots");
+    }
+    let a = main.lock().await;
+    let (h, _) = spawn_task_instance(&a, &state.registry.instances, name).await?;
+    Ok(h)
+}
+
+/// web 入向实例名门禁：实例名会拼进 `instances/<name>/` 目录路径（实例私有
+/// MEMORY），不能让它当路径片段用。CLI /session 命令的同类校验是历史欠账，
+/// 这里先把新开的 web 入口守住。
+fn valid_instance_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
 }
 
 /// 归一化上传图的路径形态为 `uploads/...`：`/upload` 回传的是带前缀的相对路径，
@@ -886,5 +1039,89 @@ mod tests {
             }
             other => panic!("expected Approval, got {other:?}"),
         }
+    }
+
+    // ---- ADR-0032 T7：实例路由协议 ----
+
+    /// 路由规则唯一性：手写事件（route_event）与 sink 事件（WebSink::send_event）
+    /// 必须同形——main 直发，任务实例包一层 Instance。
+    #[tokio::test]
+    async fn test_route_event_wraps_non_main() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WebEvent>(8);
+        route_event(&tx, "main", WebEvent::Done).await;
+        route_event(&tx, "foo", WebEvent::Done).await;
+        let first = rx.recv().await.unwrap();
+        assert!(
+            matches!(first, WebEvent::Done),
+            "main 事件必须直发，got {first:?}"
+        );
+        match rx.recv().await.unwrap() {
+            WebEvent::Instance { instance, event } => {
+                assert_eq!(instance, "foo");
+                assert!(matches!(*event, WebEvent::Done));
+            }
+            other => panic!("task 实例事件必须包 Instance，got {other:?}"),
+        }
+    }
+
+    /// Instance 封装的序列化形状：前端按 `type === 'instance'` 解包分桶，
+    /// 内层 event 保序透传。
+    #[test]
+    fn test_web_event_instance_serialization() {
+        let ev = WebEvent::Instance {
+            instance: "foo".into(),
+            event: Box::new(WebEvent::Chunk { delta: "hi".into() }),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains(r#""type":"instance""#), "{json}");
+        assert!(json.contains(r#""instance":"foo""#), "{json}");
+        assert!(json.contains(r#""type":"chunk""#), "{json}");
+    }
+
+    /// for_instance 的 sink 事件打实例标；TurnEndSignal 必须携带同名实例——
+    /// WS 主循环按它清理 per-instance turns 表，带错名字会泄漏句柄或误清别人。
+    #[tokio::test]
+    async fn test_web_sink_for_instance_tags_events_and_signal() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WebEvent>(8);
+        let (end_tx, mut end_rx) = tokio::sync::mpsc::channel::<TurnEndSignal>(8);
+        let mut sink = WebSink::for_instance(tx, end_tx, "research");
+        sink.on_chunk("hi").await;
+        sink.on_done().await;
+        match rx.recv().await.unwrap() {
+            WebEvent::Instance { instance, event } => {
+                assert_eq!(instance, "research");
+                assert!(matches!(*event, WebEvent::Chunk { .. }));
+            }
+            other => panic!("expected wrapped Chunk, got {other:?}"),
+        }
+        let sig = end_rx.recv().await.unwrap();
+        assert_eq!(sig.0, "research");
+    }
+
+    /// 实例名门禁：实例名拼进 `instances/<name>/` 目录路径，路径片段一律拒绝；
+    /// main 走专用分支不在此判（resolve_instance 先查 main）。
+    #[test]
+    fn test_valid_instance_name_rejects_path_shapes() {
+        assert!(valid_instance_name("research"));
+        assert!(valid_instance_name("refactor-2"));
+        assert!(!valid_instance_name(""));
+        assert!(!valid_instance_name(".."));
+        assert!(!valid_instance_name(".hidden"));
+        assert!(!valid_instance_name("a/b"));
+        assert!(!valid_instance_name("a\\b"));
+        assert!(!valid_instance_name("a:b"));
+        assert!(!valid_instance_name(&"x".repeat(65)));
+    }
+
+    /// 前端帧形状：open 帧（rail 点 dormant 线唤醒）带 instance、无 text。
+    #[test]
+    fn test_open_frame_deserializes() {
+        let c: ChatIn = serde_json::from_str(r#"{"type":"open","instance":"research"}"#)
+            .expect("open frame should parse");
+        assert_eq!(c.instance.as_deref(), Some("research"));
+        assert!(c.text.is_none());
+        // 缺省 instance 的旧帧仍解析（向后兼容）
+        let c: ChatIn = serde_json::from_str(r#"{"type":"chat","text":"hi"}"#).unwrap();
+        assert_eq!(c.instance, None);
     }
 }

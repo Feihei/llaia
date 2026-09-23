@@ -1,3 +1,4 @@
+use crate::agent::instances::InstanceKind;
 use crate::agent::AgentRegistry;
 use crate::channels::web::WebEvent;
 use crate::config::Config;
@@ -1966,8 +1967,13 @@ pub async fn get_todos(
 /// 卡片本身由 WS 的 `approval` 事件实时推入聊天流；本端点管的是**状态恢复**：
 /// pending 存在审批门控的内存里、不随页面生命周期走，页面刷新或换设备后
 /// live 事件流已断，前端靠它把仍待决的项补成卡片（并把已在别处解析掉的卡片置灰）。
-/// 动作不走这里——批准/拒绝是 WS 帧 `{type:"approval",id,approve}`，翻译成
+/// 动作不走这里——批准/拒绝是 WS 帧 `{type:"approval",id,approve,instance}`，翻译成
 /// `/ok <id>` / `/deny <id>` 复用既有 Resume 续跑通路（见 channels/web.rs）。
+///
+/// ADR-0032 T7：跨实例聚合——审批注册在哪个实例的 gate 上，卡片就归属哪个
+/// 实例的面板（每条带 `instance` 字段）。用 `try_lock` 而非 `lock`：turn 在跑的
+/// 实例此刻不可能有可决策的 pending（注册 pending 后本轮即 Done、锁随即释放），
+/// 跳过比让整个刷新请求挂到回合结束体面。
 pub async fn get_approvals(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1976,24 +1982,54 @@ pub async fn get_approvals(
     if !authorize(&state, &headers, &q) {
         return unauthorized();
     }
-    let agent = state.registry.main.lock().await;
-    let approvals: Vec<serde_json::Value> = agent
-        .approval_gate
-        .list()
-        .await
-        .into_iter()
-        .filter(|p| p.kind == crate::agent::approval::PendingKind::Approval)
-        .map(|p| {
-            serde_json::json!({
+    let mut approvals: Vec<serde_json::Value> = Vec::new();
+    let mut saw_main = false;
+    for inst in state.registry.instances.list().await {
+        if inst.kind == InstanceKind::Main {
+            saw_main = true;
+        }
+        let Ok(agent) = inst.agent.try_lock() else {
+            continue;
+        };
+        for p in agent
+            .approval_gate
+            .list()
+            .await
+            .into_iter()
+            .filter(|p| p.kind == crate::agent::approval::PendingKind::Approval)
+        {
+            approvals.push(serde_json::json!({
                 "id": p.id,
                 "tool_name": p.tool_name,
                 "summary": crate::agent::approval::summarize_args_for_display(&p.tool_name, &p.args),
                 "within_workspace": p.within_workspace,
                 "channel": p.channel,
                 "created_at": p.created_at,
-            })
-        })
-        .collect();
+                "instance": inst.name,
+            }));
+        }
+    }
+    if !saw_main {
+        // 未走 register_main 的装配路径（部分测试环境）：退回只看 main
+        let agent = state.registry.main.lock().await;
+        for p in agent
+            .approval_gate
+            .list()
+            .await
+            .into_iter()
+            .filter(|p| p.kind == crate::agent::approval::PendingKind::Approval)
+        {
+            approvals.push(serde_json::json!({
+                "id": p.id,
+                "tool_name": p.tool_name,
+                "summary": crate::agent::approval::summarize_args_for_display(&p.tool_name, &p.args),
+                "within_workspace": p.within_workspace,
+                "channel": p.channel,
+                "created_at": p.created_at,
+                "instance": "main",
+            }));
+        }
+    }
     let json = serde_json::json!({ "approvals": approvals });
     (
         StatusCode::OK,
@@ -2004,6 +2040,7 @@ pub async fn get_approvals(
 }
 
 /// GET /api/questions → 当前待回答问题（只读展示，ADR-0022）。
+/// T7：与 /api/approvals 同款跨实例聚合，问题卡片按 `instance` 归属面板。
 pub async fn get_questions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2012,22 +2049,106 @@ pub async fn get_questions(
     if !authorize(&state, &headers, &q) {
         return unauthorized();
     }
-    let agent = state.registry.main.lock().await;
-    let questions: Vec<serde_json::Value> = agent
-        .approval_gate
-        .questions()
-        .await
-        .iter()
-        .map(|p| {
-            serde_json::json!({
+    let mut questions: Vec<serde_json::Value> = Vec::new();
+    let mut saw_main = false;
+    for inst in state.registry.instances.list().await {
+        if inst.kind == InstanceKind::Main {
+            saw_main = true;
+        }
+        let Ok(agent) = inst.agent.try_lock() else {
+            continue;
+        };
+        for p in agent.approval_gate.questions().await.iter() {
+            questions.push(serde_json::json!({
                 "id": p.id,
                 "question": p.question,
                 "choices": p.choices,
                 "channel": p.channel,
-            })
-        })
-        .collect();
+                "instance": inst.name,
+            }));
+        }
+    }
+    if !saw_main {
+        let agent = state.registry.main.lock().await;
+        for p in agent.approval_gate.questions().await.iter() {
+            questions.push(serde_json::json!({
+                "id": p.id,
+                "question": p.question,
+                "choices": p.choices,
+                "channel": p.channel,
+                "instance": "main",
+            }));
+        }
+    }
     let json = serde_json::json!({ "questions": questions });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
+/// GET /api/instances → 实例 rail 数据（ADR-0032 T7）。
+///
+/// 注册实例（main + 已 spawn 的任务实例）与 dormant 任务线合成：rail 要同时
+/// 能点开在跑的面板、唤醒沉睡的线（唤醒 = 前端往该实例名发 chat 帧，WS 侧
+/// 按需 spawn）。main turn 在跑时不取 main 锁——dormant 列表短暂缺席可以接受，
+/// 不能让 rail 轮询挂到回合结束。
+pub async fn get_instances(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    // sqlite 任务线快照（session_uuid / last_activity 供前端标历史与排序）。
+    // try_lock + 立刻 clone Arc：不与 in-flight turn 互斥。
+    let mut task_rows: std::collections::HashMap<i64, crate::memory::sqlite::TaskSessionRow> =
+        std::collections::HashMap::new();
+    if let Ok(agent) = state.registry.main.try_lock() {
+        let store = agent.session_store.clone();
+        drop(agent);
+        if let Ok(tasks) = store.list_open_tasks() {
+            for t in tasks {
+                task_rows.insert(t.session_id, t);
+            }
+        }
+    }
+
+    let mut instances: Vec<serde_json::Value> = Vec::new();
+    let mut registered_sessions: Vec<i64> = Vec::new();
+    for inst in state.registry.instances.list().await {
+        registered_sessions.push(inst.session_id);
+        let busy = inst.busy_reason().await;
+        let row = task_rows.get(&inst.session_id);
+        instances.push(serde_json::json!({
+            "name": inst.name,
+            "kind": if inst.kind == InstanceKind::Main { "main" } else { "task" },
+            "busy": busy,
+            "bound_path": inst.bound_path.as_ref().map(|p| p.display().to_string()),
+            "session_uuid": row.map(|r| r.session_uuid.clone()),
+            "last_activity": row.map(|r| r.last_activity.clone()),
+            "dormant": false,
+        }));
+    }
+    // dormant 任务线：sqlite 里 open 的任务线减去已注册实例
+    for (sid, t) in &task_rows {
+        if registered_sessions.contains(sid) {
+            continue;
+        }
+        instances.push(serde_json::json!({
+            "name": t.title,
+            "kind": "task",
+            "busy": null,
+            "bound_path": t.bound_path,
+            "session_uuid": t.session_uuid,
+            "last_activity": t.last_activity,
+            "dormant": true,
+        }));
+    }
+    let json = serde_json::json!({ "instances": instances });
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
@@ -2746,6 +2867,8 @@ pub fn build_system_routes() -> axum::Router<AppState> {
             "/api/session-lines/switch",
             axum::routing::post(switch_session_line),
         )
+        // 实例 rail（ADR-0032 T7）：注册实例 + dormant 任务线合成
+        .route("/api/instances", axum::routing::get(get_instances))
         .route(
             "/api/sessions/{uuid}",
             axum::routing::get(get_session_detail).delete(delete_session_api),
@@ -3183,6 +3306,18 @@ model = "local.m"
                 && js.contains("checkUpdate")
                 && idx.contains("Check Updates"),
             "index.html/app.js missing plan.md W2 About update-check button (stale embed?)"
+        );
+        // ADR-0032 T7：实例 rail + 分桶前端必须随嵌入资源更新（rust-embed 编译期嵌入，
+        // 忘重启/重编译就会看到旧 LINES 栏）
+        assert!(
+            idx.contains("INSTANCES") && idx.contains("switchInstance"),
+            "index.html missing instance rail markup (stale embed?)"
+        );
+        assert!(
+            js.contains("activeInstance")
+                && js.contains("loadInstances")
+                && js.contains("routingInstance"),
+            "app.js missing instance bucket/routing logic (stale embed?)"
         );
 
         let css = StaticAsset::get("theme.css")

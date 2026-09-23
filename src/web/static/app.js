@@ -14,19 +14,29 @@ function llaiaApp() {
     authing: false,
     authError: '',
     // chat
-    messages: [],
     inputText: '',
     busy: false,
     uploaded: [],
+    // 实例面板（ADR-0032 T7）：消息按实例分桶，activeInstance 决定当前显示的桶。
+    // messages 升级为 getter/setter（桶切换 + WS 派发路由），旧的 this.messages
+    // 调用点零改动——读写都落在当前桶上。
+    activeInstance: 'main',
+    buckets: { main: [] },
+    routingInstance: null, // WS 事件派发中的目标桶名（后台实例事件不顶掉当前面板）
+    instances: [],         // /api/instances：rail 数据（活跃实例 + dormant 任务线）
+    perBusy: {},           // instance 名 → turn 是否在跑；busy 是当前面板的投影
     // 聊天历史是否已回放过（restoreChat 的幂等标记）。
     // 不能用 messages.length 代替：审批卡片可能先于回放落进消息流（WS 事件/刷新恢复），
     // 那样会误判成"已回放"，整个历史就再也不回放了。
     chatLoaded: false,
-    // 会话线（ADR-0031 WebUI 侧通路）：聊天左侧栏活跃线列表与当前所在线
-    sessionLines: [],
-    currentLine: null,
-    currentLineKind: 'main',
-    lineMsg: '',
+    get messages() {
+      const name = this.routingInstance || this.activeInstance;
+      if (!this.buckets[name]) this.buckets[name] = [];
+      return this.buckets[name];
+    },
+    set messages(v) {
+      this.buckets[this.routingInstance || this.activeInstance] = v;
+    },
     // WS 未就绪时的待发送帧队列（连上按序补发，见 flushOutbox）
     outbox: [],
     // todo (ADR-0024, read-only display; v1 no click-to-toggle from UI)
@@ -216,6 +226,8 @@ function llaiaApp() {
           this._questionTimer = setInterval(() => this.loadQuestions(), 5000);
           // 环境探测（P6）：变化低频，登录时加载一次 + 手动刷新
           this.loadEnv();
+          // 实例 rail（ADR-0032 T7）：登录即拉一次，之后在 done/切换时刷新
+          this.loadInstances();
           // 微信卡片：低频轮询登录进度（二维码只在等扫码期有意义；端点只读、开销极小）
           this.pollWechatLogin();
           this._wechatTimer = setInterval(() => this.pollWechatLogin(), 2500);
@@ -283,20 +295,31 @@ function llaiaApp() {
         const j = await r.json();
         const pendings = j.approvals || [];
         const alive = new Set(pendings.map(a => a.id));
+        // T7：卡片按实例归属补进各自的面板桶（id 全局唯一，alive 判定跨桶成立）
         for (const a of pendings) {
-          if (!this.messages.some(m => m.role === 'approval' && m.id === a.id)) {
-            this.messages.push({
-              role: 'approval',
-              id: a.id,
-              tool_name: a.tool_name,
-              summary: a.summary,
-              within_workspace: a.within_workspace,
-              state: 'pending',
-            });
-          }
+          const inst = a.instance || 'main';
+          this.routingInstance = inst;
+          try {
+            if (!this.messages.some(m => m.role === 'approval' && m.id === a.id)) {
+              this.messages.push({
+                role: 'approval',
+                id: a.id,
+                tool_name: a.tool_name,
+                summary: a.summary,
+                within_workspace: a.within_workspace,
+                instance: inst,
+                state: 'pending',
+              });
+            }
+          } finally { this.routingInstance = null; }
         }
-        for (const m of this.messages) {
-          if (m.role === 'approval' && m.state === 'pending' && !alive.has(m.id)) m.state = 'stale';
+        for (const name of Object.keys(this.buckets)) {
+          this.routingInstance = name;
+          try {
+            for (const m of this.messages) {
+              if (m.role === 'approval' && m.state === 'pending' && !alive.has(m.id)) m.state = 'stale';
+            }
+          } finally { this.routingInstance = null; }
         }
         this.scrollBottom();
       } catch (e) { /* 非致命：卡片保持 live 流状态 */ }
@@ -305,10 +328,13 @@ function llaiaApp() {
     //（后端把该帧翻译成同样的斜杠命令，走同一条 Resume 续跑通路）。
     resolveApproval(m, approve) {
       if (m.state !== 'pending') return;
-      const frame = { type: 'approval', id: m.id, approve: !!approve };
+      // 审批注册在哪个实例的 gate 上就回哪个实例（卡片自带归属；旧卡片退回当前面板）
+      const inst = m.instance || this.activeInstance;
+      const frame = { type: 'approval', id: m.id, approve: !!approve, instance: inst };
       if (this.wsOpen()) {
         this.ws.send(JSON.stringify(frame));
-        this.busy = true; // 解析后会启动续跑 turn（与手敲 /ok 一致）
+        this.perBusy[inst] = true; // 解析后会启动续跑 turn（与手敲 /ok 一致）
+        this.syncBusy();
       } else {
         // 与聊天帧同款队列：断线时先存着，连同 outbox 一起补发。
         // 不能走 queueFrame：它会插一条 [queued] 提示气泡，而卡片本身已表达意图。
@@ -323,7 +349,7 @@ function llaiaApp() {
     async switchChat() {
       if (!this.confirmLeaveRawActive()) return;
       this.tab = 'chat';
-      this.loadSessionLines();
+      this.loadInstances();
       // 面板空（页面刚加载/刷新过）时回放当前线尾部，恢复思考块与工具信息
       if (!this.chatLoaded) await this.restoreChat();
       // 回放之后再补审批卡片：pending 存在服务端内存里，刷新/换设备后 live 事件流已断
@@ -352,53 +378,46 @@ function llaiaApp() {
         this.scrollBottom();
       } catch (e) { /* 非致命：回放失败保持空聊天流 */ }
     },
-    async loadSessionLines() {
-      // turn 中抢不到 agent 锁，请求会挂着：busy 时直接跳过（下一轮轮询补上）
-      if (this.busy) return;
+    // ---- 实例 rail（ADR-0032 T7）：注册实例 + dormant 任务线，点击切换面板 ----
+    async loadInstances() {
+      // turn 中 /api/instances 用 try_lock 不会挂（busy 实例照常列出），无需短路
+      if (!this.authed) return;
       try {
-        const r = await this.apiFetch('/api/session-lines');
-        if (!this.authed) return;
-        if (r.ok) {
-          const j = await r.json();
-          this.sessionLines = j.tasks || [];
-          this.currentLine = (j.current && j.current.session_uuid) || null;
-          this.currentLineKind = (j.current && j.current.title) ? 'task' : 'main';
-        }
-      } catch (e) { /* 非致命：左侧栏保持上次内容 */ }
+        const r = await this.apiFetch('/api/instances');
+        if (!r.ok) return;
+        const j = await r.json();
+        this.instances = j.instances || [];
+      } catch (e) { /* 非致命：rail 保持上次内容 */ }
     },
-    async switchLine(target) {
-      if (this.busy) {
-        this.lineMsg = 'Agent turn in progress — wait for it to finish before switching lines.';
-        return;
+    syncBusy() { this.busy = !!this.perBusy[this.activeInstance]; },
+    async switchInstance(name) {
+      if (name === this.activeInstance) return;
+      this.activeInstance = name;
+      this.syncBusy();
+      const inst = this.instances.find(i => i.name === name);
+      // dormant 线：先发 open 帧唤醒（后端按需 spawn，幂等；turn 不开）
+      if (inst && inst.dormant && this.wsOpen()) {
+        this.ws.send(JSON.stringify({ type: 'open', instance: name }));
       }
+      // 空桶回放该线尾部（只读填充 UI；agent 上下文的回灌在 spawn 时由后端做）
+      if ((this.buckets[name] || []).length === 0 && inst && inst.session_uuid) {
+        await this.restoreInstanceChat(name, inst.session_uuid);
+      }
+      this.scrollBottom();
+    },
+    async restoreInstanceChat(name, uuid) {
       try {
-        const r = await this.apiFetch('/api/session-lines/switch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ target }),
-        });
-        const j = await r.json().catch(() => ({}));
-        if (!this.authed) return;
-        if (r.ok) {
-          // 切线：本地消息流换成目标线尾部（后端已把同一批消息回灌进 agent 上下文）。
-          // assistant 带 reasoning（思考折叠块），tool 行渲染成工具结果气泡（2026-09-11）。
-          this.messages = [];
-          this.chatLoaded = true; // 回灌即本次回放，别再触发 restoreChat
-          for (const m of (j.backfill || [])) {
-            if (m.role === 'user') this.messages.push({ role: 'user', text: m.content });
-            else if (m.role === 'assistant') this.messages.push({ role: 'assistant', text: m.content, reasoning: m.reasoning || '', streaming: false });
-            else if (m.role === 'tool' && m.content) this.messages.push({ role: 'tool', text: 'tool', output: m.content });
-          }
-          this.messages.push({ role: 'tool', text: j.notice || '[switched]' });
-          this.lineMsg = '';
-          this.scrollBottom();
-        } else {
-          this.lineMsg = j.error || ('switch failed: HTTP ' + r.status);
+        const r = await this.apiFetch('/api/sessions/' + encodeURIComponent(uuid));
+        if (!r.ok) return;
+        const j = await r.json();
+        const b = this.buckets[name] || (this.buckets[name] = []);
+        for (const m of ((j.messages || []).slice(-40))) {
+          if (m.role === 'user') b.push({ role: 'user', text: m.content });
+          else if (m.role === 'assistant') b.push({ role: 'assistant', text: m.content, reasoning: m.reasoning_content || '', tool_calls: m.tool_calls || [], streaming: false });
+          else if (m.role === 'tool' && m.content) b.push({ role: 'tool', text: 'tool', output: m.content });
         }
-      } catch (e) {
-        this.lineMsg = 'switch failed: ' + e.message;
-      }
-      this.loadSessionLines();
+        this.scrollBottom();
+      } catch (e) { /* 非致命：回放失败保持空聊天流 */ }
     },
 
     // ---- 会话历史（P5 W1） ----
@@ -594,9 +613,11 @@ function llaiaApp() {
       this.ws.onmessage = (e) => this.onWsMessage(JSON.parse(e.data));
       this.ws.onclose = () => {
         // 连接一断就没有事件回流，本地 busy 必须落下：否则 Send 停在 Steer 态、
-        // Stop 又对着死 socket 抛异常，整个界面看起来毫无反应（服务端重启即此场景）
-        if (this.busy) {
+        // Stop 又对着死 socket 抛异常，整个界面看起来毫无反应（服务端重启即此场景）。
+        // 所有实例的 turn 都因此失联，per-instance busy 一并清空。
+        if (this.busy || Object.keys(this.perBusy).some(k => this.perBusy[k])) {
           this.busy = false;
+          this.perBusy = {};
           this.messages.push({ role: 'tool', text: '[disconnected] live stream lost, reconnecting…' });
           this.scrollBottom();
         }
@@ -611,6 +632,22 @@ function llaiaApp() {
       }, 25000);
     },
     onWsMessage(ev) {
+      // 实例路由封装（ADR-0032 T7）：任务实例的 turn 事件包在 type:"instance" 里，
+      // main 不封装（向后兼容）。派发期间 routingInstance 指向目标桶，
+      // this.messages（getter）即目标桶——所有 handler 零改动落对桶。
+      if (ev.type === 'instance') {
+        this.routingInstance = ev.instance;
+        try {
+          this.dispatchWs(ev.event);
+        } finally {
+          this.routingInstance = null;
+        }
+        return;
+      }
+      this.dispatchWs(ev);
+    },
+    dispatchWs(ev) {
+      const inst = this.routingInstance || 'main';
       switch (ev.type) {
         case 'auth_ok':
           this.flushOutbox();
@@ -666,6 +703,7 @@ function llaiaApp() {
               tool_name: ev.tool_name,
               summary: ev.summary,
               within_workspace: ev.within_workspace,
+              instance: inst,
               state: 'pending',
             });
           }
@@ -675,15 +713,20 @@ function llaiaApp() {
         case 'done':
         case 'error':
         case 'interrupted':
-          this.busy = false;
+          // 终态落目标实例的 busy；busy 是当前面板的投影，后台实例结束不惊动当前面板
+          this.perBusy[inst] = false;
+          if (inst === this.activeInstance) this.busy = false;
           // 流式结束：所有 assistant 消息退出流式态（思考块从自动展开切回折叠）
           this.messages.forEach(m => { if (m.role === 'assistant') m.streaming = false; });
           if (ev.type === 'error') this.messages.push({ role: 'tool', text: `[error: ${ev.message}]` });
           if (ev.type === 'interrupted') this.messages.push({ role: 'tool', text: '[Interrupted]' });
-          // 回合结束立即刷左侧栏：回合内可能用 /session 新建/切换了会话线
-          this.loadSessionLines();
+          // 回合结束立即刷实例 rail：turn 里可能新建/唤醒了实例（/session 等路径）
+          this.loadInstances();
           break;
-        case 'busy': alert(ev.reason); break;
+        case 'busy':
+          // 后台实例的 Busy 提示不弹窗（它的面板当前不可见，弹了让人莫名其妙）
+          if (inst === this.activeInstance) alert(ev.reason);
+          break;
         case 'side':
           // /btw 侧问答案、/steer 回执：独立样式消息块，不参与 turn 事件流
           this.messages.push({ role: 'side', text: ev.text });
@@ -710,7 +753,9 @@ function llaiaApp() {
         role: 'tool',
         text: `[queued] waiting for the WebSocket to connect (${this.outbox.length} frame(s))…`,
       });
-      this.busy = true;
+      // 帧带 instance（缺省 main）：补发成功即该实例 turn 在跑
+      this.perBusy[frame.instance || 'main'] = true;
+      this.syncBusy();
       this.scrollBottom();
       if (this.authed) this.connectWs();
     },
@@ -719,15 +764,20 @@ function llaiaApp() {
       while (this.outbox.length && this.wsOpen()) {
         const f = this.outbox.shift();
         this.ws.send(JSON.stringify(f));
-        if (f.type === 'chat' || f.type === 'approval') sentChat = true;
+        if (f.type === 'chat' || f.type === 'approval') {
+          sentChat = true;
+          this.perBusy[f.instance || 'main'] = true;
+        }
       }
       // 排队帧落地即等于 turn 已在跑：期间 onclose 可能把 busy 落下过，这里补回来，
-      // 否则按钮停在 Send 态、Stop 又禁用，用户没法中断自己刚补发的消息
-      if (sentChat) this.busy = true;
+      // 否则按钮停在 Send 态、Stop 又禁用，用户没法中断自己刚补发的消息。
+      // busy 是当前面板的投影——补发的帧可能属于别的实例面板。
+      if (sentChat) this.syncBusy();
     },
     send() {
       const text = this.inputText.trim();
       if (!text && this.uploaded.length === 0) return;
+      const inst = this.activeInstance; // 帧发到当前面板的实例（ADR-0032 T7）
       const lc = text.toLowerCase();
       if (this.busy && lc === '/stop') {
         this.inputText = '';
@@ -743,7 +793,7 @@ function llaiaApp() {
           this.messages.push({ role: 'tool', text: '[not sent] a running turn only takes text — your images are still attached; wait for it to finish or press Stop.' });
         }
         const payload = lc.startsWith('/steer') ? text : '/steer ' + text;
-        const frame = { type: 'chat', text: payload };
+        const frame = { type: 'chat', text: payload, instance: inst };
         this.inputText = '';
         if (this.wsOpen()) {
           this.ws.send(JSON.stringify(frame));
@@ -755,7 +805,7 @@ function llaiaApp() {
         return;
       }
       const imgs = this.uploaded.map(u => u.path);
-      const frame = { type: 'chat', text: this.inputText, images: imgs };
+      const frame = { type: 'chat', text: this.inputText, images: imgs, instance: inst };
       // images 一并挂到本地消息上：否则对话流里看不见自己发了什么图
       const bubble = { role: 'user', text: this.inputText, images: imgs };
       this.inputText = '';
@@ -764,6 +814,7 @@ function llaiaApp() {
       if (this.wsOpen()) {
         this.ws.send(JSON.stringify(frame));
         this.messages.push(bubble);
+        this.perBusy[inst] = true;
         this.busy = true;
       } else {
         this.queueFrame(frame, bubble);
@@ -771,7 +822,7 @@ function llaiaApp() {
       this.scrollBottom();
     },
     stop() {
-      const frame = { type: 'stop' };
+      const frame = { type: 'stop', instance: this.activeInstance };
       if (this.wsOpen()) { this.ws.send(JSON.stringify(frame)); return; }
       this.queueFrame(frame, { role: 'tool', text: '[queued] stop' });
     },
@@ -803,7 +854,11 @@ function llaiaApp() {
         return html;
       } catch { return text; }
     },
-    scrollBottom() { this.$nextTick(() => { const el = this.$refs.messages; if (el) el.scrollTop = el.scrollHeight; }); },
+    scrollBottom() {
+      // 后台实例的事件正在派发：滚的是当前可见面板，别被后台桶的节奏带走
+      if (this.routingInstance && this.routingInstance !== this.activeInstance) return;
+      this.$nextTick(() => { const el = this.$refs.messages; if (el) el.scrollTop = el.scrollHeight; });
+    },
 
     // ---- config ----
     async switchConfig(skipRawGuard) {

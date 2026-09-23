@@ -77,21 +77,22 @@
   <main>
     <div id="chat-pane" class="pane" :class="{active: tab==='chat'}">
       <div class="chat-layout">
-        <!-- 左侧栏：活跃会话线（ADR-0031 WebUI 侧通路）。主线固定置顶，点击切换；
-             切换时后端同步把工作目录切到该线的 bound_path（回主线恢复家目录） -->
+        <!-- 左侧栏：实例 rail（ADR-0032 T7）。main 置顶（后端 list 已保证），
+             点击切换面板；dormant 任务线点击即发 open 帧唤醒（按需 spawn，幂等）。
+             每个实例独立消息桶与并行 turn，互不阻塞 -->
         <aside class="session-rail">
-          <div class="session-rail-head">&#x276F; LINES <button class="inline-add" @click="loadSessionLines()">Refresh</button></div>
-          <div class="session-rail-item" :class="{active: currentLineKind === 'main'}" @click="switchLine('main')" title="Back to the main line">
-            <div class="line-title">&#8962; Main</div>
-          </div>
-          <template x-for="t in sessionLines" :key="t.session_uuid">
-            <div class="session-rail-item" :class="{active: currentLine === t.session_uuid}" @click="switchLine(t.session_uuid)" :title="t.bound_path || t.channel">
-              <div class="line-title" x-text="t.title"></div>
-              <div class="line-sub" x-text="t.bound_path || t.channel"></div>
+          <div class="session-rail-head">&#x276F; INSTANCES <button class="inline-add" @click="loadInstances()">Refresh</button></div>
+          <template x-for="it in instances" :key="it.name">
+            <div class="session-rail-item" :class="{active: activeInstance === it.name}" @click="switchInstance(it.name)" :title="it.bound_path || it.kind">
+              <div class="line-title">
+                <span x-text="it.kind === 'main' ? '\u2302 Main' : it.name"></span>
+                <span x-show="it.busy" title="turn running" style="color: var(--accent, #e8a33d);">&#9203;</span>
+              </div>
+              <div class="line-sub" x-text="(it.dormant ? '[dormant] ' : '') + (it.bound_path || it.kind)"></div>
             </div>
           </template>
-          <div class="hint" x-show="sessionLines.length === 0">No session lines yet. Type <code>/session &lt;name&gt;</code> in chat to start one.</div>
-          <div class="err" x-show="lineMsg" x-text="lineMsg"></div>
+          <div class="hint" x-show="instances.length === 0">No instances loaded — press Refresh.</div>
+          <div class="hint">Pick an instance to chat in parallel; a dormant line wakes on first message.</div>
         </aside>
         <div class="chat-main">
       <div class="messages" x-ref="messages">
