@@ -1,6 +1,20 @@
 use crate::agent::MediaKind;
 use async_trait::async_trait;
 
+/// 一次待审批请求的展示信息（channel 据此渲染按钮/卡片；不做展示的 sink 忽略）。
+///
+/// 与 `PendingApproval` 的区别：这里是**事件时刻的快照**，只带渲染所需字段，
+/// 不触碰审批门控（门控有独立锁，sink 侧不该再去锁它）。
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalRequest<'a> {
+    pub id: &'a str,
+    pub tool_name: &'a str,
+    /// 单行参数摘要（已按 `SUMMARY_CAP` 截断）
+    pub summary: &'a str,
+    /// 操作是否落在 workspace / 受信目录内
+    pub within_workspace: bool,
+}
+
 /// channel 输出抽象：`run_turn` 按 `TurnEvent` 回调 sink 的方法。
 /// channel 只实现"如何输出"，不关心 agent task 调度和中断。
 #[async_trait]
@@ -14,8 +28,9 @@ pub trait OutputSink: Send {
     /// 工具执行结果（默认忽略，CLI override 打印预览）
     async fn on_tool_result(&mut self, _output: &str) {}
     /// 一次待审批操作已注册（默认忽略；QQ 频道 override 记录 id，
-    /// 回合结束时在审批提示消息上附「通过/拒绝」按钮键盘）
-    async fn on_approval_request(&mut self, _id: &str) {}
+    /// 回合结束时在审批提示消息上附「通过/拒绝」按钮键盘；WebUI override
+    /// 推一个 approval 事件，前端在聊天流内渲染审批卡片）
+    async fn on_approval_request(&mut self, _req: &ApprovalRequest<'_>) {}
     /// 长任务心跳：按墙钟每 KEEPALIVE_INTERVAL 回调一次，`elapsed` 为自本轮开始
     /// 的累计时长（默认忽略；交互聊天频道 override 发送 "still working" 提示，
     /// 避免用户误以为卡死）。与事件是否密集无关，保证长循环也会周期提示。
@@ -122,7 +137,20 @@ pub async fn run_turn(
                             TurnEvent::Reasoning { delta } => sink.on_reasoning(&delta).await,
                             TurnEvent::ToolStart { name, .. } => sink.on_tool_start(&name).await,
                             TurnEvent::ToolResult { output, .. } => sink.on_tool_result(&output).await,
-                            TurnEvent::ApprovalRequested { id } => sink.on_approval_request(&id).await,
+                            TurnEvent::ApprovalRequested {
+                                id,
+                                tool_name,
+                                summary,
+                                within_workspace,
+                            } => {
+                                sink.on_approval_request(&ApprovalRequest {
+                                    id: &id,
+                                    tool_name: &tool_name,
+                                    summary: &summary,
+                                    within_workspace,
+                                })
+                                .await
+                            }
                             TurnEvent::MediaOutput { path, kind } => sink.on_media(&path, kind).await,
                             TurnEvent::Done => break,
                             TurnEvent::Error { message } => {

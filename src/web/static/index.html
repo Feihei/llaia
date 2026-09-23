@@ -145,6 +145,28 @@
                 <pre class="tool-result-body" x-show="open" x-text="m.output"></pre>
               </div>
             </template>
+            <!-- 审批卡片（P7）：待审批操作渲染成卡片，按钮等价于 /ok <id> / /deny <id>
+                 （后端把该 WS 帧翻译成同样的斜杠命令，复用 Resume 续跑通路） -->
+            <template x-if="m.role==='approval'">
+              <div class="approval-card" :class="'ack-' + m.state">
+                <div class="approval-head">
+                  <b class="approval-tool" x-text="m.tool_name"></b>
+                  <span class="approval-scope" x-text="m.within_workspace ? 'within workspace' : 'outside workspace'"></span>
+                  <span class="approval-id" x-text="m.id"></span>
+                </div>
+                <div class="approval-summary" x-text="m.summary"></div>
+                <div class="approval-actions" x-show="m.state === 'pending'">
+                  <!-- busy 期间禁用：后端在 turn 运行中会回 Busy 拒绝该帧（与普通消息同口径），
+                       禁掉比"点了被弹窗拒绝、卡片却已显示已批准"诚实 -->
+                  <button type="button" class="approval-btn approval-btn--ok" :disabled="busy" @click="resolveApproval(m, true)">Approve</button>
+                  <button type="button" class="approval-btn approval-btn--deny" :disabled="busy" @click="resolveApproval(m, false)">Deny</button>
+                </div>
+                <div class="approval-verdict" x-show="m.state !== 'pending'"
+                     x-text="m.state === 'approved' ? '✓ approved'
+                       : m.state === 'denied' ? '✗ denied'
+                       : 'already resolved elsewhere'"></div>
+              </div>
+            </template>
             <template x-if="m.role==='side'"><div><b>Side:</b> <div class="side-body" x-html="renderMd(m.text)"></div></div></template>
             <template x-if="m.role==='media'">
               <div>
@@ -461,10 +483,15 @@
                   <span class="hint" x-show="probeMsg[pid]" x-text="probeMsg[pid]"></span>
                   <div class="probe-models" x-show="probeModels[pid] && probeModels[pid].length">
                     <template x-for="m in probeModels[pid]" :key="m.id">
-                      <div class="probe-model-row">
+                      <div class="probe-model-row" :class="{ 'probe-model-row--added': isModelAdded(pid, m.id) }">
                         <label>
-                          <input type="checkbox" :checked="probeChecked[pid] && probeChecked[pid][m.id]" @change="toggleProbeModel(pid, m.id)">
+                          <!-- 已在 models 里的模型：勾上并禁用（一眼看出哪些加过了，避免重复添加） -->
+                          <input type="checkbox"
+                                 :checked="isModelAdded(pid, m.id) || (probeChecked[pid] && probeChecked[pid][m.id])"
+                                 :disabled="isModelAdded(pid, m.id)"
+                                 @change="toggleProbeModel(pid, m.id)">
                           <span x-text="m.id"></span>
+                          <span class="probe-added" x-show="isModelAdded(pid, m.id)">✓ added</span>
                         </label>
                       </div>
                     </template>

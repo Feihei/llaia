@@ -331,8 +331,12 @@ pub fn approval_decision(
     }
 }
 
+/// 审批提示与 WebUI 审批卡片共用的单行参数摘要字符上限。
+/// QQ/Telegram 等频道会把超长内容拆成多条消息，卡片也会被撑爆。
+pub const SUMMARY_CAP: usize = 220;
+
 /// 简短摘要（用于提示文案），避免把完整 JSON 推给用户
-fn summarize_args(tool_name: &str, args: &Value) -> String {
+pub fn summarize_args(tool_name: &str, args: &Value) -> String {
     match tool_name {
         "file_write" | "file_edit" => args
             .get("path")
@@ -372,6 +376,19 @@ fn summarize_args(tool_name: &str, args: &Value) -> String {
     }
 }
 
+/// 单行参数摘要（已按 `SUMMARY_CAP` 截断）。
+///
+/// 审批提示文案与 WebUI 审批卡片共用同一份摘要，避免两处各截各的、长度口径漂移。
+pub fn summarize_args_for_display(tool_name: &str, args: &Value) -> String {
+    let summary = summarize_args(tool_name, args);
+    if summary.chars().count() > SUMMARY_CAP {
+        let cut: String = summary.chars().take(SUMMARY_CAP).collect();
+        format!("{}… (truncated)", cut)
+    } else {
+        summary
+    }
+}
+
 /// 生成给用户看的审批提示文案
 pub fn format_approval_prompt(
     tool_name: &str,
@@ -379,19 +396,11 @@ pub fn format_approval_prompt(
     workspace: &Path,
     within_workspace: bool,
 ) -> String {
-    let summary = summarize_args(tool_name, args);
+    let summary = summarize_args_for_display(tool_name, args);
     let scope = if within_workspace {
         "within workspace"
     } else {
         "outside workspace"
-    };
-    // 长命令/长路径截断到一行，避免 QQ/Telegram 等频道把审批提示拆成多条消息。
-    const SUMMARY_CAP: usize = 220;
-    let summary = if summary.chars().count() > SUMMARY_CAP {
-        let cut: String = summary.chars().take(SUMMARY_CAP).collect();
-        format!("{}… (truncated)", cut)
-    } else {
-        summary
     };
     let target = match tool_name {
         "terminal" => format!("command: {}", summary),
@@ -440,6 +449,52 @@ pub fn validate_move_target(path: &str) -> anyhow::Result<PathBuf> {
     // 结果（无前缀）永远 starts_with 不匹配 → moved 目录内的绝对路径操作全部误判为
     // workspace 外、每次都要审批。统一剥掉前缀，保持普通路径形态。
     Ok(crate::path_guard::strip_verbatim_prefix(&canon))
+}
+
+// ---- 摘要文案：平台无关，单独放一个门（下面的 tests 模块被门控到 Windows） ----
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 摘要口径是审批提示与 WebUI 卡片共用的：短值原样、长值截断到 SUMMARY_CAP
+    /// 并带省略标记（两处各截各的会让同一操作在 CLI 与卡片上显示得不一样）。
+    #[test]
+    fn test_summarize_args_for_display_caps_long_values() {
+        let short = summarize_args_for_display("file_write", &json!({ "path": "a.txt" }));
+        assert_eq!(short, "a.txt");
+
+        let long_path = "x".repeat(SUMMARY_CAP + 50);
+        let capped = summarize_args_for_display("file_write", &json!({ "path": long_path }));
+        assert!(capped.ends_with("… (truncated)"), "{capped}");
+        assert_eq!(
+            capped.chars().count(),
+            SUMMARY_CAP + "… (truncated)".chars().count()
+        );
+
+        // 到上限为止不截断（边界不多不少）
+        let exact = "y".repeat(SUMMARY_CAP);
+        let out = summarize_args_for_display("file_write", &json!({ "path": exact }));
+        assert_eq!(out.chars().count(), SUMMARY_CAP);
+
+        // terminal 的摘要就是命令本身；无匹配字段时退化成 `k=v` / `…`
+        assert_eq!(
+            summarize_args_for_display("terminal", &json!({ "command": "ls -la" })),
+            "ls -la"
+        );
+        assert_eq!(summarize_args_for_display("foo", &json!({})), "…");
+    }
+
+    /// 审批提示文案与卡片摘要同源：提示里的 target 必须包含同一份摘要，
+    /// 否则卡片和 CLI 会各说各话。
+    #[test]
+    fn test_format_approval_prompt_reuses_summary() {
+        let args = json!({ "command": "rm -rf /tmp/x" });
+        let prompt = format_approval_prompt("terminal", &args, Path::new("/ws"), false);
+        assert!(prompt.contains("command: rm -rf /tmp/x"), "{prompt}");
+        assert!(prompt.contains("outside workspace"), "{prompt}");
+        assert!(prompt.contains("/ok"), "{prompt}");
+    }
 }
 
 // 本模块的测试全部依赖 Windows 路径/行为（verbatim `\\?\`、真实 WAS 目录命令），

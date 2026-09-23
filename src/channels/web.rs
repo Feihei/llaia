@@ -43,6 +43,13 @@ pub enum WebEvent {
         path: String,
         kind: MediaKind,
     },
+    /// 待审批操作（聊天流内渲染为审批卡片；按钮等价于 /ok /deny 文本命令）
+    Approval {
+        id: String,
+        tool_name: String,
+        summary: String,
+        within_workspace: bool,
+    },
     Done,
     Error {
         message: String,
@@ -130,6 +137,17 @@ impl OutputSink for WebSink {
             })
             .await;
     }
+    async fn on_approval_request(&mut self, req: &crate::agent::sink::ApprovalRequest<'_>) {
+        let _ = self
+            .tx
+            .send(WebEvent::Approval {
+                id: req.id.into(),
+                tool_name: req.tool_name.into(),
+                summary: req.summary.into(),
+                within_workspace: req.within_workspace,
+            })
+            .await;
+    }
     async fn on_done(&mut self) {
         let _ = self.tx.send(WebEvent::Done).await;
         let _ = self.turn_end_tx.send(TurnEndSignal).await;
@@ -173,6 +191,10 @@ pub struct ChatIn {
     pub kind: String,
     pub text: Option<String>,
     pub images: Option<Vec<String>>,
+    /// kind == "approval" 时的待审批 id
+    pub id: Option<String>,
+    /// kind == "approval" 时是批准(true)还是拒绝(false)
+    pub approve: Option<bool>,
 }
 
 async fn handle_ws(socket: WebSocket, state: AppState) {
@@ -231,9 +253,33 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                     stop.notify_one();
                                 }
                             }
-                            Some("chat") => {
-                                let chat: ChatIn = serde_json::from_str(&s).unwrap();
-                                let mut text = chat.text.unwrap_or_default();
+                            Some("chat") | Some("approval") => {
+                                let chat: ChatIn = match serde_json::from_str(&s) {
+                                    Ok(c) => c,
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "web chat frame malformed");
+                                        continue;
+                                    }
+                                };
+                                // 审批卡片按钮不新增解析逻辑：翻译成用户本来就会敲的
+                                // `/ok <id>` / `/deny <id>`，完整复用 slash → Resume 续跑
+                                // 通路（含"已解析/无此 pending"的既有提示）。
+                                let mut text = match chat.kind.as_str() {
+                                    "approval" => match (chat.id.as_deref(), chat.approve) {
+                                        (Some(id), Some(approve)) if !id.is_empty() => {
+                                            approval_frame_command(id, approve)
+                                        }
+                                        _ => {
+                                            tracing::warn!(
+                                                id = ?chat.id,
+                                                approve = ?chat.approve,
+                                                "web approval frame missing id/approve"
+                                            );
+                                            continue;
+                                        }
+                                    },
+                                    _ => chat.text.clone().unwrap_or_default(),
+                                };
 
                                 // /steer（plan.md #I）：turn 运行中非阻塞投递（不经
                                 // Agent 锁，缓冲与 registry 共享 Arc）；空闲降级为普通
@@ -358,6 +404,14 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     // 从 active_ws 注销（避免向已关闭连接广播）
     state.active_ws.lock().await.remove(&ws_id);
     write_task.abort();
+}
+
+/// 审批卡片按钮帧 → 等价的斜杠命令文本（`/ok <id>` / `/deny <id>`）。
+///
+/// 抽成纯函数是为了可测：这段映射是「卡片按钮」与「手敲 /ok」同源同路的唯一保证，
+/// 一旦有人在这里加了新分支，测试会立刻发现两条通路已经分叉。
+fn approval_frame_command(id: &str, approve: bool) -> String {
+    format!("/{} {}", if approve { "ok" } else { "deny" }, id)
 }
 
 /// 归一化上传图的路径形态为 `uploads/...`：`/upload` 回传的是带前缀的相对路径，
@@ -763,5 +817,74 @@ mod tests {
         assert_eq!(upload_rel("uploads\\a.png"), "uploads/a.png");
         // 中间的 ParentDir 原样透传，交给 resolve_within 的门禁拒绝
         assert_eq!(upload_rel("uploads/../secret"), "uploads/../secret");
+    }
+
+    // ---- P7 审批卡片 ----
+
+    /// 按钮帧必须精确翻译成用户本来就会敲的那两条命令：卡片不是第二条通路，
+    /// 只是 /ok /deny 的另一个入口。
+    #[test]
+    fn test_approval_frame_maps_to_slash_command() {
+        assert_eq!(approval_frame_command("ap7", true), "/ok ap7");
+        assert_eq!(approval_frame_command("ap7", false), "/deny ap7");
+        assert_eq!(approval_frame_command("q3", true), "/ok q3");
+    }
+
+    /// 前端帧形状：{type:"approval", id, approve}（text/images 缺省）。
+    #[test]
+    fn test_approval_frame_deserializes() {
+        let c: ChatIn = serde_json::from_str(r#"{"type":"approval","id":"ap2","approve":true}"#)
+            .expect("approval frame should parse");
+        assert_eq!(c.kind, "approval");
+        assert_eq!(c.id.as_deref(), Some("ap2"));
+        assert_eq!(c.approve, Some(true));
+        assert!(c.text.is_none());
+        // 裸 /ok 文本帧不受影响
+        let c: ChatIn = serde_json::from_str(r#"{"type":"chat","text":"/ok"}"#).unwrap();
+        assert!(c.id.is_none() && c.approve.is_none());
+    }
+
+    #[test]
+    fn test_web_event_approval_serialization() {
+        let ev = WebEvent::Approval {
+            id: "ap1".into(),
+            tool_name: "terminal".into(),
+            summary: "rm -rf build".into(),
+            within_workspace: false,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains(r#""type":"approval""#), "{json}");
+        assert!(json.contains(r#""id":"ap1""#), "{json}");
+        assert!(json.contains(r#""tool_name":"terminal""#), "{json}");
+        assert!(json.contains(r#""within_workspace":false"#), "{json}");
+    }
+
+    /// sink 回调携带的字段必须原样落到 WS 事件上（卡片渲染靠它，不再回头查门控）。
+    #[tokio::test]
+    async fn test_web_sink_approval_request_to_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WebEvent>(8);
+        let (end_tx, _end_rx) = tokio::sync::mpsc::channel::<TurnEndSignal>(8);
+        let mut sink = WebSink::new(tx, end_tx);
+        sink.on_approval_request(&crate::agent::sink::ApprovalRequest {
+            id: "ap9",
+            tool_name: "file_write",
+            summary: "/etc/hosts",
+            within_workspace: true,
+        })
+        .await;
+        match rx.recv().await.unwrap() {
+            WebEvent::Approval {
+                id,
+                tool_name,
+                summary,
+                within_workspace,
+            } => {
+                assert_eq!(id, "ap9");
+                assert_eq!(tool_name, "file_write");
+                assert_eq!(summary, "/etc/hosts");
+                assert!(within_workspace);
+            }
+            other => panic!("expected Approval, got {other:?}"),
+        }
     }
 }

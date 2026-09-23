@@ -201,6 +201,40 @@ option { background: var(--bg-input); color: var(--text); }
 /* /btw 侧问与 /steer 回执：独立样式（plan.md #H），区别于 assistant 正文 */
 .msg.side      { background: rgba(154, 108, 245, .06); border-left-color: #9a6cf5; }
 .msg.side .side-body { font-size: 13px; }
+/* 审批卡片（P7）：与 tool/side 同类「非正文」消息块，琥珀色标出「需要你决定」 */
+.msg.approval  { background: rgba(216, 178, 90, .06); border-left-color: var(--amber); }
+.approval-card { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.approval-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.approval-tool { color: var(--amber); }
+.approval-scope {
+  font-size: 11px; color: var(--text-faint);
+  border: 1px solid var(--border-bright); padding: 0 6px;
+}
+.approval-id { font-size: 11px; color: var(--text-faint); margin-left: auto; }
+.approval-summary {
+  font-size: 12px; color: var(--text-dim);
+  background: var(--bg-input); border: 1px solid var(--border);
+  padding: 6px 8px; white-space: pre-wrap; word-break: break-all;
+  max-height: 120px; overflow: auto;
+}
+.approval-actions { display: flex; gap: 8px; }
+.approval-btn {
+  font-family: var(--mono); font-size: 12px; cursor: pointer;
+  padding: 3px 14px; background: transparent; border: 1px solid var(--border-bright);
+}
+.approval-btn--ok   { color: var(--green); border-color: var(--green-deep); background: rgba(56, 224, 123, .08); }
+.approval-btn--ok:hover   { background: var(--green); color: #04140a; }
+.approval-btn--deny { color: var(--red); border-color: #6b2c2c; background: rgba(255, 95, 86, .08); }
+.approval-btn--deny:hover { background: var(--red); color: #1a0404; }
+.approval-btn:disabled { opacity: .4; cursor: not-allowed; }
+.approval-btn:disabled:hover { background: transparent; }
+.approval-btn--ok:disabled:hover { color: var(--green); }
+.approval-btn--deny:disabled:hover { color: var(--red); }
+/* 已决/失效：卡片只留一行结论，不再有可点按钮 */
+.approval-verdict { font-size: 12px; color: var(--text-faint); }
+.ack-approved .approval-verdict { color: var(--green); }
+.ack-denied   .approval-verdict { color: var(--red); }
+.ack-approved, .ack-denied { opacity: .72; }
 .msg img { max-width: 400px; border-radius: 0; border: 1px solid var(--border-bright); }
 /* 会话详情的消息 manage 模式：勾选框 + 选中高亮 */
 .msg-check { position: absolute; left: -6px; top: 4px; z-index: 2; }
@@ -841,3 +875,6 @@ white-space: pre-wrap; word-break: break-word;
 }
 #config-pane .probe-model-row { padding: 2px 0; font-size: 13px; }
 #config-pane .probe-model-row label { display: flex; align-items: center; gap: 8px; color: var(--text); }
+/* 已加入 models 的探测项：行常驻（用户能确认"这条加过了"），灰化 + 绿勾 */
+#config-pane .probe-model-row--added label { color: var(--text-faint); }
+#config-pane .probe-model-row--added .probe-added { color: var(--green); font-size: 11px; }

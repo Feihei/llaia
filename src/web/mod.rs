@@ -1961,6 +1961,48 @@ pub async fn get_todos(
         .into_response()
 }
 
+/// GET /api/approvals → 当前待审批操作列表（P7 AC1，WebUI 审批卡片）。
+///
+/// 卡片本身由 WS 的 `approval` 事件实时推入聊天流；本端点管的是**状态恢复**：
+/// pending 存在审批门控的内存里、不随页面生命周期走，页面刷新或换设备后
+/// live 事件流已断，前端靠它把仍待决的项补成卡片（并把已在别处解析掉的卡片置灰）。
+/// 动作不走这里——批准/拒绝是 WS 帧 `{type:"approval",id,approve}`，翻译成
+/// `/ok <id>` / `/deny <id>` 复用既有 Resume 续跑通路（见 channels/web.rs）。
+pub async fn get_approvals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let agent = state.registry.main.lock().await;
+    let approvals: Vec<serde_json::Value> = agent
+        .approval_gate
+        .list()
+        .await
+        .into_iter()
+        .filter(|p| p.kind == crate::agent::approval::PendingKind::Approval)
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "tool_name": p.tool_name,
+                "summary": crate::agent::approval::summarize_args_for_display(&p.tool_name, &p.args),
+                "within_workspace": p.within_workspace,
+                "channel": p.channel,
+                "created_at": p.created_at,
+            })
+        })
+        .collect();
+    let json = serde_json::json!({ "approvals": approvals });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        json.to_string(),
+    )
+        .into_response()
+}
+
 /// GET /api/questions → 当前待回答问题（只读展示，ADR-0022）。
 pub async fn get_questions(
     State(state): State<AppState>,
@@ -2689,6 +2731,8 @@ pub fn build_system_routes() -> axum::Router<AppState> {
         .route("/api/todos", axum::routing::get(get_todos))
         // ask_user（ADR-0022）：只读展示当前待回答问题
         .route("/api/questions", axum::routing::get(get_questions))
+        // P7 AC1：待审批操作列表（聊天流审批卡片的状态恢复；动作走 WS approval 帧）
+        .route("/api/approvals", axum::routing::get(get_approvals))
         .route("/api/env", axum::routing::get(get_env))
         .route("/api/env/refresh", axum::routing::post(refresh_env))
         .route("/api/doctor", axum::routing::get(get_doctor))
@@ -3157,6 +3201,24 @@ model = "local.m"
         assert!(
             css.contains(".scroll-fab") && idx.contains("scroll-fab"),
             "index.html/theme.css missing plan.md W1 session scroll-fab buttons (stale embed?)"
+        );
+        // P7 审批卡片：聊天流内的批准/拒绝按钮（index.html 模板 + 前端解析 + 样式）
+        assert!(
+            idx.contains("approval-card") && idx.contains("resolveApproval"),
+            "index.html missing P7 approval-card markup (stale embed?)"
+        );
+        assert!(
+            js.contains("resolveApproval") && js.contains("loadApprovals"),
+            "app.js missing P7 approval-card handlers (stale embed?)"
+        );
+        assert!(
+            css.contains(".approval-card") && css.contains(".approval-btn--deny"),
+            "theme.css missing P7 approval-card styles (stale embed?)"
+        );
+        // probe 列表标记已添加模型（避免同一 model 被反复加入配置）
+        assert!(
+            idx.contains("isModelAdded") && js.contains("isModelAdded"),
+            "index.html/app.js missing probe already-added marking (stale embed?)"
         );
     }
 

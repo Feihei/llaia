@@ -18,6 +18,10 @@ function llaiaApp() {
     inputText: '',
     busy: false,
     uploaded: [],
+    // 聊天历史是否已回放过（restoreChat 的幂等标记）。
+    // 不能用 messages.length 代替：审批卡片可能先于回放落进消息流（WS 事件/刷新恢复），
+    // 那样会误判成"已回放"，整个历史就再也不回放了。
+    chatLoaded: false,
     // 会话线（ADR-0031 WebUI 侧通路）：聊天左侧栏活跃线列表与当前所在线
     sessionLines: [],
     currentLine: null,
@@ -263,19 +267,68 @@ function llaiaApp() {
       } catch (e) { /* 非致命：UI 静默跳过 */ }
     },
 
+    // ---- 审批卡片（P7）：待审批列表 / 批准 / 拒绝 ----
+    // 卡片本体来自 WS 的 approval 事件；本方法只做两件事：补齐刷新后丢失的卡片、
+    // 把已在别处（CLI/QQ 文本命令）解析掉的卡片置为失效，避免点了没反应。
+    async loadApprovals() {
+      if (!this.authed) return;
+      try {
+        const r = await this.apiFetch('/api/approvals');
+        if (!r.ok) return;
+        const j = await r.json();
+        const pendings = j.approvals || [];
+        const alive = new Set(pendings.map(a => a.id));
+        for (const a of pendings) {
+          if (!this.messages.some(m => m.role === 'approval' && m.id === a.id)) {
+            this.messages.push({
+              role: 'approval',
+              id: a.id,
+              tool_name: a.tool_name,
+              summary: a.summary,
+              within_workspace: a.within_workspace,
+              state: 'pending',
+            });
+          }
+        }
+        for (const m of this.messages) {
+          if (m.role === 'approval' && m.state === 'pending' && !alive.has(m.id)) m.state = 'stale';
+        }
+        this.scrollBottom();
+      } catch (e) { /* 非致命：卡片保持 live 流状态 */ }
+    },
+    // 批准/拒绝：按钮不新增协议，只是把 /ok <id> / /deny <id> 变成一次点击
+    //（后端把该帧翻译成同样的斜杠命令，走同一条 Resume 续跑通路）。
+    resolveApproval(m, approve) {
+      if (m.state !== 'pending') return;
+      const frame = { type: 'approval', id: m.id, approve: !!approve };
+      if (this.wsOpen()) {
+        this.ws.send(JSON.stringify(frame));
+        this.busy = true; // 解析后会启动续跑 turn（与手敲 /ok 一致）
+      } else {
+        // 与聊天帧同款队列：断线时先存着，连同 outbox 一起补发。
+        // 不能走 queueFrame：它会插一条 [queued] 提示气泡，而卡片本身已表达意图。
+        this.outbox.push(frame);
+        if (this.authed) this.connectWs();
+      }
+      m.state = approve ? 'approved' : 'denied';
+      this.scrollBottom();
+    },
+
     // ---- 聊天左侧栏：活跃会话线（ADR-0031 WebUI 侧通路） ----
     async switchChat() {
       if (!this.confirmLeaveRawActive()) return;
       this.tab = 'chat';
       this.loadSessionLines();
       // 面板空（页面刚加载/刷新过）时回放当前线尾部，恢复思考块与工具信息
-      if (!this.messages.length) this.restoreChat();
+      if (!this.chatLoaded) await this.restoreChat();
+      // 回放之后再补审批卡片：pending 存在服务端内存里，刷新/换设备后 live 事件流已断
+      this.loadApprovals();
     },
     // 页面（重）进入时回放当前线尾部：chat 面板本身是纯 live 流（WS 连接无历史回放），
     // 离开再回来只剩新事件。这里拉 session 详情（含 reasoning + tool_calls + tool 结果）
     // 渲染尾部 40 条；busy 时跳过（turn 中抢不到 agent 锁，请求会挂住）。
     async restoreChat() {
-      if (this.busy || !this.authed || this.messages.length) return;
+      if (this.busy || !this.authed || this.chatLoaded) return;
       try {
         const lr = await this.apiFetch('/api/session-lines');
         if (!lr || !lr.ok) return;
@@ -290,6 +343,7 @@ function llaiaApp() {
           else if (m.role === 'assistant') this.messages.push({ role: 'assistant', text: m.content, reasoning: m.reasoning_content || '', tool_calls: m.tool_calls || [], streaming: false });
           else if (m.role === 'tool' && m.content) this.messages.push({ role: 'tool', text: 'tool', output: m.content });
         }
+        this.chatLoaded = true;
         this.scrollBottom();
       } catch (e) { /* 非致命：回放失败保持空聊天流 */ }
     },
@@ -324,6 +378,7 @@ function llaiaApp() {
           // 切线：本地消息流换成目标线尾部（后端已把同一批消息回灌进 agent 上下文）。
           // assistant 带 reasoning（思考折叠块），tool 行渲染成工具结果气泡（2026-09-11）。
           this.messages = [];
+          this.chatLoaded = true; // 回灌即本次回放，别再触发 restoreChat
           for (const m of (j.backfill || [])) {
             if (m.role === 'user') this.messages.push({ role: 'user', text: m.content });
             else if (m.role === 'assistant') this.messages.push({ role: 'assistant', text: m.content, reasoning: m.reasoning || '', streaming: false });
@@ -552,7 +607,11 @@ function llaiaApp() {
     },
     onWsMessage(ev) {
       switch (ev.type) {
-        case 'auth_ok': this.flushOutbox(); break;
+        case 'auth_ok':
+          this.flushOutbox();
+          // 重连后补一次审批卡片状态（断线期间注册/解析的 pending 不会重放）
+          if (this.chatLoaded) this.loadApprovals();
+          break;
         case 'auth_failed':
           this.forceLogin('WebSocket authentication failed, check token');
           break;
@@ -592,6 +651,22 @@ function llaiaApp() {
         case 'media':
           this.messages.push({ role: 'media', path: ev.path, kind: ev.kind });
           break;
+        case 'approval': {
+          // 审批卡片（P7）：聊天流内渲染待审批操作 + 批准/拒绝按钮。
+          // 同一 id 只渲染一次（重连/刷新恢复时可能重复收到）。
+          if (!this.messages.some(m => m.role === 'approval' && m.id === ev.id)) {
+            this.messages.push({
+              role: 'approval',
+              id: ev.id,
+              tool_name: ev.tool_name,
+              summary: ev.summary,
+              within_workspace: ev.within_workspace,
+              state: 'pending',
+            });
+          }
+          this.scrollBottom();
+          break;
+        }
         case 'done':
         case 'error':
         case 'interrupted':
@@ -639,7 +714,7 @@ function llaiaApp() {
       while (this.outbox.length && this.wsOpen()) {
         const f = this.outbox.shift();
         this.ws.send(JSON.stringify(f));
-        if (f.type === 'chat') sentChat = true;
+        if (f.type === 'chat' || f.type === 'approval') sentChat = true;
       }
       // 排队帧落地即等于 turn 已在跑：期间 onclose 可能把 busy 落下过，这里补回来，
       // 否则按钮停在 Send 态、Stop 又禁用，用户没法中断自己刚补发的消息
@@ -947,28 +1022,42 @@ function llaiaApp() {
       }
     },
     toggleProbeModel(pid, id) {
+      // 已添加项不可勾选：勾了也会被 addProbedModels 过滤掉，
+      // 让它可勾只会制造"点了却什么也没发生"的错觉。
+      if (this.isModelAdded(pid, id)) return;
       if (!this.probeChecked[pid]) this.probeChecked[pid] = {};
       this.probeChecked[pid][id] = !this.probeChecked[pid][id];
+    },
+    // 该探测项是否已在 models 里（按 model id 判重，与 alias 无关）。
+    // 判重的意义：同一条 model 能以不同 alias 反复加进配置，配置里出现
+    // 两份指向同一 model 的条目——旧行为就是这么加上去的。
+    isModelAdded(pid, modelId) {
+      const models = (this.cfg.provider[pid] && this.cfg.provider[pid].model) || {};
+      return Object.values(models).some(m => m && m.model === modelId);
     },
     // 生成模型 alias：取 id 尾段 sanitize，冲突时加序号
     genModelAlias(pid, id) {
       let base = id.split(/[/:]/).pop().toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
       if (!base) base = 'model';
-      const models = this.cfg.provider[pid].model;
+      const models = this.cfg.provider[pid].model || {};
       let alias = base, n = 2;
       while (models[alias]) { alias = base + '_' + n; n++; }
       return alias;
     },
     addProbedModels(pid) {
       const checked = this.probeChecked[pid] || {};
-      const picked = (this.probeModels[pid] || []).filter(m => checked[m.id]);
+      // 只加"勾选 且 尚未添加"的：已添加项即使残留勾选态也不重复写入
+      const picked = (this.probeModels[pid] || []).filter(m => checked[m.id] && !this.isModelAdded(pid, m.id));
       if (picked.length === 0) { alert('Select at least one model first.'); return; }
-      const models = this.cfg.provider[pid].model;
+      const p = this.cfg.provider[pid];
+      if (!p.model) p.model = {};
+      const models = p.model;
       for (const m of picked) {
         const alias = this.genModelAlias(pid, m.id);
         models[alias] = { model: m.id, context_size: null, max_tokens: null, enabled: true };
       }
-      this.probeModels[pid] = [];
+      // 列表留着不关：刚加入的项就地变成「已添加 ✓」，用户看得见结果，
+      // 也就不会以为"没生效"再点一次（重复添加正是旧行为）。
       this.probeChecked[pid] = {};
       this.probeMsg[pid] = picked.length + ' model(s) added — click Save to persist.';
     },

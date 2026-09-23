@@ -218,9 +218,18 @@ pub async fn execute_tool_calls(
                             delta: prompt.clone(),
                         })
                         .await;
-                    // 通知 channel 有待审批注册（QQ 频道据此在回合输出上附按钮键盘）
+                    // 通知 channel 有待审批注册：QQ 据此在回合输出上附按钮键盘，
+                    // WebUI 据此在聊天流内渲染审批卡片（工具名 + 摘要取自同一次注册）。
                     let _ = tx
-                        .send(TurnEvent::ApprovalRequested { id: id.clone() })
+                        .send(TurnEvent::ApprovalRequested {
+                            id: id.clone(),
+                            tool_name: call.name.clone(),
+                            summary: crate::agent::approval::summarize_args_for_display(
+                                &call.name,
+                                &call.arguments,
+                            ),
+                            within_workspace,
+                        })
                         .await;
                 }
                 if let Some(a) = &audit {

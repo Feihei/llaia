@@ -1603,11 +1603,12 @@ impl OutputSink for QqSink {
         }
     }
     // 待审批注册：记录 id，on_done 时附按钮键盘（runner 只在 NeedsApproval 分支发送）；
-    // 同时把本回合锚点（原用户消息 msg_id）登记给按钮点击续跑用
-    async fn on_approval_request(&mut self, id: &str) {
-        self.approval_ids.push(id.to_string());
+    // 同时把本回合锚点（原用户消息 msg_id）登记给按钮点击续跑用。
+    // 工具名/摘要只服务于 WebUI 卡片，QQ 只用 id。
+    async fn on_approval_request(&mut self, req: &crate::agent::sink::ApprovalRequest<'_>) {
+        self.approval_ids.push(req.id.to_string());
         self.qq
-            .remember_approval_anchor(id, self.anchor.clone())
+            .remember_approval_anchor(req.id, self.anchor.clone())
             .await;
     }
     async fn on_media(&mut self, path: &str, kind: MediaKind) {
