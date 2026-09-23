@@ -169,6 +169,11 @@ function llaiaApp() {
     probeMsg: {},
     probeModels: {},
     probeChecked: {},
+    // probe 列表展开态（与结果缓存解耦：收起不清结果，再点主按钮直接展开不重探测）
+    probeOpen: {},
+    // 手动添加模型 id 的输入框与勾选态（probe-section 底部，端点不支持 /models 时唯一入口）
+    probeManual: {},
+    probeManualChecked: {},
     // 单模型可用性探测：key = "pid.alias"，值 ''=未测 / 'ok'=可用 / 'error: <msg>'=不可用。
     // 注意：状态 map 用 probeStatus，不能叫 probeModel——与方法 probeModel() 同名会互相覆盖
     //（同 runProbe/probeModels 的冲突，见上）。
@@ -1007,19 +1012,50 @@ function llaiaApp() {
         if (j.ok) {
           this.probeModels = { ...this.probeModels, [pid]: j.models || [] };
           this.probeChecked = { ...this.probeChecked, [pid]: {} };
+          this.probeOpen = { ...this.probeOpen, [pid]: true };
           this.probeMsg = { ...this.probeMsg, [pid]: this.probeModels[pid].length
             ? this.probeModels[pid].length + ' model(s) found'
             : 'Endpoint reachable but no models returned.' };
         } else {
           this.probeModels = { ...this.probeModels, [pid]: [] };
+          this.probeOpen = { ...this.probeOpen, [pid]: true };
           this.probeMsg = { ...this.probeMsg, [pid]: 'Probe failed: ' + (j.error || r.status) };
         }
       } catch (e) {
         this.probeModels = { ...this.probeModels, [pid]: [] };
+        this.probeOpen = { ...this.probeOpen, [pid]: true };
         this.probeMsg = { ...this.probeMsg, [pid]: 'Probe failed: ' + e.message };
       } finally {
         this.probing = null;
       }
+    },
+    // 主按钮两态：列表展开 →「Add selected」（点击批量加入，含底部手填项）；
+    // 收起 →「＋ Add model」（有缓存结果就直接展开，没有才发探测请求）。
+    // 以 probeOpen 为准而非"有无结果"：探测失败时列表开着但为空，手填项仍走 Add selected。
+    probeSectionLabel(pid) {
+      if (this.probeOpen[pid]) {
+        const checked = this.probeChecked[pid] || {};
+        let n = Object.keys(checked).filter(id => checked[id] && !this.isModelAdded(pid, id)).length;
+        const manualId = (this.probeManual[pid] || '').trim();
+        if (this.probeManualChecked[pid] && manualId && !this.isModelAdded(pid, manualId)) n++;
+        return 'Add selected' + (n ? ' (' + n + ')' : '');
+      }
+      return '+ Add model';
+    },
+    probeSectionClick(pid) {
+      if (this.probing === pid) return;
+      if (this.probeOpen[pid]) {
+        this.addProbedModels(pid);
+      } else {
+        const has = this.probeModels[pid] && this.probeModels[pid].length;
+        this.probeOpen = { ...this.probeOpen, [pid]: true };
+        // 缓存还在就只展开，不重探测（base_url/key 变了用列表内的 ↻ re-probe）
+        if (!has) this.runProbe(pid);
+      }
+    },
+    toggleProbeOpen(pid) {
+      const cur = !!this.probeOpen[pid];
+      this.probeOpen = { ...this.probeOpen, [pid]: !cur };
     },
     toggleProbeModel(pid, id) {
       // 已添加项不可勾选：勾了也会被 addProbedModels 过滤掉，
@@ -1048,18 +1084,34 @@ function llaiaApp() {
       const checked = this.probeChecked[pid] || {};
       // 只加"勾选 且 尚未添加"的：已添加项即使残留勾选态也不重复写入
       const picked = (this.probeModels[pid] || []).filter(m => checked[m.id] && !this.isModelAdded(pid, m.id));
-      if (picked.length === 0) { alert('Select at least one model first.'); return; }
+      // 手填项与探测项同一条路径：勾选 + 输入非空 即纳入本次批量
+      const manualId = (this.probeManual[pid] || '').trim();
+      const manualPicked = (this.probeManualChecked[pid] && manualId && !this.isModelAdded(pid, manualId))
+        ? [manualId] : [];
+      if (picked.length === 0 && manualPicked.length === 0) { alert('Select at least one model first.'); return; }
       const p = this.cfg.provider[pid];
       if (!p.model) p.model = {};
       const models = p.model;
-      for (const m of picked) {
-        const alias = this.genModelAlias(pid, m.id);
-        models[alias] = { model: m.id, context_size: null, max_tokens: null, enabled: true };
+      for (const id of [...picked.map(m => m.id), ...manualPicked]) {
+        const alias = this.genModelAlias(pid, id);
+        models[alias] = { model: id, context_size: null, max_tokens: null, enabled: true };
       }
-      // 列表留着不关：刚加入的项就地变成「已添加 ✓」，用户看得见结果，
-      // 也就不会以为"没生效"再点一次（重复添加正是旧行为）。
+      // 加完收起列表、清勾选（含手填框）：按钮回到「＋ Add model」两态起点；想确认加过了
+      // 可再展开（就地显示 ✓ added）。probeMsg 仍提示 N added — click Save to persist.
+      this.probeOpen = { ...this.probeOpen, [pid]: false };
       this.probeChecked[pid] = {};
-      this.probeMsg[pid] = picked.length + ' model(s) added — click Save to persist.';
+      this.probeManual = { ...this.probeManual, [pid]: '' };
+      this.probeManualChecked = { ...this.probeManualChecked, [pid]: false };
+      this.probeMsg[pid] = (picked.length + manualPicked.length) + ' model(s) added — click Save to persist.';
+    },
+    // 手填输入联动：非空自动勾选（纳入 Add selected），清空自动取消
+    syncProbeManual(pid) {
+      const v = (this.probeManual[pid] || '').trim();
+      this.probeManualChecked = { ...this.probeManualChecked, [pid]: v.length > 0 };
+    },
+    toggleProbeManual(pid) {
+      const cur = !!this.probeManualChecked[pid];
+      this.probeManualChecked = { ...this.probeManualChecked, [pid]: !cur };
     },
 
     // ---- 单模型可用性探测（每个已配置 model 的 Probe 按钮） ----

@@ -475,27 +475,48 @@
                 <div class="form-row"><label>type</label><input x-model="p.type"></div>
                 <div class="form-row"><label>base_url</label><input x-model="p.base_url" style="width:400px"></div>
                 <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
-                <!-- 模型探测（P5 W2）：向 OpenAI 兼容端点 GET /models 拉取列表，勾选后加入 Models -->
+                <!-- 模型添加（P5 W2）：按钮两态——「＋ Add model」点一下探测端点 /models 并展开列表，
+                     列表展开时按钮变成「Add selected」批量加入（探测勾选项 + 底部手填项同一条路径）。
+                     折叠三角标在主按钮左侧（有缓存结果才显示）；原独立 Probe 按钮已并入。 -->
                 <div class="probe-section">
-                  <button type="button" class="inline-add" @click="runProbe(pid)" :disabled="probing===pid">
-                    <span x-text="probing===pid ? 'Probing…' : 'Probe models'"></span>
+                  <button type="button" class="probe-fold" x-show="probeModels[pid] && probeModels[pid].length"
+                          @click="toggleProbeOpen(pid)" x-text="probeOpen[pid] ? '▾' : '▸'"
+                          title="expand / collapse probe list"></button>
+                  <button type="button" class="inline-add" @click="probeSectionClick(pid)" :disabled="probing===pid">
+                    <span x-text="probing===pid ? 'Probing…' : probeSectionLabel(pid)"></span>
                   </button>
                   <span class="hint" x-show="probeMsg[pid]" x-text="probeMsg[pid]"></span>
-                  <div class="probe-models" x-show="probeModels[pid] && probeModels[pid].length">
-                    <template x-for="m in probeModels[pid]" :key="m.id">
-                      <div class="probe-model-row" :class="{ 'probe-model-row--added': isModelAdded(pid, m.id) }">
-                        <label>
-                          <!-- 已在 models 里的模型：勾上并禁用（一眼看出哪些加过了，避免重复添加） -->
-                          <input type="checkbox"
-                                 :checked="isModelAdded(pid, m.id) || (probeChecked[pid] && probeChecked[pid][m.id])"
-                                 :disabled="isModelAdded(pid, m.id)"
-                                 @change="toggleProbeModel(pid, m.id)">
-                          <span x-text="m.id"></span>
-                          <span class="probe-added" x-show="isModelAdded(pid, m.id)">✓ added</span>
-                        </label>
+                  <div class="probe-models" x-show="probeOpen[pid]">
+                    <template x-if="probeModels[pid] && probeModels[pid].length">
+                      <div>
+                        <div class="probe-models-head">
+                          <button type="button" class="linklike" @click="runProbe(pid)" :disabled="probing===pid">↻ re-probe</button>
+                        </div>
+                        <!-- 行容器交给 auto-fill 网格：按窗口宽度自动分栏（窄则退回单列） -->
+                        <div class="probe-model-grid">
+                          <template x-for="m in probeModels[pid]" :key="m.id">
+                            <div class="probe-model-row" :class="{ 'probe-model-row--added': isModelAdded(pid, m.id) }">
+                              <label>
+                                <!-- 已在 models 里的模型：勾上并禁用（一眼看出哪些加过了，避免重复添加） -->
+                                <input type="checkbox"
+                                       :checked="isModelAdded(pid, m.id) || (probeChecked[pid] && probeChecked[pid][m.id])"
+                                       :disabled="isModelAdded(pid, m.id)"
+                                       @change="toggleProbeModel(pid, m.id)">
+                                <span class="probe-model-id" x-text="m.id" :title="m.id"></span>
+                                <span class="probe-added" x-show="isModelAdded(pid, m.id)">✓ added</span>
+                              </label>
+                            </div>
+                          </template>
+                        </div>
                       </div>
                     </template>
-                    <button type="button" class="inline-add" @click="addProbedModels(pid)">+ Add selected to models</button>
+                    <!-- 手动添加：与探测项同一套勾选 + Add selected 路径；输入非空自动勾选 -->
+                    <div class="probe-manual">
+                      <input type="checkbox" :checked="!!probeManualChecked[pid]" @change="toggleProbeManual(pid)">
+                      <input x-model="probeManual[pid]" @input="syncProbeManual(pid)"
+                             placeholder="model id not listed — check and type it here"
+                             @keydown.enter.prevent="probeSectionClick(pid)">
+                    </div>
                   </div>
                 </div>
                 <div class="compat-section">

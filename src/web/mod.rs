@@ -3215,10 +3215,18 @@ model = "local.m"
             css.contains(".approval-card") && css.contains(".approval-btn--deny"),
             "theme.css missing P7 approval-card styles (stale embed?)"
         );
-        // probe 列表标记已添加模型（避免同一 model 被反复加入配置）
+        // probe 列表标记已添加模型 + 主按钮两态/手填勾选统一添加（probe-section 重设计）
         assert!(
             idx.contains("isModelAdded") && js.contains("isModelAdded"),
             "index.html/app.js missing probe already-added marking (stale embed?)"
+        );
+        assert!(
+            js.contains("probeSectionClick")
+                && js.contains("probeManualChecked")
+                && idx.contains("probeSectionClick")
+                && idx.contains("probe-manual")
+                && idx.contains("probe-fold"),
+            "index.html/app.js missing two-stage add-model button / manual model input (stale embed?)"
         );
     }
 
