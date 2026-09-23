@@ -2,6 +2,7 @@ pub mod approval;
 pub mod bootstrap;
 pub mod context;
 pub mod guard;
+pub mod instances;
 pub mod registry;
 pub mod reminder;
 pub mod runner;
@@ -167,6 +168,10 @@ pub struct Agent {
     /// 当前 active 任务线（ADR-0031）：`refresh_task_state` 从 sqlite 读出缓存；
     /// 通用线为 None。切线命令（/session /sessions，别名 /task /tasks）与回合起点刷新。
     pub active_task: Option<ActiveTask>,
+    /// 所属实例名（ADR-0032）：None = main 实例；Some(n) = 任务实例 n 的运行时 Agent。
+    /// 决定 memory 分层路由（写 `<home>/workspace/instances/<n>/MEMORY.md`）与
+    /// 家目录只读守卫（任务实例不得写共享 SOUL/USER/主 MEMORY）。
+    pub instance_name: Option<String>,
     /// /btw 最近的侧问问答（plan.md #H 自连上下文）：同进程内最近 2 组，
     /// 拼进下一次 /btw 的 prompt，让追问无需重新交代背景。不进主上下文。
     pub btw_recent: Vec<(String, String)>,
@@ -332,6 +337,7 @@ impl Agent {
             thinking_intent: ThinkingIntent::Auto,
             steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
             active_task: None,
+            instance_name: None,
             btw_recent: Vec::new(),
             guard: GuardConfig::from_runtime(&config.runtime),
             guard_streak: 0,
@@ -646,10 +652,17 @@ impl Agent {
     ///
     /// 复制的字段全都是 `Arc` 共享资源（provider、session_store、tools、config、审批门等），
     /// 仅 `context` / `session_id` / `turn_tool_calls` 是独立新实例；**`workspace_root` 例外**：
-    /// fork 持有 pin 到家目录的独立副本——主线 `/move` 进仓库后，cron/委派 的隔离 turn
-    /// 不得跟着进仓库（共享 Arc 会让它们跑在漂移的作用域里，2026-09-07 session 修订）。
-    /// 并发写 `sessions.db` 由 `SessionStore` 内部的 `Mutex<Connection>` 串行化，安全无竞争。
-    pub fn fork_for_isolated(&self, session_id: i64, disable_thinking: bool) -> Agent {
+    /// fork 持有 pin 到 `pin_root` 的独立副本——cron/委派的隔离 turn 不得跟随主线 `/move`
+    /// 漂移（2026-09-07 session 修订）。pin 目标由调用方指定（ADR-0032 实例化改造参数化）：
+    /// cron 调用点传家目录（行为不变），任务实例派生传 bound_path，实例内 delegate 派生
+    /// 传实例当前 root。并发写 `sessions.db` 由 `SessionStore` 内部的 `Mutex<Connection>`
+    /// 串行化，安全无竞争。
+    pub fn fork_for_isolated(
+        &self,
+        session_id: i64,
+        disable_thinking: bool,
+        pin_root: std::path::PathBuf,
+    ) -> Agent {
         let saved_system = self.context.system.clone();
         Agent {
             provider: self.provider.clone(),
@@ -667,7 +680,7 @@ impl Agent {
             approval_gate: self.approval_gate.clone(),
             permission_profile: self.permission_profile.clone(),
             workspace: self.workspace.clone(),
-            workspace_root: Arc::new(tokio::sync::RwLock::new(self.workspace.clone())),
+            workspace_root: Arc::new(tokio::sync::RwLock::new(pin_root)),
             trusted_dirs: self.trusted_dirs.clone(),
             config_dir: self.config_dir.clone(),
             is_main: false,
@@ -687,6 +700,8 @@ impl Agent {
             // steer 独立空缓冲：cron/委派 turn 不消费用户给主线的插话（plan.md #I）
             steer_buffer: Arc::new(StdMutex::new(VecDeque::new())),
             active_task: None,
+            // 实例谱系跟随派生源：cron 从 main fork → None；实例内 delegate fork → 继承实例名
+            instance_name: self.instance_name.clone(),
             btw_recent: Vec::new(),
             // guard 配置跟随主 agent（fork 时点快照）；退化计数独立归零
             guard: self.guard.clone(),
@@ -2985,7 +3000,7 @@ mod tests {
             .session_store
             .create_session("cron-uuid-fork", "cron:test")
             .unwrap();
-        let mut fork = agent.fork_for_isolated(cron_sid, false);
+        let mut fork = agent.fork_for_isolated(cron_sid, false, agent.workspace.clone());
         assert_eq!(fork.session_id, cron_sid);
         assert_ne!(fork.session_id, original_session_id);
         assert_eq!(fork.context.history.len(), 0);
@@ -3001,7 +3016,7 @@ mod tests {
         agent
             .set_workspace(std::path::PathBuf::from("/tmp/llaia-test/repo"))
             .await;
-        let mut fork2 = agent.fork_for_isolated(cron_sid, false);
+        let mut fork2 = agent.fork_for_isolated(cron_sid, false, agent.workspace.clone());
         assert_eq!(
             fork2.workspace_root.read().await.as_path(),
             std::path::Path::new("/tmp/llaia-test/workspace"),
@@ -3808,7 +3823,7 @@ mod tests {
     async fn test_fork_does_not_share_steer_buffer() {
         let agent = make_agent_with_rounds(true, vec![vec![]]).await;
         agent.push_steer("给主线的".into());
-        let fork = agent.fork_for_isolated(999, false);
+        let fork = agent.fork_for_isolated(999, false, agent.workspace.clone());
         // fork 副本持有独立空缓冲：cron/委派 turn 不得消费主线的插话
         assert!(fork.steer_buffer.lock().unwrap().is_empty());
         assert!(!agent.steer_buffer.lock().unwrap().is_empty());

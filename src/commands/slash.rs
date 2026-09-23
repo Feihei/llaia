@@ -854,7 +854,9 @@ async fn resolve_question(
 
 /// 切线回灌的字符预算（≈1500 token）：够带过最近的讨论脉络，又不会把
 /// 通用线的大段历史整体搬进任务线（那会破坏任务隔离）。
-const TASK_BACKFILL_CHAR_BUDGET: usize = 6000;
+/// pub(crate)：任务实例 spawn（`agent::instances::spawn_task_instance`）走同一口径回灌，
+/// 避免"切线回灌 6000、spawn 回灌另一个数"的口径漂移。
+pub(crate) const TASK_BACKFILL_CHAR_BUDGET: usize = 6000;
 
 /// /btw 侧问读取主上下文的字符预算（快照仅用于回答，不进上下文）。
 const BTW_CONTEXT_CHAR_BUDGET: usize = 6000;
@@ -953,7 +955,12 @@ fn bound_line_tip(agent: &Agent, dir: &std::path::Path) -> Option<String> {
 /// context.clear + 回灌目标线尾部（user/assistant 正文，按预算封顶不截半条）。
 /// 切换必 clear → 回灌天然幂等，无需跨切换游标。
 /// 返回回灌条数。
-async fn switch_session(agent: &mut Agent, session_id: i64, char_budget: usize) -> Result<usize> {
+/// pub(crate)：任务实例 spawn 复用同一回灌通路（ADR-0032 T2）。
+pub(crate) async fn switch_session(
+    agent: &mut Agent,
+    session_id: i64,
+    char_budget: usize,
+) -> Result<usize> {
     agent.session_id = session_id;
     agent.context.clear();
     agent.context.summary = None;
@@ -1070,7 +1077,12 @@ pub async fn switch_line_for_web(agent: &mut Agent, target: &str) -> Result<WebL
 /// 把 sqlite 消息行装回内存 context（回灌）。只取 user/assistant 正文：
 /// tool 消息的 tool_call_id 配对无法从 messages 表重建，硬塞会产生
 /// 孤儿 tool 消息违反 OpenAI 协议（严格端点 400）。返回回灌条数。
-fn backfill_context(agent: &mut Agent, msgs: Vec<crate::memory::sqlite::MessageRow>) -> usize {
+/// pub(crate)：任务实例 spawn（`agent::instances::spawn_task_instance`）复用，
+/// 保证「切线回灌」与「实例回灌」装回的口径完全一致（ADR-0032 T2）。
+pub(crate) fn backfill_context(
+    agent: &mut Agent,
+    msgs: Vec<crate::memory::sqlite::MessageRow>,
+) -> usize {
     let mut n = 0usize;
     for m in msgs {
         let msg = match m.role.as_str() {

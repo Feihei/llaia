@@ -164,7 +164,7 @@ pub async fn run_agent_mode(
     const CRON_TURN_MAX_ATTEMPTS: usize = 3;
     let mut forked = {
         let a = agent.lock().await;
-        a.fork_for_isolated(session_id, true)
+        a.fork_for_isolated(session_id, true, a.workspace.clone())
     };
     let mut attempt = 0usize;
     let result = loop {
@@ -200,7 +200,7 @@ pub async fn run_agent_mode(
                         );
                         forked = {
                             let a = agent.lock().await;
-                            a.fork_for_isolated(session_id, true)
+                            a.fork_for_isolated(session_id, true, a.workspace.clone())
                         };
                     }
                 }
@@ -218,7 +218,7 @@ pub async fn run_agent_mode(
                 // 重新派生，丢弃上一轮可能残留的上下文，从干净状态重试
                 forked = {
                     let a = agent.lock().await;
-                    a.fork_for_isolated(session_id, true)
+                    a.fork_for_isolated(session_id, true, a.workspace.clone())
                 };
             }
         }

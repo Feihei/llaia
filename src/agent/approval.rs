@@ -144,6 +144,12 @@ impl ApprovalGate {
         self.inner.lock().await.values().cloned().collect()
     }
 
+    /// 门控是否为空（无任何 pending question / 审批）。
+    /// 实例 idle 判定（ADR-0032）用它：gate 非空 = 实例在等用户输入，不可切线/dormant。
+    pub async fn is_empty(&self) -> bool {
+        self.inner.lock().await.is_empty()
+    }
+
     /// 列出所有待回答问题
     pub async fn questions(&self) -> Vec<PendingApproval> {
         self.inner
