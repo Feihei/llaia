@@ -206,6 +206,8 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 
 - `whitelist`：已废弃，加载时 warn 并 fallback 到 `none`
 
+> **审批的图形入口（WebUI，P7 AC1–AC3，2026-09-23）**：审批是 **deferred 语义**（`runner.rs` 注册 `PendingApproval` 后即发 `TurnEvent::Done` 结束本轮，不阻塞等待），所以"事后点击"天然成立——这决定了图形入口该长在哪。WebUI 走 **chat 流内审批卡片**：`TurnEvent::ApprovalRequested` 扩为带 `tool_name/summary/within_workspace`（`OutputSink::on_approval_request` 改收 `ApprovalRequest<'_>` 结构，QQ 只用 id 不受影响），`WebSink` 转成 `WebEvent::Approval`，前端渲染卡片。**动作不新增协议**：按钮发 WS 帧 `{type:"approval",id,approve}`，`channels/web.rs::approval_frame_command` 把它翻成 `/ok <id>` / `/deny <id>`，完整复用既有 slash → `SlashOutcome::Resume` 续跑通路（所以 `current_turn` / `stop` / outbox 全部照旧，不必另造广播 sink）。**只读端点 `GET /api/approvals`** 管状态恢复：pending 在内存、不随页面生命周期，刷新/换设备后靠它补卡片并把已在别处解析的标记失效；**刻意不做 POST 批准/拒绝**——续跑输出必须回到发起连接，HTTP 侧没有那套协调结构。
+
 CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道；`--host` / `--port` 只覆盖**本次**监听、不回写 config.toml）/ `llaia init`（显式生成配置骨架；`--force` 覆盖重建。serve / chat 启动时经 `prepare_startup_dir` 自动做「迁移 → 幂等补齐模板 → 加载配置」，缺啥补啥、绝不覆盖已有文件，裸 `llaia serve` 在全新机器可直接跑）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
 斜杠命令：`/archive [days]`（把当前线 N 天前消息搬进归档桶，默认 30 天） `/session [<名>|close]` `/sessions`（别名 `/task` `/tasks`） `/exit` `/stop` `/compact` `/memory-compact` `/clear`（清上下文 + 当前会话 todo） `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/btw <question>`（侧问：读上下文零污染，答案落 `side_messages` 独立表、WebUI Side 样式渲染） `/steer <msg>`（运行中插话：channel 层拦截投 `Agent.steer_buffer`，agent 工具循环非末轮迭代顶部以 `[steer] User added:` user 消息注入；空闲时降级为普通消息） `/ok <id>` `/deny <id>` `/move [<path>|home]`（别名 `/cd`）`/config` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
 

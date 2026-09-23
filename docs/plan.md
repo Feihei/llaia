@@ -54,7 +54,7 @@
 
 ## P7 — 下一步计划
 
-**状态**：⏳ 计划中（2026-09-09 立项；2026-09-22 grill 六项全部定案：MCP stdio 兜底已交付、WebUI 审批卡片立项展开，其余四项不做/留观/撤项，触发条件留档）
+**状态**：🚧 进行中（2026-09-09 立项；2026-09-22 grill 六项全部定案：MCP stdio 兜底已交付、WebUI 审批卡片立项展开，其余四项不做/留观/撤项，触发条件留档；2026-09-23 审批卡片 AC1–AC3 代码落地，待随版交付）
 
 > **旧 P7 已收口归档**：P7 编号曾用于 terminal 脚本绕过防护专项（T1–T4 / S1–S2），2026-09-07 全部定案——T3（解释器内联载荷强制审批）、S1（命令拆分 + flag 级路径检查）、T2（无特权账户文档化）已交付，S2 / T1 / T4 定案不做；完整记录（含不做项评估）随 **v0.5.0 攒发**迁入 [CHANGELOG.md](CHANGELOG.md) §v0.5.0，本文件不再保留。
 
@@ -65,9 +65,9 @@
 - **搜索增强 → 不做**（2026-09-22 grill 定案）：多源聚合/rerank 要高频搜索才摊得平成本（每查多倍 API 调用 + 去重逻辑），单用户频率撑不起；tavily/baidu/brave 三路由已交付够用。**触发条件：搜索质量真实卡住任务且换 provider 解决不了。**
 - **原子工具优化增强 → 撤项**（2026-09-22 grill 定案）：方向本身是「从实际使用痛点出发逐工具盘点」——没有痛点清单就没有项目，预先立项违背「没有具体用例就不写」的编码约定。既有两条通路承接：H 系列止血窗口（file_edit 自纠错即 H1 打样）+ 定期主干体检（例行项）；diff/patch、json/yaml 查询等新原子工具无使用证据不写，痛点出现时随用随修走 H 系列。
 - **WebUI chat 界面增强 → ③ 立项，②④ 留观，⑤ 删除**（2026-09-09 记录，2026-09-22 grill 定案）：① session-rail 已先行交付（2026-09-11，见 [CHANGELOG.md](CHANGELOG.md) §v0.5.0「chat 左侧活跃会话线列表」）；⑤ 与 P6 WebUI 批次的关系是伪问题（P6 已交付归档），删除；② bound path/任务线可视化——session-rail + `[scope]` 文本行已覆盖，留观（触发条件：图形化需求实际出现）；④ 运行状态提示（busy/工具调用/steer/todo 进度呈现）——UX 润色，留观（触发条件：日常使用中实际造成困扰）。③ 审批卡片立项展开（唯一实候选：QQ 侧 v0.5.2 已有内联审批按钮先例，WebUI 主界面还在聊天流打 `/ok`）：
-  - [ ] **AC1 · 后端审批状态端点**：GET 待审批列表（id、工具名、参数摘要）+ POST 批准/拒绝，复用 `/ok` `/deny` 处理通路
-  - [ ] **AC2 · 前端审批卡片**：聊天流内渲染待审批项为卡片（批准/拒绝按钮），结果回灌聊天流标注（对齐 QQ 内联按钮先例）；`/ok` 文本命令保留为兜底
-  - [ ] **AC3 · 实现前过一遍 approval 通路**（ApprovalContext / confirm 流 / QQ 内联按钮实现），端点形态与卡片交互细节以通路实况为准，必要时回写本清单修订
+  - [x] **AC1 · 后端审批状态端点**（2026-09-23，`web/mod.rs::get_approvals` + 路由 `GET /api/approvals`）：列出待审批（id、工具名、参数摘要、workspace 内外、频道、注册时间）。**形态按 AC3 实况收窄为只读列表**：动作不走 HTTP——`run_turn` 的续跑输出必须回到发起连接（`current_turn` / `stop` / outbox 全在 WS handler 手里），POST 就得另造一套广播 sink + busy/stop 协调，等于把已有通路复制一遍
+  - [x] **AC2 · 前端审批卡片**（2026-09-23，`channels/web.rs` + `web/static/{index.html,app.js,theme.css}`）：聊天流内渲染待审批项为卡片（工具名 + 范围 + 参数摘要 + 批准/拒绝按钮），结果回灌聊天流并与 `/ok` `/deny` **严格同源**——按钮只发 `{type:"approval",id,approve}` 帧，后端 `web.rs::approval_frame_command` 把它翻成 `/ok <id>` / `/deny <id>` 走原 `SlashOutcome::Resume` 续跑；`/ok` 文本命令保留为兜底（两处共用 `ApprovalGate`，互不冲突）。刷新/换设备后靠 AC1 端点补回卡片，已在别处解析的卡片标记为失效。事件侧 `TurnEvent::ApprovalRequested` 扩为带 `tool_name/summary/within_workspace`（sink 回调改收 `ApprovalRequest`），QQ 只用 id 不受影响
+  - [x] **AC3 · 实现前过一遍 approval 通路**（2026-09-23）：核过 `ApprovalContext` / `approval_decision` / `resolve_approval` / QQ 内联按钮（`msg_type=2` 键盘 + `ap:ok:<id>` 回调解码）——两条既有事实决定了上面两处形态收窄：① 审批是 **deferred 语义**（pending 注册后本轮即结束，非阻塞等待），所以卡片天然可以事后点击，不依赖 turn 存活；② 卡片动作**不该新增解析逻辑**，翻译成 `/ok` `/deny` 即为最大复用。回写修订已落进 AC1/AC2 条目
 - **MCP 新 spec 兼容——已拆 A/B**（2026-09-12 调研，2026-09-22 grill 定案）：新 spec（2026-07-28）删 initialize 握手 + `Mcp-Session-Id`（SEP-2567/2575），每请求自带 `_meta`（protocolVersion/clientInfo/capabilities），Streamable HTTP 须带 `Mcp-Method`/`Mcp-Name` 头（SEP-2243），另增可选 `server/discover`、list 响应 `ttlMs` 缓存提示（SEP-2549）。**背景修正（grill 2026-09-22）**：原「HTTP session 管理被删对 llaia 是利好」前提不成立——`HttpTransport` 已是 Streamable HTTP（2025-06-18 风格），session 管理仅 ~40 行且工作正常；真实暴露面在 **stdio**：新 SDK（Python mcp 2.0 起）上的 server 可能对 `initialize` 回 -32601，现 `client.rs::handshake` 失败即 server dead。在用 server（blender-mcp / sketchup-mcp）均为 stdio；sketchup-mcp 已遇 SDK 2.0 破碎（`--with mcp==1.3.0` pin 缓解——属 server 侧 Python API 破碎，非协议层，llama 无感）。**定案：以旧协议为主，只做 stdio 兜底（A）；HTTP 双协议（B）留观**。
   - [x] **A1 · stdio `-32601` 容忍降级**（2026-09-22，`mcp/client.rs::handshake` + `mcp/transport.rs::TransportError::JsonRpc`）：`initialize` 收 -32601 → log warn（一行）→ 跳过握手直接发 `tools/list`；降级后所有 JSON-RPC 请求带 `_meta`（protocolVersion = 新 spec 档 + clientInfo，`McpServer::with_stateless_meta`）；`notifications/initialized` 不发；旧协议握手主路径不动
   - [x] **A2 · 协商版本记录 + 校验**（2026-09-22，`McpServer::record_negotiated_version` + `negotiated_version` 字段）：initialize 成功路径不再丢弃响应——记录 server 协商的 `protocolVersion`，不在支持集合 → warn，不静默

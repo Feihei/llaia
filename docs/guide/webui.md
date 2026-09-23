@@ -41,6 +41,7 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 - 发图：图片与文字一起发出，模型按视觉输入读图；发出的图会以缩略图留在你自己的消息气泡里，点开可看原图。
 - 取回：`GET /file` 从工作区提供文件。
 - 连接未就绪（页面刚打开还在握手、或服务端刚重启）时发送**不会静默丢失，也不用你重按**：消息按序排队，连上后自动补发，期间显示 `[queued] waiting for the WebSocket to connect`。
+- **审批卡片**：需要确认的操作（写文件、跑命令、切目录等）会在对话流里落一张卡片——工具名、workspace 内外、参数摘要，加 **Approve / Deny** 两个按钮。点击等价于手敲 `/ok <id>` / `/deny <id>`（同一条续跑通路），结果照常回灌对话流；`/ok` `/deny` 文本命令始终可用。断线时点击会像普通消息一样排队补发；刷新页面后仍待决的卡片会自动补回，已在别的频道（CLI / QQ）解析掉的会标记为失效。
 
 ## 管理界面
 
@@ -69,6 +70,7 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 | `GET /api/mcp` · `POST /api/mcp` · `DELETE /api/mcp` | 列出 / 增 / 删 MCP server |
 | `GET|POST|PUT|DELETE /api/skills/:name` | 技能管理 |
 | `GET /api/todos` · `GET /api/questions` | 只读面板数据源 |
+| `GET /api/approvals` | 待审批操作列表（审批卡片的状态恢复；批准/拒绝走 WS `approval` 帧，非本端点） |
 | `GET /api/env` · `POST /api/env/refresh` | 环境探测缓存 / 重探 |
 | `GET /api/doctor` | 运行诊断检查 |
 | `GET /api/sessions` | 会话历史列表 / 详情 / 删除 / 导出 |

@@ -29,6 +29,11 @@ LLAIA 能读/写你的文件、跑 shell 命令——能力越大风险越大。
 
 这套流程对所有频道一致（CLI / QQ / Telegram / 钉钉 / 微信 / Web）。非交互频道（cron / delegate）等不了用户，**自动拒绝**并说明。
 
+QQ 与 WebUI 提供图形入口，**都只是把第 4 步的 `/ok` `/deny` 变成一次点击**（复用同一 `ApprovalGate` 与同一续跑通路，不新增第二条判定逻辑）：
+
+- **QQ**：审批提示消息上的「✅ 通过 / ❌ 拒绝」内联按钮（`msg_type=2` 键盘）；键盘被平台拒绝时自动降级回文本命令。
+- **WebUI**：聊天流内的**审批卡片**（工具名 + workspace 内外 + 参数摘要 + Approve / Deny）。按钮发一个 WS `approval` 帧，服务端把它翻成 `/ok <id>` / `/deny <id>` 后走原通路。刷新 / 换设备后仍待决的卡片由 `GET /api/approvals` 补回，已在别处解析的标记为失效。
+
 ## `/move` / `/cd`
 
 `/move <path>`（别名 `/cd`）切换 agent 工作目录：
