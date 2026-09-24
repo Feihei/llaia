@@ -173,6 +173,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 | `mcp`                                    | `tools/mcp`                               | 接入外部 MCP server 暴露的工具                                                                                                                             |
 | `send_media`                             | `tools/send_media`                        | 向频道回传图片/文件等媒体（作用域 = workspace\_root ∪ 受信目录，跟随 `/move`；家目录恒可发送，同 `file_read` extra\_readable 语义）                                                   |
 | `tts`                                    | `tools/tts`                               | 文本合成语音（`[tools.tts]` 配置，OpenAI 兼容 `/audio/speech`，产物落 workspace/tts/，发送走 `send_file`；P5 T1）                                                       |
+| `image_gen` / `image_edit`               | `tools/image_gen`                         | 图片生成/编辑（`[tools.image_gen]` 配置，OpenAI 兼容 `/images/generations` + `/images/edits`，后端任意：sd-server/agnes/OpenAI；产物落 workspace/images/，发送走 `send_image`；编辑输入路径作用域同 send\_image） |
 
 > **环境探测（P5 E1，非工具）**：`src/envprobe.rs` 启动时对 main agent 探测一次本机工具链（shell/python/node/npm/rustc/cargo/go/git/docker，2s/命令 timeout），以 Runtime Context 尾部注入（与 todo 同区，KV 缓存友好）；`/env` 命令手动刷新；WebUI 聊天页 ENV 只读面板（`GET /api/env` 缓存 / `POST /api/env/refresh` 重探）。
 

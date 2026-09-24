@@ -9,6 +9,7 @@ pub mod ask_user;
 pub mod cron;
 pub mod delegate;
 pub mod file;
+pub mod image_gen;
 pub mod mcp;
 pub mod memory;
 pub mod search;

@@ -573,6 +573,24 @@ pub async fn build_single_agent(
     {
         all_tools.push(tts_tool);
     }
+    // 图片生成/编辑：OpenAI 兼容 /images/generations + /images/edits。本地后端
+    // （sd-server）通常无 key → allow_no_key=true，enabled 即注册。
+    if let Some(gen_tool) = crate::tools::image_gen::ImageGenTool::build(
+        &config.tools.image_gen,
+        true,
+        workspace.clone(),
+    )? {
+        all_tools.push(gen_tool);
+    }
+    if let Some(edit_tool) = crate::tools::image_gen::ImageEditTool::build(
+        &config.tools.image_gen,
+        true,
+        workspace.clone(),
+        workspace_root.clone(),
+        trusted_dirs.clone(),
+    )? {
+        all_tools.push(edit_tool);
+    }
     // skill 自管工具（ADR-0027）：仅 main agent 注册。
     // agent 通过它们直接写/改 skill 目录（落在 workspace 之外，file_write 够不到）。
     if is_main {

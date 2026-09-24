@@ -21,6 +21,7 @@ agent 在对话中可以调用的工具。模型通过「原生 function calling
 | `cron` | 管理定时任务 | 是 |
 | `mcp` | 调用已接入的 MCP server 工具 | 视工具而定 |
 | `tts` | 文本合成语音（`[tools.tts]` 配置） | 否 |
+| `image_gen` / `image_edit` | 图片生成/编辑（`[tools.image_gen]` 配置，OpenAI 兼容 images 端点，支持本地 sd-server 等后端） | 否 |
 
 ## 副作用与确认
 

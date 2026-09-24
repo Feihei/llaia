@@ -718,6 +718,9 @@ pub struct ToolsConfig {
     /// TTS（P5 T1）：OpenAI 兼容 /audio/speech
     #[serde(default)]
     pub tts: TtsConfig,
+    /// 图片生成/编辑：OpenAI 兼容 /images/generations 与 /images/edits
+    #[serde(default)]
+    pub image_gen: ImageGenConfig,
     /// web_fetch 正文抽取与体积上限
     #[serde(default)]
     pub web_fetch: WebFetchConfig,
@@ -910,6 +913,58 @@ fn default_tts_voice() -> String {
     "alloy".into()
 }
 
+/// Image generation/editing config: OpenAI-compatible `/images/generations`
+/// and `/images/edits` endpoints. Works with any compatible backend
+/// (sd-server from stable-diffusion.cpp, agnes, OpenAI, ...).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageGenConfig {
+    /// Register `image_gen` / `image_edit` tools (also requires non-empty api_key;
+    /// local sd-server typically needs no key, so `allow_no_key` skips that check)
+    #[serde(default)]
+    pub enabled: bool,
+    /// OpenAI-compatible images endpoint base (tool appends /images/generations, /images/edits)
+    #[serde(default = "default_image_gen_base_url")]
+    pub base_url: String,
+    /// API key, supports ${VAR} .env references (unused by local sd-server)
+    #[serde(default)]
+    pub api_key: String,
+    /// Default image model; empty => omit `model` field from the request
+    #[serde(default)]
+    pub model: String,
+    /// Default output size ("WIDTHxHEIGHT", e.g. "512x512"); empty => omit
+    #[serde(default = "default_image_gen_size")]
+    pub size: String,
+    /// Per-request timeout in seconds (local diffusion can be slow)
+    #[serde(default = "default_image_gen_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl Default for ImageGenConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: default_image_gen_base_url(),
+            api_key: String::new(),
+            model: String::new(),
+            size: default_image_gen_size(),
+            timeout_secs: default_image_gen_timeout(),
+        }
+    }
+}
+
+fn default_image_gen_base_url() -> String {
+    // sd-server (stable-diffusion.cpp) default port
+    "http://127.0.0.1:1234/v1".into()
+}
+
+fn default_image_gen_size() -> String {
+    "512x512".into()
+}
+
+fn default_image_gen_timeout() -> u64 {
+    300
+}
+
 impl Config {
     pub fn load(path: &PathBuf) -> Result<Self> {
         let content = std::fs::read_to_string(path)
@@ -1076,6 +1131,7 @@ impl Config {
         self.tools.baidu.api_key = expand(&self.tools.baidu.api_key)?;
         self.tools.brave.api_key = expand(&self.tools.brave.api_key)?;
         self.tools.tts.api_key = expand(&self.tools.tts.api_key)?;
+        self.tools.image_gen.api_key = expand(&self.tools.image_gen.api_key)?;
         self.log.dir = expand(&self.log.dir)?;
         Ok(())
     }

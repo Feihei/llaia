@@ -763,6 +763,13 @@
             <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.tts.api_key"></div>
             <div class="form-row"><label>model</label><input x-model="cfg.tools.tts.model"></div>
             <div class="form-row"><label>voice</label><input x-model="cfg.tools.tts.voice"></div>
+            <h3>image_gen <span class="hint">(OpenAI-compatible /images/generations + /images/edits; sd-server, agnes, ...)</span></h3>
+            <div class="form-row"><label>enabled</label><input type="checkbox" x-model="cfg.tools.image_gen.enabled"></div>
+            <div class="form-row"><label>base_url</label><input x-model="cfg.tools.image_gen.base_url" style="width:320px"></div>
+            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.image_gen.api_key"></div>
+            <div class="form-row"><label>model</label><input x-model="cfg.tools.image_gen.model" placeholder="empty = omit"></div>
+            <div class="form-row"><label>size</label><input x-model="cfg.tools.image_gen.size" placeholder="512x512"></div>
+            <div class="form-row"><label>timeout_secs</label><input type="number" x-model="cfg.tools.image_gen.timeout_secs"></div>
           </div>
         </template>
         <template x-if="configSection==='skills'">

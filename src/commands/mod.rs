@@ -171,6 +171,13 @@ base_url = "https://api.openai.com/v1"
 api_key = ""                   # supports "${TTS_API_KEY}"
 model = "tts-1"
 voice = "alloy"
+[tools.image_gen]              # OpenAI-compatible /images/generations + /images/edits
+enabled = false                # sd-server (stable-diffusion.cpp), agnes, OpenAI, ...
+base_url = "http://127.0.0.1:1234/v1"
+api_key = ""                   # supports "${IMAGE_GEN_API_KEY}"; local sd-server needs none
+model = ""                     # empty = omit "model" from requests
+size = "512x512"               # WIDTHxHEIGHT; empty = omit
+timeout_secs = 300             # local diffusion can be slow
 "#;
 
 /// Default .env template for `init`: secrets live here, kept out of config.toml plaintext.
