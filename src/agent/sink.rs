@@ -15,6 +15,16 @@ pub struct ApprovalRequest<'a> {
     pub within_workspace: bool,
 }
 
+/// 一次 ask_user 待回答问题的展示信息（与 `ApprovalRequest` 同族的事件时刻快照）。
+#[derive(Debug, Clone, Copy)]
+pub struct QuestionRequest<'a> {
+    pub id: &'a str,
+    /// 问题文本
+    pub question: &'a str,
+    /// 可选结构化单选选项（无选项的问题渲染成纯文本 + 自定义输入）
+    pub choices: Option<&'a [String]>,
+}
+
 /// channel 输出抽象：`run_turn` 按 `TurnEvent` 回调 sink 的方法。
 /// channel 只实现"如何输出"，不关心 agent task 调度和中断。
 #[async_trait]
@@ -31,6 +41,9 @@ pub trait OutputSink: Send {
     /// 回合结束时在审批提示消息上附「通过/拒绝」按钮键盘；WebUI override
     /// 推一个 approval 事件，前端在聊天流内渲染审批卡片）
     async fn on_approval_request(&mut self, _req: &ApprovalRequest<'_>) {}
+    /// 一次 ask_user 待回答问题已注册（默认忽略；WebUI override 推一个
+    /// question 事件，前端在聊天流内渲染问题卡片）
+    async fn on_question_asked(&mut self, _req: &QuestionRequest<'_>) {}
     /// 长任务心跳：按墙钟每 KEEPALIVE_INTERVAL 回调一次，`elapsed` 为自本轮开始
     /// 的累计时长（默认忽略；交互聊天频道 override 发送 "still working" 提示，
     /// 避免用户误以为卡死）。与事件是否密集无关，保证长循环也会周期提示。
@@ -148,6 +161,18 @@ pub async fn run_turn(
                                     tool_name: &tool_name,
                                     summary: &summary,
                                     within_workspace,
+                                })
+                                .await
+                            }
+                            TurnEvent::QuestionAsked {
+                                id,
+                                question,
+                                choices,
+                            } => {
+                                sink.on_question_asked(&QuestionRequest {
+                                    id: &id,
+                                    question: &question,
+                                    choices: choices.as_deref(),
                                 })
                                 .await
                             }

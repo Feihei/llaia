@@ -235,6 +235,28 @@ option { background: var(--bg-input); color: var(--text); }
 .ack-approved .approval-verdict { color: var(--green); }
 .ack-denied   .approval-verdict { color: var(--red); }
 .ack-approved, .ack-denied { opacity: .72; }
+/* 问题卡片（ADR-0022）：与审批卡片同族「需要你决定」块，青色标出「需要你回答」 */
+.msg.question { background: rgba(79, 214, 201, .05); border-left-color: var(--cyan); }
+.question-card { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.question-mark { color: var(--cyan); }
+.question-answers { display: flex; flex-direction: column; gap: 6px; }
+.question-choices { display: flex; gap: 8px; flex-wrap: wrap; }
+.question-choice {
+  font-family: var(--mono); font-size: 12px; cursor: pointer; text-align: left;
+  padding: 4px 12px; background: rgba(79, 214, 201, .06);
+  border: 1px solid var(--border-bright); color: var(--cyan);
+}
+.question-choice:hover { background: var(--cyan); color: #04141a; }
+.question-choice:disabled { opacity: .4; cursor: not-allowed; }
+.question-choice:disabled:hover { background: rgba(79, 214, 201, .06); color: var(--cyan); }
+.question-custom { display: flex; gap: 8px; }
+.question-custom input {
+  flex: 1; font-family: var(--mono); font-size: 12px;
+  background: var(--bg-input); border: 1px solid var(--border-bright);
+  color: var(--text); padding: 4px 8px;
+}
+.ack-answered { opacity: .72; }
+.ack-answered .approval-verdict { color: var(--green); }
 .msg img { max-width: 400px; border-radius: 0; border: 1px solid var(--border-bright); }
 /* 会话详情的消息 manage 模式：勾选框 + 选中高亮 */
 .msg-check { position: absolute; left: -6px; top: 4px; z-index: 2; }

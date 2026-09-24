@@ -41,7 +41,6 @@ function llaiaApp() {
     outbox: [],
     // todo (ADR-0024, read-only display; v1 no click-to-toggle from UI)
     todos: [],
-    questions: [],
     // 环境探测（P6，只读展示）
     env: '',
     envError: '',
@@ -274,14 +273,63 @@ function llaiaApp() {
         }
       } catch (e) { /* 非致命：UI 静默跳过 */ }
     },
+
+    // ---- 问题卡片（ADR-0022）：待回答问题 / 作答 ----
+    // 卡片本体来自 WS 的 question 事件；本方法做两件事：补齐刷新后丢失的卡片、
+    // 把已在别处（CLI /answer 文本命令）解析掉但本地仍 pending 的卡片置为已答。
     async loadQuestions() {
+      if (!this.authed) return;
       try {
         const r = await this.apiFetch('/api/questions');
-        if (r.ok) {
-          const j = await r.json();
-          this.questions = j.questions || [];
+        if (!r.ok) return;
+        const j = await r.json();
+        const pendings = j.questions || [];
+        const alive = new Set(pendings.map(q => q.id));
+        for (const q of pendings) {
+          const inst = q.instance || 'main';
+          this.routingInstance = inst;
+          try {
+            if (!this.messages.some(m => m.role === 'question' && m.id === q.id)) {
+              this.messages.push({
+                role: 'question',
+                id: q.id,
+                question: q.question,
+                choices: q.choices || [],
+                instance: inst,
+                state: 'pending',
+                custom: '',
+              });
+            }
+          } finally { this.routingInstance = null; }
         }
-      } catch (e) { /* 非致命：UI 静默跳过 */ }
+        for (const name of Object.keys(this.buckets)) {
+          this.routingInstance = name;
+          try {
+            for (const m of this.messages) {
+              if (m.role === 'question' && m.state === 'pending' && !alive.has(m.id)) m.state = 'answered';
+            }
+          } finally { this.routingInstance = null; }
+        }
+      } catch (e) { /* 非致命：卡片保持 live 流状态 */ }
+    },
+    // 作答：不新增协议，只是把 /answer <id> <text> 变成一次点击
+    //（chat 帧文本走同一条 slash → Resume 续跑通路，与审批卡片 → /ok 同哲学）。
+    answerQuestion(m, text) {
+      const ans = (text || '').trim();
+      if (m.state !== 'pending' || !ans) return;
+      const inst = m.instance || this.activeInstance;
+      const frame = { type: 'chat', text: '/answer ' + m.id + ' ' + ans, instance: inst };
+      if (this.wsOpen()) {
+        this.ws.send(JSON.stringify(frame));
+        this.perBusy[inst] = true; // 解析后会启动续跑 turn（与手敲 /answer 一致）
+        this.syncBusy();
+      } else {
+        this.outbox.push(frame);
+        if (this.authed) this.connectWs();
+      }
+      m.answered = ans;
+      m.state = 'answered';
+      this.scrollBottom();
     },
 
     // ---- 审批卡片（P7）：待审批列表 / 批准 / 拒绝 ----
@@ -352,8 +400,9 @@ function llaiaApp() {
       this.loadInstances();
       // 面板空（页面刚加载/刷新过）时回放当前线尾部，恢复思考块与工具信息
       if (!this.chatLoaded) await this.restoreChat();
-      // 回放之后再补审批卡片：pending 存在服务端内存里，刷新/换设备后 live 事件流已断
+      // 回放之后再补审批/问题卡片：pending 存在服务端内存里，刷新/换设备后 live 事件流已断
       this.loadApprovals();
+      this.loadQuestions();
     },
     // 页面（重）进入时回放当前线尾部：chat 面板本身是纯 live 流（WS 连接无历史回放），
     // 离开再回来只剩新事件。这里拉 session 详情（含 reasoning + tool_calls + tool 结果）
@@ -651,8 +700,8 @@ function llaiaApp() {
       switch (ev.type) {
         case 'auth_ok':
           this.flushOutbox();
-          // 重连后补一次审批卡片状态（断线期间注册/解析的 pending 不会重放）
-          if (this.chatLoaded) this.loadApprovals();
+          // 重连后补一次审批/问题卡片状态（断线期间注册/解析的 pending 不会重放）
+          if (this.chatLoaded) { this.loadApprovals(); this.loadQuestions(); }
           break;
         case 'auth_failed':
           this.forceLogin('WebSocket authentication failed, check token');
@@ -705,6 +754,23 @@ function llaiaApp() {
               within_workspace: ev.within_workspace,
               instance: inst,
               state: 'pending',
+            });
+          }
+          this.scrollBottom();
+          break;
+        }
+        case 'question': {
+          // 问题卡片（ADR-0022）：聊天流内渲染待回答问题 + 选项按钮/自定义输入。
+          // 同一 id 只渲染一次（重连/刷新恢复时可能重复收到）。
+          if (!this.messages.some(m => m.role === 'question' && m.id === ev.id)) {
+            this.messages.push({
+              role: 'question',
+              id: ev.id,
+              question: ev.question,
+              choices: ev.choices || [],
+              instance: inst,
+              state: 'pending',
+              custom: '',
             });
           }
           this.scrollBottom();

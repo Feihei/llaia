@@ -52,6 +52,13 @@ pub enum WebEvent {
         summary: String,
         within_workspace: bool,
     },
+    /// ask_user 待回答问题（聊天流内渲染为问题卡片；选项按钮/自定义输入
+    /// 等价于 /answer <id> <text> 文本命令）
+    Question {
+        id: String,
+        question: String,
+        choices: Option<Vec<String>>,
+    },
     Done,
     Error {
         message: String,
@@ -177,6 +184,14 @@ impl OutputSink for WebSink {
             tool_name: req.tool_name.into(),
             summary: req.summary.into(),
             within_workspace: req.within_workspace,
+        })
+        .await;
+    }
+    async fn on_question_asked(&mut self, req: &crate::agent::sink::QuestionRequest<'_>) {
+        self.send_event(WebEvent::Question {
+            id: req.id.into(),
+            question: req.question.into(),
+            choices: req.choices.map(|cs| cs.to_vec()),
         })
         .await;
     }

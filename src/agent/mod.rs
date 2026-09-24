@@ -51,6 +51,16 @@ pub enum TurnEvent {
         /// 操作是否落在 workspace / 受信目录内（卡片范围标注）
         within_workspace: bool,
     },
+    /// ask_user 待回答问题已注册（ADR-0022）：WebUI 据此在聊天流内渲染问题卡片
+    /// （问题文本 + 可选选项按钮 + 自定义答案输入）。仅交互频道注册时发送，
+    /// 不改变 deferred 语义；默认 sink 忽略。与 ApprovalRequested 同族事件。
+    QuestionAsked {
+        id: String,
+        /// 问题文本（卡片标题正文）
+        question: String,
+        /// 可选结构化单选选项（卡片渲染成可点按钮）
+        choices: Option<Vec<String>>,
+    },
     /// 工具请求发送媒体给用户（channel 负责实际发送）
     MediaOutput { path: String, kind: MediaKind },
     /// 整轮结束（所有文本和工具调用完成）

@@ -128,10 +128,24 @@ pub async fn execute_tool_calls(
                             id, question, choice_hint, id
                         );
                         tracing::info!(id = %id, question = %question, "pending question registered");
+                        // 文本频道（CLI/IM）：保留提示文案 chunk；web 频道由问题卡片
+                        // 承担同样信息（问题 + 选项 + id），再发 chunk 就是重复噪音。
+                        if channel != "web" {
+                            if let Some(tx) = event_tx {
+                                let _ = tx
+                                    .send(TurnEvent::Chunk {
+                                        delta: prompt.clone(),
+                                    })
+                                    .await;
+                            }
+                        }
+                        // 问题卡片事件（WebUI 渲染聊天流内卡片；其他 sink 默认忽略）
                         if let Some(tx) = event_tx {
                             let _ = tx
-                                .send(TurnEvent::Chunk {
-                                    delta: prompt.clone(),
+                                .send(TurnEvent::QuestionAsked {
+                                    id: id.clone(),
+                                    question: question.clone(),
+                                    choices: choices.clone(),
                                 })
                                 .await;
                         }

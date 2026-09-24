@@ -168,6 +168,35 @@
                        : 'already resolved elsewhere'"></div>
               </div>
             </template>
+            <!-- ask_user 问题卡片（ADR-0022）：待回答问题渲染成聊天流内卡片，
+                 选项按钮/自定义输入等价于 /answer <id> <text>（同一条 Resume 续跑通路） -->
+            <template x-if="m.role==='question'">
+              <div class="question-card" :class="'ack-' + m.state">
+                <div class="approval-head">
+                  <b class="question-mark">&#x2753; Question</b>
+                  <span class="approval-id" x-text="m.id"></span>
+                </div>
+                <div class="approval-summary" x-text="m.question"></div>
+                <div class="question-answers" x-show="m.state === 'pending'">
+                  <!-- 模型给的选项：一键作答 -->
+                  <div class="question-choices" x-show="m.choices && m.choices.length">
+                    <template x-for="(c, ci) in (m.choices || [])" :key="ci">
+                      <button type="button" class="question-choice" :disabled="busy"
+                              @click="answerQuestion(m, c)" x-text="c"></button>
+                    </template>
+                  </div>
+                  <!-- 自定义答案：输入或直接在下方输入框回复均可 -->
+                  <div class="question-custom">
+                    <input type="text" x-model="m.custom" placeholder="Or type your own answer..."
+                           @keydown.enter.prevent="answerQuestion(m, m.custom)" :disabled="busy">
+                    <button type="button" class="approval-btn approval-btn--ok" :disabled="busy || !(m.custom || '').trim()"
+                            @click="answerQuestion(m, m.custom)">Send</button>
+                  </div>
+                </div>
+                <div class="approval-verdict" x-show="m.state !== 'pending'"
+                     x-text="m.state === 'answered' ? ('&#10003; answered' + (m.answered ? ': ' + m.answered : '')) : 'already answered elsewhere'"></div>
+              </div>
+            </template>
             <template x-if="m.role==='side'"><div><b>Side:</b> <div class="side-body" x-html="renderMd(m.text)"></div></div></template>
             <template x-if="m.role==='media'">
               <div>
@@ -207,16 +236,8 @@
           </span>
         </template>
       </div>
-      <!-- ask_user（ADR-0022）：当前待回答问题只读展示 -->
-      <div class="todo-panel" x-show="questions.length" style="border-left-color:#d9b34a;">
-        <div class="todo-head" style="color:#d9b34a;">&#x276F; QUESTIONS <span class="todo-count" x-text="questions.length"></span></div>
-        <template x-for="q in questions" :key="q.id">
-          <div class="todo-item">
-            <span class="todo-mark in_progress">?</span>
-            <span class="todo-task" x-text="q.question"></span>
-          </div>
-        </template>
-      </div>
+      <!-- ask_user（ADR-0022）：待回答问题已改为聊天流内问题卡片（role==='question'），
+           不再在 composer 下方挂只读面板——那块面板不随对话流滚动、答完也不消失 -->
         </div>
         <!-- 右侧栏：todo 清单 + 环境探测（只读）。**常驻显示**——原先两块都空时整体隐藏，
              于是 env 为空时连唯一的重取入口 Refresh 也一起被藏掉，用户只会看到「栏没了」 -->

@@ -3356,6 +3356,19 @@ model = "local.m"
             css.contains(".approval-card") && css.contains(".approval-btn--deny"),
             "theme.css missing P7 approval-card styles (stale embed?)"
         );
+        // ADR-0022 问题卡片：聊天流内的 ask_user 卡片（选项按钮 + 自定义答案输入）
+        assert!(
+            idx.contains("question-card") && idx.contains("answerQuestion"),
+            "index.html missing ask_user question-card markup (stale embed?)"
+        );
+        assert!(
+            js.contains("answerQuestion") && js.contains("loadQuestions"),
+            "app.js missing ask_user question-card handlers (stale embed?)"
+        );
+        assert!(
+            css.contains(".question-card") && css.contains(".question-choice"),
+            "theme.css missing ask_user question-card styles (stale embed?)"
+        );
         // probe 列表标记已添加模型 + 主按钮两态/手填勾选统一添加（probe-section 重设计）
         assert!(
             idx.contains("isModelAdded") && js.contains("isModelAdded"),
