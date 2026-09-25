@@ -78,6 +78,20 @@
 
 ---
 
+## P8 — 模型目录重构（Model Catalog）
+
+**状态**：⏳ 已定案未开始（2026-09-25 三轮 grill 定案，[plan 文档](plans/2026-09-25-model-catalog.md)）
+
+`[provider]` 升级为**统一连接注册表**：llm family（openai_compatible/anthropic/gemini，可挂 model、进 probe）+ service family（tavily/baidu/brave 等纯凭据，无 model 条目、不进 probe，`type` 即判别器、显式未知 type 报错）。模型独立成 `[model.<id>]` 目录按 kind 分型（chat/tts/image/…，缺省 chat）；agents 与 tools（tts/image_gen/search，未来 embedding）一律从注册表/目录引用，api_key 管线只在 provider 层一份。配置格式不兼容 → 一步到位无迁移（`deny_unknown_fields` 报错安全网），目标随 **v0.6.0** 发版。
+
+- [ ] **核心 schema**：`ProviderConfig` 收窄 + 双 family type 判别 + `ModelEntry`（kind/capabilities/enabled）+ `model_from_ref` 唯一解析收口 + 引用存在性/kind 匹配校验（agent model/fallback/compact/vision 仅 kind=chat，vision 顺手过滤 multimodal）
+- [ ] **tools 引用化**：`[tools.tts]` / `[tools.image_gen]` 删 inline base_url/api_key，改 `model = "<id>"` 引用（kind 过滤；不符 → 不注册 + warn）；`[tools.search]`/`web_fetch` 改引用 service family provider，`[tools.tavily]/[tools.baidu]/[tools.brave]` 段删除；secrets/mask/merge 的 tools 层 api_key 分支全删
+- [ ] **WebUI Models 选项卡**：卡片网格 + provider/kind/multimodal 过滤；添加流 = 选 provider（仅 llm family）→ probe（per type listing，SiliconFlow 类混入非 LLM 模型默认归 chat）→ 必选 kind → kind 专属表单；批量添加删除；Provider 表单瘦身（service family 只渲染 api_key）
+- [ ] **CLI 收尾**：`/models`（模型目录）+ `/providers`（连接注册表）拆分，`/provider` 保留别名转发；CONFIG_TEMPLATE 重写；doctor；加载期 `deny_unknown_fields` 拦旧配置并出友好错误
+- [ ] **文档与版本**：AGENTS.md / configuration guide / CHANGELOG / ADR-0008 演进记录；直升 v0.6.0
+
+---
+
 ## 遗留 backlog（主干体检·主动不做项，2026-08-26 起留档）
 
 影响小或需结构性前提，暂缓处理，需要时再评估：
