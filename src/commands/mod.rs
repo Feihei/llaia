@@ -36,8 +36,8 @@ context_threshold = 0.7
 max_iterations = 10
 # permission = "default"  # optional: permission tier default / read-only / yolo; defaults to default. Switch at runtime with /permission (not persisted)
 # timezone = "Asia/Shanghai"     # optional: IANA timezone name (e.g. Asia/Shanghai / America/New_York); defaults to system timezone
-# compact_model = "default.qwen"  # optional: cheaper model for context compaction; defaults to main model
-# vision_model = "default.gpt-4o"  # optional: model to describe images when main model lacks multimodal; defaults to sending images to main model
+# compact_model = "qwen"  # optional: cheaper model for context compaction; defaults to main model
+# vision_model = "gpt-4o"  # optional: model to describe images when main model lacks multimodal; defaults to sending images to main model
 # ask_user_timeout_secs = 300       # optional: blocking ask_user clarification timeout (seconds)
 # tool_result_cap = 32768           # optional: max chars per tool result text (truncated beyond; full result kept in sessions.db)
 # keepalive_interval_secs = 600     # optional: "still working" heartbeat interval for long tasks (seconds)
@@ -60,56 +60,79 @@ max_iterations = 10
 level = "info"
 dir = "~/.llaia/logs"
 
-# Provider: connect an LLM service
+# Providers: the unified connection registry. `type` picks the family:
+#   llm family     (openai_compatible / anthropic / gemini) — hosts [model.<id>] entries, probeable
+#   service family (tavily / baidu / brave)                — pure credentials for search/extract, no models
+# An explicit unknown type is a startup error; omitting `type` defaults to openai_compatible.
+#
 # Local Ollama example:
 # [provider.default]
 # type = "openai_compatible"
 # base_url = "http://localhost:11434/v1"
 # api_key = "${OLLAMA_API_KEY}"  # or leave empty
 #
-# [provider.default.qwen]
-# model = "qwen2.5:7b"
+# Models: the global catalog. Each [model.<id>] entry references a provider.
+# kind = chat (default) | tts | image | embedding — omitted kind means chat.
+#
+# [model.qwen]
+# provider = "default"
+# model = "qwen2.5:7b"           # the server-side model name
 # native_tool_calling = false
 # context_size = 32768           # optional; unset: local endpoints are probed, others
 #                                # assume an optimistic 128000 and shrink reactively
 #                                # when the provider rejects an oversized request
+# capabilities = ["multimodal"]  # optional capability flags (v1: multimodal only)
 # enabled = false                # optional; defaults to true. Keep the params on file but
-#                                # hide the model from /provider and the WebUI pickers.
+#                                # hide the model from /models and the WebUI pickers.
 #                                # Explicit references still work (e.g. an agent.model
 #                                # already pointing here keeps running until you switch)
 #
-# [provider.default.qwen.thinking]  # optional; per-model thinking capability (P1/P2,
-#                                   # docs/plans/2026-09-10-thinking-capability-model.md).
-#                                   # All fields default to unknown/unset: /reasoning then
-#                                   # rejects levels and legacy-falls-back for off. Fill in
-#                                   # from wire probes only — dialects bind to deployment,
-#                                   # never guess from the model name.
+# [model.qwen.thinking]          # optional; per-model thinking capability (P1/P2,
+#                                # docs/plans/2026-09-10-thinking-capability-model.md).
+#                                # All fields default to unknown/unset: /reasoning then
+#                                # rejects levels and legacy-falls-back for off. Fill in
+#                                # from wire probes only — dialects bind to deployment,
+#                                # never guess from the model name.
 # default = "unknown"            # model's resting level: none|low|medium|high|max|unknown
 # level_wire = "reasoning_effort"  # how levels are sent: reasoning_effort | none (no knob)
 # off_wire = "reasoning_effort_none"  # how "off" is sent: enable_thinking_false |
 #                                  # thinking_disabled | reasoning_effort_none | unsupported
 # preserve = false               # echo reasoning_content back verbatim (default off;
 #                                # enable only if the server verifiably consumes it)
-
-# Cloud Anthropic example (also works with a gateway base_url):
+#
+# Cloud Anthropic example (also works with a gateway base_url). Note: anthropic/gemini
+# providers only accept kind = "chat" model entries.
 # [provider.claude]
 # type = "anthropic"
 # api_key = "${ANTHROPIC_API_KEY}"
 #
-# [provider.claude.sonnet]
+# [model.sonnet]
+# provider = "claude"
 # model = "claude-sonnet-4-20250514"
 # max_tokens = 8192              # required for Anthropic; defaults to 4096 if unset
+#
+# Search services (service family): pure credentials, no model entries, never appear
+# in the add-model probe list. Referenced by [tools.search].provider below.
+# [provider.tv]
+# type = "tavily"
+# api_key = "${TAVILY_API_KEY}"
+# [provider.baidu]
+# type = "baidu"
+# api_key = "${BAIDU_API_KEY}"
+# [provider.brave]
+# type = "brave"
+# api_key = "${BRAVE_API_KEY}"
 
 # Main Agent: leave model empty to enter degraded mode (no provider, WebUI config only)
-# After configuring a provider above, set e.g. "default.qwen" to enable chat
-# fallback = ["default.qwen"]    # optional: model ref chain tried in order when the main model fails
+# After configuring a provider + model above, set e.g. "qwen" to enable chat
+# fallback = ["qwen"]            # optional: model id chain tried in order when the main model fails
 # workspace / soul / user / memory fields are deprecated; auto-resolved to ~/.llaia/workspace/
 [agent.main]
 model = ""
 
 # Sub-agent example (uncomment to enable; workspace auto-resolves to ~/.llaia/workspace/subagent/<alias>/)
 # [agent.coder]
-# model = "default.qwen"
+# model = "qwen"
 # denied_tools = ["memory_write"]
 # delegate_timeout = 180
 
@@ -156,27 +179,16 @@ command_whitelist = []
 interpret_inline = "approval"   # approval (default): force /ok approval for interpreter inline code like `python -c`, even inside workspace; off disables the gate
 
 [tools.search]
-provider = "tavily"            # search provider: tavily / baidu / brave
+provider = ""                  # provider id reference (service family, e.g. "tv" configured above); empty = no search tool
 top_k = 8                      # default number of results
 
-[tools.tavily]
-api_key = ""                   # supports "${TAVILY_API_KEY}" env var reference
-[tools.baidu]
-api_key = ""                   # Baidu Qianfan AI Search; supports "${BAIDU_API_KEY}"
-[tools.brave]
-api_key = ""                   # Brave Search API; supports "${BRAVE_API_KEY}"
-[tools.tts]                    # P5 T1: OpenAI-compatible /audio/speech
+[tools.tts]                    # OpenAI-compatible /audio/speech via the model catalog
 enabled = false
-base_url = "https://api.openai.com/v1"
-api_key = ""                   # supports "${TTS_API_KEY}"
-model = "tts-1"
-voice = "alloy"
-[tools.image_gen]              # OpenAI-compatible /images/generations + /images/edits
+model = ""                     # model id of a kind = "tts" entry (endpoint/key come from its provider)
+voice = "alloy"                # default voice (call parameter, not a model attribute)
+[tools.image_gen]              # OpenAI-compatible /images/generations + /images/edits via the model catalog
 enabled = false                # sd-server (stable-diffusion.cpp), agnes, OpenAI, ...
-base_url = "http://127.0.0.1:1234/v1"
-api_key = ""                   # supports "${IMAGE_GEN_API_KEY}"; local sd-server needs none
-model = ""                     # empty = omit "model" from requests
-size = "512x512"               # WIDTHxHEIGHT; empty = omit
+model = ""                     # model id of a kind = "image" entry; its `size` field is the default output size
 timeout_secs = 300             # local diffusion can be slow
 "#;
 
@@ -922,18 +934,25 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         );
     } else {
         for (pid, p) in &cfg.provider {
-            println!("\nprovider.{}: {}", pid, p.base_url);
-            for (alias, m) in &p.model {
-                // /provider 不列 disabled 模型，这里不标出来会显得两处视图不一致
-                let hidden = if m.enabled { "" } else { " [disabled]" };
-                println!(
-                    "  model.{}: {} (native_tool_calling={}){}",
-                    alias,
-                    m.model,
-                    native_label(m.native_tool_calling),
-                    hidden
-                );
-            }
+            println!(
+                "\nprovider.{}: {} (type={})",
+                pid,
+                p.base_url,
+                p.effective_type()
+            );
+        }
+        for (mid, m) in &cfg.models {
+            // /models 不列 disabled 模型，这里不标出来会显得两处视图不一致
+            let hidden = if m.enabled { "" } else { " [disabled]" };
+            println!(
+                "  model.{}: {} (provider={}, kind={}, native_tool_calling={}){}",
+                mid,
+                m.model,
+                m.provider,
+                m.kind.as_str(),
+                native_label(m.native_tool_calling),
+                hidden
+            );
         }
     }
 
@@ -1061,40 +1080,37 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         );
     }
 
-    // 解析 model 引用，展示 provider 端点
-    match Config::parse_model_ref(&agent_cfg.model) {
-        Ok((prov_id, model_alias)) => {
-            if let Some(p) = cfg.provider.get(prov_id) {
-                println!("\nprovider.{}: {}", prov_id, p.base_url);
-                if let Some(m) = p.model.get(model_alias) {
-                    println!(
-                        "  model.{}: {} (native_tool_calling={})",
-                        model_alias,
-                        m.model,
-                        native_label(m.native_tool_calling)
-                    );
-                    match reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(5))
-                        .build()
-                        .map_err(|e| anyhow::anyhow!("failed to build http client: {}", e))?
-                        .get(format!("{}/models", p.base_url.trim_end_matches('/')))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => println!("  /models status: {}", resp.status()),
-                        Err(e) => println!("  /models error: {} (5s timeout)", e),
-                    }
-                } else {
-                    println!(
-                        "  [model.{} not found under provider.{}]",
-                        model_alias, prov_id
-                    );
+    // 解析 model 目录条目，展示 provider 端点
+    match cfg.models.get(&agent_cfg.model) {
+        Some(m) => {
+            if let Some(p) = cfg.provider.get(&m.provider) {
+                println!("\nprovider.{}: {}", m.provider, p.base_url);
+                println!(
+                    "  model.{}: {} (kind={} native_tool_calling={})",
+                    agent_cfg.model,
+                    m.model,
+                    m.kind.as_str(),
+                    native_label(m.native_tool_calling)
+                );
+                match reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("failed to build http client: {}", e))?
+                    .get(format!("{}/models", p.base_url.trim_end_matches('/')))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => println!("  /models status: {}", resp.status()),
+                    Err(e) => println!("  /models error: {} (5s timeout)", e),
                 }
             } else {
-                println!("\n[warn] provider.{} not configured", prov_id);
+                println!("\n[warn] provider.{} not configured", m.provider);
             }
         }
-        Err(e) => println!("\n[invalid agent.model: {}]", e),
+        None => println!(
+            "\n[warn] model '{}' not configured (missing [model.{}])",
+            agent_cfg.model, agent_cfg.model
+        ),
     }
 
     Ok(())
@@ -1149,7 +1165,8 @@ pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
         return Ok(checks);
     }
 
-    // provider 连通性：仅探测 openai_compatible（anthropic/gemini 的 /models 语义不同）
+    // provider 连通性：service family 只报配置态（/models 语义不存在），
+    // anthropic/gemini 的 /models 语义不同也只报配置态
     if cfg.provider.is_empty() {
         checks.push(DoctorCheck::warn(
             "providers",
@@ -1157,10 +1174,10 @@ pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
         ));
     }
     for (pid, p) in &cfg.provider {
-        if p.provider_type != "openai_compatible" {
+        if p.effective_type() != "openai_compatible" {
             checks.push(DoctorCheck::ok(
                 &format!("provider.{pid}"),
-                format!("type={} (connectivity not probed)", p.provider_type),
+                format!("type={} (connectivity not probed)", p.effective_type()),
             ));
             continue;
         }
@@ -1181,19 +1198,11 @@ pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
     match cfg.agent.get("main") {
         None => checks.push(DoctorCheck::warn("agent.main", "not configured")),
         Some(a) => {
-            match crate::provider::provider_from_ref(&cfg, &a.model) {
+            match crate::provider::model_from_ref(&cfg, &a.model) {
                 Ok(p) => {
                     checks.push(DoctorCheck::ok("agent.main.model", p.label()));
                     // 三态：显式配置 > 探测命中 > 双皆无（回退乐观默认，需用户知情）
-                    let configured =
-                        Config::parse_model_ref(&a.model)
-                            .ok()
-                            .and_then(|(pid, malias)| {
-                                cfg.provider
-                                    .get(pid)
-                                    .and_then(|pr| pr.model.get(malias))
-                                    .and_then(|m| m.context_size)
-                            });
+                    let configured = cfg.models.get(&a.model).and_then(|m| m.context_size);
                     match (configured, p.detect_context_size().await) {
                         (Some(n), _) => {
                             checks.push(DoctorCheck::ok("context_size", format!("configured {n}")))
@@ -1205,7 +1214,7 @@ pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
                             "context_size",
                             format!(
                                 "not configured and probe failed; falling back to optimistic \
-                                 default {} — set [provider.<id>.<model_alias>].context_size \
+                                 default {} — set [model.<id>].context_size \
                                  if the real window differs (overflow errors shrink it \
                                  at runtime)",
                                 crate::agent::DEFAULT_CONTEXT_SIZE
@@ -1368,12 +1377,13 @@ mod tests {
              type = \"openai_compatible\"\n\
              base_url = \"{base_url}\"\n\
              \n\
-             [provider.local.default]\n\
+             [model.local-default]\n\
+             provider = \"local\"\n\
              model = \"test-model\"\n\
              native_tool_calling = true\n\
              \n\
              [agent.main]\n\
-             model = \"local.default\"\n"
+             model = \"local-default\"\n"
         );
         std::fs::write(dir.join("config.toml"), toml).unwrap();
     }

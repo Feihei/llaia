@@ -888,53 +888,32 @@ white-space: pre-wrap; word-break: break-word;
 #sessions-pane .hint { color: var(--text-faint); font-size: 12px; margin-top: 6px; }
 #sessions-pane .err { color: var(--red); font-size: 12px; margin-top: 6px; }
 
-/* ---- 模型探测（P5 W2） ---- */
+/* ---- 模型探测（P5 W2；P8 后 probe-section 仅用于 Models 选项卡的添加面板） ---- */
 #config-pane .probe-section { margin: 6px 0 10px; }
-/* 折叠三角标：主按钮左侧的独立小按钮（有缓存结果才显示），点它只开合不发请求 */
-#config-pane .probe-fold {
-  background: none; border: none; padding: 0 2px; cursor: pointer;
-  color: var(--text-faint); font-size: 12px; line-height: 1;
-}
-#config-pane .probe-fold:hover { color: var(--text); }
-#config-pane .probe-models {
-  margin: 8px 0 4px; padding: 8px 10px;
+
+/* ---- Models 选项卡（P8）：过滤条 + 卡片网格 + 添加面板 ---- */
+#config-pane .model-filter {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 10px 0; padding: 8px 10px;
   background: var(--bg-elev); border: 1px solid var(--border);
-  border-left: 3px solid var(--cyan);
 }
-#config-pane .probe-model-row { padding: 2px 0; font-size: 13px; }
-#config-pane .probe-model-row label { display: flex; align-items: center; gap: 8px; color: var(--text); }
-/* 宽窗口自动分栏：列宽下限 240px，按容器实际宽度 auto-fill 出尽可能多的列；窄窗口自然退回单列 */
-#config-pane .probe-model-grid {
+#config-pane .model-filter select { width: auto; min-width: 120px; }
+/* 模型卡片网格：列宽下限 340px，auto-fill 分栏；窄窗口自然退单列 */
+#config-pane .model-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 0 16px;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
 }
-/* 长模型名在窄列里截断显示，悬停 title 看全名 */
-#config-pane .probe-model-row label { min-width: 0; }
-#config-pane .probe-model-id {
-  min-width: 0; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-/* 已加入 models 的探测项：行常驻（用户能确认"这条加过了"），灰化 + 绿勾 */
-#config-pane .probe-model-row--added label { color: var(--text-faint); }
-#config-pane .probe-model-row--added .probe-added { color: var(--green); font-size: 11px; }
-/* 列表头：re-probe 重探测（折叠三角标已移到主按钮左侧） */
-#config-pane .probe-models-head {
-  display: flex; align-items: center; gap: 12px; margin-bottom: 4px;
-}
+#config-pane .model-grid .provider-card { margin: 0; }
+/* disabled 模型卡：保留在目录里（改回 enabled 即恢复），只灰化 */
+#config-pane .model-card--off { border-left-color: var(--border); opacity: .75; }
+#config-pane .card-header-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+/* 添加流面板：青色左边条与卡片网格区分 */
+#config-pane .add-model-panel { border-left-color: var(--cyan); }
+#config-pane .add-model-panel .hint { margin-left: 10px; }
 #config-pane .linklike {
   background: none; border: none; padding: 0; cursor: pointer;
   color: var(--cyan); font-size: 12px; font-family: inherit;
 }
 #config-pane .linklike:hover { text-decoration: underline; }
 #config-pane .linklike:disabled { color: var(--text-faint); cursor: default; text-decoration: none; }
-/* 手动添加 model id：checkbox + 输入框，与探测项同走 Add selected */
-#config-pane .probe-manual {
-  display: flex; align-items: center; gap: 8px; margin-top: 8px;
-  padding-top: 8px; border-top: 1px dashed var(--border);
-}
-#config-pane .probe-manual input[type="checkbox"] { flex: none; }
-#config-pane .probe-manual input[type="text"],
-#config-pane .probe-manual input:not([type]) {
-  flex: 1; min-width: 0; font-size: 13px;
-}

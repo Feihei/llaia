@@ -12,7 +12,7 @@
 //!   (workspace_root ∪ trusted dirs ∪ agent home), so files under `uploads/`
 //!   stay reachable after `/move`
 
-use crate::config::ImageGenConfig;
+use crate::config::{Config, ImageGenConfig, ModelKind};
 use crate::image_utils::is_image_file;
 use crate::path_guard;
 use crate::tools::file::resolve_within;
@@ -56,14 +56,59 @@ struct Endpoint {
 }
 
 impl Endpoint {
-    fn from_cfg(cfg: &ImageGenConfig) -> Self {
-        Self {
-            base_url: cfg.base_url.trim_end_matches('/').to_string(),
-            api_key: cfg.api_key.clone(),
-            model: cfg.model.trim().to_string(),
-            size: cfg.size.trim().to_string(),
-            timeout: Duration::from_secs(cfg.timeout_secs.max(1)),
+    /// 从模型目录解析端点参数（P8）：`model` 引用 kind=image 条目，
+    /// base_url/api_key 来自条目的 provider，服务端模型名与默认尺寸来自条目。
+    /// 引用无效/ kind 不符 → None（warn 已在内部记录）。
+    fn from_catalog(cfg: &ImageGenConfig, config: &Config) -> Option<Self> {
+        if !cfg.enabled {
+            return None;
         }
+        let ref_id = cfg.model.trim();
+        if ref_id.is_empty() {
+            tracing::warn!(
+                "tools.image_gen.enabled but tools.image_gen.model is empty; image tools not registered"
+            );
+            return None;
+        }
+        let entry = config.models.get(ref_id)?;
+        if entry.kind != ModelKind::Image {
+            tracing::warn!(
+                model = ref_id,
+                kind = entry.kind.as_str(),
+                "tools.image_gen.model must reference a kind = \"image\" entry; image tools not registered"
+            );
+            return None;
+        }
+        let prov = config.provider.get(&entry.provider)?;
+        Some(Self {
+            base_url: prov.base_url.trim_end_matches('/').to_string(),
+            api_key: prov.api_key.clone(),
+            model: entry.model.trim().to_string(),
+            size: entry.size.clone().unwrap_or_default().trim().to_string(),
+            timeout: Duration::from_secs(cfg.timeout_secs.max(1)),
+        })
+    }
+
+    /// 同 `from_catalog`，但对无效引用补 warn（enabled 时才调用）。
+    fn from_catalog_warned(cfg: &ImageGenConfig, config: &Config) -> Option<Self> {
+        let resolved = Self::from_catalog(cfg, config);
+        if resolved.is_none()
+            && cfg.enabled
+            && !cfg.model.trim().is_empty()
+            && config.models.contains_key(cfg.model.trim())
+        {
+            // kind 正确但 provider 缺失的场景（from_catalog 静默返回 None 的唯一情况）
+            if let Some(e) = config.models.get(cfg.model.trim()) {
+                if e.kind == ModelKind::Image && !config.provider.contains_key(&e.provider) {
+                    tracing::warn!(
+                        model = cfg.model.as_str(),
+                        provider = %e.provider,
+                        "image model references a missing provider; image tools not registered"
+                    );
+                }
+            }
+        }
+        resolved
     }
 
     fn client(&self) -> Result<reqwest::Client> {
@@ -143,23 +188,17 @@ pub struct ImageGenTool {
 }
 
 impl ImageGenTool {
-    /// 按 `[tools.image_gen]` 构建；`enabled` 关闭时返回 None；本地 sd-server
-    /// 通常无 key，`allow_no_key = true`（api_key 为空也注册）。
+    /// 按 `[tools.image_gen]` + 模型目录构建（P8）：`model` 引用 kind=image 条目；
+    /// 本地 sd-server 通常无 key（provider api_key 为空时不发 Authorization 头）。
     pub fn build(
         cfg: &ImageGenConfig,
-        allow_no_key: bool,
+        config: &Config,
         workspace: PathBuf,
     ) -> Result<Option<Arc<dyn Tool>>> {
-        if !cfg.enabled {
+        let Some(ep) = Endpoint::from_catalog_warned(cfg, config) else {
             return Ok(None);
-        }
-        if !allow_no_key && cfg.api_key.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(Arc::new(ImageGenTool {
-            ep: Endpoint::from_cfg(cfg),
-            workspace,
-        })))
+        };
+        Ok(Some(Arc::new(ImageGenTool { ep, workspace })))
     }
 
     async fn generate(&self, prompt: &str, size: Option<&str>) -> Result<PathBuf> {
@@ -246,20 +285,17 @@ pub struct ImageEditTool {
 impl ImageEditTool {
     pub fn build(
         cfg: &ImageGenConfig,
-        allow_no_key: bool,
+        config: &Config,
         workspace: PathBuf,
         workspace_root: Arc<RwLock<PathBuf>>,
         trusted: Arc<RwLock<Vec<PathBuf>>>,
     ) -> Result<Option<Arc<dyn Tool>>> {
-        if !cfg.enabled {
+        let Some(ep) = Endpoint::from_catalog_warned(cfg, config) else {
             return Ok(None);
-        }
-        if !allow_no_key && cfg.api_key.is_empty() {
-            return Ok(None);
-        }
+        };
         let home = workspace.clone();
         Ok(Some(Arc::new(ImageEditTool {
-            ep: Endpoint::from_cfg(cfg),
+            ep,
             workspace,
             workspace_root,
             trusted,
@@ -403,15 +439,39 @@ mod tests {
     use std::net::TcpListener;
     use tempfile::tempdir;
 
-    fn cfg(base_url: &str) -> ImageGenConfig {
-        ImageGenConfig {
+    /// 组装（ImageGenConfig, Config）：kind=image 目录条目 `sdxl` 引用 `imgprov` provider
+    fn fixture(base_url: &str) -> (ImageGenConfig, Config) {
+        let mut config = Config::default_for_workspace("~/.llaia");
+        config.provider.insert(
+            "imgprov".into(),
+            crate::config::ProviderConfig {
+                provider_type: "openai_compatible".into(),
+                base_url: base_url.to_string(),
+                api_key: "sk-test".into(),
+                compat: None,
+            },
+        );
+        config.models.insert(
+            "sdxl".into(),
+            crate::config::ModelEntry {
+                provider: "imgprov".into(),
+                model: "sd-test".into(),
+                kind: ModelKind::Image,
+                enabled: true,
+                context_size: None,
+                max_tokens: None,
+                native_tool_calling: None,
+                thinking: None,
+                size: Some("512x512".into()),
+                capabilities: Vec::new(),
+            },
+        );
+        let cfg = ImageGenConfig {
             enabled: true,
-            base_url: base_url.to_string(),
-            api_key: "sk-test".into(),
-            model: "sd-test".into(),
-            size: "512x512".into(),
+            model: "sdxl".into(),
             timeout_secs: 10,
-        }
+        };
+        (cfg, config)
     }
 
     /// 极简 mock：循环 accept，按序回 canned 响应并捕获请求体。
@@ -472,21 +532,27 @@ mod tests {
     }
 
     #[test]
-    fn build_gates_on_enabled_and_key() {
+    fn build_gates_on_enabled_and_ref_resolution() {
         let ws = tempdir().unwrap();
-        let mut c = cfg("http://localhost:9/v1");
+        let (mut c, conf) = fixture("http://localhost:9/v1");
         c.enabled = false;
-        assert!(ImageGenTool::build(&c, false, ws.path().to_path_buf())
+        assert!(ImageGenTool::build(&c, &conf, ws.path().to_path_buf())
             .unwrap()
             .is_none());
-        // enabled 但无 key 且不允许免 key → 不注册
-        let mut c = cfg("http://localhost:9/v1");
-        c.api_key = String::new();
-        assert!(ImageGenTool::build(&c, false, ws.path().to_path_buf())
+        // 引用未知条目 → 不注册
+        c.enabled = true;
+        c.model = "nope".into();
+        assert!(ImageGenTool::build(&c, &conf, ws.path().to_path_buf())
             .unwrap()
             .is_none());
-        // 本地 sd-server：无 key 也注册（allow_no_key）
-        assert!(ImageGenTool::build(&c, true, ws.path().to_path_buf())
+        // 引用非 image 条目（qwen 是 chat）→ 不注册
+        c.model = "qwen".into();
+        assert!(ImageGenTool::build(&c, &conf, ws.path().to_path_buf())
+            .unwrap()
+            .is_none());
+        // 正常引用 → 注册（provider api_key 为空也无妨：本地 sd-server 场景）
+        c.model = "sdxl".into();
+        assert!(ImageGenTool::build(&c, &conf, ws.path().to_path_buf())
             .unwrap()
             .is_some());
     }
@@ -496,7 +562,8 @@ mod tests {
         let ws = tempdir().unwrap();
         let body = format!("{{\"data\":[{{\"b64_json\":\"{}\"}}]}}", fake_png_b64());
         let (base, _captured) = spawn_mock(move |_| vec![("200 OK".into(), body)]);
-        let tool = ImageGenTool::build(&cfg(&base), false, ws.path().to_path_buf())
+        let (c, conf) = fixture(&base);
+        let tool = ImageGenTool::build(&c, &conf, ws.path().to_path_buf())
             .unwrap()
             .unwrap();
         let out = tool
@@ -522,7 +589,8 @@ mod tests {
                 ("200 OK".into(), "fake-png-bytes".into()),
             ]
         });
-        let tool = ImageGenTool::build(&cfg(&base), false, ws.path().to_path_buf())
+        let (c, conf) = fixture(&base);
+        let tool = ImageGenTool::build(&c, &conf, ws.path().to_path_buf())
             .unwrap()
             .unwrap();
         let out = tool
@@ -542,7 +610,8 @@ mod tests {
                 "{\"error\":{\"message\":\"boom\"}}".into(),
             )]
         });
-        let tool = ImageGenTool::build(&cfg(&base), false, ws.path().to_path_buf())
+        let (c, conf) = fixture(&base);
+        let tool = ImageGenTool::build(&c, &conf, ws.path().to_path_buf())
             .unwrap()
             .unwrap();
         let err = tool
@@ -554,7 +623,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_requires_prompt() {
-        let tool = ImageGenTool::build(&cfg("http://localhost:9/v1"), false, PathBuf::from("."))
+        let (c, conf) = fixture("http://localhost:9/v1");
+        let tool = ImageGenTool::build(&c, &conf, PathBuf::from("."))
             .unwrap()
             .unwrap();
         let err = tool.execute(&json!({}), "cli").await.unwrap_err();
@@ -567,9 +637,10 @@ mod tests {
         std::fs::write(ws.path().join("src.png"), b"source-image").unwrap();
         let body = format!("{{\"data\":[{{\"b64_json\":\"{}\"}}]}}", fake_png_b64());
         let (base, captured) = spawn_mock(move |_| vec![("200 OK".into(), body)]);
+        let (c, conf) = fixture(&base);
         let root = Arc::new(RwLock::new(ws.path().to_path_buf()));
         let trusted: Arc<RwLock<Vec<PathBuf>>> = Arc::new(RwLock::new(Vec::new()));
-        let tool = ImageEditTool::build(&cfg(&base), false, ws.path().to_path_buf(), root, trusted)
+        let tool = ImageEditTool::build(&c, &conf, ws.path().to_path_buf(), root, trusted)
             .unwrap()
             .unwrap();
         let out = tool
@@ -600,9 +671,10 @@ mod tests {
         std::fs::write(outside.path().join("stranger.png"), b"x").unwrap();
         std::fs::write(ws.path().join("doc.txt"), b"not an image").unwrap();
         let (base, _captured) = spawn_mock(|_| vec![]);
+        let (c, conf) = fixture(&base);
         let root = Arc::new(RwLock::new(ws.path().to_path_buf()));
         let trusted: Arc<RwLock<Vec<PathBuf>>> = Arc::new(RwLock::new(Vec::new()));
-        let tool = ImageEditTool::build(&cfg(&base), false, ws.path().to_path_buf(), root, trusted)
+        let tool = ImageEditTool::build(&c, &conf, ws.path().to_path_buf(), root, trusted)
             .unwrap()
             .unwrap();
 
@@ -630,15 +702,15 @@ mod tests {
 
     #[test]
     fn schemas_expose_expected_fields() {
-        let c = cfg("http://localhost:9/v1");
-        let gen = ImageGenTool::build(&c, false, PathBuf::from("."))
+        let (c, conf) = fixture("http://localhost:9/v1");
+        let gen = ImageGenTool::build(&c, &conf, PathBuf::from("."))
             .unwrap()
             .unwrap();
         assert_eq!(gen.name(), "image_gen");
         assert!(gen.parameters_schema()["properties"]["prompt"].is_object());
         let edit = ImageEditTool::build(
             &c,
-            false,
+            &conf,
             PathBuf::from("."),
             Arc::new(RwLock::new(PathBuf::from("."))),
             Arc::new(RwLock::new(Vec::new())),

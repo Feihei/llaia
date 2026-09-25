@@ -194,3 +194,14 @@ ws_base = "https://open.feishu.cn"
 ## 增量（2026-09-09）
 
 **ModelConfig 新增 `enabled`**：`bool`，默认 `true`（缺键即启用，存量配置零迁移）。语义是**只管可发现性**——`enabled = false` 让模型退出 `/provider` 列表（含 `<序号>` 索引基准）与 WebUI 的 agent model / fallback 下拉，但 `provider_from_ref` 仍解析显式引用：在该收口拦截会把「关掉当前 `agent.model` 指向的模型」变成下次启动即失败。序列化上 `skip_serializing_if` 跳过 **true** 那一侧（只有显式 `enabled = false` 落盘，config.toml 不被脏 diff 污染），代价是 `GET /api/config` 一并省略该键、前端装载需 `enabled ??= true` 归一化。间接引用由 `Config::reconcile_disabled_models` 收敛：`agent.<alias>.fallback` 剔除，`runtime.compact_model` / `runtime.vision_model` warn + 置 None 回退主模型——**只改内存态、不改写盘**，故盘上引用原样保留、模型重新启用后自动恢复。详见 [plans/2026-09-09-model-enabled-toggle.md](../plans/2026-09-09-model-enabled-toggle.md)。
+
+## 增量（2026-09-25，P8 模型目录）
+
+**schema v1.2：`[provider]` 收窄为连接注册表，模型独立成 `[model.<id>]` 目录**（[plan](../plans/2026-09-25-model-catalog.md)）：
+
+- `[provider.<id>]` 只剩 `type` / `base_url` / `api_key` / `compat`，`deny_unknown_fields` 兜底——旧 `[provider.<id>.<alias>]` model 子表启动即报错而非静默吞掉。provider 分两族：llm family（openai_compatible/anthropic/gemini，可挂 model、可 probe）与 service family（tavily/baidu/brave，纯凭据，无 model 条目、不进 probe），`type` 即判别器、显式未知 type 报错（缺省仍回退 openai_compatible）。
+- 顶层 `[model.<id>]`（serde rename 单数 `model`；Rust 字段 `Config.models` 用 BTreeMap 保证落盘顺序）：`provider` 引用 + `kind`（chat 缺省/tts/image/embedding，决定 wire API 归属）+ kind 专属属性（image 的 `size`）+ `capabilities` 正交能力位数组（v1 仅 `multimodal`，预留扩展）。
+- 引用一元化：两段式 `provider_id.model_alias` 全部退役为 model id（agent `model`/`fallback`、`compact_model`/`vision_model`、`[tools.search].provider`、`[tools.tts].model`、`[tools.image_gen].model`、`[tools.web_fetch].extract_provider`）；`provider_from_ref` → `model_from_ref`（kind=chat 门禁收在解析层）。tools 层 api_key 字段全部删除，凭据只在 provider 层一份（SecretField 管线同步收缩）。
+- 一步到位无兼容层（自用为主，量小改配置五分钟）：不给旧结构留迁移代码，错误消息指引人工迁移。
+
+**修订（同日实施期）**：「一步到位」原定 `deny_unknown_fields` 启动即报错，落地时发现对存量配置过于粗暴——agent 引用、fallback、tools 引用全要手工改写。改为 `Config::load` 反序列化前的**自动迁移层**（`migrate_legacy_config`）：旧 model 子表/凭据段/内联端点原地改写为新形态（仅内存态，幂等，磁盘不动），model id 沿用 `pid.alias` 两段式使旧引用零改动解析；显式 `[model]` 条目优先，`deny_unknown_fields` 保留拦真 unknown 键。

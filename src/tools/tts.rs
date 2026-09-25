@@ -5,7 +5,7 @@
 //!   脆弱）记 v2 待研究（见 `docs/plans/2026-08-17-p5-remaining.md` §T1 决策修订）
 //! - 产物落 `workspace/tts/<uuid>.mp3`（默认），路径经 `resolve_within` 校验防越权
 
-use crate::config::TtsConfig;
+use crate::config::{Config, ModelKind, TtsConfig};
 use crate::tools::file::resolve_within;
 use crate::tools::Tool;
 use anyhow::{anyhow, bail, Result};
@@ -27,15 +27,52 @@ pub struct TtsTool {
 }
 
 impl TtsTool {
-    /// 按 `[tools.tts]` 构建；`enabled` 或 `api_key` 缺失时返回 None（不注册）。
-    pub fn build(cfg: &TtsConfig, workspace: PathBuf) -> Result<Option<Arc<dyn Tool>>> {
-        if !cfg.enabled || cfg.api_key.is_empty() {
+    /// 按 `[tools.tts]` + 模型目录构建（P8）：`model` 引用 kind=tts 条目，
+    /// 端点/key 来自条目的 provider，服务端模型名来自条目的 `model` 字段。
+    /// `enabled` 关闭或引用无效时返回 None（不注册）。本地 TTS 后端 provider
+    /// 可以不配 key（api_key 为空时不发 Authorization 头）。
+    pub fn build(
+        cfg: &TtsConfig,
+        config: &Config,
+        workspace: PathBuf,
+    ) -> Result<Option<Arc<dyn Tool>>> {
+        if !cfg.enabled {
             return Ok(None);
         }
+        let ref_id = cfg.model.trim();
+        if ref_id.is_empty() {
+            tracing::warn!(
+                "tools.tts.enabled but tools.tts.model is empty; tts tool not registered"
+            );
+            return Ok(None);
+        }
+        let Some(entry) = config.models.get(ref_id) else {
+            tracing::warn!(
+                model = ref_id,
+                "tools.tts.model references an unknown model entry; tts tool not registered"
+            );
+            return Ok(None);
+        };
+        if entry.kind != ModelKind::Tts {
+            tracing::warn!(
+                model = ref_id,
+                kind = entry.kind.as_str(),
+                "tools.tts.model must reference a kind = \"tts\" entry; tts tool not registered"
+            );
+            return Ok(None);
+        }
+        let Some(prov) = config.provider.get(&entry.provider) else {
+            tracing::warn!(
+                model = ref_id,
+                provider = %entry.provider,
+                "tts model references a missing provider; tts tool not registered"
+            );
+            return Ok(None);
+        };
         Ok(Some(Arc::new(TtsTool {
-            base_url: cfg.base_url.trim_end_matches('/').to_string(),
-            api_key: cfg.api_key.clone(),
-            model: cfg.model.clone(),
+            base_url: prov.base_url.trim_end_matches('/').to_string(),
+            api_key: prov.api_key.clone(),
+            model: entry.model.clone(),
             voice: cfg.voice.clone(),
             workspace,
         })))
@@ -52,15 +89,16 @@ impl TtsTool {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()?;
-        let resp = client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(&json!({
-                "model": self.model,
-                "input": text,
-                "voice": voice,
-                "response_format": "mp3",
-            }))
+        let mut req = client.post(&url).json(&json!({
+            "model": self.model,
+            "input": text,
+            "voice": voice,
+            "response_format": "mp3",
+        }));
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| anyhow!("TTS request failed: {e}"))?;
@@ -136,43 +174,96 @@ impl Tool for TtsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ModelEntry, ProviderConfig};
+
+    /// 组装一份带 tts 目录条目的最小 Config
+    fn config() -> Config {
+        let mut config = Config::default_for_workspace("~/.llaia");
+        config.provider.insert(
+            "ttsprov".into(),
+            ProviderConfig {
+                provider_type: "openai_compatible".into(),
+                base_url: "http://localhost:9/v1".into(),
+                api_key: "sk-test".into(),
+                compat: None,
+            },
+        );
+        config.models.insert(
+            "tts1".into(),
+            ModelEntry {
+                provider: "ttsprov".into(),
+                model: "tts-1".into(),
+                kind: ModelKind::Tts,
+                enabled: true,
+                context_size: None,
+                max_tokens: None,
+                native_tool_calling: None,
+                thinking: None,
+                size: None,
+                capabilities: Vec::new(),
+            },
+        );
+        config
+    }
 
     fn cfg() -> TtsConfig {
         TtsConfig {
             enabled: true,
-            base_url: "http://localhost:9/v1".into(),
-            api_key: "sk-test".into(),
-            model: "tts-1".into(),
+            model: "tts1".into(),
             voice: "alloy".into(),
         }
     }
 
     #[test]
-    fn build_returns_none_when_disabled_or_no_key() {
+    fn build_returns_none_when_disabled_or_ref_unusable() {
+        let config = config();
         let mut c = cfg();
         c.enabled = false;
-        assert!(TtsTool::build(&c, PathBuf::from(".")).unwrap().is_none());
-        let mut c = cfg();
-        c.api_key = String::new();
-        assert!(TtsTool::build(&c, PathBuf::from(".")).unwrap().is_none());
+        assert!(TtsTool::build(&c, &config, PathBuf::from("."))
+            .unwrap()
+            .is_none());
+        // 引用未知条目
+        let c = TtsConfig {
+            enabled: true,
+            model: "nope".into(),
+            voice: "alloy".into(),
+        };
+        assert!(TtsTool::build(&c, &config, PathBuf::from("."))
+            .unwrap()
+            .is_none());
+        // 引用非 tts 条目（default_for_workspace 的 qwen 是 chat）
+        let c = TtsConfig {
+            enabled: true,
+            model: "qwen".into(),
+            voice: "alloy".into(),
+        };
+        assert!(TtsTool::build(&c, &config, PathBuf::from("."))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn build_returns_tool_when_enabled() {
-        let tool = TtsTool::build(&cfg(), PathBuf::from(".")).unwrap().unwrap();
+        let tool = TtsTool::build(&cfg(), &config(), PathBuf::from("."))
+            .unwrap()
+            .unwrap();
         assert_eq!(tool.name(), "tts");
     }
 
     #[tokio::test]
     async fn execute_requires_text() {
-        let tool = TtsTool::build(&cfg(), PathBuf::from(".")).unwrap().unwrap();
+        let tool = TtsTool::build(&cfg(), &config(), PathBuf::from("."))
+            .unwrap()
+            .unwrap();
         let err = tool.execute(&json!({}), "cli").await.unwrap_err();
         assert!(err.to_string().contains("missing 'text'"));
     }
 
     #[tokio::test]
     async fn execute_rejects_empty_and_long_text() {
-        let tool = TtsTool::build(&cfg(), PathBuf::from(".")).unwrap().unwrap();
+        let tool = TtsTool::build(&cfg(), &config(), PathBuf::from("."))
+            .unwrap()
+            .unwrap();
         let err = tool
             .execute(&json!({ "text": "   " }), "cli")
             .await
@@ -188,7 +279,9 @@ mod tests {
 
     #[test]
     fn schema_exposes_text_and_voice() {
-        let tool = TtsTool::build(&cfg(), PathBuf::from(".")).unwrap().unwrap();
+        let tool = TtsTool::build(&cfg(), &config(), PathBuf::from("."))
+            .unwrap()
+            .unwrap();
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["text"].is_object());
         assert!(schema["properties"]["voice"].is_object());

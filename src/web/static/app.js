@@ -52,7 +52,7 @@ function llaiaApp() {
     _wechatTimer: null,
     ws: null,
     // config
-    cfg: { runtime:{}, log:{}, provider:{}, agent:{}, webui:{}, channels:{qq:{},telegram:{},dingtalk:{},wechat:{},mail:{},feishu:{}}, tools:{terminal:{whitelist:[]},tavily:{},tts:{}} },
+    cfg: { runtime:{}, log:{}, provider:{}, model:{}, agent:{}, webui:{}, channels:{qq:{},telegram:{},dingtalk:{},wechat:{},mail:{},feishu:{}}, tools:{terminal:{whitelist:[]},search:{},tts:{},image_gen:{}} },
     compatOpen: {},
     // thinking 面板开合状态（pid.alias → bool），与 m.thinking 配置段存在性解耦：
     // 已配置的模型也能折叠面板而不丢配置（旧实现把两者绑死，配置过的模型永远收不起来）。
@@ -173,21 +173,19 @@ function llaiaApp() {
     skillContentMsg: '',
     // per-agent fallback draft (dropdown selection before "Add")
     fallbackDraft: {},
-    // 模型探测（P5 W2）
+    // 模型探测（P5 W2，P8 复用于 Models 选项卡的添加流：probe 结果按 provider 缓存）
     probing: null,
     probeMsg: {},
     probeModels: {},
-    probeChecked: {},
-    // probe 列表展开态（与结果缓存解耦：收起不清结果，再点主按钮直接展开不重探测）
-    probeOpen: {},
-    // 手动添加模型 id 的输入框与勾选态（probe-section 底部，端点不支持 /models 时唯一入口）
-    probeManual: {},
-    probeManualChecked: {},
-    // 单模型可用性探测：key = "pid.alias"，值 ''=未测 / 'ok'=可用 / 'error: <msg>'=不可用。
+    // 单模型可用性探测：key = model 目录 id，值 ''=未测 / 'ok'=可用 / 'error: <msg>'=不可用。
     // 注意：状态 map 用 probeStatus，不能叫 probeModel——与方法 probeModel() 同名会互相覆盖
     //（同 runProbe/probeModels 的冲突，见上）。
     probeStatus: {},
     probeModelBusy: {},
+    // Models 选项卡（P8）：过滤条 + 卡片网格 + 添加流
+    modelFilter: { provider: '', kind: '', multimodal: false },
+    addModelOpen: false,
+    addModelDraft: { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false },
     // 会话历史（P5 W1）
     sessions: [],
     selectedSession: null,
@@ -936,33 +934,29 @@ function llaiaApp() {
       if (r.ok) {
         const data = await r.json();
         console.log('config loaded:', Object.keys(data), 'provider keys:', Object.keys(data.provider || {}));
-        // adapt for serde flatten: provider's model is flattened to top level (e.g. qwen3_6),
-        // frontend needs to collect non-type/base_url/api_key fields into p.model
-        for (const pid in data.provider) {
-          const p = data.provider[pid];
-          if (!p.model) p.model = {};
-          this.compatOpen[pid] = false;
-          for (const k of Object.keys(p).slice()) {
-            if (k !== 'type' && k !== 'base_url' && k !== 'api_key' && k !== 'model' && k !== 'compat') {
-              p.model[k] = p[k];
-              delete p[k];
-              // thinking 面板初始开合：已配置（任一字段非 null）默认展开，未配置默认收起
-              this.thinkingOpen[pid + '.' + k] = this.thinkingConfigured(p.model[k]);
-              // enabled 走 serde skip_serializing_if（true 时省略），所以 GET 回来的
-              // 启用模型不带该键。不归一化的话 checkbox 会把「启用」显示成未勾选。
-              if (p.model[k].enabled === undefined) p.model[k].enabled = true;
-              // thinking 同理：未设置的字段被省略，归一化成 null（select 显示 unset）。
-              // 注意 default = "unknown" 反序列化成 None（GET 不带该键）——语义本就是未指定。
-              if (p.model[k].thinking) {
-                const t = p.model[k].thinking;
-                if (t.default === undefined) t.default = null;
-                if (t.level_wire === undefined) t.level_wire = null;
-                if (t.off_wire === undefined) t.off_wire = null;
-                if (t.preserve === undefined) t.preserve = null;
-              }
-            }
+        // P8 model catalog：data.model 是顶层目录（id → ModelEntry），无 flatten。
+        // 归一化 serde skip 掉的缺省键，否则 checkbox/select 显示漂移
+        //（enabled=true 省略、kind=chat 省略、capabilities=[] 省略）。
+        const models = data.model || {};
+        for (const id in models) {
+          const m = models[id];
+          if (m.enabled === undefined) m.enabled = true;
+          if (!m.kind) m.kind = 'chat';
+          if (!Array.isArray(m.capabilities)) m.capabilities = [];
+          // thinking 未设置字段省略 → null（select 显示 unset）。
+          // 注意 default = "unknown" 反序列化成 None（GET 不带该键）——语义本就是未指定。
+          if (m.thinking) {
+            const t = m.thinking;
+            if (t.default === undefined) t.default = null;
+            if (t.level_wire === undefined) t.level_wire = null;
+            if (t.off_wire === undefined) t.off_wire = null;
+            if (t.preserve === undefined) t.preserve = null;
           }
+          // thinking 面板初始开合：已配置（任一字段非 null）默认展开，未配置默认收起
+          this.thinkingOpen[id] = this.thinkingConfigured(m);
         }
+        data.model = models;
+        for (const pid in data.provider) this.compatOpen[pid] = false;
         this.cfg = data;
         // 初始化每个 agent 的 fallback 草稿（下拉选择暂存）
         this.fallbackDraft = {};
@@ -1020,33 +1014,31 @@ function llaiaApp() {
     },
     async saveConfig() {
       if (!confirm('Structured save preserves comments on unchanged sections and applies provider/agent deletions.\nUse the "Raw TOML" editor for full manual control.\n\nContinue?')) return;
-      // expand model back to provider top level (adapt for serde flatten)
       // strip NaN (empty input[type=number] yields NaN, JSON.stringify turns it to null, backend u32 parse fails)
       const cfgToSend = JSON.parse(JSON.stringify(this.cfg, (key, value) => {
         // permission: empty/unset → drop so backend stores None (effective default)
         if (key === 'permission' && (value === '' || value === null || value === undefined)) return undefined;
         return typeof value === 'number' && isNaN(value) ? undefined : value;
       }));
-      for (const pid in cfgToSend.provider) {
+      // 全 null 的 compat 覆盖层等价于未设置，丢弃以免在 TOML 写入空 compat = {}
+      for (const pid in cfgToSend.provider || {}) {
         const p = cfgToSend.provider[pid];
-        if (p.model) {
-          for (const alias in p.model) {
-            // 全 null / 空值的 thinking 等价于未设置，丢弃以免写入空段（同 compat）
-            const t = p.model[alias].thinking;
-            if (t) {
-              for (const k of ['default', 'level_wire', 'off_wire', 'preserve']) {
-                if (t[k] === '' || t[k] === undefined) delete t[k];
-              }
-              if (Object.keys(t).length === 0) delete p.model[alias].thinking;
-            }
-            p[alias] = p.model[alias];
-          }
-          delete p.model;
-        }
-        // 全 null 的 compat 覆盖层等价于未设置，丢弃以免在 TOML 写入空 compat = {}
         if (p.compat && Object.values(p.compat).every(v => v === null)) {
           delete p.compat;
         }
+      }
+      // models 子树清理：全 null thinking 等价于未设置（空对象会写出空段）；kind 空串归位 chat（serde enum 拒收 ""）。
+      for (const id in cfgToSend.model || {}) {
+        const m = cfgToSend.model[id];
+        const t = m.thinking;
+        if (t) {
+          for (const k of ['default', 'level_wire', 'off_wire', 'preserve']) {
+            if (t[k] === '' || t[k] === undefined) delete t[k];
+          }
+          if (Object.keys(t).length === 0) delete m.thinking;
+        }
+        if (!m.kind) m.kind = 'chat';
+        if (m.size === '') delete m.size;
       }
       console.log('PUT /api/config body:', JSON.stringify(cfgToSend).slice(0, 300));
       const r = await this.apiFetch('/api/config', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(cfgToSend) });
@@ -1061,7 +1053,8 @@ function llaiaApp() {
       const id = prompt('Enter new provider id (e.g., ollama, openai):');
       if (!id || !id.trim()) return;
       if (this.cfg.provider[id]) { alert('Provider already exists: ' + id); return; }
-      this.cfg.provider[id] = { type: 'openai_compatible', base_url: '', api_key: '', model: {} };
+      // P8：ProviderConfig 有 deny_unknown_fields，这里不能再塞 model:{}（旧结构残留）
+      this.cfg.provider[id] = { type: 'openai_compatible', base_url: '', api_key: '' };
       this.compatOpen[id] = false;
     },
     deleteProvider(pid) {
@@ -1089,34 +1082,103 @@ function llaiaApp() {
       // 回到 null = 完全不覆盖，纯按 base_url 探测
       this.cfg.provider[pid].compat = null;
     },
-    addModel(pid) {
-      const alias = prompt('Enter new model alias (e.g., qwen3, gpt4):');
-      if (!alias || !alias.trim()) return;
-      if (this.cfg.provider[pid].model[alias]) { alert('Model already exists: ' + alias); return; }
-      this.cfg.provider[pid].model[alias] = { model: '', context_size: null, max_tokens: null, enabled: true };
+    // ---- provider family 辅助（P8）----
+    effectiveType(pid) {
+      const p = (this.cfg.provider || {})[pid];
+      return p ? (p.type || 'openai_compatible') : '';
     },
-    // ---- 模型级 thinking 能力声明（P2-12）----
-    toggleThinking(pid, alias) {
-      const m = this.cfg.provider[pid].model[alias];
+    isServiceProvider(pid) {
+      return ['tavily', 'baidu', 'brave'].includes(this.effectiveType(pid));
+    },
+    // llm family：可承载 [model.<id>] 条目的 provider（添加模型的下拉只列这些）
+    llmProviders() {
+      const out = [];
+      for (const pid in this.cfg.provider || {}) {
+        if (!this.isServiceProvider(pid)) out.push(pid);
+      }
+      return out.sort();
+    },
+    // service family：纯凭据搜索/抽取服务（tools.search.provider 下拉只列这些）
+    serviceProviders() {
+      const out = [];
+      for (const pid in this.cfg.provider || {}) {
+        if (this.isServiceProvider(pid)) out.push(pid);
+      }
+      return out.sort();
+    },
+
+    // ---- Models 选项卡（P8）：目录 CRUD + 添加流 ----
+    // 过滤后的模型 id 列表（过滤条：provider / kind / multimodal）
+    filteredModels() {
+      const f = this.modelFilter;
+      const out = [];
+      for (const id in this.cfg.model || {}) {
+        const m = this.cfg.model[id];
+        if (f.provider && m.provider !== f.provider) continue;
+        if (f.kind && (m.kind || 'chat') !== f.kind) continue;
+        if (f.multimodal && !(m.capabilities || []).includes('multimodal')) continue;
+        out.push(id);
+      }
+      return out.sort();
+    },
+    openAddModel() {
+      this.addModelDraft = { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false };
+      this.addModelOpen = true;
+    },
+    confirmAddModel() {
+      const d = this.addModelDraft;
+      const pid = d.provider;
+      if (!pid || !this.cfg.provider[pid]) { alert('Select a provider first.'); return; }
+      if (this.isServiceProvider(pid)) { alert('Search/service providers cannot host models.'); return; }
+      const id = (d.id || '').trim();
+      if (!id) { alert('Enter a model id.'); return; }
+      if (this.cfg.model[id]) { alert('Model already exists: ' + id); return; }
+      const serverModel = (d.model || '').trim();
+      if (!serverModel) { alert('Enter the server-side model name.'); return; }
+      const kind = d.kind || 'chat';
+      // anthropic/gemini 仅 chat（Config::load 同样校验，这里提前拦截给出行内提示）
+      if (this.effectiveType(pid) !== 'openai_compatible' && kind !== 'chat') {
+        alert('Provider type ' + this.effectiveType(pid) + ' only supports kind=chat.'); return;
+      }
+      const entry = { provider: pid, model: serverModel, kind, enabled: true,
+                      context_size: null, max_tokens: null,
+                      capabilities: d.multimodal ? ['multimodal'] : [] };
+      if (kind === 'image' && (d.size || '').trim()) entry.size = d.size.trim();
+      this.cfg.model[id] = entry;
+      this.thinkingOpen[id] = false;
+      this.addModelOpen = false;
+    },
+    // capabilities 里的 multimodal 位翻转（checkbox 绑定数组不便，走方法）
+    toggleMultimodal(id) {
+      const m = this.cfg.model[id];
       if (!m) return;
-      const key = pid + '.' + alias;
+      if (!Array.isArray(m.capabilities)) m.capabilities = [];
+      const i = m.capabilities.indexOf('multimodal');
+      if (i >= 0) m.capabilities.splice(i, 1); else m.capabilities.push('multimodal');
+    },
+    // ---- 模型级 thinking 能力声明（P2-12，P8 改按目录 id 寻址）----
+    toggleThinking(id) {
+      const m = this.cfg.model[id];
+      if (!m) return;
       // 首次展开且尚无配置段时补一个全 null 存根（保存时全空段被丢弃，等价于不写 [thinking]）。
       // 开合本身只翻 thinkingOpen，不碰配置——已配置的模型折叠后配置原样保留。
-      if (!m.thinking && !this.thinkingOpen[key]) {
+      if (!m.thinking && !this.thinkingOpen[id]) {
         m.thinking = { default: null, level_wire: null, off_wire: null, preserve: null };
       }
-      this.thinkingOpen[key] = !this.thinkingOpen[key];
+      this.thinkingOpen[id] = !this.thinkingOpen[id];
     },
     thinkingConfigured(m) {
       return m.thinking && Object.values(m.thinking).some(v => v !== null);
     },
-    deleteModel(pid, alias) {
-      if (!confirm('Delete model ' + pid + '.' + alias + '?')) return;
-      delete this.cfg.provider[pid].model[alias];
-      delete this.thinkingOpen[pid + '.' + alias];
+    deleteModel(id) {
+      if (!confirm('Delete model ' + id + '? Agents/tools referencing it will break.')) return;
+      delete this.cfg.model[id];
+      delete this.thinkingOpen[id];
+      delete this.probeStatus[id];
+      delete this.probeModelBusy[id];
     },
 
-    // ---- 模型探测（P5 W2） ----
+    // ---- 模型探测（P5 W2，P8 后仅服务 Models 选项卡的添加流） ----
     // 注意：方法名不能与 data 属性 probeModels（探测结果 map）同名——
     // 方法体内 this.probeModels = {...} 会把方法自身覆盖成普通对象，首次探测后按钮全部失灵。
     async runProbe(pid) {
@@ -1132,124 +1194,37 @@ function llaiaApp() {
         const j = await r.json();
         if (j.ok) {
           this.probeModels = { ...this.probeModels, [pid]: j.models || [] };
-          this.probeChecked = { ...this.probeChecked, [pid]: {} };
-          this.probeOpen = { ...this.probeOpen, [pid]: true };
           this.probeMsg = { ...this.probeMsg, [pid]: this.probeModels[pid].length
             ? this.probeModels[pid].length + ' model(s) found'
             : 'Endpoint reachable but no models returned.' };
         } else {
           this.probeModels = { ...this.probeModels, [pid]: [] };
-          this.probeOpen = { ...this.probeOpen, [pid]: true };
           this.probeMsg = { ...this.probeMsg, [pid]: 'Probe failed: ' + (j.error || r.status) };
         }
       } catch (e) {
         this.probeModels = { ...this.probeModels, [pid]: [] };
-        this.probeOpen = { ...this.probeOpen, [pid]: true };
         this.probeMsg = { ...this.probeMsg, [pid]: 'Probe failed: ' + e.message };
       } finally {
         this.probing = null;
       }
     },
-    // 主按钮两态：列表展开 →「Add selected」（点击批量加入，含底部手填项）；
-    // 收起 →「＋ Add model」（有缓存结果就直接展开，没有才发探测请求）。
-    // 以 probeOpen 为准而非"有无结果"：探测失败时列表开着但为空，手填项仍走 Add selected。
-    probeSectionLabel(pid) {
-      if (this.probeOpen[pid]) {
-        const checked = this.probeChecked[pid] || {};
-        let n = Object.keys(checked).filter(id => checked[id] && !this.isModelAdded(pid, id)).length;
-        const manualId = (this.probeManual[pid] || '').trim();
-        if (this.probeManualChecked[pid] && manualId && !this.isModelAdded(pid, manualId)) n++;
-        return 'Add selected' + (n ? ' (' + n + ')' : '');
-      }
-      return '+ Add model';
-    },
-    probeSectionClick(pid) {
-      if (this.probing === pid) return;
-      if (this.probeOpen[pid]) {
-        this.addProbedModels(pid);
-      } else {
-        const has = this.probeModels[pid] && this.probeModels[pid].length;
-        this.probeOpen = { ...this.probeOpen, [pid]: true };
-        // 缓存还在就只展开，不重探测（base_url/key 变了用列表内的 ↻ re-probe）
-        if (!has) this.runProbe(pid);
-      }
-    },
-    toggleProbeOpen(pid) {
-      const cur = !!this.probeOpen[pid];
-      this.probeOpen = { ...this.probeOpen, [pid]: !cur };
-    },
-    toggleProbeModel(pid, id) {
-      // 已添加项不可勾选：勾了也会被 addProbedModels 过滤掉，
-      // 让它可勾只会制造"点了却什么也没发生"的错觉。
-      if (this.isModelAdded(pid, id)) return;
-      if (!this.probeChecked[pid]) this.probeChecked[pid] = {};
-      this.probeChecked[pid][id] = !this.probeChecked[pid][id];
-    },
-    // 该探测项是否已在 models 里（按 model id 判重，与 alias 无关）。
-    // 判重的意义：同一条 model 能以不同 alias 反复加进配置，配置里出现
-    // 两份指向同一 model 的条目——旧行为就是这么加上去的。
-    isModelAdded(pid, modelId) {
-      const models = (this.cfg.provider[pid] && this.cfg.provider[pid].model) || {};
-      return Object.values(models).some(m => m && m.model === modelId);
-    },
-    // 生成模型 alias：取 id 尾段 sanitize，冲突时加序号
-    genModelAlias(pid, id) {
-      let base = id.split(/[/:]/).pop().toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
-      if (!base) base = 'model';
-      const models = this.cfg.provider[pid].model || {};
-      let alias = base, n = 2;
-      while (models[alias]) { alias = base + '_' + n; n++; }
-      return alias;
-    },
-    addProbedModels(pid) {
-      const checked = this.probeChecked[pid] || {};
-      // 只加"勾选 且 尚未添加"的：已添加项即使残留勾选态也不重复写入
-      const picked = (this.probeModels[pid] || []).filter(m => checked[m.id] && !this.isModelAdded(pid, m.id));
-      // 手填项与探测项同一条路径：勾选 + 输入非空 即纳入本次批量
-      const manualId = (this.probeManual[pid] || '').trim();
-      const manualPicked = (this.probeManualChecked[pid] && manualId && !this.isModelAdded(pid, manualId))
-        ? [manualId] : [];
-      if (picked.length === 0 && manualPicked.length === 0) { alert('Select at least one model first.'); return; }
-      const p = this.cfg.provider[pid];
-      if (!p.model) p.model = {};
-      const models = p.model;
-      for (const id of [...picked.map(m => m.id), ...manualPicked]) {
-        const alias = this.genModelAlias(pid, id);
-        models[alias] = { model: id, context_size: null, max_tokens: null, enabled: true };
-      }
-      // 加完收起列表、清勾选（含手填框）：按钮回到「＋ Add model」两态起点；想确认加过了
-      // 可再展开（就地显示 ✓ added）。probeMsg 仍提示 N added — click Save to persist.
-      this.probeOpen = { ...this.probeOpen, [pid]: false };
-      this.probeChecked[pid] = {};
-      this.probeManual = { ...this.probeManual, [pid]: '' };
-      this.probeManualChecked = { ...this.probeManualChecked, [pid]: false };
-      this.probeMsg[pid] = (picked.length + manualPicked.length) + ' model(s) added — click Save to persist.';
-    },
-    // 手填输入联动：非空自动勾选（纳入 Add selected），清空自动取消
-    syncProbeManual(pid) {
-      const v = (this.probeManual[pid] || '').trim();
-      this.probeManualChecked = { ...this.probeManualChecked, [pid]: v.length > 0 };
-    },
-    toggleProbeManual(pid) {
-      const cur = !!this.probeManualChecked[pid];
-      this.probeManualChecked = { ...this.probeManualChecked, [pid]: !cur };
-    },
 
-    // ---- 单模型可用性探测（每个已配置 model 的 Probe 按钮） ----
-    // 用「编辑器当前值」探测：后端按 base_url/key/model 发一次最小 chat 请求，
+    // ---- 单模型可用性探测（Models 选项卡每个模型卡的 Probe 按钮） ----
+    // 用「编辑器当前值」探测：后端按 provider 端点 + model 名发一次最小 chat 请求，
     // 能返回即代表该模型真实可用（不只是 GET /models 列表可见）。key 掩码 '••••' 由后端回退真值。
-    async probeModel(pid, alias) {
-      const key = pid + '.' + alias;
-      if (this.probeModelBusy[key]) return;
-      const p = this.cfg.provider[pid];
-      const m = p.model[alias];
-      if (!m || !m.model) { this.probeStatus[key] = 'error: empty model id'; return; }
-      this.probeModelBusy = { ...this.probeModelBusy, [key]: true };
-      this.probeStatus = { ...this.probeStatus, [key]: '' };
+    // P8：路径段用模型目录 id（后端只用 body.model，路径段仅日志语义）。
+    async probeModel(id) {
+      if (this.probeModelBusy[id]) return;
+      const m = (this.cfg.model || {})[id];
+      if (!m || !m.model) { this.probeStatus[id] = 'error: empty model id'; return; }
+      const p = (this.cfg.provider || {})[m.provider];
+      if (!p) { this.probeStatus[id] = 'error: provider not found: ' + m.provider; return; }
+      this.probeModelBusy = { ...this.probeModelBusy, [id]: true };
+      this.probeStatus = { ...this.probeStatus, [id]: '' };
       try {
         const r = await this.apiFetch(
-          '/api/providers/' + encodeURIComponent(pid) +
-          '/models/' + encodeURIComponent(alias) + '/probe',
+          '/api/providers/' + encodeURIComponent(m.provider) +
+          '/models/' + encodeURIComponent(id) + '/probe',
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1260,29 +1235,29 @@ function llaiaApp() {
         const v = j.ok
           ? 'ok'
           : 'error: ' + (j.error || ('HTTP ' + r.status));
-        this.probeStatus = { ...this.probeStatus, [key]: v };
+        this.probeStatus = { ...this.probeStatus, [id]: v };
       } catch (e) {
-        this.probeStatus = { ...this.probeStatus, [key]: 'error: ' + e.message };
+        this.probeStatus = { ...this.probeStatus, [id]: 'error: ' + e.message };
       } finally {
-        this.probeModelBusy = { ...this.probeModelBusy, [key]: false };
+        this.probeModelBusy = { ...this.probeModelBusy, [id]: false };
       }
     },
-    probeModelBtnText(pid, alias) {
-      const v = this.probeStatus[pid + '.' + alias];
-      if (this.probeModelBusy[pid + '.' + alias]) return 'Probing…';
+    probeModelBtnText(id) {
+      const v = this.probeStatus[id];
+      if (this.probeModelBusy[id]) return 'Probing…';
       if (v === 'ok') return '✓ ok';
       if (v) return '✗';
       return 'Probe';
     },
-    probeModelBtnTitle(pid, alias) {
-      const v = this.probeStatus[pid + '.' + alias] || '';
+    probeModelBtnTitle(id) {
+      const v = this.probeStatus[id] || '';
       return v && v !== 'ok' ? v : 'Probe this model';
     },
     // 必须返回布尔 true/false：Alpine 对表达式含 '.' 且值为 undefined 时会转成 ''，
     // 而 '' 不在其 [null,undefined,false] 移除列表里，会把 disabled 设置上。
     //（见 vendor/alpine.min.js 的 bind 处理器 dot 规则）。用 helper 规避。
-    probeBusy(pid, alias) {
-      return !!this.probeModelBusy[pid + '.' + alias];
+    probeBusy(id) {
+      return !!this.probeModelBusy[id];
     },
 
     addAgent() {
@@ -1295,20 +1270,24 @@ function llaiaApp() {
       };
       this.fallbackDraft[alias] = '';
     },
-    // 所有可选项的 model ref 列表（provider_id.model_alias）。
+    // agent model/fallback 的可选项：models 目录里 kind=chat 且 enabled 的 id（P8 一元 ref）。
     // enabled = false 的模型不列出（只管可发现性；显式当前值由下拉的 "(current)" 兜底）。
     modelRefs() {
-      const refs = [];
-      const p = this.cfg.provider || {};
-      for (const pid in p) {
-        const models = p[pid].model || {};
-        for (const m in models) {
-          if (models[m].enabled === false) continue;
-          refs.push(pid + '.' + m);
-        }
-      }
-      return refs;
+      return this.kindModelRefs('chat');
     },
+    // 按 kind 过滤目录（tts/image_gen 卡片的 model 下拉数据源）
+    kindModelRefs(kind) {
+      const refs = [];
+      for (const id in this.cfg.model || {}) {
+        const m = this.cfg.model[id];
+        if (m.enabled === false) continue;
+        if ((m.kind || 'chat') !== kind) continue;
+        refs.push(id);
+      }
+      return refs.sort();
+    },
+    ttsModelRefs() { return this.kindModelRefs('tts'); },
+    imageModelRefs() { return this.kindModelRefs('image'); },
     addFallback(alias) {
       const ref = this.fallbackDraft[alias];
       if (!ref) return;

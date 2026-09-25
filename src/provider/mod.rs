@@ -435,20 +435,30 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// 从 model ref（"provider_id.model_alias"）构建单个 provider 实例。
-pub fn provider_from_ref(
+/// 从模型目录条目构建单个 chat provider 实例（P8）。
+/// `model_ref` 为全局唯一 model id（`[model.<id>]`）；端点与凭据取自条目引用的 provider。
+/// 只有 `kind = "chat"` 的条目能构建 chat provider（tts/image/embedding 条目走各自工具通路）。
+pub fn model_from_ref(
     config: &crate::config::Config,
     model_ref: &str,
 ) -> Result<Arc<dyn Provider>> {
-    let (prov_id, model_alias) = crate::config::Config::parse_model_ref(model_ref)?;
-    let prov_cfg = config
-        .provider
-        .get(prov_id)
-        .ok_or_else(|| anyhow::anyhow!("provider.{} not configured", prov_id))?;
-    let model_cfg = prov_cfg.model.get(model_alias).ok_or_else(|| {
-        anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
+    let entry = config.models.get(model_ref).ok_or_else(|| {
+        anyhow::anyhow!("model.{model_ref} not configured (missing [model.{model_ref}])")
     })?;
-    match prov_cfg.provider_type.as_str() {
+    if entry.kind != crate::config::ModelKind::Chat {
+        anyhow::bail!(
+            "model.{model_ref} has kind \"{}\" — only kind = \"chat\" entries can serve as a chat provider",
+            entry.kind.as_str()
+        );
+    }
+    let prov_cfg = config.provider.get(&entry.provider).ok_or_else(|| {
+        anyhow::anyhow!(
+            "model.{model_ref} references provider '{}' which is not configured",
+            entry.provider
+        )
+    })?;
+    let model_cfg = entry;
+    match prov_cfg.effective_type() {
         "anthropic" => {
             let base_url = if prov_cfg.base_url.is_empty() {
                 "https://api.anthropic.com"
@@ -475,7 +485,7 @@ pub fn provider_from_ref(
                 model_cfg.max_tokens.unwrap_or(0),
             )?))
         }
-        // openai_compatible 及未知 type 都走 OpenAI 兼容协议（存量配置无 type 也能跑）
+        // openai_compatible（含缺省）走 OpenAI 兼容协议
         _ => {
             // 兼容层：先按 base_url + model slug 探测预设（plan #4/#10），再用 [provider.<id>.compat.*] 覆盖
             let mut compat = compat::Compat::detect(&prov_cfg.base_url, &model_cfg.model);
@@ -521,13 +531,13 @@ pub fn build_provider_chain(
     if main_ref.is_empty() {
         return Ok(None);
     }
-    let main = provider_from_ref(config, main_ref)?;
+    let main = model_from_ref(config, main_ref)?;
     if fallback.is_empty() {
         return Ok(Some(main));
     }
     let mut chain = vec![main];
     for f in fallback {
-        match provider_from_ref(config, f) {
+        match model_from_ref(config, f) {
             Ok(p) => chain.push(p),
             Err(e) => tracing::warn!(
                 model = f.as_str(),

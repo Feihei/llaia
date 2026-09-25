@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use crate::provider::compat::CompatConfig;
@@ -15,9 +15,14 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub log: LogConfig,
-    /// provider id => ProviderConfig
+    /// provider id => ProviderConfig（统一连接注册表：llm family + service family）
     #[serde(default)]
     pub provider: HashMap<String, ProviderConfig>,
+    /// model id => ModelEntry（P8 模型目录：全局唯一，按 kind 分型）。
+    /// rename 为单数 `model`：用户可见的 TOML/JSON 键是 `[model.<id>]`（对齐已提交的
+    /// 规划文档与 CONFIG_TEMPLATE），Rust 侧字段名保持复数 models。
+    #[serde(default, rename = "model")]
+    pub models: BTreeMap<String, ModelEntry>,
     /// agent alias => AgentConfig
     #[serde(default)]
     pub agent: HashMap<String, AgentConfig>,
@@ -36,7 +41,7 @@ pub struct RuntimeConfig {
     pub context_threshold: f64,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
-    /// 上下文压缩用的模型引用 "provider_id.model_alias"。
+    /// 上下文压缩用的模型引用（P8：`[model.<id>]` 目录条目 id）。
     /// 未设置时复用 agent 自身的 provider（兼容旧行为）。
     /// 设置后会构建独立的 compact provider，可用更便宜的模型做压缩。
     #[serde(default)]
@@ -46,7 +51,7 @@ pub struct RuntimeConfig {
     /// 非法值在 Config::load 里 warn + 置 None。
     #[serde(default)]
     pub timezone: Option<String>,
-    /// 图片描述用的模型引用 "provider_id.model_alias"。
+    /// 图片描述用的模型引用（P8：`[model.<id>]` 目录条目 id，须 kind=chat）。
     /// 主模型无多模态能力时，用此模型描述图片，描述文本替换图片注入主模型上下文。
     /// 未设置时：图片直接发给主模型（主模型不支持则由 provider 决定如何处理）。
     #[serde(default)]
@@ -203,62 +208,133 @@ fn default_log_dir() -> String {
     "~/.llaia/logs".into()
 }
 
-/// 一个 provider 端点（连接信息），下挂多个 model 配置。
-/// TOML 写法 `[provider.<id>.<model_alias>]` 会被 flatten 收入 `model` HashMap。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// llm family：可承载 `[model.<id>]` 条目的端点类型（同一 OpenAI 兼容端点可同时
+/// 挂 chat/tts/image 多能力模型——kind 分在 model 上而非 provider 上的根因）。
+pub const LLM_PROVIDER_TYPES: &[&str] = &["openai_compatible", "anthropic", "gemini"];
+
+/// service family：纯凭据服务（搜索/抽取），无 model 条目、不进添加模型的 probe 列表。
+pub const SERVICE_PROVIDER_TYPES: &[&str] = &["tavily", "baidu", "brave"];
+
+/// 一个 provider 端点（连接信息）：统一连接注册表条目。`type` 即判别器，分两族：
+///
+/// - **llm family**（`openai_compatible`/`anthropic`/`gemini`）：可被 `[model.<id>]`
+///   条目引用，出现在添加模型的 probe 列表
+/// - **service family**（`tavily`/`baidu`/`brave`…）：纯凭据，`[tools.search]` /
+///   `web_fetch.extract_provider` 按引用消费
+///
+/// `type` 缺省 = openai_compatible（存量习惯保留）；**显式未知值在 `Config::load`
+/// 报错**——静默回退会让打错的 service type 变成一个 LLM provider 蹲进 probe 列表。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
-    #[serde(rename = "type")]
+    /// 端点类型，见上。`deny_unknown_fields` 同时是 P8 一步到位的安全网：
+    /// 旧配置的 `[provider.<id>.<alias>]` model 子表在此显式报错而非静默丢失。
+    #[serde(rename = "type", default)]
     pub provider_type: String,
+    #[serde(default)]
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
-    /// model alias => ModelConfig，通过 `#[serde(flatten)]` 直接捕获
-    /// TOML 中 `[provider.<id>.<model_alias>]` 的子表
-    #[serde(flatten, default)]
-    pub model: HashMap<String, ModelConfig>,
-    /// 兼容覆盖层 `[provider.<id>.compat.*]`；优先级高于 base_url 自动探测。
-    /// 未设置时按 base_url 子串探测（ollama / llamacpp），其余走 bare 行为。
+    /// 兼容覆盖层 `[provider.<id>.compat.*]`；仅 llm family 的 chat 请求消费。
+    /// 优先级高于 base_url 自动探测；未设置时按 base_url 子串探测（ollama/llamacpp）。
     #[serde(default)]
     pub compat: Option<CompatConfig>,
 }
 
+impl ProviderConfig {
+    /// 解析后的有效 type（缺省回退 openai_compatible）
+    pub fn effective_type(&self) -> &str {
+        if self.provider_type.is_empty() {
+            "openai_compatible"
+        } else {
+            &self.provider_type
+        }
+    }
+
+    /// 是否 service family（纯凭据，不承载 model 条目）
+    pub fn is_service(&self) -> bool {
+        SERVICE_PROVIDER_TYPES.contains(&self.effective_type())
+    }
+}
+
+/// 模型能力分型（P8）：kind 决定 wire API 归属与 WebUI 表单形态。
+/// 单选——一个条目只归属一种 wire API；正交能力位（multimodal 等）走 `capabilities`。
+/// 缺省 Chat：probe 结果大多数是 LLM，未选 kind 时落在这里（SiliconFlow 类端点
+/// 会混入非 LLM 模型，用户可改）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelKind {
+    #[default]
+    Chat,
+    Tts,
+    Image,
+    Embedding,
+}
+
+impl ModelKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Tts => "tts",
+            Self::Image => "image",
+            Self::Embedding => "embedding",
+        }
+    }
+}
+
+fn is_chat(k: &ModelKind) -> bool {
+    *k == ModelKind::Chat
+}
+
+/// 模型目录条目（P8）：全局唯一 model id，引用 llm family provider。
+///
+/// serde 方向守则（沿 2026-09-09 enabled 教训）：bool/enum 缺省值的 skip 方向是
+/// 「等于缺省时省略」，反了会在 put_config replace 合并下静默蒸发/回读漂移。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfig {
+pub struct ModelEntry {
+    /// provider id 引用；指向 service family provider 在 `Config::load` 报错
+    pub provider: String,
+    /// 服务端模型名（请求体 model 字段）
     pub model: String,
-    /// 思考能力声明（P1，docs/plans/2026-09-10-thinking-capability-model.md D2）：
-    /// `[provider.<id>.<model>.thinking]`。None（未写段）= 能力未知。
-    ///
-    /// `skip_serializing_if` 方向照 `enabled` 教训：必须 None 时省略——provider
-    /// 子树在 `put_config` 走 replace 合并（缺失即删），若写成「Some 时省略」
-    /// 会让已声明的 thinking 在 WebUI 保存时静默蒸发。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingConfig>,
-    /// 是否用 OpenAI function calling 协议（发 `tools` + 期待结构化 `tool_calls`）。
-    /// `None`（缺省）= auto：跟随 `Compat` 探测/配置结果（plan #10），不再要求用户手设。
-    /// 存量 `native_tool_calling = true/false` 仍按 Option 语义解析为 Some(…)，零破坏。
-    #[serde(default)]
-    pub native_tool_calling: Option<bool>,
+    /// 能力分型；skip = 盘面干净，回读缺省即 chat
+    #[serde(default, skip_serializing_if = "is_chat")]
+    pub kind: ModelKind,
+    /// 是否对外可见。**只管可发现性**（下拉列表、`/models` 目录），
+    /// `model_from_ref` 仍接受显式引用——关掉当前 `agent.model` 指向的模型
+    /// 不该让下次启动直接失败。skip 方向：必须 true 时省略（沿 enabled 教训）。
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     /// 模型上下文窗口大小（tokens），用于判断何时触发自动压缩。
     /// 未配置时启动后从服务端懒探测（llama.cpp /props 或 Ollama /api/show）；
-    /// 探测不到的端点（多为远程 API）回退乐观默认 128000——猜小的代价（压缩阈值长期
-    /// 为真、每迭代摘要绞碎上下文）大于猜大（真超载时 provider 报错，触发反应式收缩纠正）。
-    /// 取 min(配置值, 探测值)。
-    #[serde(default)]
+    /// 探测不到的端点（多为远程 API）回退乐观默认 128000。取 min(配置值, 探测值)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_size: Option<usize>,
     /// 单次生成最大 token 数。Anthropic Messages API 必传 max_tokens，
     /// 未配置时默认 4096；OpenAI 兼容 provider 忽略此项。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
-    /// 是否对外可见。**只管可发现性**（`/provider` 列表、WebUI model/fallback 下拉），
-    /// `provider_from_ref` 仍接受显式引用——关掉当前 `agent.model` 指向的模型不该让
-    /// 下次启动直接失败。用途：把模型参数记在配置里但暂不想被选中。
-    ///
-    /// `skip_serializing_if` 的方向**不能反**：必须 true 时省略（只写显式 `= false`）。
-    /// 若写成 false 时省略，配合 provider 子树的 replace 合并（缺失即删，
-    /// `web/mod.rs:606-615`）会让 disabled 状态在保存时静默蒸发、回读变 true。
-    /// 代价：GET /api/config 也省略该键，前端装载须 `enabled ??= true` 归一化。
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub enabled: bool,
+    /// 是否用 OpenAI function calling 协议（发 `tools` + 期待结构化 `tool_calls`）。
+    /// `None`（缺省）= auto：跟随 `Compat` 探测/配置结果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_tool_calling: Option<bool>,
+    /// 思考能力声明（P1 D2）：`[model.<id>.thinking]`。None（未写段）= 能力未知。
+    /// None 时省略——provider/model 子树走 replace 合并（缺失即删），
+    /// 若写成「Some 时省略」会让已声明的 thinking 在 WebUI 保存时静默蒸发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
+    /// kind=image 的默认输出尺寸（"WIDTHxHEIGHT"）；其他 kind 上出现 → load warn。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    /// 正交能力位数组，v1 仅 "multimodal"；未知值 load warn（向前兼容新能力位）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+}
+
+impl ModelEntry {
+    /// 是否声明某能力位
+    pub fn has_capability(&self, cap: &str) -> bool {
+        self.capabilities.iter().any(|c| c == cap)
+    }
 }
 
 fn default_true() -> bool {
@@ -321,7 +397,7 @@ fn is_true(b: &bool) -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// 引用 "provider_id.model_alias"，例如 "default.qwen3"
+    /// 引用 `[model.<id>]` 目录条目 id（P8），例如 "qwen3"
     pub model: String,
     /// [deprecated] workspace 字段已移除（P3-a 起自动推导，见 derive_workspace），
     /// 存量配置里的该键由 serde 直接忽略（未开 deny_unknown_fields）。
@@ -704,21 +780,15 @@ fn default_web_port() -> u16 {
 pub struct ToolsConfig {
     #[serde(default)]
     pub terminal: TerminalToolConfig,
-    #[serde(default)]
-    pub tavily: TavilyConfig,
-    /// 统一搜索配置：选定单一 provider + 默认返回条数
+    /// 统一搜索配置：`provider` 为 service family provider 的 **id 引用**（P8），
+    /// 空 = 不注册 search 工具；引用缺失/指向 llm family → 工具不注册 + warn
     #[serde(default)]
     pub search: SearchConfig,
-    /// 百度千帆 AI Search provider key（Bearer token）
-    #[serde(default)]
-    pub baidu: BaiduConfig,
-    /// Brave Search API key
-    #[serde(default)]
-    pub brave: BraveConfig,
-    /// TTS（P5 T1）：OpenAI 兼容 /audio/speech
+    /// TTS（P5 T1）：`model` 为模型目录中 kind=tts 条目的 id 引用；
+    /// base_url/api_key/服务端模型名全部来自该条目与其 provider
     #[serde(default)]
     pub tts: TtsConfig,
-    /// 图片生成/编辑：OpenAI 兼容 /images/generations 与 /images/edits
+    /// 图片生成/编辑：`model` 为 kind=image 条目的 id 引用
     #[serde(default)]
     pub image_gen: ImageGenConfig,
     /// web_fetch 正文抽取与体积上限
@@ -792,12 +862,6 @@ fn default_command_whitelist() -> Vec<String> {
     Vec::new()
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TavilyConfig {
-    #[serde(default)]
-    pub api_key: String,
-}
-
 /// `web_fetch` 工具配置：控制正文抽取与体积上限。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebFetchConfig {
@@ -805,17 +869,17 @@ pub struct WebFetchConfig {
     /// 足够覆盖一篇新闻正文，又避免把整站 HTML/JS 灌进上下文。
     #[serde(default = "default_web_fetch_max_chars")]
     pub max_chars: usize,
-    /// 复用 `[tools.tavily].api_key` 走 Tavily `/extract` 服务端抽取（对反爬 / JS 渲染页
-    /// 成功率更高，对应 AstrBot 的做法）。仅在 Tavily key 非空时生效；否则自动退化为本地抽取。
-    #[serde(default = "default_web_fetch_use_tavily")]
-    pub use_tavily_extract: bool,
+    /// 服务端抽取的 provider id 引用（P8：须为支持 extract 能力的 service family
+    /// provider，如 tavily）。空 = 本地抽取；引用无效 → 自动退化本地抽取 + warn。
+    #[serde(default)]
+    pub extract_provider: String,
 }
 
 impl Default for WebFetchConfig {
     fn default() -> Self {
         Self {
             max_chars: default_web_fetch_max_chars(),
-            use_tavily_extract: default_web_fetch_use_tavily(),
+            extract_provider: String::new(),
         }
     }
 }
@@ -824,14 +888,11 @@ fn default_web_fetch_max_chars() -> usize {
     20_000
 }
 
-fn default_web_fetch_use_tavily() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
-    /// 选定的单一搜索 provider：tavily / baidu / brave（doubao 暂未实现）
-    #[serde(default = "default_search_provider")]
+    /// 搜索 provider 的 id 引用（P8：service family，如 tavily/baidu/brave）。
+    /// 空 = 不注册 search 工具。
+    #[serde(default)]
     pub provider: String,
     /// 默认返回条数
     #[serde(default = "default_search_top_k")]
@@ -841,30 +902,14 @@ pub struct SearchConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            provider: default_search_provider(),
+            provider: String::new(),
             top_k: default_search_top_k(),
         }
     }
 }
 
-fn default_search_provider() -> String {
-    "tavily".into()
-}
-
 fn default_search_top_k() -> usize {
     8
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BaiduConfig {
-    #[serde(default)]
-    pub api_key: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BraveConfig {
-    #[serde(default)]
-    pub api_key: String,
 }
 
 /// TTS 配置（P5 T1）：OpenAI 兼容 `/audio/speech` 端点。
@@ -872,19 +917,14 @@ pub struct BraveConfig {
 /// 不可测且接口脆弱）记 v2 待研究。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TtsConfig {
-    /// 是否注册 `tts` 工具（还需 api_key 非空）
+    /// 是否注册 `tts` 工具（还需 model 引用解析到 kind=tts 条目）
     #[serde(default)]
     pub enabled: bool,
-    /// OpenAI 兼容 TTS 端点，默认官方
-    #[serde(default = "default_tts_base_url")]
-    pub base_url: String,
-    /// TTS API key，支持 ${VAR} 引用 .env
+    /// 模型目录条目 id（kind=tts）；端点与 key 来自条目的 provider，服务端模型名
+    /// 来自条目的 `model` 字段。引用无效 → 工具不注册 + warn
     #[serde(default)]
-    pub api_key: String,
-    /// 合成模型，默认 tts-1
-    #[serde(default = "default_tts_model")]
     pub model: String,
-    /// 默认音色，默认 alloy
+    /// 默认音色，默认 alloy（调用参数，非模型属性）
     #[serde(default = "default_tts_voice")]
     pub voice: String,
 }
@@ -893,20 +933,10 @@ impl Default for TtsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            base_url: default_tts_base_url(),
-            api_key: String::new(),
-            model: default_tts_model(),
+            model: String::new(),
             voice: default_tts_voice(),
         }
     }
-}
-
-fn default_tts_base_url() -> String {
-    "https://api.openai.com/v1".into()
-}
-
-fn default_tts_model() -> String {
-    "tts-1".into()
 }
 
 fn default_tts_voice() -> String {
@@ -918,22 +948,15 @@ fn default_tts_voice() -> String {
 /// (sd-server from stable-diffusion.cpp, agnes, OpenAI, ...).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageGenConfig {
-    /// Register `image_gen` / `image_edit` tools (also requires non-empty api_key;
-    /// local sd-server typically needs no key, so `allow_no_key` skips that check)
+    /// Register `image_gen` / `image_edit` tools (also requires the model ref to
+    /// resolve to a kind=image entry; local sd-server typically needs no key,
+    /// so an empty provider api_key is fine)
     #[serde(default)]
     pub enabled: bool,
-    /// OpenAI-compatible images endpoint base (tool appends /images/generations, /images/edits)
-    #[serde(default = "default_image_gen_base_url")]
-    pub base_url: String,
-    /// API key, supports ${VAR} .env references (unused by local sd-server)
-    #[serde(default)]
-    pub api_key: String,
-    /// Default image model; empty => omit `model` field from the request
+    /// 模型目录条目 id（kind=image）；端点与 key 来自条目的 provider，服务端模型名
+    /// 与默认尺寸来自条目的 `model` / `size` 字段。引用无效 → 工具不注册 + warn
     #[serde(default)]
     pub model: String,
-    /// Default output size ("WIDTHxHEIGHT", e.g. "512x512"); empty => omit
-    #[serde(default = "default_image_gen_size")]
-    pub size: String,
     /// Per-request timeout in seconds (local diffusion can be slow)
     #[serde(default = "default_image_gen_timeout")]
     pub timeout_secs: u64,
@@ -943,33 +966,305 @@ impl Default for ImageGenConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            base_url: default_image_gen_base_url(),
-            api_key: String::new(),
             model: String::new(),
-            size: default_image_gen_size(),
             timeout_secs: default_image_gen_timeout(),
         }
     }
-}
-
-fn default_image_gen_base_url() -> String {
-    // sd-server (stable-diffusion.cpp) default port
-    "http://127.0.0.1:1234/v1".into()
-}
-
-fn default_image_gen_size() -> String {
-    "512x512".into()
 }
 
 fn default_image_gen_timeout() -> u64 {
     300
 }
 
+/// P8 一步到位的兼容层：v0.5 旧结构 → 模型目录，反序列化**前**对 raw TOML 原地改写。
+///
+/// 处理三类遗留形态（互相独立，缺哪补哪）：
+/// 1. `[provider.<pid>.<alias>]` model 子表（含嵌套 thinking）→ `[model."<pid>.<alias>"]`
+///    目录条目。model id 刻意沿用 `"pid.alias"` 两段式——agent `model` / `fallback` /
+///    `compact_model` / `vision_model` 里的旧引用无需任何改动即继续解析。
+/// 2. `[tools.tavily|baidu|brave]` 凭据段 → 同名 service family provider
+///    （`[tools.search].provider = "tavily"` 的旧语义是类型名，恰好等于新建 id，直通）。
+/// 3. `[tools.tts]` / `[tools.image_gen]` 内联 base_url/api_key/model → provider +
+///    目录条目 + 引用改写；`[tools.web_fetch].use_tavily_extract` → `extract_provider`。
+///
+/// 迁移只改内存态：磁盘文件保持原样（避免 toml 序列化毁掉注释与手排格式）。
+/// 每次启动都会重复迁移，属于幂等无害操作；在 WebUI 保存一次即可把新结构写盘，
+/// 届时迁移按 id 冲突检测自动跳过已迁移条目。返回的 notice 逐条由调用方 warn。
+fn migrate_legacy_config(raw: &mut toml::Value) -> Vec<String> {
+    let mut notices = Vec::new();
+    let Some(root) = raw.as_table_mut() else {
+        return notices;
+    };
+
+    // 全程 owned 操作（remove 下来处理完再写回），避免同时持有 provider / model /
+    // tools 三棵子树的可变借用。pending_* 收集本轮要写入的条目，统一做 id 冲突检测。
+    const PROVIDER_RESERVED: [&str; 4] = ["type", "base_url", "api_key", "compat"];
+
+    let mut providers = root
+        .remove("provider")
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default();
+    let mut tools = root
+        .remove("tools")
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default();
+    let mut catalog = root
+        .remove("model")
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default();
+
+    // ---- 1. provider 层的 legacy model 子表 → 目录条目 ----
+    let mut pids: Vec<String> = providers.keys().cloned().collect();
+    pids.sort(); // 输出顺序稳定，notice 可读
+    for pid in pids {
+        let Some(ptbl) = providers.get_mut(&pid).and_then(|v| v.as_table_mut()) else {
+            continue;
+        };
+        let aliases: Vec<String> = ptbl
+            .iter()
+            .filter(|(k, v)| !PROVIDER_RESERVED.contains(&k.as_str()) && v.is_table())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for alias in aliases {
+            let Some(sub) = ptbl.remove(&alias).and_then(|v| v.as_table().cloned()) else {
+                continue;
+            };
+            // 服务端模型名是目录条目的硬要求，缺失时丢弃并提示（P7 配置不该出现）
+            let Some(server_model) = sub.get("model").and_then(|v| v.as_str()).to_owned() else {
+                notices.push(format!(
+                    "legacy [provider.{pid}.{alias}] has no `model` field; dropped"
+                ));
+                continue;
+            };
+            let model_id = format!("{pid}.{alias}");
+            if catalog.contains_key(&model_id) {
+                // 用户已手工迁移过同名条目：显式 [model] 条目优先，legacy 段让位
+                notices.push(format!(
+                    "model {model_id} already defined in [model.\"{model_id}\"]; \
+                     legacy [provider.{pid}.{alias}] table dropped"
+                ));
+                continue;
+            }
+            let mut entry = toml::Table::new();
+            entry.insert("provider".into(), toml::Value::from(pid.clone()));
+            entry.insert("model".into(), toml::Value::from(server_model));
+            for key in [
+                "context_size",
+                "max_tokens",
+                "enabled",
+                "native_tool_calling",
+                "thinking",
+                "size",
+            ] {
+                if let Some(v) = sub.get(key) {
+                    entry.insert(key.into(), v.clone());
+                }
+            }
+            catalog.insert(model_id.clone(), toml::Value::Table(entry));
+            notices.push(format!(
+                "migrated legacy [provider.{pid}.{alias}] -> [model.\"{model_id}\"]"
+            ));
+        }
+    }
+
+    // 追加 provider（不存在才写，显式配置优先）
+    fn ensure_provider(
+        providers: &mut toml::Table,
+        id: &str,
+        ptype: &str,
+        base_url: &str,
+        api_key: &str,
+        notices: &mut Vec<String>,
+    ) {
+        if providers.contains_key(id) {
+            return;
+        }
+        let mut p = toml::Table::new();
+        p.insert("type".into(), toml::Value::from(ptype));
+        p.insert("base_url".into(), toml::Value::from(base_url));
+        p.insert("api_key".into(), toml::Value::from(api_key));
+        providers.insert(id.into(), toml::Value::Table(p));
+        notices.push(format!(
+            "migrated legacy [tools.{id}] credentials -> [provider.{id}] (type = \"{ptype}\")"
+        ));
+    }
+    // 追加目录条目（不存在才写）
+    fn ensure_model(
+        catalog: &mut toml::Table,
+        id: &str,
+        provider: &str,
+        server_model: &str,
+        kind: &str,
+        size: Option<toml::Value>,
+        notices: &mut Vec<String>,
+    ) {
+        if catalog.contains_key(id) {
+            return;
+        }
+        let mut entry = toml::Table::new();
+        entry.insert("provider".into(), toml::Value::from(provider));
+        entry.insert("model".into(), toml::Value::from(server_model));
+        entry.insert("kind".into(), toml::Value::from(kind));
+        if let Some(size) = size {
+            entry.insert("size".into(), size);
+        }
+        catalog.insert(id.into(), toml::Value::Table(entry));
+        notices.push(format!(
+            "migrated legacy [tools.{provider}] endpoint -> [model.\"{id}\"] (kind = \"{kind}\")"
+        ));
+    }
+
+    // ---- 2. 搜索凭据段 → service family provider ----
+    for (name, ptype) in [("tavily", "tavily"), ("baidu", "baidu"), ("brave", "brave")] {
+        let Some(sec) = tools.remove(name).and_then(|v| v.as_table().cloned()) else {
+            continue;
+        };
+        let api_key = sec
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        ensure_provider(&mut providers, name, ptype, "", &api_key, &mut notices);
+        // [tools.search].provider 旧语义是类型名（tavily/baidu/brave），与新建
+        // provider id 恰好同串，无需改写；其余取值留给 load 校验去 warn。
+    }
+
+    // ---- 3a. tts 内联端点 → provider + kind=tts 条目 ----
+    if let Some(tts) = tools.get_mut("tts").and_then(|v| v.as_table_mut()) {
+        let base = tts
+            .remove("base_url")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let api_key = tts
+            .remove("api_key")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let server_model = tts
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if !base.trim().is_empty() && !server_model.trim().is_empty() {
+            let model_id = format!("tts.{server_model}");
+            ensure_provider(
+                &mut providers,
+                "tts",
+                "openai_compatible",
+                &base,
+                &api_key,
+                &mut notices,
+            );
+            ensure_model(
+                &mut catalog,
+                &model_id,
+                "tts",
+                &server_model,
+                "tts",
+                None,
+                &mut notices,
+            );
+            tts.insert("model".into(), toml::Value::from(model_id));
+        } else if tts.get("enabled").and_then(|v| v.as_bool()) == Some(true) {
+            // 迁移条件不满足：legacy 键已摘除，残留的 model 值会被当作目录引用
+            // 解析失败 → 工具不注册 + warn，与旧版"配置不完整则不可用"等价
+            notices.push(
+                "tools.tts.enabled but legacy base_url/model incomplete; configure \
+                 [model.<id>] (kind = \"tts\") and point tools.tts.model at it"
+                    .to_string(),
+            );
+        }
+    }
+
+    // ---- 3b. image_gen 内联端点 → provider + kind=image 条目 ----
+    if let Some(ig) = tools.get_mut("image_gen").and_then(|v| v.as_table_mut()) {
+        let base = ig
+            .remove("base_url")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let api_key = ig
+            .remove("api_key")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let size = ig.remove("size");
+        let server_model = ig
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if !base.trim().is_empty() && !server_model.trim().is_empty() {
+            // 旧配置的 base_url 常是完整端点（…/images/generations）；新代码按
+            // provider.base_url + "/images/generations" 拼接，须剥掉尾巴防双写
+            let provider_base = base
+                .trim_end_matches('/')
+                .trim_end_matches("/images/generations")
+                .to_string();
+            let model_id = format!("image_gen.{server_model}");
+            ensure_provider(
+                &mut providers,
+                "image_gen",
+                "openai_compatible",
+                &provider_base,
+                &api_key,
+                &mut notices,
+            );
+            ensure_model(
+                &mut catalog,
+                &model_id,
+                "image_gen",
+                &server_model,
+                "image",
+                size,
+                &mut notices,
+            );
+            ig.insert("model".into(), toml::Value::from(model_id));
+        } else if ig.get("enabled").and_then(|v| v.as_bool()) == Some(true) {
+            notices.push(
+                "tools.image_gen.enabled but legacy base_url/model incomplete; configure \
+                 [model.<id>] (kind = \"image\") and point tools.image_gen.model at it"
+                    .to_string(),
+            );
+        }
+    }
+
+    // ---- 3c. web_fetch 抽取开关改引用 ----
+    if let Some(wf) = tools.get_mut("web_fetch").and_then(|v| v.as_table_mut()) {
+        if let Some(use_tavily) = wf.remove("use_tavily_extract").and_then(|v| v.as_bool()) {
+            if use_tavily {
+                wf.insert("extract_provider".into(), toml::Value::from("tavily"));
+                notices.push(
+                    "migrated tools.web_fetch.use_tavily_extract -> extract_provider = \"tavily\""
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    // ---- 写回（无迁移发生时写回空表也无副作用：Config 各字段均有 default） ----
+    root.insert("provider".into(), toml::Value::Table(providers));
+    root.insert("tools".into(), toml::Value::Table(tools));
+    if !catalog.is_empty() {
+        root.insert("model".into(), toml::Value::Table(catalog));
+    }
+
+    notices
+}
+
 impl Config {
     pub fn load(path: &PathBuf) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config: {:?}", path))?;
-        let mut config: Config = toml::from_str(&content)
+        // P8 兼容层：先解析成 raw Value，把 v0.5 的旧结构原地改写成模型目录形态
+        //（[provider.<pid>.<alias>] 子表 → [model."<pid>.<alias>"]、[tools.tavily]
+        // 等凭据段 → service family provider、tts/image_gen 内联端点 → 目录引用），
+        // 再交给 serde 反序列化。agent 引用（"pid.alias"）恰好等于迁移后的 model id，
+        // 因此旧配置无需任何手工修改即可加载。
+        let mut raw: toml::Value = toml::from_str(&content)
+            .with_context(|| format!("failed to parse config: {:?}", path))?;
+        for notice in migrate_legacy_config(&mut raw) {
+            tracing::warn!("{}", notice);
+        }
+        let mut config: Config = raw
+            .try_into()
             .with_context(|| format!("failed to parse config: {:?}", path))?;
         // 向后兼容：旧 [channels.web] → 新 [webui]
         // ChannelsConfig 已无 web 字段，serde 会静默忽略 toml 里的 [channels.web]，
@@ -1010,13 +1305,67 @@ impl Config {
                 "[agent.main] missing in config.toml — main agent will start in degraded mode"
             );
         }
+        // P8：provider type 显式未知 → 报错（不静默回退——打错的 service type
+        // 会变出一个 LLM provider 蹲进 probe 列表）。缺省（未写 type）回退 openai_compatible。
+        for (id, p) in &config.provider {
+            let t = p.provider_type.trim();
+            if !t.is_empty()
+                && !LLM_PROVIDER_TYPES.contains(&t)
+                && !SERVICE_PROVIDER_TYPES.contains(&t)
+            {
+                anyhow::bail!(
+                    "provider.{id}: unknown type '{t}' (llm family: {}, service family: {})",
+                    LLM_PROVIDER_TYPES.join("|"),
+                    SERVICE_PROVIDER_TYPES.join("|")
+                );
+            }
+        }
+        // P8：model 目录条目校验——provider 存在、非 service family、
+        // anthropic/gemini 只能挂 chat（校验放加载期，不留运行时报错）
+        for (mid, m) in &config.models {
+            let Some(p) = config.provider.get(&m.provider) else {
+                anyhow::bail!(
+                    "model.{mid}: provider '{}' not configured ([provider.{}])",
+                    m.provider,
+                    m.provider
+                );
+            };
+            if p.is_service() {
+                anyhow::bail!(
+                    "model.{mid}: references service-family provider '{}' which cannot host models",
+                    m.provider
+                );
+            }
+            if matches!(p.effective_type(), "anthropic" | "gemini") && m.kind != ModelKind::Chat {
+                anyhow::bail!(
+                    "model.{mid}: provider '{}' (type {}) only supports kind = \"chat\"",
+                    m.provider,
+                    p.effective_type()
+                );
+            }
+            if m.size.is_some() && m.kind != ModelKind::Image {
+                tracing::warn!(
+                    model = mid.as_str(),
+                    "model entry has `size` set but kind is not \"image\"; the field will be ignored"
+                );
+            }
+            for cap in &m.capabilities {
+                if cap != "multimodal" {
+                    tracing::warn!(
+                        model = mid.as_str(),
+                        capability = cap.as_str(),
+                        "unknown model capability (known: multimodal); kept for forward compatibility"
+                    );
+                }
+            }
+        }
         // compact_model 引用校验：避免拼写错误到运行时才暴露
-        if let Some(m) = &config.runtime.compact_model {
-            if let Err(e) = Self::parse_model_ref(m) {
+        if let Some(m) = config.runtime.compact_model.clone() {
+            if let Err(e) = Self::validate_chat_model_ref(&config, &m) {
                 tracing::warn!(
                     model = m.as_str(),
                     error = %e,
-                    "runtime.compact_model is not a valid 'provider_id.model_alias' reference, will be ignored"
+                    "runtime.compact_model is not a usable chat model reference, will be ignored"
                 );
                 config.runtime.compact_model = None;
             }
@@ -1068,23 +1417,28 @@ impl Config {
                 "runtime.max_turn_duration_secs <= keepalive_interval_secs, no heartbeat will ever fire"
             );
         }
-        // agent fallback 链引用校验：无效项移除（备用链是容错手段，不应阻塞启动）
+        // agent fallback 链引用校验：无效项移除（备用链是容错手段，不应阻塞启动）。
+        // 先快照可用 chat model id 集合，避免 iter_mut 期间再借 config。
+        let valid_chat_refs: std::collections::HashSet<String> = config
+            .models
+            .iter()
+            .filter(|(_, m)| m.kind == ModelKind::Chat)
+            .map(|(id, _)| id.clone())
+            .collect();
         for (alias, agent_cfg) in config.agent.iter_mut() {
             let before = agent_cfg.fallback.len();
-            agent_cfg
-                .fallback
-                .retain(|m| match Self::parse_model_ref(m) {
-                    Ok(_) => true,
-                    Err(e) => {
-                        tracing::warn!(
-                            agent = alias.as_str(),
-                            model = m.as_str(),
-                            error = %e,
-                            "agent fallback entry is not a valid 'provider_id.model_alias' reference, removed"
-                        );
-                        false
-                    }
-                });
+            agent_cfg.fallback.retain(|m| {
+                if valid_chat_refs.contains(m) {
+                    true
+                } else {
+                    tracing::warn!(
+                        agent = alias.as_str(),
+                        model = m.as_str(),
+                        "agent fallback entry is not a usable chat model reference, removed"
+                    );
+                    false
+                }
+            });
             if agent_cfg.fallback.len() != before {
                 tracing::debug!(agent = alias.as_str(), "fallback chain sanitized");
             }
@@ -1127,34 +1481,27 @@ impl Config {
         self.channels.feishu.app_id = expand(&self.channels.feishu.app_id)?;
         self.channels.feishu.app_secret = expand(&self.channels.feishu.app_secret)?;
         self.webui.token = expand(&self.webui.token)?;
-        self.tools.tavily.api_key = expand(&self.tools.tavily.api_key)?;
-        self.tools.baidu.api_key = expand(&self.tools.baidu.api_key)?;
-        self.tools.brave.api_key = expand(&self.tools.brave.api_key)?;
-        self.tools.tts.api_key = expand(&self.tools.tts.api_key)?;
-        self.tools.image_gen.api_key = expand(&self.tools.image_gen.api_key)?;
         self.log.dir = expand(&self.log.dir)?;
         Ok(())
     }
 
-    /// 把引用了 disabled model（`[provider.<id>.<alias>].enabled = false`）的**间接**
+    /// 把引用了 disabled model（`[model.<id>].enabled = false`）的**间接**
     /// 引用收敛到可用集合：
     ///
     /// - `runtime.compact_model` / `runtime.vision_model` → warn + 置 None（回退主模型）
     /// - `agent.<alias>.fallback` → 剔除（备用链不该指向故意停用的模型）
     /// - `agent.<alias>.model` → **刻意不碰**：那是用户显式选定的当前模型，`enabled`
-    ///   只管可发现性（见 `ModelConfig::enabled`），硬拦会让"关掉当前模型"变成下次
+    ///   只管可发现性（见 `ModelEntry::enabled`），硬拦会让"关掉当前模型"变成下次
     ///   启动即失败、且 WebUI 保存路径连改回来都走不通。
     ///
     /// 由 `Config::load` 与 WebUI `put_config` 各调一次（后者不走 `load`）。
     pub fn reconcile_disabled_models(&mut self) {
-        let mut disabled: Vec<String> = Vec::new();
-        for (pid, p) in &self.provider {
-            for (alias, m) in &p.model {
-                if !m.enabled {
-                    disabled.push(format!("{}.{}", pid, alias));
-                }
-            }
-        }
+        let disabled: Vec<String> = self
+            .models
+            .iter()
+            .filter(|(_, m)| !m.enabled)
+            .map(|(id, _)| id.clone())
+            .collect();
         if disabled.is_empty() {
             return;
         }
@@ -1192,11 +1539,21 @@ impl Config {
         }
     }
 
-    /// 解析 "provider_id.model_alias"，返回 (provider_id, model_alias)
-    pub fn parse_model_ref(ref_str: &str) -> Result<(&str, &str)> {
-        ref_str
-            .split_once('.')
-            .context("agent.model must be 'provider_id.model_alias'")
+    /// 校验 model id 引用是否指向**可作 chat provider** 的目录条目：
+    /// 存在、enabled 不拦（只管可发现性）、kind 必须是 chat。
+    /// 供 compact_model / fallback 的加载期收敛；`agent.model` 刻意不走此校验
+    /// （disabled 不拦，避免 brick 当前模型）。
+    pub fn validate_chat_model_ref(config: &Config, model_id: &str) -> Result<()> {
+        let entry = config.models.get(model_id).ok_or_else(|| {
+            anyhow::anyhow!("model.{model_id} not configured in [model.{model_id}]")
+        })?;
+        if entry.kind != ModelKind::Chat {
+            anyhow::bail!(
+                "model.{model_id} has kind \"{}\" — only kind = \"chat\" entries can serve as a chat model",
+                entry.kind.as_str()
+            );
+        }
+        Ok(())
     }
 
     /// 默认配置（首次启动用），结构最小化
@@ -1204,18 +1561,6 @@ impl Config {
         let config_dir = shellexpand::tilde(config_dir).into_owned();
 
         let mut provider: HashMap<String, ProviderConfig> = HashMap::new();
-        let mut models: HashMap<String, ModelConfig> = HashMap::new();
-        models.insert(
-            "qwen".into(),
-            ModelConfig {
-                model: "qwen2.5:7b".into(),
-                native_tool_calling: Some(true),
-                context_size: None,
-                max_tokens: None,
-                enabled: true,
-                thinking: None,
-            },
-        );
         provider.insert(
             "default".into(),
             ProviderConfig {
@@ -1223,7 +1568,23 @@ impl Config {
                 base_url: "http://localhost:11434/v1".into(),
                 api_key: String::new(),
                 compat: None,
-                model: models,
+            },
+        );
+
+        let mut models: BTreeMap<String, ModelEntry> = BTreeMap::new();
+        models.insert(
+            "qwen".into(),
+            ModelEntry {
+                provider: "default".into(),
+                model: "qwen2.5:7b".into(),
+                kind: ModelKind::Chat,
+                enabled: true,
+                context_size: None,
+                max_tokens: None,
+                native_tool_calling: Some(true),
+                thinking: None,
+                size: None,
+                capabilities: Vec::new(),
             },
         );
 
@@ -1231,7 +1592,7 @@ impl Config {
         agent.insert(
             "main".into(),
             AgentConfig {
-                model: "default.qwen".into(),
+                model: "qwen".into(),
                 soul: None,
                 user: None,
                 memory: None,
@@ -1249,6 +1610,7 @@ impl Config {
                 dir: format!("{}/logs", config_dir),
             },
             provider,
+            models,
             agent,
             webui: WebUiConfig::default(),
             channels: ChannelsConfig::default(),
@@ -1293,9 +1655,10 @@ mod tests {
     #[test]
     fn thinking_config_toml_roundtrip_and_skip_direction() {
         // P1 D2：thinking 段解析；unknown 字面值 → None；skip 方向（enabled 教训）：
-        // None 时序列化省略键（provider 子树 replace 合并缺失即删，方向不能反）
-        let mc: ModelConfig = toml::from_str(
+        // None 时序列化省略键（model 子树 replace 合并缺失即删，方向不能反）
+        let mc: ModelEntry = toml::from_str(
             r#"
+provider = "p"
 model = "m"
 [thinking]
 default = "unknown"
@@ -1315,21 +1678,246 @@ off_wire = "enable_thinking_false"
             Some(crate::provider::ThinkingOffWire::EnableThinkingFalse)
         );
         // 具体档位值解析
-        let mc2: ModelConfig =
-            toml::from_str("model = \"m\"\n[thinking]\ndefault = \"high\"").unwrap();
+        let mc2: ModelEntry =
+            toml::from_str("provider = \"p\"\nmodel = \"m\"\n[thinking]\ndefault = \"high\"")
+                .unwrap();
         assert_eq!(
             mc2.thinking.as_ref().unwrap().default,
             Some(crate::provider::ThinkingLevel::High)
         );
         // 拼错的档位直接报错（不静默吞）
-        assert!(
-            toml::from_str::<ModelConfig>("model = \"m\"\n[thinking]\ndefault = \"hgh\"").is_err()
-        );
+        assert!(toml::from_str::<ModelEntry>(
+            "provider = \"p\"\nmodel = \"m\"\n[thinking]\ndefault = \"hgh\""
+        )
+        .is_err());
         // None 时序列化省略 thinking 键
-        let bare: ModelConfig = toml::from_str("model = \"m\"").unwrap();
+        let bare: ModelEntry = toml::from_str("provider = \"p\"\nmodel = \"m\"").unwrap();
         assert!(!toml::to_string(&bare).unwrap().contains("thinking"));
         // Some 时保留（put_config 往返不蒸发）
         assert!(toml::to_string(&mc).unwrap().contains("[thinking]"));
+    }
+
+    #[test]
+    fn model_entry_kind_and_capabilities_skip_direction() {
+        // P8：kind 缺省 = chat 且序列化省略；capabilities 空省略
+        let bare: ModelEntry = toml::from_str("provider = \"p\"\nmodel = \"m\"").unwrap();
+        assert_eq!(bare.kind, ModelKind::Chat);
+        assert!(bare.capabilities.is_empty());
+        let s = toml::to_string(&bare).unwrap();
+        assert!(!s.contains("kind"), "chat 应省略 kind 键:\n{s}");
+        assert!(!s.contains("capabilities"), "空 capabilities 应省略:\n{s}");
+
+        let img: ModelEntry = toml::from_str(
+            "provider = \"p\"\nmodel = \"sd\"\nkind = \"image\"\nsize = \"512x512\"",
+        )
+        .unwrap();
+        assert_eq!(img.kind, ModelKind::Image);
+        let s = toml::to_string(&img).unwrap();
+        assert!(s.contains("kind = \"image\""), "非 chat 必须显式落盘:\n{s}");
+        assert!(s.contains("size = \"512x512\""));
+
+        // 拼错的 kind 直接报错（不静默吞）
+        assert!(
+            toml::from_str::<ModelEntry>("provider = \"p\"\nmodel = \"m\"\nkind = \"voice\"")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_unknown_type_is_rejected_but_legacy_subtables_migrate() {
+        // 显式未知 type → 报错（静默回退会让打错的 service type 变成 LLM provider）
+        let toml = r#"
+[provider.typos]
+type = "tavly"
+api_key = "k"
+
+[agent.main]
+model = "qwen"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let err = Config::load(&tmp.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("unknown type 'tavly'"), "{err}");
+
+        // P8 兼容层：旧配置的 [provider.<id>.<alias>] model 子表自动迁移为
+        // [model."<id>.<alias>"]，agent 引用沿用两段式无需改动，加载成功
+        let legacy = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.qwen]
+model = "qwen2.5:7b"
+context_size = 32768
+enabled = false
+
+[agent.main]
+model = "default.qwen"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", legacy).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        let entry = config.models.get("default.qwen").expect("migrated entry");
+        assert_eq!(entry.provider, "default");
+        assert_eq!(entry.model, "qwen2.5:7b");
+        assert_eq!(entry.context_size, Some(32768));
+        assert!(!entry.enabled);
+        assert!(config.provider.contains_key("default"));
+        // legacy 子表必须从 provider 表里消失，否则下次反序列化仍被 deny_unknown_fields 拒收
+        //（本测试经迁移通路已验证；直接对新结构断言 provider 只剩保留键）
+    }
+
+    #[test]
+    fn migrate_legacy_tools_sections_end_to_end() {
+        // 模拟真实旧配置的 tools 全家桶：凭据段 + 内联 tts/image_gen 端点 + 抽取开关
+        let legacy = r#"
+[provider.llamacpp]
+type = "openai_compatible"
+base_url = "http://127.0.0.1:8080/v1"
+
+[provider.llamacpp.qwen]
+model = "qwen3"
+context_size = 128000
+
+[provider.llamacpp.qwen.thinking]
+default = "medium"
+preserve = false
+
+[tools.tavily]
+api_key = "tv-key"
+
+[tools.search]
+provider = "tavily"
+top_k = 8
+
+[tools.tts]
+enabled = false
+base_url = "https://api.openai.com/v1"
+api_key = ""
+model = "tts-1"
+voice = "alloy"
+
+[tools.image_gen]
+enabled = true
+base_url = "https://api.agnes-ai.cn/v1/images/generations"
+api_key = "img-key"
+model = "agnes-image-2.5-flash"
+size = "1024x1024"
+timeout_secs = 300
+
+[tools.web_fetch]
+max_chars = 6000
+use_tavily_extract = true
+
+[agent.main]
+model = "llamacpp.qwen"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", legacy).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+
+        // 1. model 子表 → 目录条目（含嵌套 thinking 原样搬运）
+        let qwen = config.models.get("llamacpp.qwen").expect("chat entry");
+        assert_eq!(qwen.model, "qwen3");
+        assert!(matches!(
+            qwen.thinking.as_ref().unwrap().default,
+            Some(crate::provider::ThinkingLevel::Medium)
+        ));
+
+        // 2. 搜索凭据 → service family provider；search.provider 引用直通
+        let tv = config.provider.get("tavily").expect("tavily provider");
+        assert_eq!(tv.effective_type(), "tavily");
+        assert_eq!(tv.api_key, "tv-key");
+        assert_eq!(config.tools.search.provider, "tavily");
+
+        // 3. tts → provider + kind=tts 条目 + 引用改写
+        let tts = config.models.get("tts.tts-1").expect("tts entry");
+        assert_eq!(tts.kind, ModelKind::Tts);
+        assert_eq!(tts.provider, "tts");
+        assert_eq!(config.tools.tts.model, "tts.tts-1");
+        assert_eq!(config.tools.tts.voice, "alloy");
+        assert!(!config.tools.tts.enabled);
+
+        // 4. image_gen → provider（base_url 剥掉 /images/generations 尾巴）+ kind=image 条目
+        let img = config
+            .models
+            .get("image_gen.agnes-image-2.5-flash")
+            .expect("image entry");
+        assert_eq!(img.kind, ModelKind::Image);
+        assert_eq!(img.size.as_deref(), Some("1024x1024"));
+        let igp = config.provider.get("image_gen").unwrap();
+        assert_eq!(igp.base_url, "https://api.agnes-ai.cn/v1");
+        assert_eq!(
+            config.tools.image_gen.model,
+            "image_gen.agnes-image-2.5-flash"
+        );
+
+        // 5. web_fetch 开关 → 引用
+        assert_eq!(config.tools.web_fetch.extract_provider, "tavily");
+    }
+
+    #[test]
+    fn migrate_skips_conflicting_model_ids() {
+        // 显式 [model] 条目优先：legacy 子表同 id 时让位并被丢弃
+        let legacy = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[provider.default.qwen]
+model = "old-name"
+
+[model."default.qwen"]
+provider = "default"
+model = "new-name"
+
+[agent.main]
+model = "default.qwen"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", legacy).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert_eq!(config.models.get("default.qwen").unwrap().model, "new-name");
+    }
+
+    #[test]
+    fn model_entry_validation_errors() {
+        // service family provider 不能挂 model 条目
+        let toml = r#"
+[provider.tv]
+type = "tavily"
+api_key = "k"
+
+[model.bad]
+provider = "tv"
+model = "x"
+
+[agent.main]
+model = "qwen"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let err = Config::load(&tmp.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("cannot host models"), "{err}");
+
+        // anthropic provider 只能挂 chat 条目
+        let toml = r#"
+[provider.anth]
+type = "anthropic"
+api_key = "k"
+
+[model.bad]
+provider = "anth"
+kind = "image"
+model = "x"
+
+[agent.main]
+model = "qwen"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let err = Config::load(&tmp.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("only supports kind"), "{err}");
     }
 
     #[test]
@@ -1344,24 +1932,30 @@ type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 api_key = "sk-test"
 
-[provider.default.qwen3]
+[model.qwen3]
+provider = "default"
 model = "qwen-3.6-35b-MTP"
 native_tool_calling = false
 
-[provider.default.qwen2]
+[model.qwen2]
+provider = "default"
 model = "qwen2.5:7b"
 native_tool_calling = true
 
+[provider.tv]
+type = "tavily"
+api_key = "tvly-test"
+
 [agent.main]
-model = "default.qwen3"
+model = "qwen3"
 workspace = "~/custom-ws"
 
 [tools.terminal]
 confirm = "always"
 whitelist = ["ls"]
 
-[tools.tavily]
-api_key = "tvly-test"
+[tools.search]
+provider = "tv"
 
 [log]
 level = "debug"
@@ -1378,24 +1972,26 @@ dir = "~/.llaia-test/logs"
         assert_eq!(config.runtime.keepalive_interval_secs, 600);
         assert_eq!(config.runtime.max_turn_duration_secs, 3600);
 
-        // provider with nested models
+        // provider 注册表 + model 目录
         let p = config.provider.get("default").unwrap();
         assert_eq!(p.base_url, "http://localhost:11434/v1");
-        let m1 = p.model.get("qwen3").unwrap();
+        let m1 = config.models.get("qwen3").unwrap();
         assert_eq!(m1.model, "qwen-3.6-35b-MTP");
+        assert_eq!(m1.provider, "default");
         assert!(!m1.native_tool_calling.unwrap_or(true));
-        let m2 = p.model.get("qwen2").unwrap();
+        let m2 = config.models.get("qwen2").unwrap();
         assert!(m2.native_tool_calling.unwrap_or(true));
+        // service family provider
+        assert!(config.provider.get("tv").unwrap().is_service());
 
         // agent: workspace 字段已移除（存量配置中的该键被忽略），soul/user/memory 缺省为 None
         let a = config.agent.get("main").unwrap();
-        assert_eq!(a.model, "default.qwen3");
+        assert_eq!(a.model, "qwen3");
         assert!(a.soul.is_none());
 
         // tools
         assert_eq!(config.tools.terminal.confirm, "always");
-        assert_eq!(config.tools.tavily.api_key, "tvly-test");
-        assert_eq!(config.tools.search.provider, "tavily");
+        assert_eq!(config.tools.search.provider, "tv");
         assert_eq!(config.tools.search.top_k, 8);
 
         // log
@@ -1407,10 +2003,11 @@ dir = "~/.llaia-test/logs"
         let config = Config::default_for_workspace("~/.llaia");
         let p = config.provider.get("default").unwrap();
         assert_eq!(p.provider_type, "openai_compatible");
-        let m = p.model.get("qwen").unwrap();
+        let m = config.models.get("qwen").unwrap();
+        assert_eq!(m.provider, "default");
         assert_eq!(m.native_tool_calling, Some(true));
         let a = config.agent.get("main").unwrap();
-        assert_eq!(a.model, "default.qwen");
+        assert_eq!(a.model, "qwen");
         assert!(a.soul.is_none());
         // runtime 默认值
         assert_eq!(config.runtime.context_threshold, 0.7);
@@ -1425,21 +2022,19 @@ dir = "~/.llaia-test/logs"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
         // 缺省 native_tool_calling = None（auto：跟随探测），不显式声明
         assert!(config
-            .provider
-            .get("default")
-            .unwrap()
-            .model
+            .models
             .get("qwen")
             .unwrap()
             .native_tool_calling
@@ -1460,11 +2055,10 @@ model = "default.qwen"
     }
 
     #[test]
-    fn test_parse_model_ref() {
-        let (p, m) = Config::parse_model_ref("default.qwen3").unwrap();
-        assert_eq!(p, "default");
-        assert_eq!(m, "qwen3");
-        assert!(Config::parse_model_ref("invalid").is_err());
+    fn test_validate_chat_model_ref() {
+        let config = Config::default_for_workspace("~/.llaia");
+        assert!(Config::validate_chat_model_ref(&config, "qwen").is_ok());
+        assert!(Config::validate_chat_model_ref(&config, "nope").is_err());
     }
 
     #[test]
@@ -1474,11 +2068,12 @@ model = "default.qwen"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 soul = "~/custom/SOUL.md"
 user = "~/custom/USER.md"
@@ -1499,11 +2094,12 @@ memory = "~/custom/MEMORY.md"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 
 [channels.qq]
@@ -1526,11 +2122,12 @@ app_secret = "test-secret"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1547,15 +2144,16 @@ workspace = "~/.llaia"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 
 [agent.coder]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia/agents/coder"
 soul = "~/.llaia/agents/coder.md"
 denied_tools = ["memory_write"]
@@ -1591,11 +2189,12 @@ type = "openai_compatible"
 base_url = "${{{}}}/v1"
 api_key = "${{{}}}"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 
 [channels.qq]
@@ -1626,11 +2225,12 @@ type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 api_key = "${LLAIA_NONEXISTENT_VAR_2026}"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1655,11 +2255,12 @@ type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 api_key = "${lowercase_var}"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1687,11 +2288,12 @@ workspace = "~/.llaia"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 
 [webui]
@@ -1716,11 +2318,12 @@ token = "secret-token"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 
 [channels.web]
@@ -1744,11 +2347,12 @@ token = "migrated-token"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 
 [webui]
@@ -1776,11 +2380,12 @@ token = "old-token"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.qwen]
+[model.qwen]
+provider = "default"
 model = "qwen2.5:7b"
 
 [agent.main]
-model = "default.qwen"
+model = "qwen"
 workspace = "~/.llaia"
 
 [channels.qq]
@@ -1793,7 +2398,7 @@ confirm_mode = "whitelist"
     }
 
     /// 存量配置（无 enabled 键）读出 true；且序列化方向必须是「true 时省略」。
-    /// 反了的话 disabled 不落盘，配合 provider 子树 replace 合并会在保存时被静默删除。
+    /// 反了的话 disabled 不落盘，配合 model 子树 replace 合并会在保存时被静默删除。
     #[test]
     fn test_model_enabled_default_and_serialize_direction() {
         let toml = r#"
@@ -1801,22 +2406,26 @@ confirm_mode = "whitelist"
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.legacy]
+[model.legacy]
+provider = "default"
 model = "no-enabled-key"
 
-[provider.default.hidden]
+[model.hidden]
+provider = "default"
 model = "explicit-off"
 enabled = false
 
 [agent.main]
-model = "default.legacy"
+model = "legacy"
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
-        let models = &config.provider["default"].model;
-        assert!(models["legacy"].enabled, "缺省应为启用（存量零迁移）");
-        assert!(!models["hidden"].enabled);
+        assert!(
+            config.models["legacy"].enabled,
+            "缺省应为启用（存量零迁移）"
+        );
+        assert!(!config.models["hidden"].enabled);
 
         let out = toml::to_string(&config).expect("serialize config");
         assert!(
@@ -1830,8 +2439,8 @@ model = "default.legacy"
 
         // 往返：disabled 不会被写盘过程洗掉
         let back: Config = toml::from_str(&out).expect("re-parse serialized config");
-        assert!(!back.provider["default"].model["hidden"].enabled);
-        assert!(back.provider["default"].model["legacy"].enabled);
+        assert!(!back.models["hidden"].enabled);
+        assert!(back.models["legacy"].enabled);
     }
 
     /// `enabled` 只管可发现性：间接引用（fallback / compact / vision）被收敛，
@@ -1840,36 +2449,32 @@ model = "default.legacy"
     fn test_reconcile_disabled_models() {
         let toml = r#"
 [runtime]
-compact_model = "default.hidden"
-vision_model = "default.hidden"
+compact_model = "hidden"
+vision_model = "hidden"
 
 [provider.default]
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.kept]
+[model.kept]
+provider = "default"
 model = "visible"
 
-[provider.default.hidden]
+[model.hidden]
+provider = "default"
 model = "disabled"
 enabled = false
 
 [agent.main]
-model = "default.hidden"
-fallback = ["default.kept", "default.hidden"]
+model = "hidden"
+fallback = ["kept", "hidden"]
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
 
-        assert_eq!(
-            config.agent["main"].model, "default.hidden",
-            "不碰显式当前模型"
-        );
-        assert_eq!(
-            config.agent["main"].fallback,
-            vec!["default.kept".to_string()]
-        );
+        assert_eq!(config.agent["main"].model, "hidden", "不碰显式当前模型");
+        assert_eq!(config.agent["main"].fallback, vec!["kept".to_string()]);
         assert_eq!(config.runtime.compact_model, None, "回退主模型");
         assert_eq!(config.runtime.vision_model, None, "图片回退主模型");
     }
@@ -1879,29 +2484,31 @@ fallback = ["default.kept", "default.hidden"]
     fn test_reconcile_keeps_enabled_refs() {
         let toml = r#"
 [runtime]
-compact_model = "default.a"
-vision_model = "default.b"
+compact_model = "a"
+vision_model = "b"
 
 [provider.default]
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"
 
-[provider.default.a]
+[model.a]
+provider = "default"
 model = "one"
 
-[provider.default.b]
+[model.b]
+provider = "default"
 model = "two"
 enabled = true
 
 [agent.main]
-model = "default.a"
-fallback = ["default.b"]
+model = "a"
+fallback = ["b"]
 "#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", toml).unwrap();
         let config = Config::load(&tmp.path().to_path_buf()).unwrap();
-        assert_eq!(config.runtime.compact_model.as_deref(), Some("default.a"));
-        assert_eq!(config.runtime.vision_model.as_deref(), Some("default.b"));
-        assert_eq!(config.agent["main"].fallback, vec!["default.b".to_string()]);
+        assert_eq!(config.runtime.compact_model.as_deref(), Some("a"));
+        assert_eq!(config.runtime.vision_model.as_deref(), Some("b"));
+        assert_eq!(config.agent["main"].fallback, vec!["b".to_string()]);
     }
 }

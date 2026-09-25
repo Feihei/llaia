@@ -54,16 +54,17 @@ type = "openai_compatible"
 base_url = "http://localhost:11434/v1"   # 本地 Ollama 默认地址
 api_key = ""                              # 本地 Ollama 通常留空
 
-[provider.default.qwen]
-model = "qwen2.5:7b"
+[model.qwen]
+provider = "default"
+model = "qwen2.5:7b"                      # 服务端模型名
 native_tool_calling = false
 context_size = 32768
 
 [agent.main]
-model = "default.qwen"                    # 引用 provider.<id>.<model_alias>
+model = "qwen"                            # 引用 [model.<id>] 目录条目
 ```
 
-云端 Anthropic 用 `type = "anthropic"`，并在 model 下加 `max_tokens`（必填，未配默认 4096）。主模型不稳定时可在 `[agent.main]` 下加 `fallback = [...]` 自动降级。
+云端 Anthropic 用 `type = "anthropic"`，并在 model 条目上加 `max_tokens`（必填，未配默认 4096）。主模型不稳定时可在 `[agent.main]` 下加 `fallback = [...]` 自动降级。
 
 完整的配置字段见 [配置参考](configuration.md)。
 

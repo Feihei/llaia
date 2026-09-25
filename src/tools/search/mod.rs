@@ -10,7 +10,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::config::ToolsConfig;
+use crate::config::{Config, ToolsConfig};
 use crate::tools::Tool;
 
 pub mod baidu;
@@ -26,12 +26,20 @@ pub struct SearchResult {
 }
 
 /// 搜索 provider 抽象：各内置搜索源实现此 trait，把自家响应归一化成 `SearchResult`。
+/// wire 协议各家各异（GET/POST、header、参数名），全部封在实现里——对配置与
+/// 调用方只暴露统一的 query/top_k → hits 契约（P8 前提 8：新增一家 = adapter +
+/// type 枚举项，schema/WebUI 零改动）。
 #[async_trait]
 pub trait SearchProvider: Send + Sync {
     /// provider 标识（tavily / baidu / brave …），用于日志。
     fn name(&self) -> &str;
     /// 执行一次搜索，返回至多 `top_k` 条归一化结果。
     async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>>;
+    /// 是否支持服务端正文抽取（`web_fetch.extract_provider` 的引用校验依据）。
+    /// v1 仅 tavily（`/extract`）；jina reader / tinyfish Fetch 接入时改写此项。
+    fn supports_extract(&self) -> bool {
+        false
+    }
 }
 
 /// 统一 `search` 工具：持有单一 provider，对 agent 只暴露 `query` + 可选 `top_k`。
@@ -48,25 +56,47 @@ impl UnifiedSearch {
         }
     }
 
-    /// 按 `[tools.search].provider` 选定 provider；key 缺失 / 未知则返回 `None`
-    /// （不注册 `search` 工具，与老 tavily `if !api_key.is_empty()` 行为一致）。
-    pub fn build(tools: &ToolsConfig) -> Result<Option<Arc<dyn Tool>>> {
+    /// 按 `[tools.search].provider`（service family provider 的 **id 引用**）解析
+    /// adapter；引用为空/未知/指向 llm family/凭据为空 → `None`（不注册 `search`
+    /// 工具，与老 tavily `if !api_key.is_empty()` 行为一致）。
+    pub fn build(tools: &ToolsConfig, config: &Config) -> Result<Option<Arc<dyn Tool>>> {
         let search_cfg = &tools.search;
-        let provider: Option<Arc<dyn SearchProvider>> = match search_cfg.provider.as_str() {
-            "tavily" if !tools.tavily.api_key.is_empty() => Some(Arc::new(
-                tavily::TavilyProvider::new(tools.tavily.api_key.clone())?,
-            )),
-            "baidu" if !tools.baidu.api_key.is_empty() => Some(Arc::new(
-                baidu::BaiduProvider::new(tools.baidu.api_key.clone())?,
-            )),
-            "brave" if !tools.brave.api_key.is_empty() => Some(Arc::new(
-                brave::BraveProvider::new(tools.brave.api_key.clone())?,
-            )),
-            other => {
-                if tools.search.provider != "tavily" || !tools.tavily.api_key.is_empty() {
+        let id = search_cfg.provider.trim();
+        if id.is_empty() {
+            return Ok(None);
+        }
+        let Some(prov) = config.provider.get(id) else {
+            tracing::warn!(
+                provider = id,
+                "tools.search.provider references an unknown provider; search tool not registered"
+            );
+            return Ok(None);
+        };
+        if !prov.is_service() {
+            tracing::warn!(
+                provider = id,
+                "tools.search.provider must reference a service-family provider (tavily|baidu|brave); search tool not registered"
+            );
+            return Ok(None);
+        }
+        let api_key = prov.api_key.clone();
+        let provider: Option<Arc<dyn SearchProvider>> = match prov.effective_type() {
+            "tavily" if !api_key.is_empty() => {
+                Some(Arc::new(tavily::TavilyProvider::new(api_key)?))
+            }
+            "baidu" if !api_key.is_empty() => Some(Arc::new(baidu::BaiduProvider::new(api_key)?)),
+            "brave" if !api_key.is_empty() => Some(Arc::new(brave::BraveProvider::new(api_key)?)),
+            t => {
+                if api_key.is_empty() {
                     tracing::warn!(
-                        provider = other,
-                        "unknown or unimplemented search provider; search tool not registered"
+                        provider = id,
+                        "search provider api_key is empty; search tool not registered"
+                    );
+                } else {
+                    tracing::warn!(
+                        provider = id,
+                        ty = t,
+                        "unknown or unimplemented search provider type; search tool not registered"
                     );
                 }
                 None

@@ -415,7 +415,7 @@ pub async fn build_single_agent(
     );
 
     // 尝试构建 provider：model 为空 → 降级模式（provider = None）
-    // model 非空但 provider/model 配置缺失 → 报错（用户意图配置但配错）
+    // model 非空但目录条目缺失 → 报错（用户意图配置但配错）
     // fallback 链：主模型失败时按序降级（fallback 项缺失仅 warn 不阻塞）
     let (provider, model_cfg, has_delegate) = if agent_cfg.model.is_empty() {
         tracing::warn!(
@@ -424,14 +424,17 @@ pub async fn build_single_agent(
         );
         (None, None, false)
     } else {
-        let (prov_id, model_alias) = Config::parse_model_ref(&agent_cfg.model)?;
         let model_cfg = config
-            .provider
-            .get(prov_id)
-            .and_then(|p| p.model.get(model_alias))
+            .models
+            .get(&agent_cfg.model)
             .cloned()
             .ok_or_else(|| {
-                anyhow::anyhow!("provider.{}.model.{} not configured", prov_id, model_alias)
+                anyhow::anyhow!(
+                    "agent.{}.model references model '{}' which is not configured ([model.{}])",
+                    alias,
+                    agent_cfg.model,
+                    agent_cfg.model
+                )
             })?;
 
         let provider =
@@ -456,7 +459,7 @@ pub async fn build_single_agent(
     // 构建 vision_provider（独立于主 provider，用于描述图片）
     // vision_model 未配置 / 解析失败 → None（图片直接发给主模型）
     let vision_provider: Option<Arc<dyn Provider>> = match &config.runtime.vision_model {
-        Some(m) if !m.is_empty() => match crate::provider::provider_from_ref(config, m) {
+        Some(m) if !m.is_empty() => match crate::provider::model_from_ref(config, m) {
             Ok(p) => Some(p),
             Err(e) => {
                 tracing::warn!(model = m.as_str(), error = %e, "build vision_provider failed, images will be sent to main provider");
@@ -528,17 +531,24 @@ pub async fn build_single_agent(
             config.tools.terminal.delete_guard != "off",
         )),
         Arc::new({
-            // web_fetch 正文抽取：若启用且配置了 Tavily key，则复用其做服务端抽取。
-            let tavily = if config.tools.web_fetch.use_tavily_extract
-                && !config.tools.tavily.api_key.is_empty()
-            {
-                Some(Arc::new(crate::tools::search::tavily::TavilyProvider::new(
-                    config.tools.tavily.api_key.clone(),
-                )?))
-            } else {
-                None
+            // web_fetch 正文抽取：extract_provider 引用支持 extract 能力的
+            // service family provider（v1 = tavily）时走服务端抽取。
+            let extractor = match config.tools.web_fetch.extract_provider.trim() {
+                "" => None,
+                id => match crate::tools::web::resolve_extractor(config, id) {
+                    Ok(Some(p)) => Some(p),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            provider = id,
+                            error = %e,
+                            "web_fetch.extract_provider unusable, falling back to local extraction"
+                        );
+                        None
+                    }
+                },
             };
-            WebFetch::new(config.tools.web_fetch.max_chars, tavily)?
+            WebFetch::new(config.tools.web_fetch.max_chars, extractor)?
         }),
         Arc::new(
             MemoryWrite::new(memory_path.clone(), user_path.clone(), is_main)
@@ -565,26 +575,27 @@ pub async fn build_single_agent(
         // ask_user 工具无条件注册（无需 api_key）：agent 执行中主动向用户抛问题并阻塞等待。
         Arc::new(crate::tools::ask_user::AskUserTool),
     ];
-    if let Some(search_tool) = UnifiedSearch::build(&config.tools)? {
+    if let Some(search_tool) = UnifiedSearch::build(&config.tools, config)? {
         all_tools.push(search_tool);
     }
-    // TTS（P5 T1）：enabled 且有 api_key 时注册 tts 工具（合成到 workspace/tts/）。
-    if let Some(tts_tool) = crate::tools::tts::TtsTool::build(&config.tools.tts, workspace.clone())?
+    // TTS（P5 T1）：enabled 且 model 引用解析到 kind=tts 条目时注册（合成到 workspace/tts/）。
+    if let Some(tts_tool) =
+        crate::tools::tts::TtsTool::build(&config.tools.tts, config, workspace.clone())?
     {
         all_tools.push(tts_tool);
     }
-    // 图片生成/编辑：OpenAI 兼容 /images/generations + /images/edits。本地后端
-    // （sd-server）通常无 key → allow_no_key=true，enabled 即注册。
+    // 图片生成/编辑：model 引用 kind=image 目录条目。本地后端（sd-server）通常
+    // 无 key → provider api_key 为空时不发 Authorization 头，enabled 即注册。
     if let Some(gen_tool) = crate::tools::image_gen::ImageGenTool::build(
         &config.tools.image_gen,
-        true,
+        config,
         workspace.clone(),
     )? {
         all_tools.push(gen_tool);
     }
     if let Some(edit_tool) = crate::tools::image_gen::ImageEditTool::build(
         &config.tools.image_gen,
-        true,
+        config,
         workspace.clone(),
         workspace_root.clone(),
         trusted_dirs.clone(),
@@ -899,11 +910,11 @@ pub async fn build_agent(
     Ok((registry, cron_tool, mcp_registry))
 }
 
-/// 根据 "provider_id.model_alias" 引用从 config 构建 compact_provider。
+/// 根据 `[model.<id>]` 目录条目 id 从 config 构建 compact_provider。
 /// compact_model 未配置 / provider 不存在 / model 不存在 → Err（调用方降级处理）
 fn build_compact_provider(
     config: &Config,
     model_ref: &str,
 ) -> anyhow::Result<Option<Arc<dyn Provider>>> {
-    Ok(Some(crate::provider::provider_from_ref(config, model_ref)?))
+    Ok(Some(crate::provider::model_from_ref(config, model_ref)?))
 }

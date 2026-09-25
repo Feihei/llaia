@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::tools::search::tavily::TavilyProvider;
 use crate::tools::Tool;
 use anyhow::{anyhow, Result};
@@ -10,11 +11,37 @@ use std::time::Duration;
 /// 下载字节硬上限：避免把整站大文件/视频灌进内存。抽取后还会按 `max_chars` 二次截断文本。
 const MAX_DOWNLOAD_BYTES: usize = 4 * 1024 * 1024;
 
+/// 解析 `web_fetch.extract_provider` 引用为服务端抽取器（P8）。
+/// 须为支持 extract 能力的 service family provider（v1 = tavily）。
+/// 返回 `Ok(None)` = 引用为空（本地抽取）；`Err` = 引用无效（调用方 warn 后退化本地）。
+pub fn resolve_extractor(config: &Config, id: &str) -> Result<Option<Arc<TavilyProvider>>> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let Some(prov) = config.provider.get(id) else {
+        anyhow::bail!("provider '{id}' not configured");
+    };
+    if !prov.is_service() {
+        anyhow::bail!("provider '{id}' is not a service-family provider");
+    }
+    if prov.effective_type() != "tavily" {
+        anyhow::bail!(
+            "provider '{id}' (type {}) has no extract capability (v1: tavily only)",
+            prov.effective_type()
+        );
+    }
+    if prov.api_key.is_empty() {
+        anyhow::bail!("provider '{id}' has an empty api_key");
+    }
+    Ok(Some(Arc::new(TavilyProvider::new(prov.api_key.clone())?)))
+}
+
 pub struct WebFetch {
     client: reqwest::Client,
     max_chars: usize,
-    /// 可选 Tavily 服务端抽取器（复用 `[tools.tavily].api_key`）。
-    /// `None` 时（未启用或 key 为空）走本地 readability / html2text 抽取。
+    /// 可选服务端抽取器（由 `web_fetch.extract_provider` 引用解析）。
+    /// `None` 时走本地 readability / html2text 抽取。
     tavily: Option<Arc<TavilyProvider>>,
 }
 

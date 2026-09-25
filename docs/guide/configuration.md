@@ -17,7 +17,7 @@
 | `context_threshold` | `0.7` | 上下文压缩阈值（占 context_size 比例），超过自动压缩。 |
 | `max_iterations` | `10` | agent 工具循环上限。 |
 | `timezone` | 未设（跟随系统） | IANA 时区名，如 `Asia/Shanghai`。非法值告警并回退系统本地时区。 |
-| `compact_model` | 未设 | 用更便宜的模型跑上下文压缩，格式 `"provider_id.model_alias"`；不配则复用主模型。 |
+| `compact_model` | 未设 | 用更便宜的模型跑上下文压缩，值为 `[model.<id>]` 目录条目 id（P8 一元引用）；不配则复用主模型。 |
 | `vision_model` | 未设 | 主模型无多模态时，用此模型描述图片（文本替换图片注入主模型）。 |
 | `permission` | 未设（= `default`） | 权限档位：`read-only` / `default` / `yolo`。详见 [权限与安全](permissions.md)。 |
 | `ask_user_timeout_secs` | `300` | ask_user 阻塞式澄清超时秒数，超时按"按最合理假设继续"处理。 |
@@ -45,37 +45,68 @@
 | `level` | `info` | 日志级别：`debug` / `info` / `warn` / `error`。 |
 | `dir` | `~/.llaia/logs` | 日志目录（未显式配时跟随 config 文件所在目录的 `logs/`）。 |
 
-## `[provider.<id>]` 与 `[provider.<id>.<model_alias>]`
+## `[provider.<id>]` — 连接注册表（P8）
 
-provider 定义"连接"（base_url + api_key），model 定义"具体模型组合"。agent 用 `"<id>.<alias>"` 引用。
+provider 只管"连接"：端点类型、base_url、api_key，可选兼容覆盖层。模型全部搬进顶层 `[model.<id>]` 目录（见下节）。
 
 ```toml
+# llm family：可承载模型条目（type 决定 wire 协议）
 [provider.default]
-type = "openai_compatible"          # 或 "anthropic"
+type = "openai_compatible"          # 或 "anthropic" / "gemini"
 base_url = "http://localhost:11434/v1"
 api_key = "${OLLAMA_API_KEY}"       # 留空或引用 .env
-
-[provider.default.qwen]
-model = "qwen2.5:7b"
-native_tool_calling = false          # true=OpenAI function calling；false=标签协议降级
-context_size = 32768                 # 可选；不配则本地端点自动探测，探测不到的按乐观默认 128000（provider 报溢出时自动收缩）。取 min(配置, 探测)
-enabled = false                      # 可选；默认 true。把参数留在配置里，但不进 /provider 列表与 WebUI 模型下拉
 
 [provider.claude]                     # 云端 Anthropic 示例
 type = "anthropic"
 api_key = "${ANTHROPIC_API_KEY}"
 
-[provider.claude.sonnet]
+# service family：纯凭据搜索/抽取服务，不承载模型、不进 probe 列表
+[provider.tv]
+type = "tavily"
+api_key = "${TAVILY_API_KEY}"
+```
+
+- `type` 缺省回退 `openai_compatible`；**显式写错的 type 启动即报错**。
+- llm family 有 `[provider.<id>.compat]` 可选覆盖层，抹平 OpenAI 兼容端点的实现差异（自动按 base_url 探测，见 ADR-0026）。
+- **旧配置自动迁移**：v0.5 的 `[provider.<id>.<alias>]` model 子表、`[tools.tavily|baidu|brave]` 凭据段、`[tools.tts]`/`[tools.image_gen]` 内联端点在启动时自动改写为新结构（内存态，磁盘文件不动）。model id 沿用 `<provider>.<alias>` 两段式，所以 agent 里的旧引用（如 `model = "default.qwen"`）无需任何改动。在 WebUI 保存一次即可把新结构写盘。
+
+## `[model.<id>]` — 模型目录（P8）
+
+模型全局唯一、按 kind 分型，引用一个 llm family provider：
+
+```toml
+[model.qwen]
+provider = "default"
+model = "qwen2.5:7b"                 # 服务端模型名（请求体 model 字段）
+kind = "chat"                        # 缺省 chat；tts / image / embedding
+native_tool_calling = false          # true=OpenAI function calling；false=标签协议降级；缺省 auto
+context_size = 32768                 # 可选；不配则本地端点自动探测，探测不到按乐观默认 128000（provider 报溢出时自动收缩）。取 min(配置, 探测)
+enabled = false                      # 可选；默认 true。把参数留在目录里，但不进 /models 列表与 WebUI 模型下拉
+capabilities = ["multimodal"]        # 可选能力位数组，v1 仅 multimodal
+
+[model.tts1]
+provider = "default"
+model = "qwen3-tts"                  # kind=tts：由 [tools.tts].model 引用
+kind = "tts"
+
+[model.sdxl]
+provider = "default"
+model = "sd_xl_base"
+kind = "image"
+size = "512x512"                     # kind=image 专属：默认输出尺寸
+
+[model.sonnet]
+provider = "claude"
 model = "claude-sonnet-4-20250514"
 max_tokens = 8192                     # Anthropic 必传，未配默认 4096
 ```
 
-`[provider.<id>]` 的 `type` 决定走哪套实现：`anthropic` 走 Anthropic Provider；缺省/未知回退 OpenAI 兼容（存量配置不受影响）。
+校验：`provider` 必须指向存在的 llm family provider（service family 会报错）；anthropic/gemini 只能挂 chat 条目。
 
 ### 模型级 `thinking`（思考能力声明）
 
 ```toml
-[provider.ollama-local.qwen35.thinking]
+[model.qwen35.thinking]
 default = "high"                    # 模型默认档位：none|low|medium|high|max|unknown（缺省=unknown）
 level_wire = "reasoning_effort"     # 档位方言：reasoning_effort（服务端校验非法值）或 none（不给旋钮）
 off_wire = "reasoning_effort_none"  # 关方言：enable_thinking_false | thinking_disabled | reasoning_effort_none | unsupported
@@ -85,10 +116,10 @@ off_wire = "reasoning_effort_none"  # 关方言：enable_thinking_false | thinki
 
 ### 模型级 `enabled`（可发现性开关）
 
-用途：模型参数先记在配置里，但暂时不希望它被选中。
+用途：模型参数先记在目录里，但暂时不希望它被选中。
 
-- 缺省即 `true`，存量配置无需改动；**只有显式 `enabled = false` 会写入** `config.toml`（启用态不落盘，避免每个模型多一行脏 diff）。WebUI Config → Provider 的模型行前有同名开关，关闭后该行灰化但仍可编辑、可重新启用。
-- 只影响**可发现性**，不影响可用性：`provider_from_ref` 不拦显式引用，所以 `agent.<alias>.model` 指向已禁用模型时**继续生效**（否则"关掉当前模型"会变成下次启动即失败）；WebUI 下拉此时把当前值显示为 `xxx (current)`。
+- 缺省即 `true`，存量配置无需改动；**只有显式 `enabled = false` 会写入** `config.toml`（启用态不落盘，避免每个模型多一行脏 diff）。WebUI Config → Models 的模型卡上有开关，关闭后卡片灰化但仍可编辑、可重新启用。
+- 只影响**可发现性**，不影响可用性：`model_from_ref` 不拦显式引用，所以 `agent.<alias>.model` 指向已禁用模型时**继续生效**（否则"关掉当前模型"会变成下次启动即失败）；WebUI 下拉此时把当前值显示为 `xxx (current)`。
 - `agent.<alias>.fallback` 中指向禁用模型的项被剔除并 warn。
 - `runtime.compact_model` / `runtime.vision_model` 指向禁用模型时 warn 并回退主模型；**磁盘上的引用原样保留**，模型重新启用后自动恢复，无需重填。
 - 校验发生在 `Config::reconcile_disabled_models`，由 `Config::load` 与 WebUI 保存路径各调一次，因此改动即时生效、不需重启。
@@ -97,8 +128,8 @@ off_wire = "reasoning_effort_none"  # 关方言：enable_thinking_false | thinki
 
 | 字段 | 说明 |
 |---|---|
-| `model` | `"provider_id.model_alias"` 引用；留空 = 降级模式（仅可配置 Web UI）。 |
-| `fallback` | 备用模型链，如 `["local.small", "cloud.big"]`，主模型失败依序降级。 |
+| `model` | `[model.<id>]` 目录条目 id（P8 一元引用）；留空 = 降级模式（仅可配置 Web UI）。 |
+| `fallback` | 备用模型链，如 `["small", "big"]`（同为目录条目 id），主模型失败依序降级。 |
 | `workspace` | **已移除**，自动推导到 `~/.llaia/workspace/`（子 agent 到 `workspace/subagent/<alias>/`）。旧配置里写了该字段会被直接忽略，可安全删除。 |
 | `soul` / `user` / `memory` | **已废弃**，自动从 agent 家目录推导，显式设置不生效。 |
 | `denied_tools` | 子 agent 工具黑名单（主 agent 一般留空）。 |
@@ -130,18 +161,35 @@ off_wire = "reasoning_effort_none"  # 关方言：enable_thinking_false | thinki
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
-| `provider` | `tavily` | 选定的单一搜索 provider：`tavily` / `baidu` / `brave`（doubao 暂未实现）。 |
+| `provider` | 空（不注册） | 选定的搜索 provider，须为 **service family**（`tavily` / `baidu` / `brave`）的 `[provider.<id>]` 条目 id（P8）。 |
 | `top_k` | `8` | 默认返回条数。 |
 
-统一 `search` 工具：对外只暴露一个 `search`，内部按 `provider` 路由到对应源，不串试、不聚合。所选 provider 的 key 缺失则不注册该工具。
+统一 `search` 工具：对外只暴露一个 `search`，内部按所选 provider 的 type 分派到对应 adapter，不串试、不聚合。搜索源的 api\_key 配在 provider 条目上（凭据统一进注册表）。
 
 > **解释器内联载荷为什么单独设闸**：terminal 的命令黑名单与路径校验都作用于命令行字符串本身，而 `python -c "…"` / `node -e "…"` 的真正文件操作发生在解释器内部，框架无法感知——静态分析载荷内容也不可靠。因此内联执行一律升级到人审（T3，2026-09-07 定案）：这是当下唯一能覆盖未知载荷的闸门；跑脚本文件不拦（脚本路径仍走路径校验，且写入动作在会话记录中可审计）。彻底封堵（进程级约束）见[安全加固指南](security-hardening.md)（T2 无特权账户）。
 
-## `[tools.tavily]` / `[tools.baidu]` / `[tools.brave]`
+## `[tools.tts]`
 
-| 字段 | 说明 |
-|---|---|
-| `api_key` | 对应搜索源的 key，支持 `${VAR}`。留空则该 provider 不可用。 |
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `enabled` | `false` | 是否注册 `tts` 工具。 |
+| `model` | 空 | **kind=tts** 的 `[model.<id>]` 条目 id；端点与 key 来自条目的 provider。 |
+| `voice` | `alloy` | 默认音色（调用参数，非模型属性）。 |
+
+## `[tools.image_gen]`
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `enabled` | `false` | 是否注册 `image_gen` / `image_edit` 工具。 |
+| `model` | 空 | **kind=image** 的 `[model.<id>]` 条目 id；端点、key 与默认尺寸（`size`）均来自条目。 |
+| `timeout_secs` | `300` | 单次生成超时（本地扩散较慢）。 |
+
+## `[tools.web_fetch]`
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `max_chars` | `20000` | 返回正文最大字符数，超出截断。 |
+| `extract_provider` | 空（本地抽取） | 服务端正文抽取，须为支持 extract 的 service family provider（如 tavily）。 |
 
 ## `[channels.*]`
 

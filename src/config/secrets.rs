@@ -16,6 +16,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// 敏感字段位置标识（provider 字段带动态 id）。
+///
+/// P8 后凭据只在 provider 层一份：搜索服务（tavily/baidu/brave）与 tts/image_gen
+/// 的 key 都收敛到各自的 `[provider.<id>].api_key`，tools 层不再持有敏感字段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretField {
     ProviderApiKey,
@@ -25,11 +28,6 @@ pub enum SecretField {
     MailImapPass,
     MailSmtpPass,
     FeishuAppSecret,
-    TavilyApiKey,
-    BaiduApiKey,
-    BraveApiKey,
-    TtsApiKey,
-    ImageGenApiKey,
     WebuiToken,
 }
 
@@ -122,31 +120,6 @@ pub fn collect_plaintext_secrets(cfg: &Config) -> Vec<SecretEntry> {
         &cfg.channels.feishu.app_secret
     );
     push!(
-        SecretField::TavilyApiKey,
-        "LLAIA_TAVILY_API_KEY",
-        &cfg.tools.tavily.api_key
-    );
-    push!(
-        SecretField::BaiduApiKey,
-        "LLAIA_BAIDU_API_KEY",
-        &cfg.tools.baidu.api_key
-    );
-    push!(
-        SecretField::BraveApiKey,
-        "LLAIA_BRAVE_API_KEY",
-        &cfg.tools.brave.api_key
-    );
-    push!(
-        SecretField::TtsApiKey,
-        "LLAIA_TTS_API_KEY",
-        &cfg.tools.tts.api_key
-    );
-    push!(
-        SecretField::ImageGenApiKey,
-        "LLAIA_IMAGE_GEN_API_KEY",
-        &cfg.tools.image_gen.api_key
-    );
-    push!(
         SecretField::WebuiToken,
         "LLAIA_WEBUI_TOKEN",
         &cfg.webui.token
@@ -172,11 +145,6 @@ pub fn apply_refs(cfg: &mut Config, entries: &[SecretEntry]) {
             SecretField::MailImapPass => cfg.channels.mail.imap_pass = var_ref,
             SecretField::MailSmtpPass => cfg.channels.mail.smtp_pass = var_ref,
             SecretField::FeishuAppSecret => cfg.channels.feishu.app_secret = var_ref,
-            SecretField::TavilyApiKey => cfg.tools.tavily.api_key = var_ref,
-            SecretField::BaiduApiKey => cfg.tools.baidu.api_key = var_ref,
-            SecretField::BraveApiKey => cfg.tools.brave.api_key = var_ref,
-            SecretField::TtsApiKey => cfg.tools.tts.api_key = var_ref,
-            SecretField::ImageGenApiKey => cfg.tools.image_gen.api_key = var_ref,
             SecretField::WebuiToken => cfg.webui.token = var_ref,
         }
     }
@@ -243,11 +211,6 @@ pub fn expand_config_secrets(cfg: &mut Config) {
     cfg.channels.mail.imap_pass = expand(&cfg.channels.mail.imap_pass);
     cfg.channels.mail.smtp_pass = expand(&cfg.channels.mail.smtp_pass);
     cfg.channels.feishu.app_secret = expand(&cfg.channels.feishu.app_secret);
-    cfg.tools.tavily.api_key = expand(&cfg.tools.tavily.api_key);
-    cfg.tools.baidu.api_key = expand(&cfg.tools.baidu.api_key);
-    cfg.tools.brave.api_key = expand(&cfg.tools.brave.api_key);
-    cfg.tools.tts.api_key = expand(&cfg.tools.tts.api_key);
-    cfg.tools.image_gen.api_key = expand(&cfg.tools.image_gen.api_key);
     cfg.webui.token = expand(&cfg.webui.token);
 }
 
@@ -327,19 +290,6 @@ pub fn migrate_config_secrets(config_path: &Path) -> Result<usize> {
             SecretField::FeishuAppSecret => {
                 set_nested(&mut doc, &["channels", "feishu", "app_secret"], &var_ref)
             }
-            SecretField::TavilyApiKey => {
-                set_nested(&mut doc, &["tools", "tavily", "api_key"], &var_ref)
-            }
-            SecretField::BaiduApiKey => {
-                set_nested(&mut doc, &["tools", "baidu", "api_key"], &var_ref)
-            }
-            SecretField::BraveApiKey => {
-                set_nested(&mut doc, &["tools", "brave", "api_key"], &var_ref)
-            }
-            SecretField::TtsApiKey => set_nested(&mut doc, &["tools", "tts", "api_key"], &var_ref),
-            SecretField::ImageGenApiKey => {
-                set_nested(&mut doc, &["tools", "image_gen", "api_key"], &var_ref)
-            }
             SecretField::WebuiToken => set_nested(&mut doc, &["webui", "token"], &var_ref),
         };
         if !ok {
@@ -390,7 +340,6 @@ mod tests {
                 base_url: "http://localhost:11434/v1".into(),
                 api_key: "${LLAIA_EXISTING_KEY}".into(),
                 compat: None,
-                model: Default::default(),
             },
         );
         cfg.channels.qq.app_secret = "".into();
@@ -409,17 +358,15 @@ mod tests {
                 base_url: "http://localhost:11434/v1".into(),
                 api_key: "sk-plain".into(),
                 compat: None,
-                model: Default::default(),
             },
         );
         cfg.channels.qq.app_secret = "qq-secret".into();
         cfg.channels.telegram.bot_token = "tg-token".into();
         cfg.channels.feishu.app_secret = "fs-secret".into();
-        cfg.tools.tavily.api_key = "tvly-x".into();
         cfg.webui.token = "ui-token".into();
 
         let secrets = collect_plaintext_secrets(&cfg);
-        assert_eq!(secrets.len(), 6);
+        assert_eq!(secrets.len(), 5);
         // provider var 名正确
         assert!(secrets
             .iter()
@@ -437,7 +384,6 @@ mod tests {
             "${LLAIA_TELEGRAM_BOT_TOKEN}"
         );
         assert_eq!(cfg.channels.feishu.app_secret, "${LLAIA_FEISHU_APP_SECRET}");
-        assert_eq!(cfg.tools.tavily.api_key, "${LLAIA_TAVILY_API_KEY}");
         assert_eq!(cfg.webui.token, "${LLAIA_WEBUI_TOKEN}");
         // 再收集 → 全为引用 → 空
         assert!(collect_plaintext_secrets(&cfg).is_empty());

@@ -383,24 +383,10 @@ pub fn mask_sensitive(mut config: Config) -> Config {
     if !config.webui.token.is_empty() {
         config.webui.token = MASK.into();
     }
-    if !config.tools.tavily.api_key.is_empty() {
-        config.tools.tavily.api_key = MASK.into();
-    }
-    if !config.tools.baidu.api_key.is_empty() {
-        config.tools.baidu.api_key = MASK.into();
-    }
-    if !config.tools.brave.api_key.is_empty() {
-        config.tools.brave.api_key = MASK.into();
-    }
-    if !config.tools.tts.api_key.is_empty() {
-        config.tools.tts.api_key = MASK.into();
-    }
-    if !config.tools.image_gen.api_key.is_empty() {
-        config.tools.image_gen.api_key = MASK.into();
-    }
+    // P8：凭据只在 provider 层一份（搜索服务/tts/image_gen 的 key 都在
+    // [provider.<id>].api_key），tools 层不再有可掩码字段。
     config
 }
-
 /// 用 new_config 覆盖，但 new_config 中仍为 MASK 的字段保留 old 原值
 pub fn merge_masked(old: &Config, new: &Config) -> Config {
     let mut merged = new.clone();
@@ -436,21 +422,7 @@ pub fn merge_masked(old: &Config, new: &Config) -> Config {
     if merged.webui.token == MASK {
         merged.webui.token = old.webui.token.clone();
     }
-    if merged.tools.tavily.api_key == MASK {
-        merged.tools.tavily.api_key = old.tools.tavily.api_key.clone();
-    }
-    if merged.tools.baidu.api_key == MASK {
-        merged.tools.baidu.api_key = old.tools.baidu.api_key.clone();
-    }
-    if merged.tools.brave.api_key == MASK {
-        merged.tools.brave.api_key = old.tools.brave.api_key.clone();
-    }
-    if merged.tools.tts.api_key == MASK {
-        merged.tools.tts.api_key = old.tools.tts.api_key.clone();
-    }
-    if merged.tools.image_gen.api_key == MASK {
-        merged.tools.image_gen.api_key = old.tools.image_gen.api_key.clone();
-    }
+    // P8：tools 层不再持有 api_key；provider 层的掩码恢复在上面循环里完成。
     merged
 }
 
@@ -608,8 +580,8 @@ fn merge_config_preserving_comments(disk_text: &str, merged: &Config) -> Result<
     let disk_tbl = disk_doc.as_table_mut();
     let new_tbl = new_doc.as_table();
     for (key, src_item) in new_tbl.iter() {
-        // provider / agent 由表单完整管理，允许删除缺失项（表单删 provider/agent/model）
-        let replace = key == "provider" || key == "agent";
+        // provider / agent / models 由表单完整管理，允许删除缺失项（表单删 provider/agent/model）
+        let replace = key == "provider" || key == "agent" || key == "model";
         match disk_tbl.entry(key) {
             Entry::Occupied(mut e) => merge_item(e.get_mut(), src_item, replace),
             Entry::Vacant(e) => {
@@ -787,7 +759,7 @@ fn build_compact_provider_from_config(config: &Config) -> Option<Arc<dyn Provide
     if m.is_empty() {
         return None;
     }
-    match crate::provider::provider_from_ref(config, m) {
+    match crate::provider::model_from_ref(config, m) {
         Ok(p) => Some(p),
         Err(e) => {
             tracing::warn!(error = %e, model = m.as_str(), "build compact_provider failed");
@@ -801,7 +773,7 @@ fn build_vision_provider_from_config(config: &Config) -> Option<Arc<dyn Provider
     if m.is_empty() {
         return None;
     }
-    match crate::provider::provider_from_ref(config, m) {
+    match crate::provider::model_from_ref(config, m) {
         Ok(p) => Some(p),
         Err(e) => {
             tracing::warn!(error = %e, model = m.as_str(), "build vision_provider failed");
@@ -2654,6 +2626,18 @@ pub async fn probe_models(
         )
             .into_response();
     };
+    // P8：service family（tavily/baidu/brave 等搜索服务）没有 GET /models 语义，
+    // 不出现在「添加模型」的探测流程中，显式拒绝。
+    if provider.is_service() {
+        return (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error": format!("provider '{}' is a service ({}), model probe not applicable", id, provider.effective_type())
+            })),
+        )
+            .into_response();
+    }
     let base_url = body.base_url.as_deref().unwrap_or(&provider.base_url);
     // 前端拿到的 api_key 对非空 key 一律是掩码 '••••'（见 mask_sensitive），
     // 探测时必须回退到服务端内存中的真实 key（启动时已 env 展开），
@@ -2724,8 +2708,13 @@ pub async fn probe_model(
         )
             .into_response();
     }
-    // model id：请求体覆盖优先，否则取该 alias 的已保存配置；alias 缺失时用 provider 首个 model。
-    let model_cfg = provider.model.get(&alias).map(|m| m.model.clone());
+    // model id：请求体覆盖优先（P8 后前端编辑模型卡时始终传条目的 `model` 字段），
+    // 否则取该 provider 下首个已启用 model 条目的服务端模型名。
+    let model_cfg = cfg
+        .models
+        .values()
+        .find(|m| m.provider == id && m.enabled)
+        .map(|m| m.model.clone());
     let model = body
         .model
         .clone()
@@ -3093,9 +3082,6 @@ mod tests {
         let mut c = Config::default_for_workspace("/tmp/llaia-test");
         c.provider.get_mut("default").unwrap().api_key = "sk-secret".into();
         c.channels.qq.app_secret = "qq-secret".into();
-        c.tools.tavily.api_key = "tvly-secret".into();
-        c.tools.baidu.api_key = "bd-secret".into();
-        c.tools.brave.api_key = "br-secret".into();
         c
     }
 
@@ -3104,9 +3090,6 @@ mod tests {
         let masked = mask_sensitive(sample_config());
         assert_eq!(masked.provider.get("default").unwrap().api_key, "••••");
         assert_eq!(masked.channels.qq.app_secret, "••••");
-        assert_eq!(masked.tools.tavily.api_key, "••••");
-        assert_eq!(masked.tools.baidu.api_key, "••••");
-        assert_eq!(masked.tools.brave.api_key, "••••");
     }
 
     #[test]
@@ -3243,31 +3226,41 @@ workspace = ""
 
     #[test]
     fn test_agent_fallback_persists_via_json_put_path() {
-        // 模拟前端结构化保存回传的 JSON：provider 已 flat 回顶层、agent 含 fallback 列表
+        // 模拟前端结构化保存回传的 JSON（P8 模型目录形态）：models 是顶层目录，
+        // provider 无 model 子表，agent.model / fallback 是一元 model id
         let json = r#"{
             "runtime": { "context_threshold": 0.7 },
             "provider": {
-                "local": { "type": "openai_compatible", "base_url": "http://localhost:11434/v1", "m": { "model": "qwen3", "native_tool_calling": true } }
+                "local": { "type": "openai_compatible", "base_url": "http://localhost:11434/v1" }
+            },
+            "model": {
+                "qwen": { "provider": "local", "model": "qwen3", "native_tool_calling": true }
             },
             "agent": {
-                "main": { "model": "local.m", "fallback": ["local.m", "cloud.big"], "denied_tools": [], "delegate_timeout": 120, "memory_token_budget": 4000 }
+                "main": { "model": "qwen", "fallback": ["qwen", "cloud-big"], "denied_tools": [], "delegate_timeout": 120, "memory_token_budget": 4000 }
             }
         }"#;
         let new_config: Config = serde_json::from_str(json).expect("frontend json should parse");
         assert_eq!(
             new_config.agent.get("main").unwrap().fallback,
-            vec!["local.m".to_string(), "cloud.big".to_string()],
+            vec!["qwen".to_string(), "cloud-big".to_string()],
             "fallback lost during JSON deserialize"
         );
         let merged = merge_masked(&new_config, &new_config);
         let disk = r#"
 [agent.main]
-model = "local.m"
+model = "qwen"
 "#;
         let out = merge_config_preserving_comments(disk, &merged).expect("merge ok");
         assert!(
-            out.contains("fallback") && out.contains("cloud.big"),
+            out.contains("fallback") && out.contains("cloud-big"),
             "fallback not written to disk:\n{}",
+            out
+        );
+        // models 子树走 replace 合并：条目须完整落盘（serde rename，TOML 键是单数 [model.<id>]）
+        assert!(
+            out.contains("[model.qwen]") && out.contains("model = \"qwen3\""),
+            "model catalog entry not written to disk:\n{}",
             out
         );
     }
@@ -3369,18 +3362,27 @@ model = "local.m"
             css.contains(".question-card") && css.contains(".question-choice"),
             "theme.css missing ask_user question-card styles (stale embed?)"
         );
-        // probe 列表标记已添加模型 + 主按钮两态/手填勾选统一添加（probe-section 重设计）
+        // P8 Models 选项卡：过滤条 + 卡片网格 + 添加流（选 provider → probe → 必选 kind）。
+        // 旧的 provider 卡内批量勾选添加（isModelAdded/probeSectionClick/probe-manual）
+        // 已随 P8 目录化一起退役，这里断言新入口的标记防止嵌入资源陈旧。
         assert!(
-            idx.contains("isModelAdded") && js.contains("isModelAdded"),
-            "index.html/app.js missing probe already-added marking (stale embed?)"
+            idx.contains("configSection==='models'")
+                && idx.contains("model-filter")
+                && idx.contains("model-grid")
+                && idx.contains("addModelDraft")
+                && js.contains("addModelDraft")
+                && js.contains("filteredModels")
+                && js.contains("confirmAddModel")
+                && css.contains(".model-grid")
+                && css.contains(".model-filter"),
+            "index.html/app.js/theme.css missing P8 Models tab markers (stale embed?)"
         );
+        // P8 添加流 = 必选 kind；agent 下拉走一元 model id（modelRefs 无 provider 前缀）
         assert!(
-            js.contains("probeSectionClick")
-                && js.contains("probeManualChecked")
-                && idx.contains("probeSectionClick")
-                && idx.contains("probe-manual")
-                && idx.contains("probe-fold"),
-            "index.html/app.js missing two-stage add-model button / manual model input (stale embed?)"
+            js.contains("llmProviders")
+                && js.contains("serviceProviders")
+                && js.contains("modelRefs"),
+            "app.js missing P8 provider-family helpers (stale embed?)"
         );
     }
 

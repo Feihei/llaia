@@ -513,7 +513,9 @@ tools: {}
                 ))
             }
         }
-        "/provider" => {
+        // P8：/models 是主名（模型目录），/providers 列连接注册表，/provider 留作
+        // /models 的别名转发（肌肉记忆兜底；原两段式 ref 语义已随 P8 退役）。
+        "/provider" | "/models" => {
             if args.is_empty() {
                 Ok(SlashOutcome::Handled(list_providers(agent).await))
             } else {
@@ -523,6 +525,7 @@ tools: {}
                 }
             }
         }
+        "/providers" => Ok(SlashOutcome::Handled(list_registry(agent).await)),
         "/config" => {
             let context_size = agent.context_size_now().await;
             let info = format!(
@@ -1238,81 +1241,113 @@ pub fn split_steer(line: &str) -> Option<&str> {
     Some(&trimmed[trimmed.len() - rest.len()..])
 }
 
-/// 把 config 中所有**已启用**的 provider/model 组合 flatten 成有序 model ref 列表
-/// （provider id 排序，alias 排序），同时作为 `/provider <序号>` 的索引基准。
+/// 把模型目录中所有**已启用**的条目 id 排序成列表，作为 `/provider <序号>` 的索引基准。
 /// `enabled = false` 的模型不进列表也不占序号（`enabled` 只管可发现性）；显式写
-/// `/provider <id.alias>` 仍可切换，见 `provider_from_ref`。
+/// `/provider <model_id>` 仍可切换，见 `model_from_ref`。
 pub fn flatten_model_refs(config: &Config) -> Vec<String> {
-    let mut ids: Vec<&String> = config.provider.keys().collect();
+    let mut ids: Vec<&String> = config
+        .models
+        .iter()
+        .filter(|(_, m)| m.enabled)
+        .map(|(id, _)| id)
+        .collect();
     ids.sort();
-    let mut refs = Vec::new();
-    for id in ids {
-        let prov = &config.provider[id];
-        let mut aliases: Vec<&String> = prov
-            .model
-            .iter()
-            .filter(|(_, m)| m.enabled)
-            .map(|(alias, _)| alias)
-            .collect();
-        aliases.sort();
-        for alias in aliases {
-            refs.push(format!("{}.{}", id, alias));
-        }
-    }
-    refs
+    ids.into_iter().cloned().collect()
 }
 
-/// `/provider`：列出所有可用模型，当前模型标 `*`
+/// `/provider`：列出模型目录，当前模型标 `*`
 async fn list_providers(agent: &Agent) -> String {
     let live_arc = agent.live_config();
     let live = live_arc.read().await;
     let refs = flatten_model_refs(&live);
     if refs.is_empty() {
-        if live.provider.is_empty() {
-            return "no providers configured".into();
+        if live.models.is_empty() {
+            return "no models configured — add [model.<id>] entries to config.toml".into();
         }
-        return "no enabled models — every configured model has enabled = false \
-               ([provider.<id>.<model_alias>].enabled)"
+        return "no enabled models — every catalog entry has enabled = false ([model.<id>].enabled)"
             .into();
     }
     let current_label = match agent.provider_snapshot().await {
         Some(p) => p.label(),
         None => String::new(),
     };
-    let mut out = String::from("providers:\n");
+    let mut out = String::from("models:\n");
     let mut current_listed = false;
     for (i, r) in refs.iter().enumerate() {
-        // refs 由 flatten 生成，格式保证合法
-        let (prov_id, alias) = Config::parse_model_ref(r).unwrap_or(("", ""));
-        let model_name = live.provider[prov_id].model[alias].model.clone();
-        let mark = if model_name == current_label {
+        let entry = &live.models[r];
+        let mark = if entry.model == current_label {
             current_listed = true;
             " *"
         } else {
             ""
         };
-        out.push_str(&format!("{}. {} ({}){}\n", i + 1, r, model_name, mark));
+        out.push_str(&format!(
+            "{}. {} ({}; {}){}\n",
+            i + 1,
+            r,
+            entry.model,
+            entry.kind.as_str(),
+            mark,
+        ));
     }
     // 当前模型本身被 enabled = false 隐藏时，上面不会有 `*`——不说明的话像模型丢了
     if !current_listed && !current_label.is_empty() {
         out.push_str(&format!(
-            "(current model '{}' is hidden: enabled = false. \
-             /provider [--temp] <id.alias> still switches to it explicitly)\n",
-            current_label
+            "(current model '{current_label}' is hidden: enabled = false. \
+             /provider [--temp] <model_id> still switches to it explicitly)\n"
         ));
     }
-    out.push_str("usage: /provider [--temp] <num> | /provider [--temp] <id.alias>");
+    out.push_str("usage: /provider [--temp] <num> | /provider [--temp] <model_id>");
     out.push_str("   (default persists to [agent].model; --temp switches in memory only)");
     out
 }
 
-/// `/provider <n>` 或 `/provider <id.alias>`：切换到指定模型。
+/// `/providers`：列出连接注册表（llm family + service family 分列）。
+async fn list_registry(agent: &Agent) -> String {
+    let live_arc = agent.live_config();
+    let live = live_arc.read().await;
+    if live.provider.is_empty() {
+        return "no providers configured".into();
+    }
+    let mut ids: Vec<&String> = live.provider.keys().collect();
+    ids.sort();
+    let mut out = String::from("providers (connection registry):\n");
+    for id in ids {
+        let p = &live.provider[id];
+        let family = if p.is_service() { "service" } else { "llm" };
+        let hosted: Vec<&String> = live
+            .models
+            .iter()
+            .filter(|(_, m)| m.provider == *id)
+            .map(|(mid, _)| mid)
+            .collect();
+        out.push_str(&format!(
+            "- {} (type={}, {} family) → models: {}\n",
+            id,
+            p.effective_type(),
+            family,
+            if hosted.is_empty() {
+                "(none)".into()
+            } else {
+                hosted
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ));
+    }
+    out.push_str("usage: /models to browse the model catalog; /provider <model_id> to switch");
+    out
+}
+
+/// `/provider <n>` 或 `/provider <model_id>`：切换到指定模型。
 ///
 /// **默认持久化**：把新模型写进 `[agent.<alias>].model`（config.toml）并同步内存
 /// `live_config`，重启/WebUI 保存后仍保持。若要纯临时试跑不落地，用 `--temp`：
-/// `/provider --temp <n|id.alias>`（仅内存切换，重启即回落到 config 值）。
+/// `/provider --temp <n|model_id>`（仅内存切换，重启即回落到 config 值）。
 ///
-/// 走 build_provider_chain 而非 provider_from_ref：保留 [agent.<alias>].fallback 降级链，
+/// 走 build_provider_chain 而非 model_from_ref：保留 [agent.<alias>].fallback 降级链，
 /// 否则切换后 FallbackProvider 被裸替换丢失（回归见 test_provider_switch_preserves_fallback_chain）。
 async fn switch_provider(agent: &mut Agent, arg: &str) -> Result<String> {
     let (persist, sel) = parse_switch_arg(arg);
@@ -1378,7 +1413,7 @@ async fn switch_provider(agent: &mut Agent, arg: &str) -> Result<String> {
 }
 
 /// 解析 `/provider` 参数：`--temp <sel>` 临时切换（不写 config），其余默认持久化。
-/// 返回 `(persist, selector)`；selector 为序号或 `provider.model_alias` ref。
+/// 返回 `(persist, selector)`；selector 为序号或 model 目录 id。
 fn parse_switch_arg(arg: &str) -> (bool, &str) {
     let arg = arg.trim();
     match arg.strip_prefix("--temp ") {
@@ -1604,7 +1639,7 @@ async fn session_instance_command(
 mod tests {
     use super::*;
     use crate::agent::Agent;
-    use crate::config::{AgentConfig, ModelConfig, ProviderConfig};
+    use crate::config::{AgentConfig, ModelEntry, ProviderConfig};
     use crate::memory::sqlite::SessionStore;
     use crate::provider::{ChatRequest, ChatResponse, Provider, StreamEvent};
     use async_trait::async_trait;
@@ -1659,19 +1694,6 @@ mod tests {
                 base_url: "http://localhost:8080/v1".into(),
                 api_key: String::new(),
                 compat: None,
-                model: [(
-                    "small".into(),
-                    ModelConfig {
-                        model: "small-model".into(),
-                        native_tool_calling: Some(true),
-                        context_size: None,
-                        max_tokens: None,
-                        enabled: true,
-                        thinking: None,
-                    },
-                )]
-                .into_iter()
-                .collect(),
             },
         );
         config.provider.insert(
@@ -1681,25 +1703,42 @@ mod tests {
                 base_url: "http://localhost:8081/v1".into(),
                 api_key: String::new(),
                 compat: None,
-                model: [(
-                    "big".into(),
-                    ModelConfig {
-                        model: "big-model".into(),
-                        native_tool_calling: Some(true),
-                        context_size: None,
-                        max_tokens: None,
-                        enabled: true,
-                        thinking: None,
-                    },
-                )]
-                .into_iter()
-                .collect(),
+            },
+        );
+        config.models.insert(
+            "small".into(),
+            ModelEntry {
+                provider: "b".into(),
+                model: "small-model".into(),
+                kind: crate::config::ModelKind::Chat,
+                enabled: true,
+                context_size: None,
+                max_tokens: None,
+                native_tool_calling: Some(true),
+                thinking: None,
+                size: None,
+                capabilities: Vec::new(),
+            },
+        );
+        config.models.insert(
+            "big".into(),
+            ModelEntry {
+                provider: "a".into(),
+                model: "big-model".into(),
+                kind: crate::config::ModelKind::Chat,
+                enabled: true,
+                context_size: None,
+                max_tokens: None,
+                native_tool_calling: Some(true),
+                thinking: None,
+                size: None,
+                capabilities: Vec::new(),
             },
         );
         config.agent.insert(
             "main".into(),
             AgentConfig {
-                model: "a.big".into(),
+                model: "big".into(),
                 soul: None,
                 user: None,
                 memory: None,
@@ -1744,32 +1783,26 @@ mod tests {
 
     #[test]
     fn test_flatten_model_refs_sorted() {
-        // default_for_workspace 自带 default.qwen，加上测试插入的 a/b
+        // default_for_workspace 自带 default.qwen，加上测试插入的 big/small
         let refs = flatten_model_refs(&test_config());
-        assert_eq!(refs, vec!["a.big", "b.small", "default.qwen"]);
+        assert_eq!(refs, vec!["big", "qwen", "small"]);
     }
 
     #[test]
     fn test_flatten_model_refs_hides_disabled() {
         // enabled = false 的模型不进列表、也不占 /provider <序号> 的位置
         let mut cfg = test_config();
-        cfg.provider
-            .get_mut("a")
-            .unwrap()
-            .model
-            .get_mut("big")
-            .unwrap()
-            .enabled = false;
-        assert_eq!(flatten_model_refs(&cfg), vec!["b.small", "default.qwen"]);
+        cfg.models.get_mut("big").unwrap().enabled = false;
+        assert_eq!(flatten_model_refs(&cfg), vec!["qwen", "small"]);
     }
 
     #[tokio::test]
     async fn test_provider_list_marks_current() {
         let agent = test_agent(test_config()).await;
         let out = list_providers(&agent).await;
-        assert!(out.contains("1. a.big (big-model) *"));
-        assert!(out.contains("2. b.small (small-model)"));
-        assert!(!out.contains("2. b.small (small-model) *"));
+        assert!(out.contains("1. big (big-model; chat) *"), "{out}");
+        assert!(out.contains("small (small-model; chat)"), "{out}");
+        assert!(!out.contains("small (small-model; chat) *"));
         // 当前模型在列表里时不该有「hidden」补充说明
         assert!(!out.contains("is hidden"));
     }
@@ -1778,16 +1811,10 @@ mod tests {
     async fn test_provider_list_notes_hidden_current() {
         // 把 main 正在用的模型关掉：列表里没有它，也就没有 `*`——必须说明，否则像模型丢了
         let mut cfg = test_config();
-        cfg.provider
-            .get_mut("a")
-            .unwrap()
-            .model
-            .get_mut("big")
-            .unwrap()
-            .enabled = false;
+        cfg.models.get_mut("big").unwrap().enabled = false;
         let agent = test_agent(cfg).await;
         let out = list_providers(&agent).await;
-        assert!(!out.contains("a.big"), "disabled 模型不进列表");
+        assert!(!out.contains("big (big-model"), "disabled 模型不进列表");
         assert!(
             out.contains("current model 'big-model' is hidden: enabled = false"),
             "missing hidden-current note:\n{out}"
@@ -1798,15 +1825,15 @@ mod tests {
     async fn test_provider_switch_by_index_and_ref() {
         let mut agent = test_agent(test_config()).await;
 
-        // 按序号切换
+        // 按序号切换（fixture 含 default.qwen，排序后 1=big 2=qwen 3=small）
         let msg = switch_provider(&mut agent, "2").await.unwrap();
-        assert_eq!(msg, "[switched to b.small]");
+        assert_eq!(msg, "[switched to qwen]");
         let p = agent.provider_snapshot().await.unwrap();
-        assert_eq!(p.label(), "small-model");
+        assert_eq!(p.label(), "qwen2.5:7b");
 
         // 按 ref 切换
-        let msg = switch_provider(&mut agent, "a.big").await.unwrap();
-        assert_eq!(msg, "[switched to a.big]");
+        let msg = switch_provider(&mut agent, "big").await.unwrap();
+        assert_eq!(msg, "[switched to big]");
         let p = agent.provider_snapshot().await.unwrap();
         assert_eq!(p.label(), "big-model");
     }
@@ -1816,7 +1843,7 @@ mod tests {
         let mut agent = test_agent(test_config()).await;
         assert!(switch_provider(&mut agent, "9").await.is_err());
         assert!(switch_provider(&mut agent, "0").await.is_err());
-        assert!(switch_provider(&mut agent, "nope.missing").await.is_err());
+        assert!(switch_provider(&mut agent, "nope").await.is_err());
         // 切换失败不动现有 provider
         let p = agent.provider_snapshot().await.unwrap();
         assert_eq!(p.label(), "big-model");
@@ -1824,13 +1851,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_provider_switch_preserves_fallback_chain() {
-        // 回归：bug 版本 switch_provider 用 provider_from_ref 裸替换，
+        // 回归：bug 版本 switch_provider 用 model_from_ref 裸替换，
         // [agent.main].fallback 降级链被丢弃（kind 变回 "provider"）。
         let mut config = test_config();
-        config.agent.get_mut("main").unwrap().fallback = vec!["b.small".into()];
+        config.agent.get_mut("main").unwrap().fallback = vec!["small".into()];
         let mut agent = test_agent(config).await;
-        let msg = switch_provider(&mut agent, "a.big").await.unwrap();
-        assert_eq!(msg, "[switched to a.big]");
+        let msg = switch_provider(&mut agent, "big").await.unwrap();
+        assert_eq!(msg, "[switched to big]");
         let p = agent.provider_snapshot().await.unwrap();
         assert_eq!(p.label(), "big-model");
         // 链必须保留：FallbackProvider kind == "fallback"
@@ -1841,7 +1868,7 @@ mod tests {
     async fn test_provider_switch_without_fallback_is_bare() {
         // 未配置 fallback 时不包链（保持裸 provider，行为与旧版一致）
         let mut agent = test_agent(test_config()).await;
-        switch_provider(&mut agent, "a.big").await.unwrap();
+        switch_provider(&mut agent, "big").await.unwrap();
         let p = agent.provider_snapshot().await.unwrap();
         assert_eq!(p.kind(), "provider");
     }
@@ -1850,10 +1877,10 @@ mod tests {
     async fn test_provider_switch_temp_does_not_persist() {
         let mut agent = test_agent(test_config()).await;
         let msg = switch_provider(&mut agent, "--temp 1").await.unwrap();
-        assert_eq!(msg, "[switched to a.big (temporary)]");
+        assert_eq!(msg, "[switched to big (temporary)]");
         let p = agent.provider_snapshot().await.unwrap();
         assert_eq!(p.label(), "big-model");
-        // live_config 保持原 [agent.main].model（"a.big"），未被动过
+        // live_config 保持原 [agent.main].model（"big"），未被动过
         let model = agent
             .live_config()
             .read()
@@ -1863,7 +1890,7 @@ mod tests {
             .unwrap()
             .model
             .clone();
-        assert_eq!(model, "a.big");
+        assert_eq!(model, "big");
     }
 
     #[tokio::test]
@@ -1876,10 +1903,11 @@ mod tests {
         std::fs::write(&config_path, toml::to_string(&cfg).unwrap()).unwrap();
 
         let mut agent = test_agent_at(cfg, &dir.to_string_lossy()).await;
+        // fixture 含 default.qwen，排序后序号 2 = qwen（P8 一元 ref）
         let msg = switch_provider(&mut agent, "2").await.unwrap();
-        assert_eq!(msg, "[switched to b.small]");
+        assert_eq!(msg, "[switched to qwen]");
         let p = agent.provider_snapshot().await.unwrap();
-        assert_eq!(p.label(), "small-model");
+        assert_eq!(p.label(), "qwen2.5:7b");
 
         // 内存 live_config 已同步为新模型
         let model = agent
@@ -1891,12 +1919,12 @@ mod tests {
             .unwrap()
             .model
             .clone();
-        assert_eq!(model, "b.small");
+        assert_eq!(model, "qwen");
 
         // 磁盘 config.toml 已定点更新（保留其余字段，仅 [agent.main].model 变化）
         let disk = std::fs::read_to_string(&config_path).unwrap();
         let doc: toml_edit::DocumentMut = disk.parse().unwrap();
-        assert_eq!(doc["agent"]["main"]["model"].as_str(), Some("b.small"));
+        assert_eq!(doc["agent"]["main"]["model"].as_str(), Some("qwen"));
 
         // 清理临时目录
         let _ = std::fs::remove_dir_all(&dir);

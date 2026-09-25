@@ -366,6 +366,7 @@
         <div :class="{active: configSection==='runtime'}" @click="switchConfigSection('runtime')">Runtime</div>
         <div :class="{active: configSection==='log'}" @click="switchConfigSection('log')">Log</div>
         <div :class="{active: configSection==='provider'}" @click="switchConfigSection('provider')">Provider</div>
+        <div :class="{active: configSection==='models'}" @click="switchConfigSection('models')">Models</div>
         <div :class="{active: configSection==='agent'}" @click="switchConfigSection('agent')">Agent</div>
         <div :class="{active: configSection==='channels'}" @click="switchConfigSection('channels')">Channels</div>
         <div :class="{active: configSection==='tools'}" @click="switchConfigSection('tools')">Tools</div>
@@ -380,8 +381,11 @@
         <div class="config-head">
           <span>&#x276F; CONFIG <span x-text="configSection"></span></span>
           <span class="config-head-actions">
-            <template x-if="['runtime','log','provider','agent','channels','tools'].includes(configSection)">
+            <template x-if="['runtime','log','provider','models','agent','channels','tools'].includes(configSection)">
               <button @click="saveConfig()">Save</button>
+            </template>
+            <template x-if="configSection==='models'">
+              <button class="btn-add" @click="openAddModel()">+ Add model</button>
             </template>
             <template x-if="configSection==='provider'">
               <button class="btn-add" @click="addProvider()">+ Add provider</button>
@@ -497,57 +501,14 @@
                 <div class="form-row"><label>type</label><input x-model="p.type"></div>
                 <div class="form-row"><label>base_url</label><input x-model="p.base_url" style="width:400px"></div>
                 <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
-                <!-- 模型添加（P5 W2）：按钮两态——「＋ Add model」点一下探测端点 /models 并展开列表，
-                     列表展开时按钮变成「Add selected」批量加入（探测勾选项 + 底部手填项同一条路径）。
-                     折叠三角标在主按钮左侧（有缓存结果才显示）；原独立 Probe 按钮已并入。 -->
-                <div class="probe-section">
-                  <button type="button" class="probe-fold" x-show="probeModels[pid] && probeModels[pid].length"
-                          @click="toggleProbeOpen(pid)" x-text="probeOpen[pid] ? '▾' : '▸'"
-                          title="expand / collapse probe list"></button>
-                  <button type="button" class="inline-add" @click="probeSectionClick(pid)" :disabled="probing===pid">
-                    <span x-text="probing===pid ? 'Probing…' : probeSectionLabel(pid)"></span>
-                  </button>
-                  <span class="hint" x-show="probeMsg[pid]" x-text="probeMsg[pid]"></span>
-                  <div class="probe-models" x-show="probeOpen[pid]">
-                    <template x-if="probeModels[pid] && probeModels[pid].length">
-                      <div>
-                        <div class="probe-models-head">
-                          <button type="button" class="linklike" @click="runProbe(pid)" :disabled="probing===pid">↻ re-probe</button>
-                        </div>
-                        <!-- 行容器交给 auto-fill 网格：按窗口宽度自动分栏（窄则退回单列） -->
-                        <div class="probe-model-grid">
-                          <template x-for="m in probeModels[pid]" :key="m.id">
-                            <div class="probe-model-row" :class="{ 'probe-model-row--added': isModelAdded(pid, m.id) }">
-                              <label>
-                                <!-- 已在 models 里的模型：勾上并禁用（一眼看出哪些加过了，避免重复添加） -->
-                                <input type="checkbox"
-                                       :checked="isModelAdded(pid, m.id) || (probeChecked[pid] && probeChecked[pid][m.id])"
-                                       :disabled="isModelAdded(pid, m.id)"
-                                       @change="toggleProbeModel(pid, m.id)">
-                                <span class="probe-model-id" x-text="m.id" :title="m.id"></span>
-                                <span class="probe-added" x-show="isModelAdded(pid, m.id)">✓ added</span>
-                              </label>
-                            </div>
-                          </template>
-                        </div>
-                      </div>
-                    </template>
-                    <!-- 手动添加：与探测项同一套勾选 + Add selected 路径；输入非空自动勾选 -->
-                    <div class="probe-manual">
-                      <input type="checkbox" :checked="!!probeManualChecked[pid]" @change="toggleProbeManual(pid)">
-                      <input x-model="probeManual[pid]" @input="syncProbeManual(pid)"
-                             placeholder="model id not listed — check and type it here"
-                             @keydown.enter.prevent="probeSectionClick(pid)">
-                    </div>
-                  </div>
-                </div>
-                <div class="compat-section">
+                <div class="hint" x-show="isServiceProvider(pid)">Search/service provider — hosts no models; reference it from tools.search / web_fetch.extract_provider. Models are managed in the Models tab.</div>
+                <div class="compat-section" x-show="!isServiceProvider(pid)">
                   <button type="button" class="collapse-toggle" @click="toggleCompat(pid)">
                     <span x-text="compatOpen[pid] ? '▾' : '▸'"></span> Compatibility
                     <span class="hint" x-show="p.compat">overrides set</span>
                   </button>
                   <div class="compat-body" x-show="compatOpen[pid]">
-                    <div class="hint">Endpoint differences are auto-detected from base_url (ollama/llama → preset). Override only when needed.</div>
+                    <div class="hint">Endpoint differences are auto-detected from base_url (ollama/llama → preset). Override only when needed. Applies to chat requests of models on this provider.</div>
                     <template x-if="!p.compat">
                       <button type="button" class="inline-add" @click="enableCompat(pid)">+ Add compatibility overrides</button>
                     </template>
@@ -578,40 +539,151 @@
                     </template>
                   </div>
                 </div>
-                <h4>Models</h4>
-                <template x-for="(m, alias) in p.model" :key="alias">
-                  <div>
-                    <div class="model-row" :class="{ 'model-row--off': m.enabled === false }">
-                      <label class="switch" :title="m.enabled === false
-                        ? 'disabled: params kept, hidden from /provider and the model pickers'
-                        : 'enabled'">
-                        <input type="checkbox" x-model="m.enabled">
-                        <span x-text="alias"></span>
-                      </label>
-                      <input x-model="m.model" style="width:150px" placeholder="model id">
-                      <input type="number" placeholder="ctx" title="context window (tokens)" x-model.number="m.context_size" style="width:64px">
-                      <input type="number" placeholder="max_tokens" title="single-response token cap (per-model)" x-model.number="m.max_tokens" style="width:84px">
-                      <button type="button" class="collapse-toggle" @click="toggleThinking(pid, alias)"
-                              title="[provider.<id>.<alias>.thinking] — per-model thinking capability (values from wire probes, off by default)">
-                        <span x-text="thinkingOpen[pid + '.' + alias] ? '▾' : '▸'"></span> thinking
-                        <span class="hint" x-show="thinkingConfigured(m)">configured</span>
-                      </button>
-                      <button type="button" class="inline-add probebtn"
-                      :class="{ 'probebtn--ok': probeStatus[pid + '.' + alias] === 'ok', 'probebtn--err': probeStatus[pid + '.' + alias] && probeStatus[pid + '.' + alias] !== 'ok' }"
-                      :title="probeModelBtnTitle(pid, alias)"
-                      @click="probeModel(pid, alias)"
-                      :disabled="probeBusy(pid, alias)">
-                      <span x-text="probeModelBtnText(pid, alias)"></span>
+              </div>
+            </template>
+          </div>
+        </template>
+        <template x-if="configSection==='models'">
+          <div>
+            <!-- 添加流（P8）：选 provider（仅 llm family）→ probe → 必选 kind → 添加。
+                 批量添加已删：一次加一条，kind 决定表单形态与 wire API 归属。 -->
+            <template x-if="addModelOpen">
+              <div class="provider-card add-model-panel">
+                <div class="card-header">
+                  <h3>Add model</h3>
+                  <button class="btn-delete" @click="addModelOpen=false">Cancel</button>
+                </div>
+                <div class="form-row"><label>provider</label>
+                  <select x-model="addModelDraft.provider">
+                    <option value="">— select a provider —</option>
+                    <template x-for="pid in llmProviders()" :key="pid">
+                      <option :value="pid" x-text="pid + ' (' + effectiveType(pid) + ')'"></option>
+                    </template>
+                  </select>
+                </div>
+                <template x-if="addModelDraft.provider">
+                  <div class="probe-section">
+                    <button type="button" class="inline-add" @click="runProbe(addModelDraft.provider)" :disabled="probing===addModelDraft.provider">
+                      <span x-text="probing===addModelDraft.provider ? 'Probing…' : 'Probe /models'"></span>
                     </button>
-                    <button class="btn-delete" @click="deleteModel(pid, alias)">×</button>
+                    <span class="hint" x-show="probeMsg[addModelDraft.provider]" x-text="probeMsg[addModelDraft.provider]"></span>
+                    <template x-if="probeModels[addModelDraft.provider] && probeModels[addModelDraft.provider].length">
+                      <div class="form-row"><label>pick probed</label>
+                        <select @change="addModelDraft.model = $event.target.value; $event.target.value = ''">
+                          <option value="">— pick a probed model —</option>
+                          <template x-for="pm in probeModels[addModelDraft.provider]" :key="pm.id">
+                            <option :value="pm.id" x-text="pm.id"></option>
+                          </template>
+                        </select>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <div class="form-row"><label>server model</label>
+                  <input x-model="addModelDraft.model" style="width:400px" placeholder="model name on the wire (e.g. qwen3:32b) — probe results fill this in"></div>
+                <div class="form-row"><label>model id</label>
+                  <input x-model="addModelDraft.id" style="width:400px" placeholder="unique catalog id, e.g. qwen3-32b"></div>
+                <div class="form-row"><label>kind</label>
+                  <select x-model="addModelDraft.kind">
+                    <option value="chat">chat</option>
+                    <option value="tts" :disabled="effectiveType(addModelDraft.provider) !== 'openai_compatible'">tts</option>
+                    <option value="image" :disabled="effectiveType(addModelDraft.provider) !== 'openai_compatible'">image</option>
+                    <option value="embedding" :disabled="effectiveType(addModelDraft.provider) !== 'openai_compatible'">embedding</option>
+                  </select>
+                  <span class="hint" x-show="addModelDraft.provider && effectiveType(addModelDraft.provider) !== 'openai_compatible'">anthropic / gemini only support chat</span></div>
+                <div class="form-row" x-show="addModelDraft.kind==='image'"><label>size</label>
+                  <input x-model="addModelDraft.size" placeholder="512x512 (default output size)"></div>
+                <div class="form-row"><label>capabilities</label>
+                  <label class="switch"><input type="checkbox" x-model="addModelDraft.multimodal"> multimodal</label></div>
+                <button class="inline-add" @click="confirmAddModel()">Add model</button>
+                <span class="hint">Added to the in-memory catalog below — click Save to persist.</span>
+              </div>
+            </template>
+            <!-- 过滤条：provider / kind / multimodal -->
+            <div class="model-filter">
+              <select x-model="modelFilter.provider">
+                <option value="">all providers</option>
+                <template x-for="pid in llmProviders()" :key="pid">
+                  <option :value="pid" x-text="pid"></option>
+                </template>
+              </select>
+              <select x-model="modelFilter.kind">
+                <option value="">all kinds</option>
+                <option value="chat">chat</option>
+                <option value="tts">tts</option>
+                <option value="image">image</option>
+                <option value="embedding">embedding</option>
+              </select>
+              <label class="switch"><input type="checkbox" x-model="modelFilter.multimodal"> multimodal only</label>
+              <span class="hint" x-text="filteredModels().length + ' model(s)'"></span>
+            </div>
+            <!-- 卡片网格：auto-fill 分栏，窄窗口退单列 -->
+            <div class="model-grid">
+              <template x-for="id in filteredModels()" :key="id">
+                <div class="provider-card model-card" :class="{ 'model-card--off': cfg.model[id].enabled === false }">
+                  <div class="card-header">
+                    <h3 x-text="id"></h3>
+                    <span class="card-header-actions">
+                      <label class="switch" :title="cfg.model[id].enabled === false
+                        ? 'disabled: kept, but hidden from /models and the model pickers'
+                        : 'enabled'">
+                        <input type="checkbox" x-model="cfg.model[id].enabled">
+                        <span x-text="cfg.model[id].enabled === false ? 'off' : 'on'"></span>
+                      </label>
+                      <button class="btn-delete" @click="deleteModel(id)">×</button>
+                    </span>
+                  </div>
+                  <div class="form-row"><label>provider</label>
+                    <select x-model="cfg.model[id].provider">
+                      <option value="" disabled>— provider —</option>
+                      <template x-for="pid in llmProviders()" :key="pid">
+                        <option :value="pid" x-text="pid + ' (' + effectiveType(pid) + ')'"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div class="form-row"><label>kind</label>
+                    <select x-model="cfg.model[id].kind">
+                      <option value="chat">chat</option>
+                      <option value="tts" :disabled="cfg.model[id].provider && effectiveType(cfg.model[id].provider) !== 'openai_compatible'">tts</option>
+                      <option value="image" :disabled="cfg.model[id].provider && effectiveType(cfg.model[id].provider) !== 'openai_compatible'">image</option>
+                      <option value="embedding" :disabled="cfg.model[id].provider && effectiveType(cfg.model[id].provider) !== 'openai_compatible'">embedding</option>
+                    </select>
+                  </div>
+                  <div class="form-row"><label>model</label>
+                    <input x-model="cfg.model[id].model" style="width:220px" placeholder="server model name"></div>
+                  <template x-if="(cfg.model[id].kind || 'chat') === 'chat'">
+                    <div>
+                      <div class="form-row"><label>ctx</label>
+                        <input type="number" x-model.number="cfg.model[id].context_size" style="width:140px" title="context window (tokens); empty = probe at startup, fallback 128000"></div>
+                      <div class="form-row"><label>max_tokens</label>
+                        <input type="number" x-model.number="cfg.model[id].max_tokens" style="width:140px" title="single-response token cap (required for anthropic, ignored elsewhere)"></div>
+                    </div>
+                  </template>
+                  <div class="form-row" x-show="(cfg.model[id].kind || 'chat') === 'image'"><label>size</label>
+                    <input x-model="cfg.model[id].size" style="width:140px" placeholder="512x512"></div>
+                  <div class="form-row"><label>capabilities</label>
+                    <label class="switch"><input type="checkbox" :checked="(cfg.model[id].capabilities || []).includes('multimodal')" @change="toggleMultimodal(id)"> multimodal</label></div>
+                  <div class="model-row">
+                    <button type="button" class="collapse-toggle" @click="toggleThinking(id)"
+                            title="[model.<id>.thinking] — per-model thinking capability (values from wire probes, off by default)">
+                      <span x-text="thinkingOpen[id] ? '▾' : '▸'"></span> thinking
+                      <span class="hint" x-show="thinkingConfigured(cfg.model[id])">configured</span>
+                    </button>
+                    <button type="button" class="inline-add probebtn"
+                            :class="{ 'probebtn--ok': probeStatus[id] === 'ok', 'probebtn--err': probeStatus[id] && probeStatus[id] !== 'ok' }"
+                            :title="probeModelBtnTitle(id)"
+                            @click="probeModel(id)"
+                            :disabled="probeBusy(id)">
+                      <span x-text="probeModelBtnText(id)"></span>
+                    </button>
                   </div>
                   <!-- 模型级 thinking 能力声明（P2-12）：值必须来自 wire 实测，全空 = 未声明。
                        开合走 thinkingOpen（与配置段解耦）：已配置的模型也能折叠，配置不丢。 -->
-                  <template x-if="m.thinking && thinkingOpen[pid + '.' + alias]">
+                  <template x-if="cfg.model[id].thinking && thinkingOpen[id]">
                     <div class="compat-body" style="margin:2px 0 6px 22px">
                       <div class="hint">[thinking] capability for this model — dialects must come from wire probes (see thinking-capability plan); all-unset = no [thinking] section, requests stay byte-identical to legacy.</div>
                       <label class="switch">default level:
-                        <select x-model="m.thinking.default">
+                        <select x-model="cfg.model[id].thinking.default">
                           <option :value="null">unknown (unset)</option>
                           <option value="none">none</option>
                           <option value="low">low</option>
@@ -621,14 +693,14 @@
                         </select>
                       </label>
                       <label class="switch">level wire:
-                        <select x-model="m.thinking.level_wire">
+                        <select x-model="cfg.model[id].thinking.level_wire">
                           <option :value="null">unset (no knob)</option>
                           <option value="none">none (endpoint ignores effort)</option>
                           <option value="reasoning_effort">reasoning_effort (validated server-side)</option>
                         </select>
                       </label>
                       <label class="switch">off wire:
-                        <select x-model="m.thinking.off_wire">
+                        <select x-model="cfg.model[id].thinking.off_wire">
                           <option :value="null">unset (legacy fallback)</option>
                           <option value="enable_thinking_false">enable_thinking_false (chat_template_kwargs)</option>
                           <option value="thinking_disabled">thinking_disabled (DeepSeek)</option>
@@ -636,14 +708,13 @@
                           <option value="unsupported">unsupported (rejects /reasoning none)</option>
                         </select>
                       </label>
-                      <label class="switch"><input type="checkbox" x-model="m.thinking.preserve"> preserve: echo reasoning_content back (default off; only enable if the server verifiably consumes it)</label>
+                      <label class="switch"><input type="checkbox" x-model="cfg.model[id].thinking.preserve"> preserve: echo reasoning_content back (default off; only enable if the server verifiably consumes it)</label>
                     </div>
                   </template>
                 </div>
               </template>
-                <button class="inline-add" @click="addModel(pid)">+ Add model</button>
-              </div>
-            </template>
+            </div>
+            <div class="hint" x-show="!filteredModels().length && !addModelOpen">No models yet — click "+ Add model" to add one.</div>
           </div>
         </template>
         <template x-if="configSection==='agent'">
@@ -770,27 +841,48 @@
             <div class="form-row"><label>confirm</label><input x-model="cfg.tools.terminal.confirm"></div>
             <div class="form-row"><label>whitelist (comma separated)</label><input :value="cfg.tools.terminal.whitelist.join(',')" @input="cfg.tools.terminal.whitelist=$event.target.value.split(',')"></div>
             <h3>search</h3>
-            <div class="form-row"><label>provider</label><input x-model="cfg.tools.search.provider"></div>
-            <div class="form-row"><label>top_k</label><input type="number" x-model="cfg.tools.search.top_k"></div>
-            <h3>tavily</h3>
-            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.tavily.api_key"></div>
-            <h3>baidu</h3>
-            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.baidu.api_key"></div>
-            <h3>brave</h3>
-            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.brave.api_key"></div>
-            <h3>tts <span class="hint">(P5 T1, OpenAI-compatible /audio/speech)</span></h3>
+            <div class="form-row"><label>provider</label>
+              <select x-model="cfg.tools.search.provider">
+                <option value="">— none (search tool not registered) —</option>
+                <template x-if="cfg.tools.search.provider && !serviceProviders().includes(cfg.tools.search.provider)">
+                  <option :value="cfg.tools.search.provider" x-text="cfg.tools.search.provider + ' (current)'"></option>
+                </template>
+                <template x-for="pid in serviceProviders()" :key="pid">
+                  <option :value="pid" x-text="pid"></option>
+                </template>
+              </select>
+            </div>
+            <div class="hint">Search providers (tavily/baidu/brave, ...) live in the Provider tab as service-type entries — add endpoints and keys there.</div>
+            <div class="form-row"><label>top_k</label><input type="number" x-model.number="cfg.tools.search.top_k"></div>
+            <h3>tts <span class="hint">(OpenAI-compatible /audio/speech; model = catalog entry with kind=tts)</span></h3>
             <div class="form-row"><label>enabled</label><input type="checkbox" x-model="cfg.tools.tts.enabled"></div>
-            <div class="form-row"><label>base_url</label><input x-model="cfg.tools.tts.base_url" style="width:320px"></div>
-            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.tts.api_key"></div>
-            <div class="form-row"><label>model</label><input x-model="cfg.tools.tts.model"></div>
+            <div class="form-row"><label>model</label>
+              <select x-model="cfg.tools.tts.model">
+                <option value="">— none —</option>
+                <template x-if="cfg.tools.tts.model && !ttsModelRefs().includes(cfg.tools.tts.model)">
+                  <option :value="cfg.tools.tts.model" x-text="cfg.tools.tts.model + ' (current)'"></option>
+                </template>
+                <template x-for="r in ttsModelRefs()" :key="r">
+                  <option :value="r" x-text="r"></option>
+                </template>
+              </select>
+            </div>
             <div class="form-row"><label>voice</label><input x-model="cfg.tools.tts.voice"></div>
-            <h3>image_gen <span class="hint">(OpenAI-compatible /images/generations + /images/edits; sd-server, agnes, ...)</span></h3>
+            <h3>image_gen <span class="hint">(OpenAI-compatible /images/generations + /images/edits; model = catalog entry with kind=image)</span></h3>
             <div class="form-row"><label>enabled</label><input type="checkbox" x-model="cfg.tools.image_gen.enabled"></div>
-            <div class="form-row"><label>base_url</label><input x-model="cfg.tools.image_gen.base_url" style="width:320px"></div>
-            <div class="form-row"><label>api_key</label><input type="password" x-model="cfg.tools.image_gen.api_key"></div>
-            <div class="form-row"><label>model</label><input x-model="cfg.tools.image_gen.model" placeholder="empty = omit"></div>
-            <div class="form-row"><label>size</label><input x-model="cfg.tools.image_gen.size" placeholder="512x512"></div>
-            <div class="form-row"><label>timeout_secs</label><input type="number" x-model="cfg.tools.image_gen.timeout_secs"></div>
+            <div class="form-row"><label>model</label>
+              <select x-model="cfg.tools.image_gen.model">
+                <option value="">— none —</option>
+                <template x-if="cfg.tools.image_gen.model && !imageModelRefs().includes(cfg.tools.image_gen.model)">
+                  <option :value="cfg.tools.image_gen.model" x-text="cfg.tools.image_gen.model + ' (current)'"></option>
+                </template>
+                <template x-for="r in imageModelRefs()" :key="r">
+                  <option :value="r" x-text="r"></option>
+                </template>
+              </select>
+            </div>
+            <div class="hint">Default output size lives on the model entry (size field, Models tab).</div>
+            <div class="form-row"><label>timeout_secs</label><input type="number" x-model.number="cfg.tools.image_gen.timeout_secs"></div>
           </div>
         </template>
         <template x-if="configSection==='skills'">

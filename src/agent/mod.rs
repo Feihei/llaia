@@ -276,20 +276,14 @@ fn build_agents_md_prompt(root: &std::path::Path, home: &std::path::Path) -> Str
     )
 }
 
-/// 从实时配置读取 `[agent.<alias>].model` 指向的 model_cfg.context_size（显式上限）。
-/// model 未配置 / 对应 provider.model 缺失 → None（走探测或兜底默认）。
+/// 从实时配置读取 `[agent.<alias>].model` 指向的目录条目 context_size（显式上限）。
+/// model 未配置 / 目录条目缺失 → None（走探测或兜底默认）。
 fn resolve_configured_context_size(config: &Config, alias: &str) -> Option<usize> {
     let model_ref = config.agent.get(alias)?.model.clone();
     if model_ref.is_empty() {
         return None;
     }
-    let (prov_id, model_alias) = Config::parse_model_ref(&model_ref).ok()?;
-    config
-        .provider
-        .get(prov_id)?
-        .model
-        .get(model_alias)?
-        .context_size
+    config.models.get(&model_ref)?.context_size
 }
 
 impl Agent {

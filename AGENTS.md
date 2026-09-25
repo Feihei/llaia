@@ -87,17 +87,17 @@ MEMORY.md 超限时先备份再由 LLM 去重压缩。上下文压缩时旧消�
 
 ## Provider 与工具调用
 
+> **模型目录（P8，2026-09-25 定案）**：`[provider]` 收窄为**统一连接注册表**（端点 + 凭据），模型独立成顶层 **`[model.<id>]`** 目录（serde rename 单数 `model`，Rust 字段 `Config.models`）。provider 分两族（`type` 即判别器，无 kind 字段）：**llm family**（`openai_compatible` / `anthropic` / `gemini`，可承载 model 条目、可 probe）与 **service family**（`tavily` / `baidu` / `brave`，纯凭据搜索服务，无 model、不进 probe 列表）。`ModelEntry` 字段：`provider`（引用）、`model`（服务端模型名）、`kind`（chat 缺省 / tts / image / embedding，决定 wire API 归属）、`enabled`（可发现性）、`context_size` / `max_tokens` / `native_tool_calling` / `thinking` / `size`（image 专属）/ `capabilities`（v1 仅 `multimodal`，预留扩展数组）。引用一律**一元 model id**：`[agent.<alias>].model` / `fallback` / `[tools.search].provider` / `[tools.tts].model` / `[tools.image_gen].model` / `[tools.web_fetch].extract_provider`；两段式 `provider_id.model_alias` 退役，`provider_from_ref` → `model_from_ref`（`src/provider/mod.rs`）。**加载期自动迁移（2026-09-25 补，推翻"一步到位无兼容层"的原决策）**：实际落地时发现 deny_unknown_fields 报错对存量配置过于粗暴（agent 引用、fallback 全要手工改），故在 `Config::load` 反序列化**前**加了 `migrate_legacy_config`（`src/config.rs`）：对 raw TOML 原地改写，把 v0.5 旧结构转成目录形态——① `[provider.<pid>.<alias>]` model 子表（含嵌套 thinking）→ `[model."<pid>.<alias>"]`，**model id 刻意沿用两段式**，agent `model`/`fallback`/`compact_model`/`vision_model` 旧引用零改动继续解析；② `[tools.tavily|baidu|brave]` → 同名 service family provider（`[tools.search].provider` 旧值是类型名、恰好等于新建 id，直通）；③ `[tools.tts]`/`[tools.image_gen]` 内联 base_url/api_key/model → provider + kind 条目 + 引用改写（image_gen 的 legacy base_url 若含 `/images/generations` 尾巴会剥掉，防拼接双写）；④ `web_fetch.use_tavily_extract` → `extract_provider`。迁移只改内存态（磁盘文件不动，避免序列化毁注释/格式），每次启动幂等重复执行；id 冲突时显式 `[model]` 条目优先、legacy 子表丢弃。校验（`Config::load`）：model 引用的 provider 必须存在且非 service；anthropic/gemini 仅挂 chat 条目；image 条目才该有 `size`；显式未知 type 报错（缺省仍回退 openai_compatible）。`deny_unknown_fields` 保留，拦的是迁移后仍存在的真 unknown 键。详见 [docs/plans/2026-09-25-model-catalog.md](docs/plans/2026-09-25-model-catalog.md)。WebUI：Config 侧栏新增 **Models 选项卡**（卡片网格 + provider/kind/multimodal 过滤条 + 添加流 = 选 provider → probe → 必选 kind），provider 卡瘦身（service family 只渲染 api\_key），agent/tools 的模型选择全部改目录下拉；批量添加已删。CLI：`/models`（目录列表主名）+ `/providers`（连接注册表分族列出），`/provider` 留别名转发。详见 [docs/plans/2026-09-25-model-catalog.md](docs/plans/2026-09-25-model-catalog.md)。
+
 - Provider 类型（按 `[provider.<id>].type` 区分）：
 
-  - `openai_compatible`（默认，未写 `type` 也走这个）：覆盖 Ollama、Llama.cpp、LMStudio 等 OpenAI 兼容端点
+  - llm family：`openai_compatible`（默认，未写 `type` 也走这个；覆盖 Ollama、Llama.cpp、LMStudio 等 OpenAI 兼容端点）、`anthropic`（Anthropic Messages API，需 `max_tokens`）、`gemini`（Google Gemini API，需 `max_tokens`）
 
-  - `anthropic`：Anthropic Messages API（需 `max_tokens`）
+  - service family：`tavily` / `baidu` / `brave`（搜索凭据，由 `[tools.search].provider` 与 `[tools.web_fetch].extract_provider` 引用）
 
-  - `gemini`：Google Gemini API（需 `max_tokens`）
+  - **显式未知 `type` 启动即报错**（P8：静默回退会让打错的 service type 变成 LLM provider）；未写 `type` 回退 `openai_compatible`
 
-  - 未知 `type` 一律按 `openai_compatible` 处理（存量无 type 配置也能跑）
-
-  - 支持 **fallback 备用模型链**：`[agent.<alias>].fallback` 列出备用 model ref，主模型请求失败时按序降级
+  - 支持 **fallback 备用模型链**：`[agent.<alias>].fallback` 列出备用 model id，主模型请求失败时按序降级
 
 - 工具调用协议：**原生优先 + 标签降级**
 
@@ -138,7 +138,11 @@ OpenAI 兼容端点各家实现参差，`OpenAiCompatibleProvider` 通过 `Compa
 [provider.ollama_local]
 type = "openai_compatible"
 base_url = "http://localhost:11434/v1"   # 自动探测命中 ollama 预设
-model = [["default", { model = "qwen3:14b", native_tool_calling = true }]]
+
+[model.qwen14b]
+provider = "ollama_local"
+model = "qwen3:14b"
+native_tool_calling = true
 
 [provider.ollama_local.compat]
 reasoning_to_content = true
@@ -146,13 +150,13 @@ max_tokens_field = "max_completion_tokens"   # 该模型用 max_completion_token
 requires_assistant_after_tool = false          # 覆盖预设里的 true
 ```
 
-`[provider.<id>].model.<alias>.max_tokens`（usize，可选）会随着 `max_tokens_field` 选定的字段名发送上限。`ChatResponse` 现额外返回 `usage: Option<Usage>` 与 `finish_reason: Option<String>`，便于上层做 token 统计与结束判定。
+`[model.<id>].max_tokens`（usize，可选）会随着 `max_tokens_field` 选定的字段名发送上限。`ChatResponse` 现额外返回 `usage: Option<Usage>` 与 `finish_reason: Option<String>`，便于上层做 token 统计与结束判定。
 
 详见 [docs/adr/0026-provider-compat.md](docs/adr/0026-provider-compat.md) 与规划 [docs/plans/2026-08-14-provider-compat.md](docs/plans/2026-08-14-provider-compat.md)。
 
-> **模型级 `enabled`（可发现性开关，2026-09-09）**：`[provider.<id>].model.<alias>.enabled`（bool，默认 true）用于"把模型参数记在配置里但暂不想被选中"。四条不可破坏的性质：**(1) 只管可发现性**——`flatten_model_refs`（`/provider` 列表与 `<序号>` 索引基准）与前端 `modelRefs()`（agent model / fallback 下拉）过滤 disabled，但 **`provider_from_ref` 绝不拦**：硬拦会让"关掉当前 `agent.model` 指向的模型"变成下次启动即失败、且 WebUI 保存连改回来都走不通（下拉靠既有的 `xxx (current)` 兜底）。**(2) `skip_serializing_if` 方向不能反**——必须 true 时省略（只写显式 `= false`）；写成 false 时省略会配合 provider 子树的 replace 合并（缺失即删）让 disabled 状态保存时静默蒸发。**(3) 间接引用收敛**在 `Config::reconcile_disabled_models`：fallback 剔除、`compact_model`/`vision_model` warn + 置 None（回退主模型，**只改内存态**、盘上引用保留以便重新启用后自动恢复），由 `Config::load` 与 `put_config` 各调一次（后者不走 load，少调就要重启才生效）。**(4) 前端须归一化**——`skip_serializing_if` 对 `serde_json` 同样生效，GET /api/config 省略该键，装载时 `enabled ??= true` 否则 checkbox 把启用态显示成未勾选；另开关必须用 checkbox（`x-model` 产出真 boolean），用 `<select>` 会得到字符串 `"true"` 使 serde bool 解析失败、整个 PUT 返 400。UI 采 astrbot 式：行常驻 + 灰化 + 开关，不从列表抹掉。详见 [docs/plans/2026-09-09-model-enabled-toggle.md](docs/plans/2026-09-09-model-enabled-toggle.md)。
+> **模型级 `enabled`（可发现性开关，2026-09-09；P8 起挂在 `[model.<id>].enabled`）**：用于"把模型参数记在目录里但暂不想被选中"。四条不可破坏的性质：**(1) 只管可发现性**——`flatten_model_refs`（`/models` 列表与 `<序号>` 索引基准）与前端 `modelRefs()`（agent model / fallback 下拉）过滤 disabled，但 **`model_from_ref` 绝不拦**：硬拦会让"关掉当前 `agent.model` 指向的模型"变成下次启动即失败、且 WebUI 保存连改回来都走不通（下拉靠既有的 `xxx (current)` 兜底）。**(2) `skip_serializing_if` 方向不能反**——必须 true 时省略（只写显式 `= false`）；写成 false 时省略会配合 models 子树的 replace 合并（缺失即删）让 disabled 状态保存时静默蒸发。**(3) 间接引用收敛**在 `Config::reconcile_disabled_models`：fallback 剔除、`compact_model`/`vision_model` warn + 置 None（回退主模型，**只改内存态**、盘上引用保留以便重新启用后自动恢复），由 `Config::load` 与 `put_config` 各调一次（后者不走 load，少调就要重启才生效）。**(4) 前端须归一化**——`skip_serializing_if` 对 `serde_json` 同样生效，GET /api/config 省略该键，装载时 `enabled ??= true` 否则 checkbox 把启用态显示成未勾选；另开关必须用 checkbox（`x-model` 产出真 boolean），用 `<select>` 会得到字符串 `"true"` 使 serde bool 解析失败、整个 PUT 返 400。UI 采 astrbot 式：卡片常驻 + 灰化 + 开关，不从网格抹掉。详见 [docs/plans/2026-09-09-model-enabled-toggle.md](docs/plans/2026-09-09-model-enabled-toggle.md)。
 
-> **思考能力模型（P0/P1/P2，2026-09-10）**：`[provider.<id>].model.<alias>.thinking`（`ThinkingConfig`：`default` 档位、`level_wire`/`off_wire` 方言、`preserve` 回传，全部缺省 = unknown/关）承载 `/reasoning` 的能力面。核心裁决（全部来自五家端点 wire 实测，见 plan）：**方言挂在部署粒度而非模型名**——拒绝按名字 substring 猜，`resolve_thinking()`（provider 层唯一收口）把意图 × 声明映射成出站参数；**能力门禁前置于注入**，`none` 落在不支持关的端点上拒收报错而非静默降级；**`ChatRequest.thinking: Option<ThinkingIntent>`**（None = 不发任何思考参数，与旧 `disable_thinking` 时代 auto 同字节）；**生效态走尾部注入**（`Context.reasoning_state`，不进 system 前缀）；**guard 重试按 `off_wire` 分流**（unknown/unsupported 不再假装关思考，改 `[guard]` 提示 + 收紧思考帽）；`finish_reason=length` + 空内容是**输出预算问题不是退化**（不重试不计熔断）。P0 留存：`StreamEvent::ReasoningDelta` → `ChatMessage.reasoning_content` → sqlite `reasoning_content` 列 + WebUI 思考折叠块，逐字、出站零变化。P2 回传：`preserve=true` 时 assistant 历史的思考逐字随请求发回，默认关、缺就缺；`reasoning_to_content` 折回通路与独立字段二选一不双份（`--reasoning-format: deepseek-legacy` 证明共存可能，但框架侧仍二选一）。WebUI Config 模型行有 thinking 折叠面板（值必须来自实测）。详见 [docs/plans/2026-09-10-thinking-capability-model.md](docs/plans/2026-09-10-thinking-capability-model.md)。
+> **思考能力模型（P0/P1/P2，2026-09-10；P8 起挂在 `[model.<id>.thinking]`）**：`ThinkingConfig`（`default` 档位、`level_wire`/`off_wire` 方言、`preserve` 回传，全部缺省 = unknown/关）承载 `/reasoning` 的能力面。核心裁决（全部来自五家端点 wire 实测，见 plan）：**方言挂在部署粒度而非模型名**——拒绝按名字 substring 猜，`resolve_thinking()`（provider 层唯一收口）把意图 × 声明映射成出站参数；**能力门禁前置于注入**，`none` 落在不支持关的端点上拒收报错而非静默降级；**`ChatRequest.thinking: Option<ThinkingIntent>`**（None = 不发任何思考参数，与旧 `disable_thinking` 时代 auto 同字节）；**生效态走尾部注入**（`Context.reasoning_state`，不进 system 前缀）；**guard 重试按 `off_wire` 分流**（unknown/unsupported 不再假装关思考，改 `[guard]` 提示 + 收紧思考帽）；`finish_reason=length` + 空内容是**输出预算问题不是退化**（不重试不计熔断）。P0 留存：`StreamEvent::ReasoningDelta` → `ChatMessage.reasoning_content` → sqlite `reasoning_content` 列 + WebUI 思考折叠块，逐字、出站零变化。P2 回传：`preserve=true` 时 assistant 历史的思考逐字随请求发回，默认关、缺就缺；`reasoning_to_content` 折回通路与独立字段二选一不双份（`--reasoning-format: deepseek-legacy` 证明共存可能，但框架侧仍二选一）。WebUI Config 模型行有 thinking 折叠面板（值必须来自实测）。详见 [docs/plans/2026-09-10-thinking-capability-model.md](docs/plans/2026-09-10-thinking-capability-model.md)。
 
 详见 [docs/adr/0005-provider-and-tool-calling.md](docs/adr/0005-provider-and-tool-calling.md)。
 
@@ -163,7 +167,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 | `file_read` / `file_write` / `file_edit` | `tools/file`                              | 文件读写、精确修改                                                                                                                                         |
 | `terminal`                               | `tools/terminal`                          | 终端命令（含 ls/grep 等，不单列），受 `tools.terminal` 命令策略约束                                                                                                   |
 | `web_fetch`                              | `tools/web`                               | 获取网页                                                                                                                                              |
-| `search`                                 | `tools/search`                            | 联网搜索（统一 `search` 工具，按 `[tools.search].provider` 路由到 tavily/baidu/brave，需对应 provider 的 api\_key）                                                   |
+| `search`                                 | `tools/search`                            | 联网搜索（统一 `search` 工具，按 `[tools.search].provider` 引用 service family provider（P8 注册表），按其 type 分派 tavily/baidu/brave adapter；SearchProvider trait + SearchHit IR，ADR-0023） |
 | `todo`                                   | `tools/todo`                              | 规划后执行：每会话一份待办清单（`add`/`list`/`update`/`done`），自动注入 Runtime Context（ADR-0024）                                                                      |
 | `ask_user`                               | `tools/ask_user`                          | 执行中主动向用户抛问题并**阻塞等待**回答再继续；交互频道走软暂停+续跑，非交互频道按最合理假设继续（ADR-0022）                                                                                     |
 | `memory_write`                           | `tools/memory`                            | 写 MEMORY.md                                                                                                                                       |
@@ -172,8 +176,8 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 | `cron`                                   | `tools/cron`                              | 注册/执行定时任务（Agent 模式 / Step 模式）                                                                                                                     |
 | `mcp`                                    | `tools/mcp`                               | 接入外部 MCP server 暴露的工具                                                                                                                             |
 | `send_media`                             | `tools/send_media`                        | 向频道回传图片/文件等媒体（作用域 = workspace\_root ∪ 受信目录，跟随 `/move`；家目录恒可发送，同 `file_read` extra\_readable 语义）                                                   |
-| `tts`                                    | `tools/tts`                               | 文本合成语音（`[tools.tts]` 配置，OpenAI 兼容 `/audio/speech`，产物落 workspace/tts/，发送走 `send_file`；P5 T1）                                                       |
-| `image_gen` / `image_edit`               | `tools/image_gen`                         | 图片生成/编辑（`[tools.image_gen]` 配置，OpenAI 兼容 `/images/generations` + `/images/edits`，后端任意：sd-server/agnes/OpenAI；产物落 workspace/images/，发送走 `send_image`；编辑输入路径作用域同 send\_image） |
+| `tts`                                    | `tools/tts`                               | 文本合成语音（`[tools.tts].model` 引用 kind=tts 目录条目，端点/key/模型名均来自条目的 provider，OpenAI 兼容 `/audio/speech`，产物落 workspace/tts/，发送走 `send_file`）                                                       |
+| `image_gen` / `image_edit`               | `tools/image_gen`                         | 图片生成/编辑（`[tools.image_gen].model` 引用 kind=image 目录条目（含默认 `size`），OpenAI 兼容 `/images/generations` + `/images/edits`，后端任意：sd-server/agnes/OpenAI；产物落 workspace/images/，发送走 `send_image`；编辑输入路径作用域同 send\_image） |
 
 > **环境探测（P5 E1，非工具）**：`src/envprobe.rs` 启动时对 main agent 探测一次本机工具链（shell/python/node/npm/rustc/cargo/go/git/docker，2s/命令 timeout），以 Runtime Context 尾部注入（与 todo 同区，KV 缓存友好）；`/env` 命令手动刷新；WebUI 聊天页 ENV 只读面板（`GET /api/env` 缓存 / `POST /api/env/refresh` 重探）。
 
@@ -233,7 +237,7 @@ CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 Web
   workspace/                 # agent 家目录（固定）：SOUL.md / USER.md / MEMORY.md / reminder.md / sessions.db / uploads/ / subagent/
 ```
 
-- 配置格式：toml，命名式 section（`[provider.<id>]` / `[provider.<id>.<model_alias>]` / `[agent.<alias>]` / `[webui]` / `[channels.<qq|telegram|dingtalk|wechat|mail|feishu>]` / `[tools.terminal]` / `[tools.search]` / `[tools.tavily]` / `[tools.baidu]` / `[tools.brave]` / `[runtime]`）
+- 配置格式：toml，命名式 section（`[provider.<id>]`（连接注册表：llm + service family）/ `[model.<id>]`（模型目录，P8）/ `[agent.<alias>]` / `[webui]` / `[channels.<qq|telegram|dingtalk|wechat|mail|feishu>]` / `[tools.terminal]` / `[tools.search]` / `[tools.web_fetch]` / `[tools.tts]` / `[tools.image_gen]` / `[runtime]`）
 
 - `workspace`（agent 家目录，固定）同时作为 state dir；文件/终端工具的实时作用域是 `workspace_root`，可被 `/move` 切换（详见「持久化」）
 
@@ -253,7 +257,7 @@ IM 频道在 `[channels.<name>]` 下配置（均含 `enabled`，默认 false，�
 >
 > - **Raw TOML 编辑器**（`PUT /api/config/raw`，Config → Raw TOML 标签）：原文写回，注释完全保留，适合手改 schema 内任意字段（如 `[provider.<id>].compat.*` 覆盖层、agent `fallback`）。
 >
-> 表单目前暴露的 agent 字段：`model`（下拉选 `provider_id.model_alias`）、`fallback`（可增删的备用模型链标签列表）、`delegate_timeout`；provider 字段：`type`、`base_url`、`api_key`、以及折叠的 **Compatibility** 高级面板（`compat` 覆盖层的 6 个开关，`provider` 级、绝不会混入 model 列表）。schema 内但表单未单列的项，仍可用 Raw TOML 维护。
+> 表单目前暴露的 agent 字段：`model`（下拉选 Models 目录中 kind=chat 的条目 id）、`fallback`（可增删的备用模型链标签列表）、`delegate_timeout`；provider 字段：`type`、`base_url`、`api_key`、以及折叠的 **Compatibility** 高级面板（`compat` 覆盖层的 6 个开关，`provider` 级，仅 llm family 渲染）；**Models 选项卡**（P8）：卡片网格 + provider/kind/multimodal 过滤条 + 添加流（选 provider → probe → 必选 kind → kind 专属表单），卡片含 enabled 开关、probe 按钮与 thinking 折叠面板。schema 内但表单未单列的项，仍可用 Raw TOML 维护。
 
 ```toml
 [webui]
