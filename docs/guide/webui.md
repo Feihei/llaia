@@ -61,7 +61,7 @@ Web UI 的设置页可填 provider / model / runtime / channels 等，保存后�
 | `GET /file` | 从工作区取文件 |
 | `GET /api/config` · `PUT /api/config` | 读 / 写配置 |
 | `POST /api/config/validate` | 校验配置 |
-| `POST /api/restart` | 重启服务 |
+| `POST /api/restart` | 进程内重载：重读 config.toml 并重建全部子系统（频道/工具/MCP/cron/listener），进程与终端不退出 |
 | `POST /api/shutdown` | 优雅停止 serve（等价 `Ctrl+C`，见 [ADR-0018](../adr/0018-shutdown.md)） |
 | `GET /api/status` | 运行状态 |
 | `GET /api/cron` · `POST /api/cron` | 列出 / 增改定时任务 |

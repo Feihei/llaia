@@ -26,6 +26,9 @@ pub struct AppState {
     pub token: Arc<String>,
     /// 优雅停止信号：/api/shutdown handler 触发，serve_cmd 的 select! 监听并退出（ADR-0018）
     pub shutdown_signal: Arc<Notify>,
+    /// 进程内重载信号：/api/restart handler 触发，serve_once 收到后重读 config
+    /// 并重建全部子系统（reload loop，进程与终端不退出）
+    pub reload_signal: Arc<Notify>,
     /// active WS 连接注册表：id → event sender，用于主动推送（cron 任务结果等）
     pub active_ws: Arc<
         tokio::sync::Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<WebEvent>>>,
@@ -829,9 +832,14 @@ pub async fn validate_config(
     }
 }
 
-/// POST /api/restart → 自重启 serve 进程：spawn 替代进程后退出。
-/// 替代进程延迟 ~1s 启动，等旧进程释放端口（web channel bind 带重试兜底竞态）。
-/// 容器内拒绝：exit(0) 会终止 PID 1 导致容器整体退出，替代进程无从接管。
+/// POST /api/restart → 进程内全量重载（zeroclaw 式 reload，2026-09-26）。
+///
+/// 不再 spawn 替代进程：触发 reload 信号后 serve_once 整轮子系统推倒重建——
+/// agent 注册表/工具注册（含 image_gen 等按 config 注册的工具）/MCP registry/
+/// 频道/cron/web listener 全部从重读的 config.toml 实例化，进程与终端不退出
+/// （PID 不变，改坏 config 会在终端报错退出）。WS 连接随 listener 重建短暂断开，
+/// 前端既有 3s 重连兜底；端口释放后重新 bind（bind 自带 10×1s 重试兜底竞态）。
+/// 容器内同样适用——进程不退出，不存在 PID 1 被终止的问题。
 pub async fn restart_service(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -840,46 +848,8 @@ pub async fn restart_service(
     if !authorize(&state, &headers, &q) {
         return unauthorized();
     }
-    if in_container() {
-        return json_err(
-            StatusCode::BAD_REQUEST,
-            "running inside a container: self-restart would stop the container; restart the container instead",
-        );
-    }
-    let config_dir = match state.config_path.parent() {
-        Some(d) => d.to_path_buf(),
-        None => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot derive config_dir from config_path",
-            )
-        }
-    };
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("current_exe: {}", e),
-            )
-        }
-    };
-    let log_path = config_dir.join("logs").join("restart.log");
-    match spawn_replacement(&exe, &config_dir, &log_path) {
-        Ok(path) => {
-            tracing::info!(
-                "restart requested: replacement process spawned (output -> {}), exiting",
-                path.display()
-            );
-        }
-        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e),
-    }
-    // 先把响应送达浏览器，再延迟退出（给 axum 刷出响应的时间）
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        std::process::exit(0);
-    });
-    axum::Json(serde_json::json!({ "restarting": true })).into_response()
+    state.reload_signal.notify_one();
+    axum::Json(serde_json::json!({ "reloading": true })).into_response()
 }
 
 /// POST /api/shutdown → 优雅停止 serve 进程（ADR-0018）。
@@ -895,11 +865,6 @@ pub async fn shutdown_service(
     }
     state.shutdown_signal.notify_one();
     axum::Json(serde_json::json!({ "ok": true, "note": "shutdown signaled" })).into_response()
-}
-
-/// 容器环境探测：docker/podman 会建 /.dockerenv 或设 container 环境变量。
-fn in_container() -> bool {
-    std::path::Path::new("/.dockerenv").exists() || std::env::var_os("container").is_some()
 }
 
 /// GET /api/channels/wechat/login → 微信卡片的登录进度（二维码 + 扫码状态）。
@@ -930,61 +895,6 @@ pub async fn get_wechat_login(
         "message": view.message,
     }))
     .into_response()
-}
-
-/// spawn 替代进程：Windows 用 cmd（ping 延时），Unix 用 sh（sleep 延时）。
-/// stdout/stderr 重定向到 logs/restart.log——否则替代进程启动失败时错误无人可见
-/// （serve 常无控制台，且旧进程 300ms 后就退出）。
-/// 返回 Ok(log_path) 表示 spawn 成功。
-fn spawn_replacement(exe: &Path, config_dir: &Path, log_path: &Path) -> Result<PathBuf, String> {
-    let exe_s = exe.display().to_string();
-    let dir_s = config_dir.display().to_string();
-    // 确保 logs 目录存在（serve 正常启动时 log::init 已建，这里防御性兜底）
-    if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .map_err(|e| format!("open restart log {}: {}", log_path.display(), e))?;
-    let stderr = log_file
-        .try_clone()
-        .map_err(|e| format!("clone restart log handle: {}", e))?;
-    let spawn_result = {
-        #[cfg(windows)]
-        {
-            // 必须用 raw_arg 直传命令行：std 的 args() 会给整个 script 再包一层引号，
-            // cmd /c 首尾有引号时只剥最外层、内部引号保留为字面量，
-            // 导致把 "E:\...\llaia.exe"（带引号）当可执行名查找而报错。
-            use std::os::windows::process::CommandExt;
-            let script = format!(
-                "ping -n 2 127.0.0.1 >nul & \"{}\" --config-dir \"{}\" serve",
-                exe_s, dir_s
-            );
-            let mut c = std::process::Command::new("cmd");
-            c.raw_arg("/C");
-            c.raw_arg(&script);
-            c.stdout(std::process::Stdio::from(log_file))
-                .stderr(std::process::Stdio::from(stderr));
-            c.spawn()
-        }
-        #[cfg(not(windows))]
-        {
-            let script = format!(
-                "sleep 1 && exec \"{}\" --config-dir \"{}\" serve",
-                exe_s, dir_s
-            );
-            std::process::Command::new("sh")
-                .args(["-c", &script])
-                .stdout(std::process::Stdio::from(log_file))
-                .stderr(std::process::Stdio::from(stderr))
-                .spawn()
-        }
-    };
-    spawn_result
-        .map(|_| log_path.to_path_buf())
-        .map_err(|e| format!("spawn replacement process: {}", e))
 }
 
 /// PUT /api/config/raw → 写 TOML 文本到盘 + 热加载 provider

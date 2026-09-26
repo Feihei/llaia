@@ -669,6 +669,9 @@ pub struct WebChannel {
     pub mcp_registry: Arc<std::sync::Mutex<Option<Arc<crate::mcp::client::McpRegistry>>>>,
     /// 优雅停止信号：serve_cmd 创建并持有，注入 AppState 后由 /api/shutdown handler 触发（ADR-0018）
     pub shutdown_signal: Arc<Notify>,
+    /// 进程内重载信号：/api/restart handler 触发，serve_once 的 select! 监听后
+    /// 整轮子系统推倒重建（reload loop，进程不退出）
+    pub reload_signal: Arc<Notify>,
     /// CronTool 实例（serve 构建时注入），热加载 cron 时用它重新指向新调度器。
     /// 与 AppState 同款 Arc<Mutex<Option>> 槽位。
     pub cron_tool: Arc<std::sync::Mutex<Option<Arc<CronTool>>>>,
@@ -677,6 +680,7 @@ pub struct WebChannel {
 }
 
 impl WebChannel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         web_config: WebUiConfig,
         registry: Arc<AgentRegistry>,
@@ -684,6 +688,7 @@ impl WebChannel {
         config_path: PathBuf,
         workspace: PathBuf,
         shutdown_signal: Arc<Notify>,
+        reload_signal: Arc<Notify>,
         wechat_login: Arc<tokio::sync::RwLock<crate::channels::wechat::WechatLoginView>>,
     ) -> Self {
         let cron_path = config_path.with_file_name("cron.toml");
@@ -698,6 +703,7 @@ impl WebChannel {
             cron_scheduler: Arc::new(std::sync::Mutex::new(None)),
             mcp_registry: Arc::new(std::sync::Mutex::new(None)),
             shutdown_signal,
+            reload_signal,
             cron_tool: Arc::new(std::sync::Mutex::new(None)),
             wechat_login,
         }
@@ -735,6 +741,7 @@ impl WebChannel {
             workspace: self.workspace.clone(),
             token: Arc::new(token),
             shutdown_signal: self.shutdown_signal.clone(),
+            reload_signal: self.reload_signal.clone(),
             active_ws: self.active_ws.clone(),
             next_ws_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             cron_path: self.cron_path.clone(),

@@ -453,8 +453,8 @@
             <template x-if="configSection==='about'">
               <span class="config-head-actions">
                 <button @click="restartService()" x-bind:disabled="restarting">
-                  <span x-show="!restarting">Restart Service</span>
-                  <span x-show="restarting">Restarting…</span>
+                  <span x-show="!restarting">Reload Service</span>
+                  <span x-show="restarting">Reloading…</span>
                 </button>
                 <button @click="checkUpdate()" x-bind:disabled="checkingUpdate">
                   <span x-show="!checkingUpdate">Check Updates</span>
@@ -796,7 +796,7 @@
                   <template x-if="card.key === 'wechat' && cfg.channels.wechat.enabled && wechatLogin.status !== 'disabled'">
                     <div class="wechat-login">
                       <template x-if="wechatLogin.status === 'restart_required'">
-                        <div class="wl-hint">Saved. This channel starts with the server — press <b>Restart Service</b> (About page) or re-run <code>llaia serve</code>.</div>
+                        <div class="wl-hint">Saved. This channel starts with the server — press <b>Reload Service</b> (About page) or re-run <code>llaia serve</code>.</div>
                       </template>
                       <template x-if="wechatLogin.status === 'waiting'">
                         <div class="wl-hint">Requesting QR code...</div>

@@ -34,6 +34,7 @@ pub trait Channel: Send + Sync + 'static {
 - 共享同一个 Agent，通过 `Arc<tokio::sync::Mutex<Agent>>` 串行化访问
 
 - `serve_cmd` 根据 config 启用情况 `tokio::spawn` 多个 channel 任务（WebUI + 各 IM 频道）
+- **reload loop（2026-09-26）**：`serve_cmd` 主体抽成 `serve_once`，外层循环按 `ServeExit` 决定 Shutdown（Ctrl+C / `/api/shutdown` → 真退出）或 Reload（`/api/restart` → 重读 config.toml 后重跑 serve_once）。进程与终端不退出（PID 不变，观感等同 Ctrl+C 后重新 `llaia serve`），agent 注册表/工具注册（含 image_gen）/MCP registry/频道/cron/web listener 全部随轮重建；进程级单例（tracing subscriber、PID 文件）留在循环外，**日志级别/目录 reload 不跟随**。改坏 config 会在终端报错退出（可见），不会带旧配置假装成功。
 
 - 当前实现：`CliChannel`（终端 REPL）、`WebChannel`（WebUI HTTP/WS，主交互界面）、`QqChannel`、`TelegramChannel`、`DingtalkChannel`、`WechatChannel`（微信 ClawBot）、`FeishuChannel`、`MailChannel`（IMAP/SMTP）
 

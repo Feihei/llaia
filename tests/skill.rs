@@ -88,6 +88,7 @@ async fn build_state(tmp: &std::path::Path) -> AppState {
         workspace,
         token: Arc::new(TOKEN.to_string()),
         shutdown_signal: Arc::new(tokio::sync::Notify::new()),
+        reload_signal: Arc::new(tokio::sync::Notify::new()),
         active_ws: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         next_ws_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         cron_path: config_dir.join("cron.toml"),
@@ -288,4 +289,57 @@ async fn test_skills_api_full_lifecycle() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+// ───────────────────────── in-place reload (reload loop) ─────────────────────────
+
+/// POST /api/restart → 200 + 触发 reload_signal（进程内重载，reload loop 消费）。
+/// 旧实现是 spawn 替代进程 + exit(0)；改成信号后端到端语义靠此测试锚定。
+#[tokio::test]
+async fn test_restart_endpoint_triggers_reload_signal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = build_state(tmp.path()).await;
+
+    let res = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/restart?token={}", TOKEN))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let json = body_json(res).await;
+    assert_eq!(json["reloading"], serde_json::json!(true));
+
+    // notify_one 存了许可：notified() 立即完成 = 信号确已触发
+    state.reload_signal.notified().await;
+}
+
+/// POST /api/restart 无 token → 401，且不触发信号。
+#[tokio::test]
+async fn test_restart_endpoint_requires_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = build_state(tmp.path()).await;
+
+    let res = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/restart")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    // 无许可：notified() 必须挂起——用 timeout 证明信号没被触发
+    tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        state.reload_signal.notified(),
+    )
+    .await
+    .expect_err("reload_signal must NOT fire without token");
 }

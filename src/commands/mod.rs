@@ -443,12 +443,20 @@ pub fn effective_webui(file: &WebUiConfig, bind: &WebBindOverride) -> WebUiConfi
 }
 
 /// 守护进程模式：启动所有非 CLI 的后台频道（QQ、未来 WebUI 等），不启动终端交互
+/// serve 子系统一轮的退出原因（reload loop 的循环控制）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeExit {
+    /// 真退出：Ctrl+C 或 /api/shutdown
+    Shutdown,
+    /// 进程内重载：/api/restart —— 重读 config 并重建全部子系统，进程不退出
+    Reload,
+}
+
 pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride) -> Result<()> {
     prepare_startup_dir(config_dir)?;
-    let config = load_config_or_init(config_dir)?;
-    let webui = effective_webui(&config.webui, &bind);
-    warn_plaintext_secrets(config_dir);
+    let mut config = load_config_or_init(config_dir)?;
 
+    // tracing 全局 subscriber 只能安装一次：reload 不跟随日志级别/目录变更（改日志需真重启）。
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
 
@@ -460,8 +468,37 @@ pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride) -> Result<()> {
     pid_file.acquire()?;
     let _pid_guard = PidGuard(pid_file);
 
+    // Reload loop（zeroclaw 式，2026-09-26）：/api/restart 不再 spawn 替代进程，
+    // 而是把整轮子系统推倒重建——agent 注册表/工具注册（含 image_gen 等）/MCP/
+    // 频道/cron/web listener 全部从新 config 实例化。PID 与终端保持不变，
+    // 观感等同 Ctrl+C 后重新 `llaia serve`；改坏 config 会在终端报错退出（可见）。
+    loop {
+        let exit = serve_once(config_dir, &config, &bind).await?;
+        match exit {
+            ServeExit::Shutdown => return Ok(()),
+            ServeExit::Reload => {
+                // 先落盘重读（失败则带终端可见的错误退出，绝不带旧配置假装成功）
+                config = load_config_or_init(config_dir)?;
+                tracing::info!("config reloaded: all subsystems rebuilt in-process");
+                println!("  ↻ config reloaded — channels, tools and MCP rebuilt (same process)\n");
+            }
+        }
+    }
+}
+
+/// serve 主体的一轮：构建 registry/频道/cron/web，运行到 Ctrl+C、/api/shutdown
+/// 或 /api/restart。reload 场景下整个函数随外层 loop 重跑，无跨轮共享状态
+/// （进程级单例除外：tracing subscriber、PID 文件——见 serve_cmd）。
+async fn serve_once(
+    config_dir: &Path,
+    config: &Config,
+    bind: &WebBindOverride,
+) -> Result<ServeExit> {
+    let webui = effective_webui(&config.webui, bind);
+    warn_plaintext_secrets(config_dir);
+
     let (registry, cron_tool, mcp_registry) =
-        crate::channels::cli::build_agent(&config, config_dir).await?;
+        crate::channels::cli::build_agent(config, config_dir).await?;
 
     // serve 模式：让主 agent 与 WebChannel 共享同一份 live_config，
     // 这样 WebUI 修改 [runtime].timezone 后下一轮对话即可生效（ADR-0017 热更新）。
@@ -470,8 +507,10 @@ pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride) -> Result<()> {
         let mut a = registry.main.lock().await;
         a.attach_live_config(live_config.clone());
     }
-    // WebUI 优雅停止信号：/api/shutdown 触发后让 serve_cmd 退出（ADR-0018）
+    // WebUI 优雅停止/重载信号：/api/shutdown 与 /api/restart 各自触发，
+    // serve_once 的 select! 监听后分别走 Shutdown / Reload（ADR-0018 + reload loop）。
     let shutdown_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let reload_signal = std::sync::Arc::new(tokio::sync::Notify::new());
 
     // serve 模式：无 provider 时 warn 但继续启动（WebUI 配置功能不依赖 provider，聊天降级提示）
     {
@@ -627,6 +666,7 @@ pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride) -> Result<()> {
         config_path,
         workspace.clone(),
         shutdown_signal.clone(),
+        reload_signal.clone(),
         wechat_login.clone(),
     ));
     web.set_mcp_registry(mcp_registry);
@@ -717,16 +757,25 @@ pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride) -> Result<()> {
             tracing::info!("received Ctrl+C, shutting down");
             // 与 chat 共用同一句退出语
             println!("\n{}", crate::banner::GOODBYE);
+            shutdown_serve(&_cron, &tasks).await;
+            return Ok(ServeExit::Shutdown);
         }
         _ = shutdown_signal.notified() => {
             tracing::info!("received /api/shutdown, shutting down");
             println!("\n{}", crate::banner::GOODBYE);
+            shutdown_serve(&_cron, &tasks).await;
+            return Ok(ServeExit::Shutdown);
+        }
+        _ = reload_signal.notified() => {
+            tracing::info!("received /api/restart, reloading in place");
         }
     }
 
-    // 共享清理逻辑（ADR-0018）：cron 调度器停止 + 各 channel task abort
+    // 共享清理逻辑（ADR-0018）：cron 调度器停止 + 各 channel task abort。
+    // reload 与 shutdown 走同一条清理路径——WS 连接断开、前端 3s 重连兜底，
+    // 端口释放后 serve_once 下一轮重新 bind（bind 自带 10×1s 重试兜底竞态）。
     shutdown_serve(&_cron, &tasks).await;
-    Ok(())
+    Ok(ServeExit::Reload)
 }
 
 pub fn config_cmd(config_dir: &Path) -> Result<()> {

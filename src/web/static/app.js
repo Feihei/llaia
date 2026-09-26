@@ -1554,20 +1554,22 @@ function llaiaApp() {
       if (!this.authed) return;
       if (r.ok) { this.status = await r.json(); }
     },
-    // restart serve process; poll /api/status until the replacement process is up, then reload
+    // reload serve in place: the backend tears down and rebuilds all subsystems
+    // (channels/tools/MCP) from the current config.toml without exiting the
+    // process; poll /api/status until the listener is back, then reload the page
     async restartService() {
-      if (!confirm('Restart the llaia serve process now?')) return;
+      if (!confirm('Reload llaia with the current config? Channels, tools and MCP will be rebuilt (same process).')) return;
       this.restarting = true;
-      this.restartMsg = 'Restarting…';
+      this.restartMsg = 'Reloading…';
       try {
         const r = await this.apiFetch('/api/restart', { method: 'POST' });
         if (!r.ok) {
-          this.restartMsg = 'Restart failed: HTTP ' + r.status;
+          this.restartMsg = 'Reload failed: HTTP ' + r.status;
           this.restarting = false;
           return;
         }
       } catch (e) {
-        // old process may have exited before response landed; keep polling
+        // listener may be rebound before the response landed; keep polling
       }
       this.restartMsg = 'Waiting for service to come back…';
       const t0 = Date.now();
@@ -1583,8 +1585,8 @@ function llaiaApp() {
         } catch (e) { /* still down, retry */ }
         setTimeout(poll, 1500);
       };
-      // replacement process starts ~1s after old one exits
-      setTimeout(poll, 3000);
+      // in-process reload is fast: first probe after 1s
+      setTimeout(poll, 1000);
     },
     // stop serve process via /api/shutdown; serve_cmd then runs the shared
     // cleanup (cron stop + channel task abort) and exits (ADR-0018)
