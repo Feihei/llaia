@@ -633,24 +633,13 @@
                       <button class="btn-delete" @click="deleteModel(id)">×</button>
                     </span>
                   </div>
-                  <div class="form-row"><label>provider</label>
-                    <select x-model="cfg.model[id].provider">
-                      <option value="" disabled>— provider —</option>
-                      <template x-for="pid in llmProviders()" :key="pid">
-                        <option :value="pid" x-text="pid + ' (' + effectiveType(pid) + ')'"></option>
-                      </template>
-                    </select>
+                  <!-- 身份字段（kind / provider / server model）添加时即定死，meta 行只读展示；
+                       id 若不含 provider 名也能从这里看出来。改错删掉重加。 -->
+                  <div class="model-meta">
+                    <span class="model-fixed model-kind" x-text="cfg.model[id].kind || 'chat'"></span>
+                    <span class="hint" x-text="'@' + cfg.model[id].provider"></span>
+                    <span class="model-fixed" x-text="cfg.model[id].model" :title="cfg.model[id].provider + ' · ' + cfg.model[id].model"></span>
                   </div>
-                  <div class="form-row"><label>kind</label>
-                    <select x-model="cfg.model[id].kind">
-                      <option value="chat">chat</option>
-                      <option value="tts" :disabled="cfg.model[id].provider && effectiveType(cfg.model[id].provider) !== 'openai_compatible'">tts</option>
-                      <option value="image" :disabled="cfg.model[id].provider && effectiveType(cfg.model[id].provider) !== 'openai_compatible'">image</option>
-                      <option value="embedding" :disabled="cfg.model[id].provider && effectiveType(cfg.model[id].provider) !== 'openai_compatible'">embedding</option>
-                    </select>
-                  </div>
-                  <div class="form-row"><label>model</label>
-                    <input x-model="cfg.model[id].model" style="width:220px" placeholder="server model name"></div>
                   <template x-if="(cfg.model[id].kind || 'chat') === 'chat'">
                     <div>
                       <div class="form-row"><label>ctx</label>
@@ -663,7 +652,9 @@
                     <input x-model="cfg.model[id].size" style="width:140px" placeholder="512x512"></div>
                   <div class="form-row"><label>capabilities</label>
                     <label class="switch"><input type="checkbox" :checked="(cfg.model[id].capabilities || []).includes('multimodal')" @change="toggleMultimodal(id)"> multimodal</label></div>
-                  <div class="model-row">
+                  <!-- thinking 声明与 probe 都是 chat 专属（probe 发最小 chat 请求，
+                       tts/image/embedding 点了必失败，索性不显示） -->
+                  <div class="model-row" x-show="(cfg.model[id].kind || 'chat') === 'chat'">
                     <button type="button" class="collapse-toggle" @click="toggleThinking(id)"
                             title="[model.<id>.thinking] — per-model thinking capability (values from wire probes, off by default)">
                       <span x-text="thinkingOpen[id] ? '▾' : '▸'"></span> thinking
@@ -679,7 +670,7 @@
                   </div>
                   <!-- 模型级 thinking 能力声明（P2-12）：值必须来自 wire 实测，全空 = 未声明。
                        开合走 thinkingOpen（与配置段解耦）：已配置的模型也能折叠，配置不丢。 -->
-                  <template x-if="cfg.model[id].thinking && thinkingOpen[id]">
+                  <template x-if="(cfg.model[id].kind || 'chat') === 'chat' && cfg.model[id].thinking && thinkingOpen[id]">
                     <div class="compat-body" style="margin:2px 0 6px 22px">
                       <div class="hint">[thinking] capability for this model — dialects must come from wire probes (see thinking-capability plan); all-unset = no [thinking] section, requests stay byte-identical to legacy.</div>
                       <label class="switch">default level:

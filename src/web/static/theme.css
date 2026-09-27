@@ -898,18 +898,40 @@ white-space: pre-wrap; word-break: break-word;
   background: var(--bg-elev); border: 1px solid var(--border);
 }
 #config-pane .model-filter select { width: auto; min-width: 120px; }
-/* 模型卡片网格：列宽下限 340px，auto-fill 分栏；窄窗口自然退单列 */
+/* 模型卡片瀑布流：CSS columns 按列宽自动分栏，卡片随内容高低错落
+   （列优先填充，对模型卡片无顺序敏感问题）；窄窗口自然退单列 */
 #config-pane .model-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 12px;
+  columns: 340px;
+  column-gap: 12px;
 }
-#config-pane .model-grid .provider-card { margin: 0; }
+#config-pane .model-grid .provider-card {
+  margin: 0 0 12px;
+  break-inside: avoid; /* 卡片不跨列截断 */
+}
 /* disabled 模型卡：保留在目录里（改回 enabled 即恢复），只灰化 */
 #config-pane .model-card--off { border-left-color: var(--border); opacity: .75; }
+/* 身份 meta 行：kind 徽章 + @provider + server model，只读一行收干 */
+#config-pane .model-meta {
+  display: flex; align-items: center; gap: 8px;
+  margin: 4px 0 8px; min-width: 0;
+}
+#config-pane .model-meta .hint { flex: none; }
+#config-pane .model-meta .model-fixed { flex: 1 1 auto; }
 #config-pane .card-header-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 /* 添加流面板：青色左边条与卡片网格区分 */
 #config-pane .add-model-panel { border-left-color: var(--cyan); }
+/* 卡片上的只读字段（provider/kind/model）：添加时即定死，仅展示 */
+#config-pane .model-fixed {
+  display: inline-block; max-width: 100%;
+  font-size: 13px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: middle;
+}
+#config-pane .model-kind {
+  padding: 1px 8px;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  font-size: 11px;
+}
 #config-pane .add-model-panel .hint { margin-left: 10px; }
 #config-pane .linklike {
   background: none; border: none; padding: 0; cursor: pointer;
