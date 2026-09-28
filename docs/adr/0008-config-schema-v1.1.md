@@ -205,3 +205,5 @@ ws_base = "https://open.feishu.cn"
 - 一步到位无兼容层（自用为主，量小改配置五分钟）：不给旧结构留迁移代码，错误消息指引人工迁移。
 
 **修订（同日实施期）**：「一步到位」原定 `deny_unknown_fields` 启动即报错，落地时发现对存量配置过于粗暴——agent 引用、fallback、tools 引用全要手工改写。改为 `Config::load` 反序列化前的**自动迁移层**（`migrate_legacy_config`）：旧 model 子表/凭据段/内联端点原地改写为新形态（仅内存态，幂等，磁盘不动），model id 沿用 `pid.alias` 两段式使旧引用零改动解析；显式 `[model]` 条目优先，`deny_unknown_fields` 保留拦真 unknown 键。
+
+**修订（2026-09-28，search 平台判别下沉）**：service family 由三类型（tavily/baidu/brave）收敛为单一 `type = "search"` + `platform` 字段（tavily|baidu|brave，load 期必填且校验）。依据：三家端点 URL 均为编译期常量、配置的 base_url 从不被消费（该 family 下 url 字段无意义），type 的职责是选 adapter 代码路径而非厂商命名；`UnifiedSearch::build` 与 `resolve_extractor` 改按 `search_platform()` 分派。旧写法 `type = "tavily"` 等在加载期归一化（P8 短暂数日的形态，不值得留正式别名）。

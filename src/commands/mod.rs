@@ -62,7 +62,7 @@ dir = "~/.llaia/logs"
 
 # Providers: the unified connection registry. `type` picks the family:
 #   llm family     (openai_compatible / anthropic / gemini) — hosts [model.<id>] entries, probeable
-#   service family (tavily / baidu / brave)                — pure credentials for search/extract, no models
+#   service family (search)                                 — pure credentials for search/extract, no models
 # An explicit unknown type is a startup error; omitting `type` defaults to openai_compatible.
 #
 # Local Ollama example:
@@ -111,16 +111,20 @@ dir = "~/.llaia/logs"
 # model = "claude-sonnet-4-20250514"
 # max_tokens = 8192              # required for Anthropic; defaults to 4096 if unset
 #
-# Search services (service family): pure credentials, no model entries, never appear
+# Search services (service family): one `search` type, `platform` picks the wire
+# adapter (tavily | baidu | brave). Pure credentials, no model entries, never appear
 # in the add-model probe list. Referenced by [tools.search].provider below.
 # [provider.tv]
-# type = "tavily"
+# type = "search"
+# platform = "tavily"
 # api_key = "${TAVILY_API_KEY}"
-# [provider.baidu]
-# type = "baidu"
+# [provider.bd]
+# type = "search"
+# platform = "baidu"
 # api_key = "${BAIDU_API_KEY}"
-# [provider.brave]
-# type = "brave"
+# [provider.br]
+# type = "search"
+# platform = "brave"
 # api_key = "${BRAVE_API_KEY}"
 
 # Main Agent: leave model empty to enter degraded mode (no provider, WebUI config only)
@@ -1224,9 +1228,18 @@ pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
     }
     for (pid, p) in &cfg.provider {
         if p.effective_type() != "openai_compatible" {
+            let extra = if p.is_service() {
+                format!(" platform={}", p.search_platform().unwrap_or("?"))
+            } else {
+                String::new()
+            };
             checks.push(DoctorCheck::ok(
                 &format!("provider.{pid}"),
-                format!("type={} (connectivity not probed)", p.effective_type()),
+                format!(
+                    "type={}{} (connectivity not probed)",
+                    p.effective_type(),
+                    extra
+                ),
             ));
             continue;
         }

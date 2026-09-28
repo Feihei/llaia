@@ -448,6 +448,7 @@ mod tests {
                 provider_type: "openai_compatible".into(),
                 base_url: base_url.to_string(),
                 api_key: "sk-test".into(),
+                platform: None,
                 compat: None,
             },
         );

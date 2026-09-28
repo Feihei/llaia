@@ -213,17 +213,28 @@ fn default_log_dir() -> String {
 pub const LLM_PROVIDER_TYPES: &[&str] = &["openai_compatible", "anthropic", "gemini"];
 
 /// service family：纯凭据服务（搜索/抽取），无 model 条目、不进添加模型的 probe 列表。
-pub const SERVICE_PROVIDER_TYPES: &[&str] = &["tavily", "baidu", "brave"];
+/// 统一为单一 `search` 类型；具体平台由 `platform` 字段判别（各家 wire 协议不同，
+/// 端点 URL 是编译期常量、配置不消费——base_url 对该 family 无意义）。
+pub const SERVICE_PROVIDER_TYPES: &[&str] = &["search"];
+
+/// P8 短暂数日用过的旧 service type 写法（load 期归一化为 search + platform）
+pub const LEGACY_SERVICE_TYPES: &[&str] = &["tavily", "baidu", "brave"];
+
+/// search 类型下支持的平台（`platform` 字段合法值；新增搜索商 = 加一个 variant +
+/// 对应 adapter，无共享协议前不合并进同一 wire 实现）
+pub const SEARCH_PLATFORMS: &[&str] = &["tavily", "baidu", "brave"];
 
 /// 一个 provider 端点（连接信息）：统一连接注册表条目。`type` 即判别器，分两族：
 ///
 /// - **llm family**（`openai_compatible`/`anthropic`/`gemini`）：可被 `[model.<id>]`
 ///   条目引用，出现在添加模型的 probe 列表
-/// - **service family**（`tavily`/`baidu`/`brave`…）：纯凭据，`[tools.search]` /
-///   `web_fetch.extract_provider` 按引用消费
+/// - **service family**（`search`）：纯凭据，`platform` 选具体平台
+///   （tavily/baidu/brave），`[tools.search]` / `web_fetch.extract_provider` 按引用消费
 ///
 /// `type` 缺省 = openai_compatible（存量习惯保留）；**显式未知值在 `Config::load`
 /// 报错**——静默回退会让打错的 service type 变成一个 LLM provider 蹲进 probe 列表。
+/// 旧写法 `type = "tavily"` / `"baidu"` / `"brave"` 在加载期归一化为
+/// `type = "search"` + 对应 `platform`（P8 短暂数日，不值得留正式别名）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
@@ -235,6 +246,10 @@ pub struct ProviderConfig {
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
+    /// search 类型的平台判别（tavily/baidu/brave）；llm family 不消费。
+    /// 缺省 None：load 期校验对 type=search 强制要求该字段存在且合法。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// 兼容覆盖层 `[provider.<id>.compat.*]`；仅 llm family 的 chat 请求消费。
     /// 优先级高于 base_url 自动探测；未设置时按 base_url 子串探测（ollama/llamacpp）。
     #[serde(default)]
@@ -248,6 +263,15 @@ impl ProviderConfig {
             "openai_compatible"
         } else {
             &self.provider_type
+        }
+    }
+
+    /// search 平台（type=search 时必有的判别值；其他 family 返回 None）
+    pub fn search_platform(&self) -> Option<&str> {
+        if self.is_service() {
+            self.platform.as_deref()
+        } else {
+            None
         }
     }
 
@@ -1114,8 +1138,8 @@ fn migrate_legacy_config(raw: &mut toml::Value) -> Vec<String> {
         ));
     }
 
-    // ---- 2. 搜索凭据段 → service family provider ----
-    for (name, ptype) in [("tavily", "tavily"), ("baidu", "baidu"), ("brave", "brave")] {
+    // ---- 2. 搜索凭据段 → service family provider（type=search + platform 判别） ----
+    for name in ["tavily", "baidu", "brave"] {
         let Some(sec) = tools.remove(name).and_then(|v| v.as_table().cloned()) else {
             continue;
         };
@@ -1124,7 +1148,14 @@ fn migrate_legacy_config(raw: &mut toml::Value) -> Vec<String> {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        ensure_provider(&mut providers, name, ptype, "", &api_key, &mut notices);
+        ensure_provider(&mut providers, name, "search", "", &api_key, &mut notices);
+        // platform 补在 ensure_provider 之后：仅当条目是本次新建时写入，
+        // 用户已有同名 type=search provider 时不覆盖其显式 platform
+        if let Some(p) = providers.get_mut(name).and_then(|v| v.as_table_mut()) {
+            if !p.contains_key("platform") {
+                p.insert("platform".into(), toml::Value::from(name));
+            }
+        }
         // [tools.search].provider 旧语义是类型名（tavily/baidu/brave），与新建
         // provider id 恰好同串，无需改写；其余取值留给 load 校验去 warn。
     }
@@ -1307,6 +1338,18 @@ impl Config {
         }
         // P8：provider type 显式未知 → 报错（不静默回退——打错的 service type
         // 会变出一个 LLM provider 蹲进 probe 列表）。缺省（未写 type）回退 openai_compatible。
+        // 旧写法 type = tavily/baidu/brave（P8 短暂数日的形态）先归一化为
+        // search + platform 再校验，存量配置零改动。
+        for (id, p) in config.provider.iter_mut() {
+            if LEGACY_SERVICE_TYPES.contains(&p.provider_type.as_str()) {
+                let legacy = std::mem::take(&mut p.provider_type);
+                p.provider_type = "search".to_string();
+                p.platform = Some(legacy.clone());
+                tracing::warn!(
+                    "provider.{id}: normalized legacy type '{legacy}' -> type = \"search\", platform = \"{legacy}\""
+                );
+            }
+        }
         for (id, p) in &config.provider {
             let t = p.provider_type.trim();
             if !t.is_empty()
@@ -1318,6 +1361,20 @@ impl Config {
                     LLM_PROVIDER_TYPES.join("|"),
                     SERVICE_PROVIDER_TYPES.join("|")
                 );
+            }
+            // search 类型：platform 必填且必须受支持（adapter 按它分派 wire 实现）
+            if p.is_service() {
+                match p.platform.as_deref() {
+                    Some(pl) if SEARCH_PLATFORMS.contains(&pl) => {}
+                    Some(pl) => anyhow::bail!(
+                        "provider.{id}: unsupported search platform '{pl}' (supported: {})",
+                        SEARCH_PLATFORMS.join("|")
+                    ),
+                    None => anyhow::bail!(
+                        "provider.{id}: type = \"search\" requires a platform field ({})",
+                        SEARCH_PLATFORMS.join("|")
+                    ),
+                }
             }
         }
         // P8：model 目录条目校验——provider 存在、非 service family、
@@ -1567,6 +1624,7 @@ impl Config {
                 provider_type: "openai_compatible".into(),
                 base_url: "http://localhost:11434/v1".into(),
                 api_key: String::new(),
+                platform: None,
                 compat: None,
             },
         );
@@ -1824,9 +1882,10 @@ model = "llamacpp.qwen"
             Some(crate::provider::ThinkingLevel::Medium)
         ));
 
-        // 2. 搜索凭据 → service family provider；search.provider 引用直通
+        // 2. 搜索凭据 → service family provider（type=search + platform）；引用直通
         let tv = config.provider.get("tavily").expect("tavily provider");
-        assert_eq!(tv.effective_type(), "tavily");
+        assert_eq!(tv.effective_type(), "search");
+        assert_eq!(tv.search_platform(), Some("tavily"));
         assert_eq!(tv.api_key, "tv-key");
         assert_eq!(config.tools.search.provider, "tavily");
 
@@ -1881,11 +1940,64 @@ model = "default.qwen"
     }
 
     #[test]
+    fn search_platform_validation_and_legacy_normalization() {
+        // type=search 缺 platform → 报错
+        let toml = r#"
+[provider.tv]
+type = "search"
+api_key = "k"
+
+[agent.main]
+model = "qwen"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let err = Config::load(&tmp.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("requires a platform"), "{err}");
+
+        // platform 不在支持列表 → 报错
+        let toml = toml.replace("api_key = \"k\"", "platform = \"bing\"\napi_key = \"k\"");
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let err = Config::load(&tmp.path().to_path_buf()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported search platform 'bing'"),
+            "{err}"
+        );
+
+        // 旧写法 type = tavily/baidu/brave → 归一化 search + platform，存量零改动
+        let toml = r#"
+[provider.tv]
+type = "tavily"
+api_key = "k"
+
+[provider.bd]
+type = "baidu"
+api_key = "k"
+
+[agent.main]
+model = "qwen"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        let tv = config.provider.get("tv").unwrap();
+        assert_eq!(tv.effective_type(), "search");
+        assert_eq!(tv.search_platform(), Some("tavily"));
+        assert_eq!(
+            config.provider.get("bd").unwrap().search_platform(),
+            Some("baidu")
+        );
+    }
+
+    #[test]
     fn model_entry_validation_errors() {
         // service family provider 不能挂 model 条目
         let toml = r#"
 [provider.tv]
-type = "tavily"
+type = "search"
+platform = "tavily"
 api_key = "k"
 
 [model.bad]
@@ -1981,8 +2093,11 @@ dir = "~/.llaia-test/logs"
         assert!(!m1.native_tool_calling.unwrap_or(true));
         let m2 = config.models.get("qwen2").unwrap();
         assert!(m2.native_tool_calling.unwrap_or(true));
-        // service family provider
-        assert!(config.provider.get("tv").unwrap().is_service());
+        // service family provider（旧写法 type=tavily 已归一化为 search + platform）
+        let tv = config.provider.get("tv").unwrap();
+        assert!(tv.is_service());
+        assert_eq!(tv.effective_type(), "search");
+        assert_eq!(tv.search_platform(), Some("tavily"));
 
         // agent: workspace 字段已移除（存量配置中的该键被忽略），soul/user/memory 缺省为 None
         let a = config.agent.get("main").unwrap();

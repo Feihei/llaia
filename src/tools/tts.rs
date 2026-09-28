@@ -185,6 +185,7 @@ mod tests {
                 provider_type: "openai_compatible".into(),
                 base_url: "http://localhost:9/v1".into(),
                 api_key: "sk-test".into(),
+                platform: None,
                 compat: None,
             },
         );

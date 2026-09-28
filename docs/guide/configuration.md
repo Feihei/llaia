@@ -60,15 +60,19 @@ api_key = "${OLLAMA_API_KEY}"       # 留空或引用 .env
 type = "anthropic"
 api_key = "${ANTHROPIC_API_KEY}"
 
-# service family：纯凭据搜索/抽取服务，不承载模型、不进 probe 列表
+# service family：纯凭据搜索/抽取服务，不承载模型、不进 probe 列表。
+# 统一 type = "search"，platform 选 wire adapter（tavily | baidu | brave）——
+# 各家端点编译期固定，base_url 不消费。
 [provider.tv]
-type = "tavily"
+type = "search"
+platform = "tavily"
 api_key = "${TAVILY_API_KEY}"
 ```
 
 - `type` 缺省回退 `openai_compatible`；**显式写错的 type 启动即报错**。
+- `type = "search"` 时 `platform` 必填且须为受支持平台（启动即校验）。
 - llm family 有 `[provider.<id>.compat]` 可选覆盖层，抹平 OpenAI 兼容端点的实现差异（自动按 base_url 探测，见 ADR-0026）。
-- **旧配置自动迁移**：v0.5 的 `[provider.<id>.<alias>]` model 子表、`[tools.tavily|baidu|brave]` 凭据段、`[tools.tts]`/`[tools.image_gen]` 内联端点在启动时自动改写为新结构（内存态，磁盘文件不动）。model id 沿用 `<provider>.<alias>` 两段式，所以 agent 里的旧引用（如 `model = "default.qwen"`）无需任何改动。在 WebUI 保存一次即可把新结构写盘。
+- **旧配置自动迁移**：v0.5 的 `[provider.<id>.<alias>]` model 子表、`[tools.tavily|baidu|brave]` 凭据段、`[tools.tts]`/`[tools.image_gen]` 内联端点在启动时自动改写为新结构（内存态，磁盘文件不动）。model id 沿用 `<provider>.<alias>` 两段式，所以 agent 里的旧引用（如 `model = "default.qwen"`）无需任何改动。P8 短暂用过的 `type = "tavily"` 等写法也在加载期归一化为 `type = "search"` + 对应 `platform`。在 WebUI 保存一次即可把新结构写盘。
 
 ## `[model.<id>]` — 模型目录（P8）
 
@@ -161,7 +165,7 @@ off_wire = "reasoning_effort_none"  # 关方言：enable_thinking_false | thinki
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
-| `provider` | 空（不注册） | 选定的搜索 provider，须为 **service family**（`tavily` / `baidu` / `brave`）的 `[provider.<id>]` 条目 id（P8）。 |
+| `provider` | 空（不注册） | 选定的搜索 provider，须为 **service family**（`type = "search"`）的 `[provider.<id>]` 条目 id（P8）。 |
 | `top_k` | `8` | 默认返回条数。 |
 
 统一 `search` 工具：对外只暴露一个 `search`，内部按所选 provider 的 type 分派到对应 adapter，不串试、不聚合。搜索源的 api\_key 配在 provider 条目上（凭据统一进注册表）。
@@ -189,7 +193,7 @@ off_wire = "reasoning_effort_none"  # 关方言：enable_thinking_false | thinki
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `max_chars` | `20000` | 返回正文最大字符数，超出截断。 |
-| `extract_provider` | 空（本地抽取） | 服务端正文抽取，须为支持 extract 的 service family provider（如 tavily）。 |
+| `extract_provider` | 空（本地抽取） | 服务端正文抽取，须为 `platform = "tavily"` 的 service family provider。 |
 
 ## `[channels.*]`
 

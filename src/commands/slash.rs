@@ -1693,6 +1693,7 @@ mod tests {
                 provider_type: "openai_compatible".into(),
                 base_url: "http://localhost:8080/v1".into(),
                 api_key: String::new(),
+                platform: None,
                 compat: None,
             },
         );
@@ -1702,6 +1703,7 @@ mod tests {
                 provider_type: "openai_compatible".into(),
                 base_url: "http://localhost:8081/v1".into(),
                 api_key: String::new(),
+                platform: None,
                 compat: None,
             },
         );

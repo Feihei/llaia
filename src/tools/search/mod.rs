@@ -75,18 +75,25 @@ impl UnifiedSearch {
         if !prov.is_service() {
             tracing::warn!(
                 provider = id,
-                "tools.search.provider must reference a service-family provider (tavily|baidu|brave); search tool not registered"
+                "tools.search.provider must reference a search service provider (type = \"search\"); search tool not registered"
             );
             return Ok(None);
         }
         let api_key = prov.api_key.clone();
-        let provider: Option<Arc<dyn SearchProvider>> = match prov.effective_type() {
-            "tavily" if !api_key.is_empty() => {
+        // 平台判别：type=search 统一入口，platform（load 期校验必填且合法）选 adapter。
+        // 各家 wire 协议不同（tavily key-in-body / baidu Bearer+chat-style / brave GET+专用头），
+        // 端点 URL 是编译期常量，配置不消费。
+        let provider: Option<Arc<dyn SearchProvider>> = match prov.search_platform() {
+            Some("tavily") if !api_key.is_empty() => {
                 Some(Arc::new(tavily::TavilyProvider::new(api_key)?))
             }
-            "baidu" if !api_key.is_empty() => Some(Arc::new(baidu::BaiduProvider::new(api_key)?)),
-            "brave" if !api_key.is_empty() => Some(Arc::new(brave::BraveProvider::new(api_key)?)),
-            t => {
+            Some("baidu") if !api_key.is_empty() => {
+                Some(Arc::new(baidu::BaiduProvider::new(api_key)?))
+            }
+            Some("brave") if !api_key.is_empty() => {
+                Some(Arc::new(brave::BraveProvider::new(api_key)?))
+            }
+            platform => {
                 if api_key.is_empty() {
                     tracing::warn!(
                         provider = id,
@@ -95,8 +102,8 @@ impl UnifiedSearch {
                 } else {
                     tracing::warn!(
                         provider = id,
-                        ty = t,
-                        "unknown or unimplemented search provider type; search tool not registered"
+                        ?platform,
+                        "unknown or unimplemented search platform; search tool not registered"
                     );
                 }
                 None

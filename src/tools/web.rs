@@ -25,10 +25,10 @@ pub fn resolve_extractor(config: &Config, id: &str) -> Result<Option<Arc<TavilyP
     if !prov.is_service() {
         anyhow::bail!("provider '{id}' is not a service-family provider");
     }
-    if prov.effective_type() != "tavily" {
+    if prov.search_platform() != Some("tavily") {
         anyhow::bail!(
-            "provider '{id}' (type {}) has no extract capability (v1: tavily only)",
-            prov.effective_type()
+            "provider '{id}' (platform {:?}) has no extract capability (v1: tavily only)",
+            prov.search_platform()
         );
     }
     if prov.api_key.is_empty() {

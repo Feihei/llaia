@@ -959,7 +959,11 @@ function llaiaApp() {
           this.thinkingOpen[id] = this.thinkingConfigured(m);
         }
         data.model = models;
-        for (const pid in data.provider) this.compatOpen[pid] = false;
+        for (const pid in data.provider) {
+          this.compatOpen[pid] = false;
+          // platform：search 类型必显；llm family / 旧配置省略 → 空串让 select 显示占位
+          if (data.provider[pid].platform === undefined) data.provider[pid].platform = '';
+        }
         this.cfg = data;
         // 初始化每个 agent 的 fallback 草稿（下拉选择暂存）
         this.fallbackDraft = {};
@@ -1023,12 +1027,14 @@ function llaiaApp() {
         if (key === 'permission' && (value === '' || value === null || value === undefined)) return undefined;
         return typeof value === 'number' && isNaN(value) ? undefined : value;
       }));
-      // 全 null 的 compat 覆盖层等价于未设置，丢弃以免在 TOML 写入空 compat = {}
+      // 全 null 的 compat 覆盖层等价于未设置，丢弃以免在 TOML 写入空 compat = {}；
+      // platform 空串归位为未设置（serde Option 会把 "" 收成 Some("")，写出脏行）
       for (const pid in cfgToSend.provider || {}) {
         const p = cfgToSend.provider[pid];
         if (p.compat && Object.values(p.compat).every(v => v === null)) {
           delete p.compat;
         }
+        if (p.platform === '') delete p.platform;
       }
       // models 子树清理：全 null thinking 等价于未设置（空对象会写出空段）；kind 空串归位 chat（serde enum 拒收 ""）。
       for (const id in cfgToSend.model || {}) {
@@ -1091,7 +1097,9 @@ function llaiaApp() {
       return p ? (p.type || 'openai_compatible') : '';
     },
     isServiceProvider(pid) {
-      return ['tavily', 'baidu', 'brave'].includes(this.effectiveType(pid));
+      // 后端 load 期已把旧 type=tavily/baidu/brave 归一化为 search + platform，
+      // 前端只见统一的 search 类型
+      return this.effectiveType(pid) === 'search';
     },
     // llm family：可承载 [model.<id>] 条目的 provider（添加模型的下拉只列这些）
     llmProviders() {

@@ -509,12 +509,20 @@
                     <option value="openai_compatible">openai_compatible</option>
                     <option value="anthropic">anthropic</option>
                     <option value="gemini">gemini</option>
+                    <option value="search">search (service)</option>
+                  </select>
+                </div>
+                <!-- search 类型：platform 选 wire adapter（端点编译期固定，base_url 不消费） -->
+                <div class="form-row" x-show="p.type === 'search'"><label>platform</label>
+                  <select x-model="p.platform">
+                    <option value="" disabled>— pick a platform —</option>
                     <option value="tavily">tavily</option>
                     <option value="baidu">baidu</option>
                     <option value="brave">brave</option>
                   </select>
+                  <span class="hint">endpoint is fixed per platform — no base_url needed</span>
                 </div>
-                <div class="form-row"><label>base_url</label><input x-model="p.base_url"></div>
+                <div class="form-row" x-show="p.type !== 'search'"><label>base_url</label><input x-model="p.base_url"></div>
                 <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
                 <div class="hint" x-show="isServiceProvider(pid)">Search/service provider — hosts no models; reference it from tools.search / web_fetch.extract_provider. Models are managed in the Models tab.</div>
                 <div class="compat-section" x-show="!isServiceProvider(pid)">
