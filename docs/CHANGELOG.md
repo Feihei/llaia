@@ -6,21 +6,31 @@
 
 ---
 
-## v0.6.0 (unreleased)
+## v0.6.0 (2026-09-28)
 
-**Features**
-- **config**：**模型目录重构**（P8，[plan](plans/2026-09-25-model-catalog.md)）——`[provider]` 收窄为统一连接注册表（端点 + 凭据；llm family `openai_compatible`/`anthropic`/`gemini` + service family `tavily`/`baidu`/`brave`，`type` 即判别器），模型独立成顶层 `[model.<id>]` 目录（`provider` 引用 + `kind` 分型 chat/tts/image/embedding + `capabilities` 能力位数组，v1 仅 `multimodal`）。**加载期自动迁移**：旧 `[provider.<pid>.<alias>]` model 子表、`[tools.tavily|baidu|brave]` 凭据段、tts/image\_gen 内联端点、`use_tavily_extract` 在 `Config::load` 反序列化前原地改写为新结构（内存态、幂等；model id 沿用 `pid.alias` 两段式，agent 旧引用零改动），显式 `[model]` 条目优先；显式未知 type 报错（缺省仍回退 openai\_compatible）。引用全量一元化：agent `model`/`fallback`、`compact_model`/`vision_model`、`[tools.search].provider`、`[tools.tts].model`、`[tools.image_gen].model`、`[tools.web_fetch].extract_provider`，两段式 `provider_id.model_alias` 退役（`provider_from_ref` → `model_from_ref`）；tools 层 tavily/baidu/brave/tts/image\_gen 的 api\_key 分支全部删除，凭据收敛进 provider（SecretField 管线同步收缩）
-- **webui**：Config 新增 **Models 选项卡**——模型卡片网格（id/kind/provider/enabled/multimodal/probe/thinking 编辑）+ provider/kind/multimodal 过滤条；添加流 = 选 provider（仅 llm family）→ probe → 必选 kind → kind 专属表单，批量添加删除；Provider 卡瘦身（service family 只渲染 api\_key，compat 面板仅 llm family），agent 与 tools 的模型选择改目录下拉
-- **cli**：`/models`（模型目录列表）+ `/providers`（连接注册表分族列出）命令，`/provider` 留别名转发；CONFIG\_TEMPLATE 与 doctor 检查适配目录结构
-- **serve**：**进程内全量重载**（reload loop，2026-09-26）——`POST /api/restart` 不再 spawn 替代进程 + exit(0)，改为触发 `reload_signal`，`serve_cmd` 重读 config.toml 后把整轮子系统推倒重建（agent 注册表/工具注册（含 image_gen）/MCP registry/频道/cron/web listener 全部随轮实例化），进程与终端不退出（PID 不变，观感等同 Ctrl+C 后重新 `llaia serve`）。此前改 image_gen/频道等配置必须终端 Ctrl+C 重启才能生效的问题就此收口；进程级单例（tracing subscriber、PID 文件）留在循环外（日志级别/目录 reload 不跟随）；容器内同样可用（进程不退出，无 PID 1 风险）；改坏 config 终端报错退出，不会带旧配置假装成功
-
----
-
-## v0.5.3 (unreleased)
+**Milestone**：实例化架构（[ADR-0032](adr/0032-instance-architecture.md)）落地 + 模型目录重构（P8，配置 breaking、带加载期自动迁移）+ 进程内全量重载；原 v0.5.3 段（未单独发布）并入本版。
 
 **Features**
 - **instances**：**实例化架构落地**（[ADR-0032](adr/0032-instance-architecture.md)，T0–T9）——任务线升级为可并行执行的 Agent 实例，serve 退化为宿主、main 也是实例。`InstanceRegistry`（`src/agent/instances.rs`）管理 main + 任务实例（每实例独立 `Arc<Mutex<Agent>>`，进程内虚拟实例）；IM/CLI 频道 per-channel 附着串行路由，`/session <名>` 切线 = idle 检查（try_lock + gate 空判定，busy 三态提示）+ 换绑 + 旧实例 dormantize；实例 spawn 幂等（fork 原语 + 实例私有 MEMORY 段 + bound_path 对齐 + 6000 字符回灌）。memory 分层：实例 `memory_write` 写 `workspace/instances/<名>/MEMORY.md`（runner 按 `ApprovalContext.instance_memory_path` 拦截路由，ToolRegistry 被 fork 共享故不做工具级区分）；任务实例对 home 工作区只读（`forbidden_home` 守卫）。`fork_for_isolated` 参数化 pin_root 且改持独立 `ApprovalGate`（否则 main 的 pending 污染实例 idle 判定）
 - **webui**：**多实例并行面板**——同一条 WS 连接可同时跑多个实例的 turn（per-instance turns 表），事件按 `WebEvent::Instance` 封装分桶（main 不封装向后兼容）；左侧栏升级 **INSTANCES rail**（`GET /api/instances`：活跃实例 + dormant 任务线合成，busy 三态实时显示），dormant 线点击发 `open` 帧唤醒（幂等 spawn）、空面板回放该线尾部历史；`/api/approvals` `/api/questions` 跨实例聚合（每条带 `instance` 归属面板）；web 的 `/session` 文本命令拦截为提示（切线入口 = 面板切换）。v1 取舍：单面板显示 + 多桶并行（多实例真并行不阻塞，同屏平铺留给前端迭代）；subscriber 计数暂缓（dormantize 由非 main + idle + 无附着三道门兜底）
+- **tools**：新增 **`image_gen` / `image_edit`** 工具——OpenAI 兼容图片端点（`/images/generations` + `/images/edits`，后端任意：sd-server / agnes / OpenAI…）。模型与凭据来自 kind=image 目录条目（P8：`[tools.image_gen].model` 引用，条目含默认 `size`）；`image_gen` 响应 `data[0]` 兼容 b64_json / http(s) url / data URI 三形态，`image_edit` multipart 携 image + 可选 mask，**输入路径作用域与 `send_image` 完全一致**（workspace_root ∪ 受信目录 ∪ agent 家目录，跟随 `/move`）；产物落 `workspace/images/`，发送复用 `send_image`（tts 模式：生成与投递分离，agent 主动调）。`allow_no_key`：enabled 即注册（本地 sd-server 无需 key），tts 仍要求 api_key；api_key 全程接入 secrets 管线（掩码 / .env / init 模板 / WebUI 表单）
+- **webui**：工具审批升级为聊天流内**审批卡片**（P7 AC1–AC3）——`TurnEvent::ApprovalRequested` 扩带 tool_name/summary/within_workspace，卡片按钮发 WS 帧 `{type:"approval",id,approve}` 翻译为 `/ok|/deny <id>`，完整复用 slash Resume 通路（续跑输出必回发起连接，**刻意不做 POST 端点**——HTTP 侧没有那套广播协调结构）；`GET /api/approvals` 管刷新/换设备后的卡片恢复与已失效标记；卡片与文本提示共用 `SUMMARY_CAP` 截断口径；`/ok` `/deny` 文本命令照旧兜底
+- **webui**：`ask_user` 问题升级为聊天流内**问题卡片**（与审批卡片同族）——问题文本 + `choices` 单击按钮 + 自定义答案输入，作答后折叠为结论行；替代 composer 下方只读 QUESTIONS 面板（已移除）。作答零新协议：按钮即 `/answer <id> <text>` 走 slash Resume；web 频道不再发提示文案 Chunk，`GET /api/questions` 降级为刷新后卡片恢复（5s 轮询对账）
+- **mcp**：stdio server 对 `initialize` 回 `-32601`（method-not-found）时**无状态降级**（MCP 2026-07-28 规范已删握手，如 Python mcp SDK 2.0 server）——warn 一次后跳过握手继续，后续请求带 `_meta`（protocolVersion + clientInfo）、不发 `notifications/initialized`；`TransportError` 增结构化 `JsonRpc{code,message}` 变体使 -32601 可编程判定；握手成功路径记录服务端协商版本，超出支持集（5 个版本）warn 而非拒连；重连对无状态 server 幂等
+- **webui**：raw 编辑器卫生专项——① CodeMirror 实例移出 Alpine 响应式数据（reactive proxy 引用曾破坏 CodeMirror 内部 chunk 树身份判定，setValue 后首次编辑即文档损坏：回车重复行、删除静默错乱）；② `x-if` DOM 重建后按 `getWrapperElement().isConnected` 检测 detached 实例并重挂（此前留下裸 textarea、编辑被保存路径静默丢弃）；③ config/cron/mcp 三个 raw 编辑器**离开前未保存变更警告**（按 CodeMirror change generation，Save 后即净）；④ thinking 折叠面板与 `[thinking]` section 存在性解耦（已配置的模型此前永远无法折叠）
+- **config**：**模型目录重构**（P8，[plan](plans/2026-09-25-model-catalog.md)）——`[provider]` 收窄为统一连接注册表（端点 + 凭据；llm family `openai_compatible`/`anthropic`/`gemini` + service family `tavily`/`baidu`/`brave`，`type` 即判别器），模型独立成顶层 `[model.<id>]` 目录（`provider` 引用 + `kind` 分型 chat/tts/image/embedding + `capabilities` 能力位数组，v1 仅 `multimodal`）。**加载期自动迁移**：旧 `[provider.<pid>.<alias>]` model 子表、`[tools.tavily|baidu|brave]` 凭据段、tts/image\_gen 内联端点、`use_tavily_extract` 在 `Config::load` 反序列化前原地改写为新结构（内存态、幂等；model id 沿用 `pid.alias` 两段式，agent 旧引用零改动），显式 `[model]` 条目优先；显式未知 type 报错（缺省仍回退 openai\_compatible）。引用全量一元化：agent `model`/`fallback`、`compact_model`/`vision_model`、`[tools.search].provider`、`[tools.tts].model`、`[tools.image_gen].model`、`[tools.web_fetch].extract_provider`，两段式 `provider_id.model_alias` 退役（`provider_from_ref` → `model_from_ref`）；tools 层 tavily/baidu/brave/tts/image\_gen 的 api\_key 分支全部删除，凭据收敛进 provider（SecretField 管线同步收缩）
+- **webui**：Config 新增 **Models 选项卡**——模型卡片瀑布流（**JS 按条数固定分列**：`modelColumns` 填"当前条数最少"列、刻意不按渲染高度，展开/折叠 thinking 只撑自己所在列、不整页重排）+ provider/kind/multimodal 过滤条；卡片身份字段（kind/provider/服务端模型名）收成**只读 meta 行**（改身份 = 删除重加），enabled 开关与删除独占顶部一行，长 id 两行拆分防溢出；thinking 面板与 probe 按钮仅 chat 条目渲染（probe 发最小 chat 请求，非 chat 必失败）；添加流两段式（`+ Add model` 先 probe 展开、变 `Add selected (n)`，手动输入与 probe 行统一批处理，probe 失败也保手工入口），已添加的 probe 条目灰化勾选防重名；Provider 卡并入同一瀑布流（service family 只渲染 api\_key，compat 面板仅 llm family），type 改六值下拉（空值 = openai\_compatible），agent 与 tools 的模型选择改目录下拉
+- **cli**：`/models`（模型目录列表）+ `/providers`（连接注册表分族列出）命令，`/provider` 留别名转发；CONFIG\_TEMPLATE 与 doctor 检查适配目录结构
+- **serve**：**进程内全量重载**（reload loop，2026-09-26）——`POST /api/restart` 不再 spawn 替代进程 + exit(0)，改为触发 `reload_signal`，`serve_cmd` 重读 config.toml 后把整轮子系统推倒重建（agent 注册表/工具注册（含 image_gen）/MCP registry/频道/cron/web listener 全部随轮实例化），进程与终端不退出（PID 不变，观感等同 Ctrl+C 后重新 `llaia serve`）。此前改 image_gen/频道等配置必须终端 Ctrl+C 重启才能生效的问题就此收口；进程级单例（tracing subscriber、PID 文件）留在循环外（日志级别/目录 reload 不跟随）；容器内同样可用（进程不退出，无 PID 1 风险）；改坏 config 终端报错退出，不会带旧配置假装成功
+
+**Bug fixes**
+- **guard**：`/deny` 反馈"End this turn"让**合规的空回复**被 Generation Guard 判退化——重试提示与停止信号互相矛盾、最终"retries exhausted"噪音收场（2026-09-20 QQ 误报）。deny 反馈改为要求一句取消确认（合规回复非空不再触发 guard）；重试提示改按实际退化原因生成（`retry_notice(reason)`），不再一律报"repetition / runaway thinking"
+- **qq**：审批内联按钮放开给全部用户（`permission.type=2`）——type=0 + specify_user_ids 的客户端侧限制在 iOS 上不认 C2C openid、本地拦截点击且不回调；点击者身份本就由 `handle_interaction` 的 owner 检查在服务端把关
+- **cron**：agent 模式推送**只发最终 assistant 消息**——此前整轮可见 Chunk 拼接直推，工具调用前的过程独白泄漏进推送摘要（2026-09-20 morning_news）；过交付门后从 sqlite 取末条 assistant 消息，失败回退拼接文本
+
+**Dependencies / 基础设施**
+- **deps**：axum 0.7 → 0.8（tower-http 0.5 → 0.7）、rusqlite 0.31 → 0.40（bundled SQLite 3.45 → 3.50）、tokio-tungstenite 0.23 → 0.29（对齐 axum 0.8 的 ws 依赖、全树单副本；qq/dingtalk/feishu 适配 `Utf8Bytes`/`Bytes` 新签名）、rand 0.8 → 0.10 / mailparse 0.16 → 0.17 等小步升级（修编辑器缓冲覆盖导致的静默回退）
+- **ci**：release 流水线改单 publish job——build（matrix 打包上传）+ publish（统一生成一份 sha256sums.txt、单点上传全部资产与 release body），逐产物 .sha256 废除
 
 ---
 
