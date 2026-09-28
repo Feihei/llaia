@@ -1135,19 +1135,29 @@ function llaiaApp() {
       const p = (this.cfg.model[id] && this.cfg.model[id].provider) || '';
       return p ? { head: p + '.', tail: id } : { head: '', tail: id };
     },
-    // 瀑布流分列：按 filteredModels 的顺序依次填入"当前条数最少"的列。
+    // 通用固定分列：按列表顺序依次填入"当前条数最少"的列。
     // 刻意不用"最矮列优先"——那会让分列结果依赖卡片实际渲染高度，任何卡片
     // 展开/折叠都会把后面的卡片甩到别的列（正是要修的跳动问题）。
     // 按条数分配只看索引：分列在列表变化时才重算，列内高度变化互不影响。
-    modelColumns() {
+    dealColumns(list) {
       const cols = Array.from({ length: this.modelColCount }, () => []);
       const sizes = cols.map(() => 0);
-      for (const id of this.filteredModels()) {
+      for (const id of list) {
         const i = sizes.indexOf(Math.min(...sizes));
         cols[i].push(id);
         sizes[i]++;
       }
       return cols;
+    },
+    modelColumns() {
+      return this.dealColumns(this.filteredModels());
+    },
+    // Provider 选项卡与 Models 共用同一套瀑布流（列数/resize 也共用 modelColCount）
+    providerIds() {
+      return Object.keys(this.cfg.provider || {}).sort();
+    },
+    providerColumns() {
+      return this.dealColumns(this.providerIds());
     },
     openAddModel() {
       this.addModelDraft = { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false };

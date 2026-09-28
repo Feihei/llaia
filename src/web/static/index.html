@@ -492,14 +492,29 @@
         </template>
         <template x-if="configSection==='provider'">
           <div>
-            <template x-for="(p, pid) in cfg.provider" :key="pid">
-              <div class="provider-card">
+            <!-- 与 Models 相同的固定分列瀑布流：compat 展开/折叠只撑自己所在列 -->
+            <div class="model-cols" @resize.window="updateModelColCount()">
+              <template x-for="(col, ci) in providerColumns()" :key="'pcol' + ci">
+                <div class="model-col">
+                  <template x-for="pid in col" :key="pid">
+              <!-- p 别名恢复：分列改造把 (p, pid) 迭代换成了 pid，x-data 重新绑回条目对象 -->
+              <div class="provider-card" x-data="{ p: cfg.provider[pid] }">
                 <div class="card-header">
                   <h3 x-text="pid"></h3>
                   <button class="btn-delete" @click="deleteProvider(pid)">Delete</button>
                 </div>
-                <div class="form-row"><label>type</label><input x-model="p.type"></div>
-                <div class="form-row"><label>base_url</label><input x-model="p.base_url" style="width:400px"></div>
+                <div class="form-row"><label>type</label>
+                  <select x-model="p.type">
+                    <option value="">openai_compatible (default)</option>
+                    <option value="openai_compatible">openai_compatible</option>
+                    <option value="anthropic">anthropic</option>
+                    <option value="gemini">gemini</option>
+                    <option value="tavily">tavily</option>
+                    <option value="baidu">baidu</option>
+                    <option value="brave">brave</option>
+                  </select>
+                </div>
+                <div class="form-row"><label>base_url</label><input x-model="p.base_url"></div>
                 <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
                 <div class="hint" x-show="isServiceProvider(pid)">Search/service provider — hosts no models; reference it from tools.search / web_fetch.extract_provider. Models are managed in the Models tab.</div>
                 <div class="compat-section" x-show="!isServiceProvider(pid)">
@@ -540,7 +555,10 @@
                   </div>
                 </div>
               </div>
-            </template>
+                  </template>
+                </div>
+              </template>
+            </div>
           </div>
         </template>
         <template x-if="configSection==='models'">

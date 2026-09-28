@@ -948,6 +948,12 @@ white-space: pre-wrap; word-break: break-word;
 #config-pane .model-card .switch { flex-wrap: wrap; }
 #config-pane .model-card select,
 #config-pane .model-card input:not([type="checkbox"]) { max-width: 100%; }
+/* provider 卡同在窄列里，同一套溢出治理（add-model-panel 全宽，换行无害） */
+#config-pane .provider-card .form-row { flex-wrap: wrap; }
+#config-pane .provider-card .form-row label { width: auto; min-width: 80px; }
+#config-pane .provider-card .switch { flex-wrap: wrap; }
+#config-pane .provider-card select,
+#config-pane .provider-card input:not([type="checkbox"]) { max-width: 100%; }
 /* 添加流面板：青色左边条与卡片网格区分 */
 #config-pane .add-model-panel { border-left-color: var(--cyan); }
 /* 卡片上的只读字段（provider/kind/model）：添加时即定死，仅展示 */
