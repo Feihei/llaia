@@ -3278,12 +3278,13 @@ model = "qwen"
         assert!(
             idx.contains("configSection==='models'")
                 && idx.contains("model-filter")
-                && idx.contains("model-grid")
+                && idx.contains("model-cols")
+                && idx.contains("modelColumns")
                 && idx.contains("addModelDraft")
                 && js.contains("addModelDraft")
                 && js.contains("filteredModels")
                 && js.contains("confirmAddModel")
-                && css.contains(".model-grid")
+                && css.contains(".model-cols")
                 && css.contains(".model-filter"),
             "index.html/app.js/theme.css missing P8 Models tab markers (stale embed?)"
         );

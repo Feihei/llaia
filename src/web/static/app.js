@@ -184,6 +184,9 @@ function llaiaApp() {
     probeModelBusy: {},
     // Models 选项卡（P8）：过滤条 + 卡片网格 + 添加流
     modelFilter: { provider: '', kind: '', multimodal: false },
+    // 瀑布流列数（resize 跟随）：卡片按索引轮转固定分列，位置与高度解耦，
+    // 任一卡片展开/折叠 thinking 只影响自己所在列，不会像 CSS columns 那样整页重新分列
+    modelColCount: Math.min(3, Math.max(1, Math.floor(window.innerWidth / 420))) || 1,
     addModelOpen: false,
     addModelDraft: { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false },
     // 会话历史（P5 W1）
@@ -1120,6 +1123,31 @@ function llaiaApp() {
         out.push(id);
       }
       return out.sort();
+    },
+    updateModelColCount() {
+      this.modelColCount = Math.min(3, Math.max(1, Math.floor(window.innerWidth / 420))) || 1;
+    },
+    // 卡片标题两行拆分：id 首个 '.' 前是 provider（含点作首行），其余是尾段。
+    // 手工添加的无点 id 退回用 entry 的 provider 补首行；都没有就整 id 落尾段。
+    modelTitleParts(id) {
+      const i = id.indexOf('.');
+      if (i > 0) return { head: id.slice(0, i + 1), tail: id.slice(i + 1) };
+      const p = (this.cfg.model[id] && this.cfg.model[id].provider) || '';
+      return p ? { head: p + '.', tail: id } : { head: '', tail: id };
+    },
+    // 瀑布流分列：按 filteredModels 的顺序依次填入"当前条数最少"的列。
+    // 刻意不用"最矮列优先"——那会让分列结果依赖卡片实际渲染高度，任何卡片
+    // 展开/折叠都会把后面的卡片甩到别的列（正是要修的跳动问题）。
+    // 按条数分配只看索引：分列在列表变化时才重算，列内高度变化互不影响。
+    modelColumns() {
+      const cols = Array.from({ length: this.modelColCount }, () => []);
+      const sizes = cols.map(() => 0);
+      for (const id of this.filteredModels()) {
+        const i = sizes.indexOf(Math.min(...sizes));
+        cols[i].push(id);
+        sizes[i]++;
+      }
+      return cols;
     },
     openAddModel() {
       this.addModelDraft = { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false };

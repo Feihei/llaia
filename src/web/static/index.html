@@ -617,27 +617,33 @@
               <label class="switch"><input type="checkbox" x-model="modelFilter.multimodal"> multimodal only</label>
               <span class="hint" x-text="filteredModels().length + ' model(s)'"></span>
             </div>
-            <!-- 卡片网格：auto-fill 分栏，窄窗口退单列 -->
-            <div class="model-grid">
-              <template x-for="id in filteredModels()" :key="id">
+            <!-- 瀑布流：JS 固定分列（modelColumns，按条数分配），卡片归属与渲染高度解耦——
+                 展开/折叠 thinking 只撑自己所在列，不会像 CSS columns 那样整页重新分列。
+                 @resize.window 跟随窗口宽度调整列数。 -->
+            <div class="model-cols" @resize.window="updateModelColCount()">
+              <template x-for="(col, ci) in modelColumns()" :key="'col' + ci">
+                <div class="model-col">
+                  <template x-for="id in col" :key="id">
                 <div class="provider-card model-card" :class="{ 'model-card--off': cfg.model[id].enabled === false }">
-                  <div class="card-header">
-                    <h3 x-text="id"></h3>
-                    <span class="card-header-actions">
-                      <label class="switch" :title="cfg.model[id].enabled === false
-                        ? 'disabled: kept, but hidden from /models and the model pickers'
-                        : 'enabled'">
-                        <input type="checkbox" x-model="cfg.model[id].enabled">
-                        <span x-text="cfg.model[id].enabled === false ? 'off' : 'on'"></span>
-                      </label>
-                      <button class="btn-delete" @click="deleteModel(id)">×</button>
-                    </span>
+                  <!-- 第一行：enabled 开关（左）+ 删除（右）独占一行，长标题也不挤它们 -->
+                  <div class="model-topline">
+                    <label class="switch" :title="cfg.model[id].enabled === false
+                      ? 'disabled: kept, but hidden from /models and the model pickers'
+                      : 'enabled'">
+                      <input type="checkbox" x-model="cfg.model[id].enabled">
+                      <span x-text="cfg.model[id].enabled === false ? 'off' : 'on'"></span>
+                    </label>
+                    <button class="btn-delete" @click="deleteModel(id)">×</button>
                   </div>
+                  <!-- 标题两行：第一行 provider 加点，第二行模型 id 尾段；过长自动换行 -->
+                  <h3 class="model-title">
+                    <span class="model-title-head" x-text="modelTitleParts(id).head"></span>
+                    <span class="model-title-tail" x-text="modelTitleParts(id).tail"></span>
+                  </h3>
                   <!-- 身份字段（kind / provider / server model）添加时即定死，meta 行只读展示；
-                       id 若不含 provider 名也能从这里看出来。改错删掉重加。 -->
+                       provider 已上标题首行，这里只留 kind + 服务端模型名。改错删掉重加。 -->
                   <div class="model-meta">
                     <span class="model-fixed model-kind" x-text="cfg.model[id].kind || 'chat'"></span>
-                    <span class="hint" x-text="'@' + cfg.model[id].provider"></span>
                     <span class="model-fixed" x-text="cfg.model[id].model" :title="cfg.model[id].provider + ' · ' + cfg.model[id].model"></span>
                   </div>
                   <template x-if="(cfg.model[id].kind || 'chat') === 'chat'">
@@ -701,6 +707,8 @@
                       </label>
                       <label class="switch"><input type="checkbox" x-model="cfg.model[id].thinking.preserve"> preserve: echo reasoning_content back (default off; only enable if the server verifiably consumes it)</label>
                     </div>
+                  </template>
+                </div>
                   </template>
                 </div>
               </template>

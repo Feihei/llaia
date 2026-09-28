@@ -898,15 +898,24 @@ white-space: pre-wrap; word-break: break-word;
   background: var(--bg-elev); border: 1px solid var(--border);
 }
 #config-pane .model-filter select { width: auto; min-width: 120px; }
-/* 模型卡片瀑布流：CSS columns 按列宽自动分栏，卡片随内容高低错落
-   （列优先填充，对模型卡片无顺序敏感问题）；窄窗口自然退单列 */
-#config-pane .model-grid {
-  columns: 340px;
-  column-gap: 12px;
+/* 模型卡片瀑布流：JS 固定分列（app.js modelColumns 按条数分配）。
+   不用 CSS columns——它的列内容由浏览器自动平衡，任何卡片高度变化都会
+   触发整页重新分列（展开 thinking 相邻卡片跟着跳）。flex 列里卡片归属
+   固定，高度变化只撑自己所在列。列数由窗口宽度决定（420px/列，1–3 列） */
+#config-pane .model-cols {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
 }
-#config-pane .model-grid .provider-card {
-  margin: 0 0 12px;
-  break-inside: avoid; /* 卡片不跨列截断 */
+#config-pane .model-col {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+#config-pane .model-col .provider-card {
+  margin: 0;
 }
 /* disabled 模型卡：保留在目录里（改回 enabled 即恢复），只灰化 */
 #config-pane .model-card--off { border-left-color: var(--border); opacity: .75; }
@@ -915,9 +924,30 @@ white-space: pre-wrap; word-break: break-word;
   display: flex; align-items: center; gap: 8px;
   margin: 4px 0 8px; min-width: 0;
 }
-#config-pane .model-meta .hint { flex: none; }
 #config-pane .model-meta .model-fixed { flex: 1 1 auto; }
 #config-pane .card-header-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+/* 模型卡头部：开关/删除独占首行（左右分布），标题两行不与控件抢宽度 */
+#config-pane .model-topline {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 6px;
+}
+#config-pane .model-title {
+  margin: 0 0 8px; color: var(--green-bright);
+  border-bottom: 1px solid var(--border); padding-bottom: 8px;
+  letter-spacing: .04em;
+}
+/* 首行 provider 加点（弱化），次行模型 id 尾段；超长自动折行不溢出 */
+#config-pane .model-title-head {
+  display: block; font-size: .72em; color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+#config-pane .model-title-tail { display: block; overflow-wrap: anywhere; }
+/* 窄列溢出治理：通用 form-row 的 200px label 在卡片列里放不下 */
+#config-pane .model-card .form-row { flex-wrap: wrap; }
+#config-pane .model-card .form-row label { width: auto; min-width: 80px; }
+#config-pane .model-card .switch { flex-wrap: wrap; }
+#config-pane .model-card select,
+#config-pane .model-card input:not([type="checkbox"]) { max-width: 100%; }
 /* 添加流面板：青色左边条与卡片网格区分 */
 #config-pane .add-model-panel { border-left-color: var(--cyan); }
 /* 卡片上的只读字段（provider/kind/model）：添加时即定死，仅展示 */
