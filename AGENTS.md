@@ -191,7 +191,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 
 > **Generation Guard 输出退化防护（`src/agent/guard.rs`）**：小参数本地模型长上下文退化（重复循环、思考流失控、空输出）的框架层防御。流式消费（`consume_stream_guarded`，每迭代单次尝试）逐 TextDelta 检查三信号——**思考超限**（parser 对 `<think>` 剥离内容累计计数 `think_chars`，超 `guard_thinking_cap`）、**思考线重复**（`InThink` 逐字符喂 `RepetitionDetector`）、**可见线重复**（parser 输出喂另一检测器；字符级滑动窗口 n-gram，窗口 512/gram 24/阈值 4，默认值取 4 防代码重复行误报）；命中即 **abort 流**（drop 即断连）、**丢弃产物**（不落 sqlite/context，防重试请求携带垃圾诱导自我模仿）、通知用户、注入 `[guard]` 提示（持久化，同 `[steer]` 前缀模式）并**强制 `disable_thinking`** 重试（`guard_max_retries` 默认 1）。流正常结束但空输出（无文本无 tool\_calls）同样判退化——覆盖 provider 层丢弃 reasoning\_content 的残余形态；openai\_compat 在 `reasoning_to_content=false` 时也对 reasoning 计数、超 cap 提前 Done 截流。重试耗尽 → 诊断消息收尾；`guard_streak` 连续计数（健康流清零）达 `guard_breaker_threshold` 附加醒目警告（**只报警不拒服**，修复动作指向推理端采样参数/`/provider`）。`[runtime]` 七个 `guard_*` key + `output_guard` 总开关，`reload_runtime` 热加载；关闭时全链路短路零回归。另有顺手修复：parser `InThink` buffer 裁剪原按字节 `split_at`，中文思考流会在非字符边界 panic。详见 [docs/plans/2026-09-03-generation-guard.md](docs/plans/2026-09-03-generation-guard.md)。
 
-终端命令安全：由 `[tools.terminal]` 控制——
+终端命令安全：由 `[tools.terminal]` 控制——（顶层安全模型——资产分级、防线分层与闸门准入判据——见 [ADR-0033](docs/adr/0033-security-model.md)；下述字符串层机制定位为 L5 审计线索与提示信号，非安全边界）
 
 - `confirm`（`none` / `whitelist` 默认 / `always`）：是否需要交互式确认
 
