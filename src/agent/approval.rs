@@ -203,6 +203,11 @@ pub struct ApprovalContext {
     /// 开启时 terminal 破坏性命令走三档语义（bound 内免审转 trash / 界外强制
     /// 人审），见 `approval_decision` 内注释与 docs/plans/2026-09-17-delete-guard.md。
     pub terminal_delete_guard: bool,
+    /// cron 通道豁免 T3（构造自 `[runtime].cron_allow_inline_interpreter`）：
+    /// 开启时 `cron:<id>` 通道的 terminal 内联命令不再强制人审——非交互频道
+    /// 无法审批（T3 命中 = 直接 Denied），豁免只消摩擦；workspace 外操作仍被
+    /// 非交互 fail-fast 拒绝，范围边界不变。
+    pub cron_allow_inline: bool,
     /// 实例私有 MEMORY 路径（ADR-0032 T5）：仅任务实例 Some——runner 据此把
     /// memory_write 路由到 `<home>/workspace/instances/<n>/MEMORY.md`；
     /// main 为 None（走共享 MemoryWrite 工具写主 MEMORY，现状不变）。
@@ -267,7 +272,8 @@ pub enum ApprovalAction {
 }
 
 /// 根据权限档位 + 工具副作用 + workspace/受信目录范围，决定一次工具调用是否需要审批
-// 参数随闸门演进增长（T3 第 7 参、Delete Guard 第 8 参），结构化收编留待下次重审。
+// 参数随闸门演进增长（T3 第 7 参、Delete Guard 第 8 参、cron 豁免第 9 参），
+// 结构化收编留待下次重审。
 #[allow(clippy::too_many_arguments)]
 pub fn approval_decision(
     tool: &dyn Tool,
@@ -278,6 +284,7 @@ pub fn approval_decision(
     channel: &str,
     terminal_inline_gate: bool,
     terminal_delete_guard: bool,
+    cron_allow_inline: bool,
 ) -> ApprovalAction {
     // 子 agent 委派：不受审批拦截（与 P2-a 一致，channel 固定为 "delegate"）。
     // T3 边界（注释留档）：delegate 通道的解释器内联载荷同样绕过审批——
@@ -302,7 +309,12 @@ pub fn approval_decision(
     // T3（plan.md，2026-09-07 grill 定案）：解释器内联载荷强制人审——即使落在
     // workspace / 受信目录内。`python script.py` 不拦（路径走 path 校验，写入
     // 在 transcript 可审计），`python -c` / `node -e` / `curl | bash` 等内联形态必审。
-    if !required && terminal_inline_gate && tool.name() == "terminal" {
+    // cron 豁免（2026-10-01 dream 首跑被拦定案）：`[runtime].cron_allow_inline_interpreter`
+    // 开启时 `cron:<id>` 通道跳过本闸门——非交互频道无法审批，T3 命中即 Denied，
+    // 而模型可写脚本文件绕行（file_write + 执行均免审），闸门在 cron 只剩摩擦。
+    // 豁免不改变范围边界：workspace 外操作仍走下方非交互 fail-fast 拒绝。
+    let cron_inline_exempt = cron_allow_inline && channel.starts_with("cron:");
+    if !required && terminal_inline_gate && !cron_inline_exempt && tool.name() == "terminal" {
         if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
             if crate::path_guard::is_inline_interpreter_command(cmd) {
                 required = true;
@@ -640,6 +652,21 @@ mod tests {
         gate: bool,
         delete_guard: bool,
     ) -> ApprovalAction {
+        decision_for_channel(tool, cmd, ws, profile, gate, delete_guard, "cli", false)
+    }
+
+    /// 带 channel 与 cron 豁免开关的变体（cron 豁免测试用）。
+    #[allow(clippy::too_many_arguments)]
+    fn decision_for_channel(
+        tool: &str,
+        cmd: &str,
+        ws: &Path,
+        profile: &str,
+        gate: bool,
+        delete_guard: bool,
+        channel: &str,
+        cron_allow: bool,
+    ) -> ApprovalAction {
         let tool_stub = ToolStub { name: tool };
         approval_decision(
             &tool_stub,
@@ -647,9 +674,10 @@ mod tests {
             ws,
             &[],
             profile,
-            "cli",
+            channel,
             gate,
             delete_guard,
+            cron_allow,
         )
     }
 
@@ -812,6 +840,103 @@ mod tests {
         ));
     }
 
+    // ---------------- cron 通道豁免 T3（2026-10-01 dream 首跑被拦定案） ----------------
+
+    #[test]
+    fn test_cron_allow_inline_exempts_t3_within_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path();
+        // 开关开启：cron 通道的 python -c 落在 workspace 内 → 直接放行
+        assert!(matches!(
+            decision_for_channel(
+                "terminal",
+                "python -c \"import sqlite3\"",
+                ws,
+                "default",
+                true,
+                false,
+                "cron:dream",
+                true,
+            ),
+            ApprovalAction::Approved
+        ));
+        // 管道喂裸解释器同样豁免
+        assert!(matches!(
+            decision_for_channel(
+                "terminal",
+                "echo 'import os' | python",
+                ws,
+                "default",
+                true,
+                false,
+                "cron:dream",
+                true,
+            ),
+            ApprovalAction::Approved
+        ));
+    }
+
+    #[test]
+    fn test_cron_allow_inline_default_off_and_interactive_unaffected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path();
+        // 默认关闭：cron 通道 T3 照拦，且非交互频道直接 Denied（不注册 pending）
+        assert!(matches!(
+            decision_for_channel(
+                "terminal",
+                "python -c \"print(1)\"",
+                ws,
+                "default",
+                true,
+                false,
+                "cron:dream",
+                false,
+            ),
+            ApprovalAction::Denied { .. }
+        ));
+        // 开关开启只对 cron 通道生效：交互频道（cli/web）仍强制人审
+        assert!(matches!(
+            decision_for_channel(
+                "terminal",
+                "python -c \"print(1)\"",
+                ws,
+                "default",
+                true,
+                false,
+                "cli",
+                true,
+            ),
+            ApprovalAction::NeedsApproval { .. }
+        ));
+    }
+
+    #[test]
+    fn test_cron_allow_inline_does_not_extend_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path();
+        // 豁免只消 T3 摩擦，不扩范围：workspace 外命令仍被判需审批，
+        // 而 cron 非交互无法审批 → Denied（范围边界不变）
+        let outside = dir
+            .path()
+            .join("../elsewhere/config.toml")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let cmd = format!("cat {}", outside);
+        assert!(matches!(
+            decision_for_channel(
+                "terminal",
+                &cmd,
+                ws,
+                "default",
+                true,
+                false,
+                "cron:dream",
+                true,
+            ),
+            ApprovalAction::Denied { .. }
+        ));
+    }
+
     // ---------------- Delete Guard：破坏性命令三档语义 ----------------
 
     #[test]
@@ -860,6 +985,7 @@ mod tests {
             "cli",
             false,
             true,
+            false,
         );
         assert!(
             matches!(decision, ApprovalAction::NeedsApproval { .. }),
@@ -876,6 +1002,7 @@ mod tests {
             "cli",
             false,
             true,
+            false,
         );
         assert!(matches!(decision, ApprovalAction::NeedsApproval { .. }));
 
@@ -890,6 +1017,7 @@ mod tests {
             "cli",
             false,
             true,
+            false,
         );
         assert!(matches!(decision, ApprovalAction::Approved));
     }

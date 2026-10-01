@@ -1487,6 +1487,7 @@ impl Agent {
                 ask_user_timeout_secs: self.config.runtime.ask_user_timeout_secs as u64,
                 terminal_inline_gate: self.config.tools.terminal.interpret_inline != "off",
                 terminal_delete_guard: self.config.tools.terminal.delete_guard != "off",
+                cron_allow_inline: self.config.runtime.cron_allow_inline_interpreter,
                 // ADR-0032 T5/T6：实例路由字段——仅任务实例 Some
                 instance_memory_path: self
                     .instance_name

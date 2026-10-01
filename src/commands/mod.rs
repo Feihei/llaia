@@ -42,6 +42,7 @@ max_iterations = 10
 # tool_result_cap = 32768           # optional: max chars per tool result text (truncated beyond; full result kept in sessions.db)
 # keepalive_interval_secs = 600     # optional: "still working" heartbeat interval for long tasks (seconds)
 # max_turn_duration_secs = 3600     # optional: hard stop for a single turn (seconds)
+# cron_allow_inline_interpreter = false  # optional: let cron channels run inline interpreter commands (python -c etc.) without forced approval; out-of-scope ops stay denied. Default false
 #
 # Generation Guard: output degeneration defense for small local models
 # (repetition loops, runaway thinking, empty replies). On detection the

@@ -80,6 +80,14 @@ pub struct RuntimeConfig {
     /// 默认 3600（1 小时）；需大于心跳间隔才有意义。
     #[serde(default = "default_max_turn_duration")]
     pub max_turn_duration_secs: u64,
+    /// cron 通道豁免 T3 内联解释器闸门（2026-10-01 dream 首跑被拦定案）。
+    /// 开启后 `cron:<id>` 通道的 terminal 内联命令（`python -c` / `node -e` /
+    /// `curl | bash` 等）不再强制人审——非交互频道本就无法审批（直接 Denied），
+    /// T3 在 cron 里只剩摩擦：模型仍可写脚本文件再执行（file_write + 执行均免审），
+    /// 闸门拦不住等价行为。workspace 外操作不受影响，仍按非交互 fail-fast 拒绝。
+    /// 默认 false（保持 T3 全局语义）。
+    #[serde(default)]
+    pub cron_allow_inline_interpreter: bool,
     /// 输出退化防护总开关（Generation Guard，docs/plans/2026-09-03-generation-guard.md）。
     /// 开启后：思考流超限 / 可见文本重复 / 空输出 → 中止 + 带提示重试 →
     /// 重试耗尽诊断收尾，连续失败附加醒目警告（只报警不拒服）。
@@ -120,6 +128,7 @@ impl Default for RuntimeConfig {
             tool_result_cap: default_tool_result_cap(),
             keepalive_interval_secs: default_keepalive_interval(),
             max_turn_duration_secs: default_max_turn_duration(),
+            cron_allow_inline_interpreter: false,
             output_guard: default_output_guard(),
             guard_repeat_window: default_guard_repeat_window(),
             guard_repeat_gram: default_guard_repeat_gram(),
@@ -2080,9 +2089,13 @@ dir = "~/.llaia-test/logs"
         // runtime
         assert_eq!(config.runtime.context_threshold, 0.8);
         assert_eq!(config.runtime.max_iterations, 5);
-        // 未显式配置的两个新字段走默认
+        // 未显式配置的新字段走默认
         assert_eq!(config.runtime.keepalive_interval_secs, 600);
         assert_eq!(config.runtime.max_turn_duration_secs, 3600);
+        assert!(
+            !config.runtime.cron_allow_inline_interpreter,
+            "cron T3 豁免默认关闭"
+        );
 
         // provider 注册表 + model 目录
         let p = config.provider.get("default").unwrap();
