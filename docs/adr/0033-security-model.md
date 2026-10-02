@@ -2,7 +2,7 @@
 
 - 状态：Proposed
 - 日期：2026-10-02
-- 关联：修订 [ADR-0020](0020-permission-and-approval.md)（审批体系，本 ADR 为其上位框架）；落地 [ADR-0032](0032-instance-architecture.md) 的 forbidden_home 守卫思想；承接 [docs/guide/security-hardening.md](../guide/security-hardening.md)（T2 部署规范）；起因是 2026-10-01 dream cron 首跑被 T3 拦截的事故复盘（见 commit 2ec9b13 讨论）
+- 关联：修订 [ADR-0020](0020-permission-and-approval.md)（审批体系，本 ADR 为其上位框架）；落地 [ADR-0032](0032-instance-architecture.md) 的 forbidden_home 守卫思想；承接 [docs/guide/security-hardening.md](../guide/security-hardening.md)（T2 部署规范）；起因是 2026-10-01 dream cron 首跑被 T3 拦截的事故复盘（见 commit 2ec9b13 讨论）；防泄露与闸门取舍设计参考 `.ref` 四仓库调研（codex / zeroclaw / nanobot / astrbot，2026-10-02），出站面盘点见 §2.1
 
 ## 背景 / Context
 
@@ -36,8 +36,27 @@
 | **L1 可恢复性基建** | workspace 快照（git-backed 或 shadow copy），T0/T2 写前留底 | 不依赖"拦得住"，篡改可回滚；**可恢复性越高，闸门可以越少** | 缺位（仅 memory-compact 写前备份） |
 | **L2 OS 最小权限** | terminal 子进程跑受限 token / 低权账户（T2 落地） | 唯一不依赖命令形态的硬边界；脚本文件、python -c、任何形态同受约束 | 仅有文档规范，未落地 |
 | **L3 资产守卫** | 按资产分级直接拒/审（forbidden_home 模式推广） | 与命令形态无关，守在文件系统入口 | forbidden_home 已有；T1/T2 分级缺位 |
-| **L4 出站口检查** | 外发通道（web_fetch / IM 发送 / send_file）的把关 | 防泄露的唯一有效位置——内容已进上下文后，入站审查无意义 | **缺位**（web_fetch 视为界内免审） |
+| **L4 出站口检查** | 外发通道的分级把关（对象清单见 §2.1 出站面盘点） | 防泄露的直接位置——但出站口有七个且 **LLM provider 本身不可把关**，故 L4 防的是"被骗模型最顺手的显式通道"，根本兜底靠 L3 压缩可偷库存 | **缺位**（web_fetch 视为界内免审；terminal 网络命令零把关） |
 | **L5 字符串启发** | 黑名单、路径提取、T3 内联识别 | 永不收敛、可绕行；**降级为审计线索与提示信号，不再当安全边界** | 已有（现有补丁的主体） |
+
+### 2.1 出站面盘点（L4 的对象清单，2026-10-02 基于工具注册表逐一核实）
+
+| 出站通道 | 位置 | 数据可控性 | 现状把关 | 风险排序 |
+| --- | --- | --- | --- | --- |
+| terminal 任意网络命令 | `tools/terminal.rs` | 完全可控（目标/载荷/协议全自由） | 仅 T3 内联启发式 + 界外路径判定，内容零把关 | **1（最大缺口）** |
+| send_file / send_image | `tools/send_media.rs` | 模型选文件内容 | 无内容检查 | 2（目标固定，泄的是"主人的数据给主人"，低危） |
+| image_gen / image_edit / tts | `tools/image_gen.rs`、`tools/tts.rs` | prompt/文本发往第三方 API | 无内容检查 | 3 |
+| mcp_* 工具 | `tools/mcp.rs` | 取决于 MCP server | 审批"一律界外"是入站判定，调用照样出网 | 4 |
+| web_fetch | `tools/web.rs` | URL + 隐式带出信息 | 无域名/SSRF 检查 | 5（**最好管**：显式、URL 在 transcript 可见） |
+| mail/IM 渠道推送 | `channels/mail.rs` 等 | 内容可控，**目标固定**（config 写死 owner/群） | 结构性已封：模型无法指定收件人 | 6（✅ 无需动作） |
+| LLM provider 调用本身 | — | 模型读过的一切都会发出去 | **不可把关**（核心功能） | 0（推论：防泄露第一性原理在**读入侧**） |
+
+盘点得出的三条结论：
+
+1. **terminal 是真正的最大缺口**，但内容级把关短期做不到（命令形态无穷）——近期处置是风险标记 + audit 强化留痕，硬边界归 L2（OS 沙箱网络限制）。
+2. **web_fetch 排第 5 危险但排第 1 好管**，先做不是因为最危险，而是最便宜的第一个格子——且被骗模型被注入指令指名"访问这个 URL"时最顺手的就是它。
+3. **出站管不完，读入侧才是根本**：LLM provider 这条出站永远开着，所以每压缩一分可偷库存（env 密钥、config、sessions.db 的可读性），所有出站通道风险同时下降。这决定了 Phase 2 是"L3 读入侧收缩 + L4 首闸"的组合刀，不是单独给 web_fetch 加闸。
+
 
 ### 3. 「度」的三判据（闸门准入与退役规则）
 
@@ -56,7 +75,10 @@
 | 审批档位（P4-d）/ trusted dirs | L3/L4 之间 | 保留；权限档位继续作为交互频道的总开关 |
 | T3 内联闸门（含 cron 豁免） | L5 | **降级候选**：定位为"无意识操作的强制人审点 + 审计信号"，非边界；待 L1/L2 落地后复审是否进一步降级 |
 | 命令黑名单 / 路径提取 | L5 | 保留为提示与审计，不再承担边界叙事 |
-| 出站口（web_fetch / IM 发送 / send_file） | L4 | **缺位，第一优先补**——防泄露目的下唯一实质防线 |
+| 出站口 | L4 | **缺位**——按 §2.1 盘点：terminal 网络命令是最大缺口（近期标记+留痕，远期归 L2），web_fetch 是首刀；渠道推送已结构性封死无需动作 |
+| 子进程环境变量 | L3/T1 | **缺位**——terminal 子进程继承完整环境，模型一条 `env` 即可读出全部 API key；学 codex 默认剔除 `*KEY*`/`*SECRET*`/`*TOKEN*` |
+| config.toml / sessions.db / mcp.toml | L3/T1+T2 | **缺位**——均在 agent 可写范围，被篡改即同时丢凭据与审计；学 zeroclaw"agent 禁改自身基础设施"，推广 forbidden_home 为只读守卫 |
+| 拒绝反馈话术 | L5 话术 | **缺位**——现有拒绝信息未做两件事：不含"如何放开权限"的救济指引（防模型游说扩权，学 zeroclaw）、声明"这是策略硬边界，别用 shell 技巧绕行"（学 nanobot） |
 | workspace 快照 | L1 | **缺位**，第二优先 |
 | T2 受限进程 | L2 | **缺位**，第三优先（部署复杂度最高，收益最硬） |
 
@@ -64,7 +86,12 @@
 
 - [ ] Phase 0：本 ADR 评审定稿（拷问式 Q&A，转 Accepted）
 - [ ] Phase 1：workspace 快照基建（git-backed 或定时 shadow copy，纯增量无破坏）——为所有现有闸门的放行宽松度供底气
-- [ ] Phase 2：出站口检查（web_fetch 外发 URL 闸门 / IM 外发内容对 T1、T2 的把关），防泄露第一道闸
+- [ ] Phase 2：防泄露组合刀（L3 读入侧收缩 + L4 出站首闸，顺序即优先级）：
+  - [ ] env 变量密钥剔除：spawn terminal/MCP 子进程时剔除 `*KEY*`/`*SECRET*`/`*TOKEN*`（学 codex config_types.rs:232-246），config 键 `runtime.scrub_child_env`（默认 true）
+  - [ ] 基础设施文件只读守卫：config.toml / sessions.db / mcp.toml / trusted_dirs.json 对 agent（含 terminal 路径校验）只读，扩展 forbidden_home 守卫
+  - [ ] web_fetch 出站闸门：域名允许清单（未配置=拒绝，fail-closed）+ SSRF 校验（私网/环回/云元数据 IP、DNS 解析后复验，学 zeroclaw domain_guard）
+  - [ ] terminal 网络命令风险标记：curl/wget/nc/ssh/scp 等进 High 风险类，audit.log 强化记录（不拦截，留痕）
+  - [ ] 拒绝话术两原则：不含救济路径、声明硬边界劝阻绕行（进 approval 拒绝消息与 path_guard 错误文案）
 - [ ] Phase 3：T2 受限进程落地（Windows 受限 token / 专用低权账户，含部署文档）
 - [ ] Phase 4：闸门复审减法——用判据 3 逐个过现有机制，该降级降级、该删除删除
 - [ ] 刻意不做：脚本文件内容的 destructive 模式扫描（`os.remove` / `Remove-Item` 等）——又一个猜不完的黑名单，误报成本高（正常脚本普遍带临时文件清理），且 L1/L2 兜底后无增量收益
@@ -72,7 +99,7 @@
 ## 后果 / Consequences
 
 - (+) 新事故有了归位规则：补丁必须落入矩阵格子，体系演化从"自由生长"变为"受控填空"。
-- (+) 防泄露从零到一：出站口检查补上两条安全目的中最薄弱的一条，且直接针对注入式威胁。
+- (+) 防泄露从零到一：L3 读入侧收缩（env 密钥剔除、基础设施文件只读）+ L4 出站首闸（web_fetch 闸门）组合落地，直接针对注入式威胁；渠道推送目标固定（config 写死收件人）已结构性封死"寄给陌生人"路径，无需额外动作。
 - (+) 可恢复性基建提升全部现有闸门的放行底气——"度"的宽松有了结构性来源，不再靠闸门堆砌。
 - (−) 快照有存储与性能成本（单用户规模可控，需设保留窗口）。
 - (−) T2 受限进程部署复杂度高，可能影响部分合法工具的运行，需要灰度。
