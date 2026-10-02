@@ -1,6 +1,6 @@
 # LLAIA 项目 Roadmap
 
-> 本文档是 LLAIA 的**前瞻路线图**：顶部是已交付阶段一览（索引），主体是**近期小修（H 系列）**与下一步计划（P7）。
+> 本文档是 LLAIA 的**前瞻路线图**：顶部是已交付阶段一览（索引），主体是**近期小修（H 系列）**与下一步计划（P7–P9）。
 > 各阶段的**完整交付清单**见 [`CHANGELOG.md`](CHANGELOG.md)；详细实现计划见 [`plans/`](plans/)，设计规格见 [`specs/`](specs/)，架构决策见 [`adr/`](adr/)。
 
 **整体目标**：一个单用户、本地优先的私人 AI 助理，跨 CLI/QQ/Web 等多 channel 接入，主 Agent + 可委派子 Agent 协作，持久化记忆与会话。
@@ -89,6 +89,30 @@
 - [x] **WebUI Models 选项卡**：卡片网格 + provider/kind/multimodal 过滤；添加流 = 选 provider（仅 llm family）→ probe → 必选 kind → kind 专属表单；批量添加删除；Provider 表单瘦身（service family 只渲染 api_key）。实现注记：`probe_models` 端点显式拒 service family；静态资源回归测试断言换新标记
 - [x] **CLI 收尾**：`/models`（模型目录）+ `/providers`（连接注册表）拆分，`/provider` 保留别名转发；CONFIG_TEMPLATE 重写；doctor；加载期自动迁移层（`migrate_legacy_config`：旧 model 子表/凭据段/内联端点原地改写为新结构，agent 旧引用零改动）
 - [x] **文档与版本**：AGENTS.md / configuration guide / CHANGELOG / ADR-0008 演进记录；直升 v0.6.0
+
+---
+
+## P9 — 安全模型落地（ADR-0033）
+
+**状态**：⏳ 计划中（2026-10-02 [ADR-0033](adr/0033-security-model.md) 评审定案转 Accepted）
+
+依 ADR-0033：资产分级（**A0 人格主权 / A1 凭据 / A2 隐私历史 / A3 全盘机器**，A 编号刻意避开既有闸门 T2/T3/T6）+ 五层防线（L1 可恢复性基建 → L5 字符串启发）。总体顺序：先建可恢复性基建给全部闸门的放行宽松度供底气，再做防泄露组合刀（L3 读入侧收缩 + L4 出站首闸），字符串层降级为审计线索，最后做闸门减法。
+
+- [ ] **Phase 1 · workspace 快照基建**：git-backed 或定时 shadow copy，A0/A2 写前留底；快照存储本身对 agent 只读（防「先改本体再改快照」洗白）
+- [ ] **Phase 2 · 防泄露组合刀**（顺序即优先级；env 剔除与 Phase 1 无依赖，可提前单独落地）：
+    - [ ] **env 变量密钥剔除**：spawn terminal/MCP 子进程剔除 `*KEY*`/`*SECRET*`/`*TOKEN*`（学 codex），config 键 `runtime.scrub_child_env`（默认 true）。现状 dotenvy 把 .env 灌进进程 env（`main.rs`），terminal 一条 `env` 即倒出全部 API key
+    - [ ] **基础设施文件只读守卫**：config.toml / sessions.db / mcp.toml / trusted_dirs.json 对 agent 只读（file 工具审批→直接拒 + terminal 路径校验收紧），扩展 forbidden_home 守卫
+    - [ ] **web_fetch 出站闸门（两道分离）**：SSRF 校验无条件常开（私网/环回/云元数据 IP + DNS 解析后复验，学 zeroclaw domain_guard）；域名允许清单只收紧非交互频道（未配置 = fail-closed），交互频道走 trusted_dirs 同款模式（首访新域名审批一次、批准持久化）
+    - [ ] **terminal 网络命令风险标记**：curl/wget/nc/ssh/scp 等进 High 风险类，audit.log 强化记录（不拦截，留痕）
+    - [ ] **拒绝话术两原则**：不含救济路径、声明硬边界劝阻绕行（approval 拒绝消息与 path_guard 错误文案）
+- [ ] **Phase 3 · 部署级 T2 受限进程落地**：Windows 受限 token / 专用低权账户，含部署文档（T2 指部署规范旧名，与资产层 A2 无关）
+- [ ] **Phase 4 · 闸门复审减法**：用 ADR-0033 判据 3 逐个过现有机制，该降级降级、该删除删除（T3 内联闸门为第一候选）
+- **记忆卫生三档**（A0 特许写入口的落地点，与 ADR-0033 同日定案；三档独立排期，第 0 档随时可做）：
+    - [ ] **第 0 档 · memory_write 写入时防重**：entry 归一化（空白/标点折叠）后与现有行比对，已存在即返回 already remembered 不落盘——多数膨胀是字面重复，无需 LLM
+    - [ ] **第 1 档 · compress_memory 结构化升级**（`memory/markdown.rs`，现为裸 LLM 单发）：① 确定性预检——按 `- [YYYY-MM-DD] entry` 契约解析条目，精确/近似重复直接合并不经 LLM；② LLM 只做语义合并（输入输出均为条目列表）；③ 输出结构校验——每行匹配条目正则 + 每行可溯源到至少一条输入 + 凭空行即失败，重试一次仍败则原文件保留并报错。校验即注入防线：被骗压缩器加不进任何新内容（ADR-0033「A0 特许写入例外」的对症控制）
+    - **触发**：`trim_memory_to_budget` 实际开始丢弃内容（文件超 ADR-0025 预算）为自动压缩信号——有写前备份，按 ADR-0033 判据 1（可恢复性放行）免交互审批；`/memory-compact` 保留为手动覆盖
+    - **SOUL/USER 压缩 → 留观**：人格文件让 sidecar LLM 改写与 A0「直接拒」立场冲突，增长压力远小于 MEMORY。触发条件：实测增长出现；届时只做结构性去重（同节合并重复 bullet、逐字重复行）+ diff 人审，永不丢唯一内容
+- **留档不排期**：cron T3 豁免扩大 A2 可读面（`cron_allow_inline_interpreter` 让内联 python 可读 sessions.db，dream 首跑实证）；读入侧收缩若立项，考虑给 cron 走 scoped 会话查询 helper 而非裸文件。详见 ADR-0033 §5 留档项
 
 ---
 
