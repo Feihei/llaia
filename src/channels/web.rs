@@ -725,11 +725,10 @@ impl WebChannel {
     }
 
     pub fn build_router(&self) -> axum::Router {
-        // token：配置非空用配置，留空随机生成
+        // token：serve_cmd 已把解析结果（配置值或进程级一次的随机值）注入 self.config，
+        // reload 不更换。这里空值兜底生成仅覆盖脱离 serve_cmd 的直接构造（如测试）。
         let token = if self.config.token.is_empty() {
-            let t = generate_token();
-            tracing::info!("WebUI token (randomly generated): {}", t);
-            t
+            generate_token()
         } else {
             self.config.token.clone()
         };

@@ -71,11 +71,13 @@ model = "qwen"                            # 引用 [model.<id>] 目录条目
 ## 3. 启动
 
 ```bash
-llaia serve       # Web UI + 后台频道（推荐）
+llaia             # 默认：Web UI + 后台频道，就绪后自动用浏览器打开 Web UI
+llaia serve       # 同上但不自动开浏览器（脚本/服务器场景）
 llaia chat        # 纯终端交互
 ```
 
-- `serve` 启动后打开 **http://127.0.0.1:51217**（若 `webui.token` 留空，随机 token 会打印在日志里）。
+- Windows 下直接**双击 `llaia.exe`** 也行——等效于无参数启动，弹出的控制台窗口就是服务本体（关窗即停止）。
+- 启动后浏览器会打开 **http://127.0.0.1:51217**，token 自动附带（`?token=`），无需手输；若 `webui.token` 留空，随机 token 也会打印在日志里。
 - `chat` 进入终端 REPL，适合调试。注意 `chat` 模式**必须有 provider**，否则直接报错引导你去 WebUI 或 config 配置。
 
 ## 4. 第一次对话

@@ -221,7 +221,7 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 
 > **ask_user 的图形入口（WebUI，2026-09-24）**：与审批卡片同族——`runner.rs` 注册 pending question 后发 **`TurnEvent::QuestionAsked{id,question,choices}`**（`OutputSink::on_question_asked` 收 `QuestionRequest<'_>`，默认 sink 忽略），`WebSink` 转成 `WebEvent::Question`，前端渲染**聊天流内问题卡片**（问题文本 + `choices` 可点按钮 + 自定义答案输入）。**作答同样不新增协议**：卡片把 `/answer <id> <text>` 变成一次点击/回车（chat 帧文本直走 slash → Resume 通路）。web 频道**不再发提示文案 Chunk**（卡片即全部信息，别的频道照旧），旧的 composer 下方只读 QUESTIONS 面板已移除；`GET /api/questions` 从"面板数据源"改为"卡片状态恢复"（补齐刷新丢失的卡片、把别处已答的置为 answered），5s 轮询保留作对账心跳。
 
-CLI 子命令：`llaia chat`（默认）/ `llaia serve`（主入口，拉起 WebUI + 启用的 IM 频道；`--host` / `--port` 只覆盖**本次**监听、不回写 config.toml）/ `llaia init`（显式生成配置骨架；`--force` 覆盖重建。serve / chat 启动时经 `prepare_startup_dir` 自动做「迁移 → 幂等补齐模板 → 加载配置」，缺啥补啥、绝不覆盖已有文件，裸 `llaia serve` 在全新机器可直接跑）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。
+CLI 子命令：`llaia serve`（**默认**，无参数/双击 exe 同效：拉起 WebUI + 启用的 IM 频道，端口就绪后用系统浏览器打开 WebUI——token 以 `?token=` 附带、前端存 localStorage 免登录；`--open` 显式开启，`--host` / `--port` 只覆盖**本次**监听、不回写 config.toml；启动时发现端口已有实例在听则直接开浏览器指向它并退出；WebUI token 解析收口在 serve_cmd 进程级——配置值优先，否则随机生成**一次**并跨 reload 复用，`/api/restart` 不再踢掉浏览器登录态）/ `llaia chat`（显式进入终端 REPL）/ `llaia init`（显式生成配置骨架；`--force` 覆盖重建。serve / chat 启动时经 `prepare_startup_dir` 自动做「迁移 → 幂等补齐模板 → 加载配置」，缺啥补啥、绝不覆盖已有文件，裸 `llaia serve` 在全新机器可直接跑）/ `llaia config` / `llaia doctor` / `llaia remember <text>`。无参数（双击）路径出错时停住控制台窗口等一次回车再退出，报错不再一闪而过。
 斜杠命令：`/archive [days]`（把当前线 N 天前消息搬进归档桶，默认 30 天） `/session [<名>|close]` `/sessions`（别名 `/task` `/tasks`；web 频道被拦截为 Side 提示，切线走实例 rail） `/exit` `/stop` `/compact` `/memory-compact`（按 `agent.instance_name` 路由：任务实例写实例私有 MEMORY，main 写主 MEMORY） `/clear`（清上下文 + 当前会话 todo） `/stats` `/remember <text>` `/provider` `/permission <profile>` `/reasoning [on|off]`（会话级思考开关） `/btw <question>`（侧问：读上下文零污染，答案落 `side_messages` 独立表、WebUI Side 样式渲染） `/steer <msg>`（运行中插话：channel 层拦截投 `Agent.steer_buffer`，agent 工具循环非末轮迭代顶部以 `[steer] User added:` user 消息注入；空闲时降级为普通消息；web 投递目标 = 帧实例的 `InstanceHandle.steer_buffer`） `/ok <id>` `/deny <id>` `/cancel <id>`（取消 pending question / 审批，二者通吃） `/move [<path>|home]`（别名 `/cd`）`/config` `/env` `/migrate-secrets` `/delegate-list` `/delegate-cancel <id>` `/help`。
 
 > **敏感信息 .env 自动化（P5 S1）**：`src/config/secrets.rs`。WebUI `PUT /api/config` 保存时，明文敏感字段（provider api\_key、频道 token/secret、搜索 key、TTS key、webui token）**先写入** **`<config_dir>/.env`**（幂等 upsert、Unix 0600 权限），config.toml 只保留 `${VAR}` 引用；内存态再展开回明文供热加载（`build_provider_from_config` 不认 `${VAR}`）。`.env` 写入失败 → 保留明文 + warn 降级。存量迁移用 `/migrate-secrets`（toml\_edit 定点替换保注释）；启动时扫描明文敏感字段并 warn。`GET /api/config` 返回时敏感字段掩码为 `••••`（保存时空输入 = 保留原值，见 `mask_sensitive`/`merge_masked`）。
@@ -309,7 +309,7 @@ QQ 鉴权流程：启动时用 `app_id` + `app_secret` 调 `https://bots.qq.com/
 
 ## P1 MVP 验收标准（历史基线，已超集实现）
 
-- 能 `cargo run --` 进入交互（默认 `chat` REPL，或用 `llaia serve` 拉起 WebUI）
+- 能 `cargo run --` 进入服务模式（无参数默认 `serve` + 自动打开 WebUI；终端 REPL 用 `llaia chat`）
 
 - 能调本地 Ollama / LMStudio，以及 Anthropic / Gemini 等云端 provider
 

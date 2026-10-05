@@ -50,13 +50,15 @@ LLAIA does **not** bundle a model — you point it at an OpenAI-compatible or An
 Full walkthrough in [**docs/guide/quick-start.md**](docs/guide/quick-start.md).
 
 ```bash
-llaia serve                             # Web UI + background channels (recommended)
+llaia                                   # default: Web UI + background channels, opens the browser when ready
 # first run auto-scaffolds ~/.llaia/ (config, .env, workspace); configure in the browser
 # or edit ~/.llaia/.env + config.toml manually; `llaia init` scaffolds explicitly
+llaia serve                             # same, without auto-opening the browser
 llaia chat                              # terminal-only interactive chat
 ```
 
-- Web UI: open **http://127.0.0.1:51217** (random token printed to logs if `webui.token` is empty).
+- On Windows, double-clicking `llaia.exe` is equivalent to a bare launch (console window = the server; closing it stops the service).
+- Web UI: opened automatically at **http://127.0.0.1:51217** with the token attached (random token printed to logs if `webui.token` is empty).
 - `llaia doctor` diagnoses provider connectivity and file integrity before you dig in.
 
 ---

@@ -16,7 +16,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 进入终端交互模式（默认）
+    /// 进入终端交互模式（需显式指定；无参数启动默认走 serve）
     Chat,
     /// 启动后台服务（WebUI + 已启用的 IM 频道），不启动终端交互
     Serve {
@@ -26,6 +26,9 @@ enum Commands {
         /// 覆盖 [webui].port：只影响本次监听的端口，不回写 config.toml
         #[arg(long)]
         port: Option<u16>,
+        /// 服务就绪后用系统浏览器打开 WebUI（无参数启动时默认开启）
+        #[arg(long)]
+        open: bool,
     },
     /// 初始化配置目录：生成目录骨架 + 默认模板
     Init {
@@ -82,17 +85,43 @@ async fn main() -> Result<()> {
         let _ = dotenvy::from_path(&env_path);
     }
 
-    let command = cli.command.unwrap_or(Commands::Chat);
-    match command {
+    // 无参数启动（Windows 双击 exe 同效）默认 serve + 自动打开 WebUI；
+    // 终端 REPL 改为显式 `llaia chat`。
+    let bare = cli.command.is_none();
+    let command = cli.command.unwrap_or(Commands::Serve {
+        host: None,
+        port: None,
+        open: true,
+    });
+
+    let result: Result<()> = match command {
         Commands::Chat => llaia::commands::chat_cmd(&config_dir).await,
-        Commands::Serve { host, port } => {
-            llaia::commands::serve_cmd(&config_dir, llaia::commands::WebBindOverride { host, port })
-                .await
+        Commands::Serve { host, port, open } => {
+            llaia::commands::serve_cmd(
+                &config_dir,
+                llaia::commands::WebBindOverride { host, port },
+                open,
+            )
+            .await
         }
         Commands::Init { force } => llaia::commands::init_cmd(&config_dir, force),
         Commands::Config => llaia::commands::config_cmd(&config_dir),
         Commands::Doctor => llaia::commands::doctor_cmd(&config_dir).await,
         Commands::Remember { text } => llaia::commands::remember_cmd(&text, &config_dir).await,
+    };
+
+    // 双击启动的控制台窗口随进程退出立即关闭，报错会一闪而过——无参数路径
+    // 失败时自行打印并停住窗口等一次回车，让人来得及读错误（随后返回 Ok，
+    // 避免 tokio::main 再打一遍 "Error:"）。
+    match result {
+        Err(e) if bare => {
+            eprintln!("\nError: {e:#}");
+            println!("\nPress Enter to exit...");
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            Ok(())
+        }
+        r => r,
     }
 }
 

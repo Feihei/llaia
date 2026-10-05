@@ -74,6 +74,9 @@ readability = { version = "0.3.0", default-features = false }
 html2text = "0.17.1"
 # readability::extractor::extract 需要 url::Url 入参；作为直接依赖显式引入。
 url = "2"
+# `--open`（无参数/双击启动默认开启）用系统默认浏览器打开 WebUI；
+# Windows 走 ShellExecuteW，不经 cmd，URL 元字符无转义坑、也无控制台闪窗
+open = "5"
 
 [dev-dependencies]
 mockito = "1"

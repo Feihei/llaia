@@ -447,6 +447,121 @@ pub fn effective_webui(file: &WebUiConfig, bind: &WebBindOverride) -> WebUiConfi
     eff
 }
 
+/// 浏览器可访问的主机：`0.0.0.0` / `::` 是「监听所有网卡」，不是可点开的地址，
+/// 打开浏览器时要换成回环地址（连接探测同理）。
+fn browser_host(host: &str) -> &str {
+    match host {
+        "0.0.0.0" | "" => "127.0.0.1",
+        "::" => "::1",
+        h => h,
+    }
+}
+
+/// 拼 WebUI 浏览器 URL：IPv6 主机加方括号；token 非空时以 `?token=` 附带——
+/// 前端 app.js 会读取 query token 存入 localStorage，实现打开即免登录。
+fn webui_browser_url(host: &str, port: u16, token: &str) -> String {
+    let host = browser_host(host);
+    let base = if host.contains(':') {
+        format!("http://[{host}]:{port}")
+    } else {
+        format!("http://{host}:{port}")
+    };
+    if token.is_empty() {
+        base
+    } else {
+        format!("{base}/?token={}", percent_encode_component(token))
+    }
+}
+
+/// query 值的极简 percent-encode：RFC 3986 unreserved 之外全部转义。
+/// 随机 token 是 hex 不受影响；显式配置的 token 可能含 `&`/`#` 等 URL 元字符，
+/// 不转义会被浏览器截断 query。
+fn percent_encode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 端口是否已有服务在听（1s 超时；解析失败/连接拒绝/超时都视为未监听）。
+async fn webui_port_open(host: &str, port: u16) -> bool {
+    let addr = format!("{host}:{port}");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    .map(|res| res.is_ok())
+    .unwrap_or(false)
+}
+
+/// 用系统默认浏览器打开 URL（open crate：Windows 走 ShellExecuteW）。
+/// spawn_blocking 包一层，不阻塞 tokio worker。
+async fn open_in_browser(url: &str) -> std::io::Result<()> {
+    let url = url.to_string();
+    match tokio::task::spawn_blocking(move || open::that_detached(&url)).await {
+        Ok(res) => res,
+        Err(e) => Err(std::io::Error::other(e)),
+    }
+}
+
+/// WebUI token 解析（serve_cmd 进程级收口）：配置非空直接用并清掉随机值
+/// （用户显式改了 token）；为空用进程级随机 token——get_or_insert_with 保证
+/// 只生成一次、跨 reload 复用，修掉旧实现每轮 build_router 重新生成导致
+/// 浏览器 localStorage 登录态失效的问题。纯函数便于单测。
+fn resolve_webui_token(config_token: &str, random_token: &mut Option<String>) -> String {
+    if config_token.is_empty() {
+        random_token
+            .get_or_insert_with(|| {
+                let t = crate::web::generate_token();
+                tracing::info!("WebUI token (randomly generated): {}", t);
+                t
+            })
+            .clone()
+    } else {
+        *random_token = None;
+        config_token.to_string()
+    }
+}
+
+/// 等 WebUI 端口就绪后用系统浏览器打开（`--open`；无参数/双击启动自动生效）。
+/// 由 serve_cmd 在首轮 serve_once 之前调用，每进程至多一次——放 serve_cmd 层
+/// 而非 serve_once 层，/api/restart reload 不会重开浏览器标签。
+fn spawn_browser_opener(host: &str, port: u16, token: String) {
+    let probe_host = browser_host(host).to_string();
+    tokio::spawn(async move {
+        // WebChannel bind 自带 10×1s 重试，这里放宽到 20s 覆盖首启偏慢的机器
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if webui_port_open(&probe_host, port).await {
+                let url = webui_browser_url(&probe_host, port, &token);
+                match open_in_browser(&url).await {
+                    Ok(()) => println!("  🌐 WebUI opened in browser: {url}"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, url = %url, "failed to open system browser")
+                    }
+                }
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    host = %probe_host,
+                    port,
+                    "WebUI not reachable within 20s, browser not opened"
+                );
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    });
+}
+
 /// 守护进程模式：启动所有非 CLI 的后台频道（QQ、未来 WebUI 等），不启动终端交互
 /// serve 子系统一轮的退出原因（reload loop 的循环控制）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,7 +572,7 @@ enum ServeExit {
     Reload,
 }
 
-pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride) -> Result<()> {
+pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride, open_browser: bool) -> Result<()> {
     prepare_startup_dir(config_dir)?;
     let mut config = load_config_or_init(config_dir)?;
 
@@ -469,16 +584,45 @@ pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride) -> Result<()> {
     print!("{}", crate::banner::billboard());
     println!("  background service mode: QQ / WebUI channels, press Ctrl+C to quit\n");
 
+    // `--open`（无参数/双击启动默认开启）：目标端口已有 WebUI 在听时不再起第二实例——
+    // 那只会 bind 失败重试 10s 后报错；直接打开浏览器指向已有实例并退出。
+    // 显式配置 token 时附带（同一份 config.toml，另一个实例认得）；随机 token 属于
+    // 那个进程、外界拿不到，此时裸 URL，靠浏览器 localStorage 的既有登录态。
+    if open_browser {
+        let eff = effective_webui(&config.webui, &bind);
+        if webui_port_open(browser_host(&eff.host), eff.port).await {
+            let url = webui_browser_url(&eff.host, eff.port, &eff.token);
+            if let Err(e) = open_in_browser(&url).await {
+                tracing::warn!(error = %e, url = %url, "failed to open system browser");
+            }
+            println!("  llaia is already serving — WebUI: {url}");
+            println!("  opened it in your browser; this process exits now.\n");
+            return Ok(());
+        }
+    }
+
     let pid_file = crate::pid::PidFile::new(config_dir);
     pid_file.acquire()?;
     let _pid_guard = PidGuard(pid_file);
+
+    // token 解析上提到进程级：配置非空用配置值，为空生成一次随机值并跨 reload 复用
+    // （旧实现在 build_router 每轮重新生成，/api/restart 后浏览器 localStorage 的
+    // 登录态即失效）。reload 时若用户改了显式 token 则跟随新值。
+    let mut random_token: Option<String> = None;
+    if open_browser {
+        // 首轮 token 供浏览器 URL 用（loop 内首轮解析结果与此一致）
+        let token = resolve_webui_token(&config.webui.token, &mut random_token);
+        let eff = effective_webui(&config.webui, &bind);
+        spawn_browser_opener(&eff.host, eff.port, token);
+    }
 
     // Reload loop（zeroclaw 式，2026-09-26）：/api/restart 不再 spawn 替代进程，
     // 而是把整轮子系统推倒重建——agent 注册表/工具注册（含 image_gen 等）/MCP/
     // 频道/cron/web listener 全部从新 config 实例化。PID 与终端保持不变，
     // 观感等同 Ctrl+C 后重新 `llaia serve`；改坏 config 会在终端报错退出（可见）。
     loop {
-        let exit = serve_once(config_dir, &config, &bind).await?;
+        let webui_token = resolve_webui_token(&config.webui.token, &mut random_token);
+        let exit = serve_once(config_dir, &config, &bind, webui_token).await?;
         match exit {
             ServeExit::Shutdown => return Ok(()),
             ServeExit::Reload => {
@@ -493,13 +637,16 @@ pub async fn serve_cmd(config_dir: &Path, bind: WebBindOverride) -> Result<()> {
 
 /// serve 主体的一轮：构建 registry/频道/cron/web，运行到 Ctrl+C、/api/shutdown
 /// 或 /api/restart。reload 场景下整个函数随外层 loop 重跑，无跨轮共享状态
-/// （进程级单例除外：tracing subscriber、PID 文件——见 serve_cmd）。
+/// （进程级单例除外：tracing subscriber、PID 文件、随机 WebUI token——见 serve_cmd）。
 async fn serve_once(
     config_dir: &Path,
     config: &Config,
     bind: &WebBindOverride,
+    webui_token: String,
 ) -> Result<ServeExit> {
-    let webui = effective_webui(&config.webui, bind);
+    let mut webui = effective_webui(&config.webui, bind);
+    // token 由 serve_cmd 解析后注入（配置值或进程级随机值），WebChannel 不再自行生成
+    webui.token = webui_token;
     warn_plaintext_secrets(config_dir);
 
     let (registry, cron_tool, mcp_registry) =
@@ -1432,6 +1579,61 @@ mod tests {
             port: Some(1)
         }
         .is_none());
+    }
+
+    /// 浏览器 URL：通配监听地址要换成回环地址（0.0.0.0/:: 本身不可点开），
+    /// IPv6 主机要加方括号。
+    #[test]
+    fn browser_url_normalizes_wildcard_hosts() {
+        assert_eq!(
+            webui_browser_url("0.0.0.0", 51217, ""),
+            "http://127.0.0.1:51217"
+        );
+        assert_eq!(webui_browser_url("::", 51217, ""), "http://[::1]:51217");
+        assert_eq!(
+            webui_browser_url("127.0.0.1", 51217, ""),
+            "http://127.0.0.1:51217"
+        );
+        assert_eq!(
+            webui_browser_url("192.168.1.5", 8080, ""),
+            "http://192.168.1.5:8080"
+        );
+    }
+
+    /// token 非 URL 安全字符时必须 percent-encode：`&`/`#` 是 query 分隔符，
+    /// 不转义会被浏览器截断，前端拿到的 token 就错了。
+    #[test]
+    fn browser_url_appends_percent_encoded_token() {
+        assert_eq!(
+            webui_browser_url("127.0.0.1", 51217, "abc123"),
+            "http://127.0.0.1:51217/?token=abc123"
+        );
+        assert_eq!(
+            webui_browser_url("127.0.0.1", 51217, "a&b#c d"),
+            "http://127.0.0.1:51217/?token=a%26b%23c%20d"
+        );
+        // 空 token（随机 token 未知的 attach 场景）不附带 query
+        assert_eq!(
+            webui_browser_url("127.0.0.1", 51217, ""),
+            "http://127.0.0.1:51217"
+        );
+    }
+
+    /// 随机 token 跨 reload 复用（同一进程内多次解析得到同一个值）；
+    /// 显式配置 token 直接生效并清掉随机值（用户改了 token，下轮生效）。
+    #[test]
+    fn token_resolution_stable_within_process() {
+        let mut random = None;
+        let first = resolve_webui_token("", &mut random);
+        assert!(!first.is_empty());
+        assert_eq!(resolve_webui_token("", &mut random), first);
+        assert_eq!(random.as_deref(), Some(first.as_str()));
+
+        assert_eq!(resolve_webui_token("fixed", &mut random), "fixed");
+        assert!(random.is_none());
+        // 显式 token 清空后再回到空配置：允许重新生成新随机值
+        let again = resolve_webui_token("", &mut random);
+        assert!(!again.is_empty());
     }
 
     fn write_config(dir: &std::path::Path, base_url: &str) {
