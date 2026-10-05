@@ -58,6 +58,9 @@ pub struct StdioTransport {
     command: String,
     args: Vec<String>,
     env: HashMap<String, String>,
+    /// env 密钥剔除（ADR-0033 Phase 2，`[runtime].scrub_child_env`）：spawn 与
+    /// reset 重连 respawn 都生效；config 提供的 env 段键在白名单内不剔除。
+    scrub: bool,
     inner: tokio::sync::Mutex<Option<StdioInner>>,
 }
 
@@ -67,12 +70,14 @@ impl StdioTransport {
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
+        scrub: bool,
     ) -> Result<Self, TransportError> {
-        let inner = spawn_child(command, args, env).await?;
+        let inner = spawn_child(command, args, env, scrub).await?;
         Ok(Self {
             command: command.to_string(),
             args: args.to_vec(),
             env: env.clone(),
+            scrub,
             inner: tokio::sync::Mutex::new(Some(inner)),
         })
     }
@@ -82,15 +87,22 @@ async fn spawn_child(
     command: &str,
     args: &[String],
     env: &HashMap<String, String>,
+    scrub: bool,
 ) -> Result<StdioInner, TransportError> {
     use tokio::process::Command;
-    let mut child = Command::new(command)
-        .args(args)
+    let mut cmd = Command::new(command);
+    cmd.args(args)
         .envs(env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    // env 密钥剔除（ADR-0033 Phase 2）：config env 段的键在白名单内保留
+    if scrub {
+        let extra: Vec<String> = env.keys().cloned().collect();
+        crate::child_env::scrub_command_env(&mut cmd, &extra);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| TransportError::Closed(format!("spawn '{}': {}", command, e)))?;
     let stdin = child
@@ -224,7 +236,7 @@ impl McpTransport for StdioTransport {
         if let Some(mut inner) = guard.take() {
             let _ = inner.child.kill().await;
         }
-        let inner = spawn_child(&self.command, &self.args, &self.env).await?;
+        let inner = spawn_child(&self.command, &self.args, &self.env, self.scrub).await?;
         *guard = Some(inner);
         Ok(())
     }

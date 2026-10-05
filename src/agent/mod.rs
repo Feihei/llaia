@@ -135,6 +135,9 @@ pub struct Agent {
     pub alias: String,
     /// 审计日志（可选，测试时为 None）
     pub audit: Option<Arc<crate::audit::AuditLog>>,
+    /// A0 快照上下文（ADR-0033 L1，P9 Phase 1）：仅 main agent Some——
+    /// ApprovalContext 携带给 runner 的实例 memory 路由，/memory-compact 也用它。
+    pub snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>,
     /// 本次 turn 的工具调用历史（供 delegate 提取产出文件清单）
     pub turn_tool_calls: Vec<TurnToolCall>,
     /// 启动时配置快照（供 /provider 等运行时命令枚举/构建 provider；
@@ -333,6 +336,7 @@ impl Agent {
             is_main,
             alias,
             audit,
+            snapshot: None,
             turn_tool_calls: Vec::new(),
             config: Arc::new(config.clone()),
             live_config: Arc::new(RwLock::new(config.clone())),
@@ -709,6 +713,8 @@ impl Agent {
             is_main: false,
             alias: self.alias.clone(),
             audit: self.audit.clone(),
+            // 快照上下文跟随派生源（实例 memory 路由的覆盖写前留底用）
+            snapshot: self.snapshot.clone(),
             turn_tool_calls: Vec::new(),
             config: self.config.clone(),
             disable_thinking,
@@ -1494,6 +1500,7 @@ impl Agent {
                     .as_ref()
                     .map(|n| self.workspace.join("instances").join(n).join("MEMORY.md")),
                 forbidden_home: self.instance_name.as_ref().map(|_| self.workspace.clone()),
+                snapshot: self.snapshot.clone(),
                 timezone: self.live_config.read().await.runtime.timezone.clone(),
             };
             let (tool_msgs, deferred) =

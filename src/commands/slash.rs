@@ -419,6 +419,12 @@ pub async fn try_handle(
             };
             let backup_dir = agent.workspace.join("backups");
             let tz = agent.timezone().await;
+            // A0 写前留底（ADR-0033 L1）：workspace/backups 备份在家目录内、agent
+            // 可触碰，不构成 agent 之外的留底；快照库（config_dir/snapshots/）才是。
+            if let Some(snap) = &agent.snapshot {
+                snap.snapshot_target(&memory_path, "before_memory_compact")
+                    .await;
+            }
             match compress_memory(&memory_path, provider.as_ref(), &backup_dir, &tz).await {
                 Ok(_) => Ok(SlashOutcome::Handled(
                     "[memory-compact] MEMORY.md compressed and saved (backup in workspace/backups/). Restart to apply in the running session.".into(),

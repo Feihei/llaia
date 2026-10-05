@@ -90,9 +90,9 @@
 ### 5. 分步路线
 
 - [x] Phase 0：本 ADR 评审定稿（2026-10-02 转 Accepted。评审修订四项：资产层级 T→A 改号防与闸门 T2/T3/T6 撞车、出站面补 search 通道、web_fetch 闸拆为「SSRF 常开 + 域名清单仅非交互」、A0 特许写入口随记忆卫生三档一并定案——实施条目见 [docs/plan.md](../plan.md) P9）
-- [ ] Phase 1：workspace 快照基建（git-backed 或定时 shadow copy，纯增量无破坏）——为所有现有闸门的放行宽松度供底气；快照存储本身对 agent 只读（防「先改本体再改快照」洗白）
+- [x] Phase 1：workspace 快照基建（2026-10-05 落地，`src/snapshot.rs`；时间戳镜像目录 + sha1 去重，弃 git-backed——外部 git 依赖与轻量单 exe 定位冲突。A0/A2 写前挂钩 + 10 分钟定时 sweep 双通道；sessions.db 走 `VACUUM INTO` 一致副本 24h 节流；快照库 `<config_dir>/snapshots/` 对 agent 只读——file/terminal 工具持 `snapshot_root` 硬拒，execute 与 execute_approved 同拒。实施细节见 [docs/plans/2026-10-05-p9-snapshot-and-env-scrub.md](../plans/2026-10-05-p9-snapshot-and-env-scrub.md)）
 - [ ] Phase 2：防泄露组合刀（L3 读入侧收缩 + L4 出站首闸，顺序即优先级）：
-  - [ ] env 变量密钥剔除：spawn terminal/MCP 子进程时剔除 `*KEY*`/`*SECRET*`/`*TOKEN*`（学 codex config_types.rs:232-246），config 键 `runtime.scrub_child_env`（默认 true）。**本项与 Phase 1 无依赖、实现零风险，可提前单独落地**（评审注：dotenvy 已把 .env 灌进进程 env，terminal 一条 `env` 即倒出全部 API key）
+  - [x] env 变量密钥剔除：spawn terminal/MCP 子进程时剔除 `*KEY*`/`*SECRET*`/`*TOKEN*`（学 codex config_types.rs:232-246），config 键 `runtime.scrub_child_env`（默认 true）。2026-10-05 落地（`src/child_env.rs`；MCP server env 段显式提供的键在白名单内；`StdioTransport` 重连 respawn 同样生效）。**本项与 Phase 1 无依赖、实现零风险，可提前单独落地**（评审注：dotenvy 已把 .env 灌进进程 env，terminal 一条 `env` 即倒出全部 API key——现状已消解）
   - [ ] 基础设施文件只读守卫：config.toml / sessions.db / mcp.toml / trusted_dirs.json 对 agent（含 terminal 路径校验）只读，扩展 forbidden_home 守卫
   - [ ] web_fetch 出站闸门，两道分离（评审修订）：**SSRF 校验无条件常开**（私网/环回/云元数据 IP、DNS 解析后复验，学 zeroclaw domain_guard——不涉可用性取舍）；**域名允许清单只收紧非交互频道**（cron/delegate：未配置 = 拒绝 fail-closed），交互频道走 trusted_dirs 同款模式（首访新域名审批一次、批准持久化），不把单用户助理最高频的「帮我查这个」闸死——cron T3 已证明「闸门堆砌 = 功能死亡」
   - [ ] terminal 网络命令风险标记：curl/wget/nc/ssh/scp 等进 High 风险类，audit.log 强化记录（不拦截，留痕）

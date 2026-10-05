@@ -44,6 +44,11 @@ max_iterations = 10
 # max_turn_duration_secs = 3600     # optional: hard stop for a single turn (seconds)
 # cron_allow_inline_interpreter = false  # optional: let cron channels run inline interpreter commands (python -c etc.) without forced approval; out-of-scope ops stay denied. Default false
 #
+# Security hardening (ADR-0033)
+# snapshot_enabled = true          # optional: workspace snapshots (SOUL/USER/MEMORY, sessions.db, uploads) to <config_dir>/snapshots/ before writes + periodic sweep; agent-proof read-only. Default true
+# snapshot_retention_days = 14     # optional: snapshot retention window; older timestamped dirs are GC'd daily. Default 14
+# scrub_child_env = true           # optional: strip inherited env vars matching *KEY*/*SECRET*/*TOKEN* from terminal/MCP child processes. Default true
+#
 # Generation Guard: output degeneration defense for small local models
 # (repetition loops, runaway thinking, empty replies). On detection the
 # stream is aborted, the partial output discarded, and one retry is made

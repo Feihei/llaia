@@ -19,11 +19,16 @@ pub struct FileWrite {
     workspace: Arc<RwLock<PathBuf>>,
     trusted: Arc<RwLock<Vec<PathBuf>>>,
     is_main: bool,
+    /// A0 快照上下文（ADR-0033 L1，仅 main agent Some）：写前留底人格文件 +
+    /// 快照库只读守卫。默认 None（子 agent / 测试不受影响）。
+    snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>,
 }
 pub struct FileEdit {
     workspace: Arc<RwLock<PathBuf>>,
     trusted: Arc<RwLock<Vec<PathBuf>>>,
     is_main: bool,
+    /// 同 FileWrite.snapshot
+    snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>,
 }
 
 impl FileRead {
@@ -51,7 +56,14 @@ impl FileWrite {
             workspace,
             trusted,
             is_main,
+            snapshot: None,
         }
+    }
+
+    /// 注入 A0 快照上下文（仅 main agent）。
+    pub fn with_snapshot(mut self, snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>) -> Self {
+        self.snapshot = snapshot;
+        self
     }
 }
 impl FileEdit {
@@ -64,7 +76,14 @@ impl FileEdit {
             workspace,
             trusted,
             is_main,
+            snapshot: None,
         }
+    }
+
+    /// 注入 A0 快照上下文（仅 main agent）。
+    pub fn with_snapshot(mut self, snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>) -> Self {
+        self.snapshot = snapshot;
+        self
     }
 }
 
@@ -280,6 +299,17 @@ impl FileWrite {
             }
         }
 
+        // 快照库只读守卫（ADR-0033 L1）：execute 与 execute_approved 同拒
+        if let Some(snap) = &self.snapshot {
+            if snap.blocks_write(&resolved) {
+                anyhow::bail!(
+                    "[snapshot-guard] snapshots dir is read-only to the agent: {}",
+                    path
+                );
+            }
+            snap.snapshot_target(&resolved, "before_file_write").await;
+        }
+
         if let Some(parent) = resolved.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
@@ -358,6 +388,17 @@ impl FileEdit {
             if resolved.starts_with(&subagent_dir) {
                 anyhow::bail!("main agent cannot write to sub-agent workspace: {}", path);
             }
+        }
+
+        // 快照库只读守卫 + A0 写前留底（ADR-0033 L1）：execute 与 execute_approved 同拒
+        if let Some(snap) = &self.snapshot {
+            if snap.blocks_write(&resolved) {
+                anyhow::bail!(
+                    "[snapshot-guard] snapshots dir is read-only to the agent: {}",
+                    path
+                );
+            }
+            snap.snapshot_target(&resolved, "before_file_edit").await;
         }
 
         let content = tokio::fs::read_to_string(&resolved)

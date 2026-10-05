@@ -22,6 +22,13 @@ pub struct Terminal {
     /// 删除护栏（rm → .trash，2026-09-17）：开启时 bound path 内破坏性命令转
     /// `.trash/` 可恢复，界外由审批层强制人审。构造自 `[tools.terminal].delete_guard != "off"`。
     delete_guard: bool,
+    /// 子进程 env 密钥剔除（ADR-0033 Phase 2 首刀，`[runtime].scrub_child_env`）：
+    /// spawn 前剔除变量名含 KEY/SECRET/TOKEN 的继承变量，防 `env` 一条命令
+    /// 倒出 .env 灌进进程 env 的全部 API key。默认关闭，`with_hardening` 开启。
+    scrub_child_env: bool,
+    /// 快照库根（`<config_dir>/snapshots/`，ADR-0033 L1）：Some 时命令路径解析
+    /// 后命中即拒——快照存储对 agent 只读，execute 与 execute_approved 同拒。
+    snapshot_root: Option<PathBuf>,
     /// Windows 上探测到的 Git Bash 路径；None 表示未找到，执行回退到 `cmd /C`。
     #[cfg(windows)]
     bash_path: Option<PathBuf>,
@@ -43,9 +50,18 @@ impl Terminal {
             trusted,
             skills_dir,
             delete_guard,
+            scrub_child_env: false,
+            snapshot_root: None,
             #[cfg(windows)]
             bash_path: detect_bash(),
         }
+    }
+
+    /// 运行时加固（ADR-0033）：env 密钥剔除 + 快照库只读守卫。仅 main agent 开启。
+    pub fn with_hardening(mut self, scrub_child_env: bool, snapshot_root: Option<PathBuf>) -> Self {
+        self.scrub_child_env = scrub_child_env;
+        self.snapshot_root = snapshot_root;
+        self
     }
 
     /// 命令策略校验
@@ -154,15 +170,19 @@ async fn run_command(
     command: &str,
     bash: Option<&Path>,
     workspace: &Path,
+    scrub_child_env: bool,
 ) -> std::io::Result<std::process::Output> {
     if let Some(bash) = bash {
-        let mut child = TokioCommand::new(bash)
-            .args(["-s"])
+        let mut cmd = TokioCommand::new(bash);
+        cmd.args(["-s"])
             .current_dir(workspace)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
+            .stderr(std::process::Stdio::piped());
+        if scrub_child_env {
+            crate::child_env::scrub_command_env(&mut cmd, &[]);
+        }
+        let mut child = cmd.spawn()?;
         let mut stdin = child
             .stdin
             .take()
@@ -171,12 +191,12 @@ async fn run_command(
         drop(stdin); // EOF → bash 读完脚本后自行退出
         child.wait_with_output().await
     } else {
-        TokioCommand::new("cmd")
-            .raw_arg("/C")
-            .raw_arg(command)
-            .current_dir(workspace)
-            .output()
-            .await
+        let mut cmd = TokioCommand::new("cmd");
+        cmd.raw_arg("/C").raw_arg(command).current_dir(workspace);
+        if scrub_child_env {
+            crate::child_env::scrub_command_env(&mut cmd, &[]);
+        }
+        cmd.output().await
     }
 }
 
@@ -254,14 +274,40 @@ impl Terminal {
                 .unwrap_or_default();
         }
 
+        // 快照库守卫（ADR-0033 L1，P9 Phase 1）：`<config_dir>/snapshots/` 对 agent
+        // 只读——execute 与 execute_approved 同拒（delegate 自动放行与批准豁免跳过
+        // 范围检查的既有绕行，到这道闸为止）。路径提取是 L5 启发：`bash -s` stdin
+        // 脚本内的路径不可见，硬边界归 Phase 3 T2 受限进程；file 工具侧有精确拦截。
+        if let Some(root) = &self.snapshot_root {
+            for token in path_guard::extract_path_tokens(command) {
+                if let Ok(resolved) = path_guard::resolve_approved_path(&workspace, &token) {
+                    if resolved.starts_with(root) {
+                        anyhow::bail!(
+                            "[snapshot-guard] snapshots dir is read-only to the agent: {}",
+                            token
+                        );
+                    }
+                }
+            }
+        }
+
         #[cfg(windows)]
-        let output = run_command(command, self.bash_path.as_deref(), &workspace).await;
+        let output = run_command(
+            command,
+            self.bash_path.as_deref(),
+            &workspace,
+            self.scrub_child_env,
+        )
+        .await;
         #[cfg(not(windows))]
-        let output = TokioCommand::new("sh")
-            .args(["-c", command])
-            .current_dir(&workspace)
-            .output()
-            .await;
+        let output = {
+            let mut cmd = TokioCommand::new("sh");
+            cmd.args(["-c", command]).current_dir(&workspace);
+            if self.scrub_child_env {
+                crate::child_env::scrub_command_env(&mut cmd, &[]);
+            }
+            cmd.output().await
+        };
 
         let output = output.map_err(|e| anyhow!("spawn: {}", e))?;
         let mut combined = String::new();

@@ -713,7 +713,10 @@ async fn reconnect_mcp(state: &AppState) -> (String, Vec<Arc<dyn crate::tools::T
             return (format!("mcp config load failed: {e}"), Vec::new());
         }
     };
-    let new_mcp = Arc::new(crate::mcp::client::McpRegistry::connect_all(&mcp_cfg.server).await);
+    let scrub_child_env = state.config.read().await.runtime.scrub_child_env;
+    let new_mcp = Arc::new(
+        crate::mcp::client::McpRegistry::connect_all(&mcp_cfg.server, scrub_child_env).await,
+    );
     let mut mcp_tools: Vec<Arc<dyn crate::tools::Tool>> = Vec::new();
     for (prefixed, def) in new_mcp.tool_defs().await {
         mcp_tools.push(Arc::new(crate::tools::mcp::McpTool::new(
@@ -1621,7 +1624,8 @@ pub async fn test_mcp(
             )
         }
     };
-    match crate::mcp::client::McpServer::connect(server_cfg).await {
+    let scrub_child_env = state.config.read().await.runtime.scrub_child_env;
+    match crate::mcp::client::McpServer::connect(server_cfg, scrub_child_env).await {
         Ok(server) => {
             let tools = server
                 .tools_snapshot()

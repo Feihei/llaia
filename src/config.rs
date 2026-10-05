@@ -113,6 +113,19 @@ pub struct RuntimeConfig {
     /// 连续退化回合数达到该值时在诊断消息中附加醒目警告（熔断只报警不拒服）。
     #[serde(default = "default_guard_breaker_threshold")]
     pub guard_breaker_threshold: u32,
+    /// workspace 快照总开关（ADR-0033 L1 可恢复性，P9 Phase 1）。
+    /// 开启时对 A0/A2 资产（SOUL/USER/MEMORY、sessions.db、uploads/）写前留底 +
+    /// 定时 sweep，存储在 `<config_dir>/snapshots/`（对 agent 只读）。默认 true。
+    #[serde(default = "default_snapshot_enabled")]
+    pub snapshot_enabled: bool,
+    /// 快照保留窗口（天）：GC 删除早于 N 天的时刻目录。默认 14。
+    #[serde(default = "default_snapshot_retention_days")]
+    pub snapshot_retention_days: u64,
+    /// 子进程环境变量密钥剔除（ADR-0033 Phase 2 首刀，学 codex）：
+    /// spawn terminal/MCP 子进程时剔除变量名含 KEY/SECRET/TOKEN 的继承变量，
+    /// 防 `env` 一条命令倒出 .env 里全部 API key。默认 true。
+    #[serde(default = "default_scrub_child_env")]
+    pub scrub_child_env: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -136,6 +149,9 @@ impl Default for RuntimeConfig {
             guard_thinking_cap: default_guard_thinking_cap(),
             guard_max_retries: default_guard_max_retries(),
             guard_breaker_threshold: default_guard_breaker_threshold(),
+            snapshot_enabled: default_snapshot_enabled(),
+            snapshot_retention_days: default_snapshot_retention_days(),
+            scrub_child_env: default_scrub_child_env(),
         }
     }
 }
@@ -190,6 +206,18 @@ fn default_guard_max_retries() -> u32 {
 
 fn default_guard_breaker_threshold() -> u32 {
     2
+}
+
+fn default_snapshot_enabled() -> bool {
+    true
+}
+
+fn default_snapshot_retention_days() -> u64 {
+    14
+}
+
+fn default_scrub_child_env() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2561,7 +2589,7 @@ model = "legacy"
             "disabled 必须显式落盘:\n{out}"
         );
         assert!(
-            !out.contains("enabled = true"),
+            !out.contains("\nenabled = true"),
             "启用态应省略该键（否则每个 model 表都多一行脏 diff）:\n{out}"
         );
 

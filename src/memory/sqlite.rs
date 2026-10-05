@@ -188,6 +188,18 @@ impl SessionStore {
         })
     }
 
+    /// 产出一致性快照到 `dest`（ADR-0033 L1 可恢复性，P9 Phase 1）。
+    ///
+    /// `VACUUM INTO` 在单一语句内完成读取与写出，对 WAL 活库天然一致——裸拷 db
+    /// 文件（不带 -wal）可能得到损坏副本。产出为压缩后的独立库文件；dest 已存在
+    /// 时 SQLite 报错，由调用方保证落在新路径。
+    pub fn snapshot_into(&self, dest: &std::path::Path) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])
+            .with_context(|| format!("VACUUM INTO {:?}", dest))?;
+        Ok(())
+    }
+
     fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             r#"

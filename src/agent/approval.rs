@@ -216,6 +216,9 @@ pub struct ApprovalContext {
     /// file_write/file_edit 目标落入其内即拒绝（SOUL/USER/主 MEMORY 归 main 主权）；
     /// main 为 None（守卫关闭）。
     pub forbidden_home: Option<PathBuf>,
+    /// A0 快照上下文（ADR-0033 L1，P9 Phase 1）：实例 memory_write 路由的
+    /// 覆盖写前留底。main 与任务实例经 `Agent.snapshot` 携带，测试为 None。
+    pub snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>,
     /// `[runtime].timezone`（实例 memory 路由的条目日期用；随 live_config 读）。
     pub timezone: Option<String>,
 }

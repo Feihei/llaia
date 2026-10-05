@@ -112,7 +112,7 @@ async fn test_http_handshake_and_tool_call() {
         .create_async()
         .await;
 
-    let registry = McpRegistry::connect_all(&[http_cfg(&server.url())]).await;
+    let registry = McpRegistry::connect_all(&[http_cfg(&server.url())], false).await;
     assert_eq!(registry.server_count(), 1);
     assert_eq!(registry.tool_count(), 2);
 
@@ -152,7 +152,7 @@ async fn test_http_is_error_envelope() {
         .create_async()
         .await;
 
-    let registry = McpRegistry::connect_all(&[http_cfg(&server.url())]).await;
+    let registry = McpRegistry::connect_all(&[http_cfg(&server.url())], false).await;
     let err = registry
         .call_tool("mock__write_file", json!({}))
         .await
@@ -184,7 +184,7 @@ async fn test_http_sse_response_body() {
         .create_async()
         .await;
 
-    let registry = McpRegistry::connect_all(&[http_cfg(&server.url())]).await;
+    let registry = McpRegistry::connect_all(&[http_cfg(&server.url())], false).await;
     let out = registry
         .call_tool("mock__read_file", json!({}))
         .await
@@ -214,7 +214,7 @@ async fn test_http_jsonrpc_error_response() {
         .create_async()
         .await;
 
-    let registry = McpRegistry::connect_all(&[http_cfg(&server.url())]).await;
+    let registry = McpRegistry::connect_all(&[http_cfg(&server.url())], false).await;
     let err = registry
         .call_tool("mock__read_file", json!({}))
         .await
@@ -238,7 +238,7 @@ async fn test_connect_failure_recorded_not_fatal() {
         tool_timeout_secs: None,
         safe_tools: vec![],
     };
-    let registry = McpRegistry::connect_all(&[cfg]).await;
+    let registry = McpRegistry::connect_all(&[cfg], false).await;
     assert_eq!(registry.server_count(), 0);
     assert_eq!(registry.tool_count(), 0);
     let status = registry.status().await;

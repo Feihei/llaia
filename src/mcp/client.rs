@@ -45,37 +45,47 @@ pub struct McpServer {
 impl McpServer {
     /// 建立连接并完成握手（initialize + initialized + tools/list）。
     /// 任一步失败返回 Err（调用方 log + 跳过，不阻塞启动）。
-    pub async fn connect(config: McpServerConfig) -> anyhow::Result<Arc<Self>> {
-        let transport = Self::build_transport(&config).await?;
+    pub async fn connect(
+        config: McpServerConfig,
+        scrub_child_env: bool,
+    ) -> anyhow::Result<Arc<Self>> {
+        let transport = Self::build_transport(&config, scrub_child_env).await?;
         Self::finish_connect(config, transport).await
     }
 
     /// 按配置构建传输层（stdio / streamable HTTP / 旧版 SSE）
-    async fn build_transport(config: &McpServerConfig) -> anyhow::Result<Arc<dyn McpTransport>> {
-        let transport: Arc<dyn McpTransport> =
-            match config.transport {
-                McpTransportKind::Stdio => {
-                    let command = config.command.clone().ok_or_else(|| {
-                        anyhow::anyhow!("stdio server '{}' missing command", config.id)
-                    })?;
-                    Arc::new(StdioTransport::connect(&command, &config.args, &config.env).await?)
-                }
-                McpTransportKind::Http => Arc::new(crate::mcp::transport::HttpTransport::new(
-                    config.url.as_deref().ok_or_else(|| {
-                        anyhow::anyhow!("http server '{}' missing url", config.id)
-                    })?,
+    async fn build_transport(
+        config: &McpServerConfig,
+        scrub_child_env: bool,
+    ) -> anyhow::Result<Arc<dyn McpTransport>> {
+        let transport: Arc<dyn McpTransport> = match config.transport {
+            McpTransportKind::Stdio => {
+                let command = config.command.clone().ok_or_else(|| {
+                    anyhow::anyhow!("stdio server '{}' missing command", config.id)
+                })?;
+                Arc::new(
+                    StdioTransport::connect(&command, &config.args, &config.env, scrub_child_env)
+                        .await?,
+                )
+            }
+            McpTransportKind::Http => Arc::new(crate::mcp::transport::HttpTransport::new(
+                config
+                    .url
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("http server '{}' missing url", config.id))?,
+                config.headers.clone(),
+            )),
+            McpTransportKind::Sse => Arc::new(
+                SseTransport::connect(
+                    config
+                        .url
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("sse server '{}' missing url", config.id))?,
                     config.headers.clone(),
-                )),
-                McpTransportKind::Sse => Arc::new(
-                    SseTransport::connect(
-                        config.url.as_deref().ok_or_else(|| {
-                            anyhow::anyhow!("sse server '{}' missing url", config.id)
-                        })?,
-                        config.headers.clone(),
-                    )
-                    .await?,
-                ),
-            };
+                )
+                .await?,
+            ),
+        };
         Ok(transport)
     }
 
@@ -333,7 +343,7 @@ impl McpRegistry {
     /// 初始化所有 enabled server；单个失败 log + 跳过，不阻塞启动。
     /// 所有 server **并发**连接（plan.md 启动优化③）：单 server 握手超时（30s）
     /// 不再串行累加；连接完成后按原配置顺序注册，保证 tool_index 稳定。
-    pub async fn connect_all(configs: &[McpServerConfig]) -> Self {
+    pub async fn connect_all(configs: &[McpServerConfig], scrub_child_env: bool) -> Self {
         let mut servers = Vec::new();
         let mut tool_index = HashMap::new();
         let mut failed = HashMap::new();
@@ -343,7 +353,9 @@ impl McpRegistry {
         }
         let enabled: Vec<McpServerConfig> = configs.iter().filter(|c| c.enabled).cloned().collect();
         let results = futures_util::future::join_all(
-            enabled.iter().map(|cfg| McpServer::connect(cfg.clone())),
+            enabled
+                .iter()
+                .map(|cfg| McpServer::connect(cfg.clone(), scrub_child_env)),
         )
         .await;
 
@@ -558,7 +570,7 @@ mod tests {
             tool_timeout_secs: None,
             safe_tools: vec![],
         };
-        let registry = McpRegistry::connect_all(&[cfg]).await;
+        let registry = McpRegistry::connect_all(&[cfg], false).await;
         assert_eq!(registry.server_count(), 0);
         let status = registry.status().await;
         assert_eq!(status.len(), 1);

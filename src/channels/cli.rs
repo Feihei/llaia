@@ -505,6 +505,37 @@ pub async fn build_single_agent(
             "removed todo lists of deleted sessions"
         );
     }
+    // 快照基建（ADR-0033 L1 可恢复性，P9 Phase 1）：仅 main agent 构建——
+    // 家目录资产（SOUL/USER/MEMORY、sessions.db、uploads/）归 main 主权，子 agent
+    // 与任务实例经共享工具实例 / ApprovalContext 复用同一 Arc。写前挂钩 + 定时
+    // sweep 双通道；`snapshot_enabled = false` 时不建 store（kill switch）。
+    let snapshot_ctx: Option<Arc<crate::snapshot::SnapshotCtx>> =
+        if is_main && config.runtime.snapshot_enabled {
+            match crate::snapshot::SnapshotStore::open(
+                config_dir,
+                config.runtime.snapshot_retention_days,
+            ) {
+                Ok(store) => {
+                    let store = Arc::new(store);
+                    crate::snapshot::SnapshotStore::spawn_periodic(
+                        &store,
+                        &session_store,
+                        workspace.clone(),
+                    );
+                    Some(Arc::new(crate::snapshot::SnapshotCtx {
+                        store,
+                        home: workspace.clone(),
+                        root: config_dir.join("snapshots"),
+                    }))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "snapshot store unavailable, snapshots disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(FileRead::new(
             workspace_root.clone(),
@@ -512,24 +543,28 @@ pub async fn build_single_agent(
             is_main,
             Some(skills_dir.clone()),
         )),
-        Arc::new(FileWrite::new(
-            workspace_root.clone(),
-            trusted_dirs.clone(),
-            is_main,
-        )),
-        Arc::new(FileEdit::new(
-            workspace_root.clone(),
-            trusted_dirs.clone(),
-            is_main,
-        )),
-        Arc::new(Terminal::new(
-            config.tools.terminal.command_policy.clone(),
-            config.tools.terminal.command_whitelist.clone(),
-            workspace_root.clone(),
-            trusted_dirs.clone(),
-            Some(skills_dir.clone()),
-            config.tools.terminal.delete_guard != "off",
-        )),
+        Arc::new(
+            FileWrite::new(workspace_root.clone(), trusted_dirs.clone(), is_main)
+                .with_snapshot(snapshot_ctx.clone()),
+        ),
+        Arc::new(
+            FileEdit::new(workspace_root.clone(), trusted_dirs.clone(), is_main)
+                .with_snapshot(snapshot_ctx.clone()),
+        ),
+        Arc::new(
+            Terminal::new(
+                config.tools.terminal.command_policy.clone(),
+                config.tools.terminal.command_whitelist.clone(),
+                workspace_root.clone(),
+                trusted_dirs.clone(),
+                Some(skills_dir.clone()),
+                config.tools.terminal.delete_guard != "off",
+            )
+            .with_hardening(
+                config.runtime.scrub_child_env,
+                snapshot_ctx.as_ref().map(|c| c.root.clone()),
+            ),
+        ),
         Arc::new({
             // web_fetch 正文抽取：extract_provider 引用支持 extract 能力的
             // service family provider（v1 = tavily）时走服务端抽取。
@@ -552,6 +587,7 @@ pub async fn build_single_agent(
         }),
         Arc::new(
             MemoryWrite::new(memory_path.clone(), user_path.clone(), is_main)
+                .with_snapshot(snapshot_ctx.clone())
                 .with_timezone(config.runtime.timezone.clone()),
         ),
         // memory_research（plan.md）：跨会话 FTS5 全文搜索历史消息，只读。
@@ -724,6 +760,8 @@ pub async fn build_single_agent(
     .await;
     // 记录 system 前缀与 tool-instructions 标记，供热加载 skills 时重建
     agent.init_system_meta(system_prompt_base, has_tool_instructions);
+    // A0 快照上下文（P9 Phase 1）：main 持 Some，ApprovalContext / /memory-compact 复用
+    agent.snapshot = snapshot_ctx;
 
     // 环境探测（P5 E1）：仅 main agent 启动时探测一次，注入 Runtime Context；
     // 子 agent（委派任务）不探测，避免启动开销。/env 命令可手动刷新。
@@ -768,8 +806,13 @@ pub async fn build_agent(
     let phase = std::time::Instant::now();
     let mcp_path = config_dir.join("mcp.toml");
     let mcp_cfg = crate::mcp::McpConfig::load(&mcp_path)?;
-    let mcp_registry =
-        Arc::new(crate::mcp::client::McpRegistry::connect_all(&mcp_cfg.server).await);
+    let mcp_registry = Arc::new(
+        crate::mcp::client::McpRegistry::connect_all(
+            &mcp_cfg.server,
+            config.runtime.scrub_child_env,
+        )
+        .await,
+    );
     let mut mcp_tools: Vec<Arc<dyn Tool>> = Vec::new();
     for (prefixed, def) in mcp_registry.tool_defs().await {
         mcp_tools.push(Arc::new(crate::tools::mcp::McpTool::new(

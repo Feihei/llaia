@@ -181,6 +181,10 @@ pub async fn execute_tool_calls(
         // main（instance_memory_path = None）走共享 MemoryWrite 工具，现状不变。
         if call.name == "memory_write" {
             if let Some(mem_path) = &ctx.instance_memory_path {
+                // A0 写前留底（ADR-0033 L1）：实例 MEMORY 覆盖写前快照旧内容
+                if let Some(snap) = &ctx.snapshot {
+                    snap.snapshot_target(mem_path, "before_memory_write").await;
+                }
                 let out = match crate::tools::memory::write_memory_entry(
                     mem_path,
                     ctx.timezone.as_deref(),
@@ -411,6 +415,7 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
+                snapshot: None,
                 timezone: None,
             },
             None,
@@ -449,6 +454,7 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
+                snapshot: None,
                 timezone: None,
             },
             None,
@@ -509,6 +515,7 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
+                snapshot: None,
                 timezone: None,
             },
             None,
@@ -537,6 +544,7 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
+                snapshot: None,
                 timezone: None,
             },
             None,
@@ -564,6 +572,7 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
+                snapshot: None,
                 timezone: None,
             },
             None,
@@ -602,6 +611,7 @@ mod tests {
             cron_allow_inline: false,
             instance_memory_path: Some(inst_mem.clone()),
             forbidden_home: None,
+            snapshot: None,
             timezone: None,
         };
         let calls = vec![ToolCall {
@@ -648,6 +658,7 @@ mod tests {
             gate: ApprovalGate::new(),
             agent_alias: "main".into(),
             audit: None,
+            snapshot: None,
             ask_user_timeout_secs: 0,
             terminal_inline_gate: false,
             terminal_delete_guard: false,
