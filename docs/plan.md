@@ -1,6 +1,6 @@
 # LLAIA 项目 Roadmap
 
-> 本文档是 LLAIA 的**前瞻路线图**：顶部是已交付阶段一览（索引），主体是**近期小修（H 系列）**与下一步计划（P7–P9）。
+> 本文档是 LLAIA 的**前瞻路线图**：顶部是已交付阶段一览（索引），主体是**近期小修（H 系列）**与下一步计划（P9）。
 > 各阶段的**完整交付清单**见 [`CHANGELOG.md`](CHANGELOG.md)；详细实现计划见 [`plans/`](plans/)，设计规格见 [`specs/`](specs/)，架构决策见 [`adr/`](adr/)。
 
 **整体目标**：一个单用户、本地优先的私人 AI 助理，跨 CLI/QQ/Web 等多 channel 接入，主 Agent + 可委派子 Agent 协作，持久化记忆与会话。
@@ -36,6 +36,8 @@
 | v0.5.0 | ✅ | 发版版本（因含行为不兼容改动由原定的 v0.4.1 直升 minor）：H1–H4 止血 + T3/S1 terminal 安全收口 + 画像模板升级 + /session 改名 + 框架消息英文化 + todo GC + WebUI 归档卫生 + chat 会话线侧栏，2026-09-11 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.5.0）、[release-notes/v0.5.0.md](release-notes/v0.5.0.md) |
 | v0.5.1 | ✅ | 补丁版：全新机器启动崩溃修复 + todo 注入弱化（done 项不再回灌）+ path_guard 段首路径程序名校验 + 受信目录持久化 + chat 历史回放/审批结果标注 + 微信登录二维码上卡，2026-09-14 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.5.1）、[release-notes/v0.5.1.md](release-notes/v0.5.1.md) |
 | v0.5.2 | ✅ | 补丁版：Delete Guard（破坏性命令进 .trash）+ QQ 审批内联按钮（msg_type=2）+ 思考流 guard 补漏 + path_guard 内联载荷扩面，2026-09-17 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.5.2）、[release-notes/v0.5.2.md](release-notes/v0.5.2.md) |
+| P7 | ✅ | 六项 grill 全部收敛：WebUI 审批/问题卡片（AC1–AC3）、MCP stdio 新 spec 兜底（A1–A4）、session-rail 先行交付；其余留观/不做定案（触发条件留档见下节） | [CHANGELOG.md](CHANGELOG.md)（§v0.5.0、§v0.6.0） |
+| P8 | ✅ | 模型目录重构：provider 连接注册表 + `[model.<id>]` 目录 + 加载期自动迁移，配置 breaking 随 v0.6.0 | [CHANGELOG.md](CHANGELOG.md)（§v0.6.0）、[plans/2026-09-25-model-catalog.md](plans/2026-09-25-model-catalog.md) |
 
 > **P6 已全部交付并归档**：原 P6 节的完整勾选清单（WebUI W1/W2/W3、会话主题总结、provider 针对性优化、`memory_research`、启动优化 #11、主干代码体检、#A–#J 新增发现、Generation Guard、First-run Bootstrap 等）已随各项实现陆续迁入 [CHANGELOG.md](CHANGELOG.md) §v0.3.1 / §v0.4.0，本文件不再保留已交付明细。注意 CHANGELOG 里**没有独立的 §v0.3.2**：原按 0.3.2 攒的开发内容跨版本号当作 v0.4.0 发布，段标题已一并重定。v0.5.0 的三项同样已迁入 CHANGELOG，本文件只留索引与下一步。
 
@@ -52,55 +54,32 @@
 
 ---
 
-## P7 — 下一步计划
+## P7 — 已收口归档（2026-09-09 立项，2026-09-23 交付齐）
 
-**状态**：🚧 进行中（2026-09-09 立项；2026-09-22 grill 六项全部定案：MCP stdio 兜底已交付、WebUI 审批卡片立项展开，其余四项不做/留观/撤项，触发条件留档；2026-09-23 审批卡片 AC1–AC3 代码落地，待随版交付）
+> **旧 P7 已收口归档**：P7 编号曾用于 terminal 脚本绕过防护专项（T1–T4 / S1–S2），2026-09-07 全部定案——T3（解释器内联载荷强制审批）、S1（命令拆分 + flag 级路径检查）、T2（无特权账户文档化）已交付，S2 / T1 / T4 定案不做；完整记录随 **v0.5.0 攒发**迁入 [CHANGELOG.md](CHANGELOG.md) §v0.5.0。
 
-> **旧 P7 已收口归档**：P7 编号曾用于 terminal 脚本绕过防护专项（T1–T4 / S1–S2），2026-09-07 全部定案——T3（解释器内联载荷强制审批）、S1（命令拆分 + flag 级路径检查）、T2（无特权账户文档化）已交付，S2 / T1 / T4 定案不做；完整记录（含不做项评估）随 **v0.5.0 攒发**迁入 [CHANGELOG.md](CHANGELOG.md) §v0.5.0，本文件不再保留。
+> **新 P7 六项全部过 grill（2026-09-22）并交付/定案**：已交付明细（WebUI 审批卡片 AC1–AC3、ask_user 问题卡片、MCP stdio `-32601` 兜底 A1–A4、session-rail 先行）随 §v0.5.0 / §v0.6.0 迁入 [CHANGELOG.md](CHANGELOG.md)，本文件不再保留。
 
-> 六项已全部过 grill（2026-09-22）：一项立项展开（WebUI 审批卡片），三项不做/留观（触发条件留档，触发后重新评估再立项），一项撤项并入既有流程；MCP 项早前同日定案并已交付。「想法落袋防忘」阶段结束，本节不再有未拷问条目。
+**留观 / 不做定案（触发条件留档，触发后重新评估再立项）**：
 
-- **RAG → 留观**（2026-09-22 grill 定案）：现有记忆栈三层已覆盖——MEMORY.md（事实 + 预算裁剪 + 压缩）、`memory_research`（P5，FTS5 跨会话关键词召回）、sqlite 留底。RAG 的真实增量只有语义召回（关键词失配时）与非会话语料库（文档目录），单用户痛点未出现；届时嵌入（Ollama 本地）+ sqlite-vec 契合 sqlite-first 架构，纯加法不迟。**触发条件：出现一批反复被查询的本地文档语料，且 `memory_research` 关键词召回不满意。**
-- **浏览器自动化 → 不自建**（2026-09-22 grill 定案）：原三选项（内嵌 chromiumoxide / 驱动外部实例 / MCP 外挂）裁决 MCP 外挂完胜——MCP 基础设施已建成在用（blender/sketchup-mcp），`McpTool` 默认 `requires_confirm=true`（仅 `safe_tools` 白名单免确认，浏览器工具**绝不进白名单**——能碰登录态/内网），playwright-mcp 是现成维护中 server。内嵌方案 = 几百行新维护面 + 沙箱/审批从零设计。**触发动作：需要时改 mcp.toml 接 playwright-mcp，零代码零立项。**
-- **搜索增强 → 不做**（2026-09-22 grill 定案）：多源聚合/rerank 要高频搜索才摊得平成本（每查多倍 API 调用 + 去重逻辑），单用户频率撑不起；tavily/baidu/brave 三路由已交付够用。**触发条件：搜索质量真实卡住任务且换 provider 解决不了。**
-- **原子工具优化增强 → 撤项**（2026-09-22 grill 定案）：方向本身是「从实际使用痛点出发逐工具盘点」——没有痛点清单就没有项目，预先立项违背「没有具体用例就不写」的编码约定。既有两条通路承接：H 系列止血窗口（file_edit 自纠错即 H1 打样）+ 定期主干体检（例行项）；diff/patch、json/yaml 查询等新原子工具无使用证据不写，痛点出现时随用随修走 H 系列。
-- **WebUI chat 界面增强 → ③ 立项，②④ 留观，⑤ 删除**（2026-09-09 记录，2026-09-22 grill 定案）：① session-rail 已先行交付（2026-09-11，见 [CHANGELOG.md](CHANGELOG.md) §v0.5.0「chat 左侧活跃会话线列表」）；⑤ 与 P6 WebUI 批次的关系是伪问题（P6 已交付归档），删除；② bound path/任务线可视化——session-rail + `[scope]` 文本行已覆盖，留观（触发条件：图形化需求实际出现）；④ 运行状态提示（busy/工具调用/steer/todo 进度呈现）——UX 润色，留观（触发条件：日常使用中实际造成困扰）。③ 审批卡片立项展开（唯一实候选：QQ 侧 v0.5.2 已有内联审批按钮先例，WebUI 主界面还在聊天流打 `/ok`）：
-  - [x] **AC1 · 后端审批状态端点**（2026-09-23，`web/mod.rs::get_approvals` + 路由 `GET /api/approvals`）：列出待审批（id、工具名、参数摘要、workspace 内外、频道、注册时间）。**形态按 AC3 实况收窄为只读列表**：动作不走 HTTP——`run_turn` 的续跑输出必须回到发起连接（`current_turn` / `stop` / outbox 全在 WS handler 手里），POST 就得另造一套广播 sink + busy/stop 协调，等于把已有通路复制一遍
-  - [x] **AC2 · 前端审批卡片**（2026-09-23，`channels/web.rs` + `web/static/{index.html,app.js,theme.css}`）：聊天流内渲染待审批项为卡片（工具名 + 范围 + 参数摘要 + 批准/拒绝按钮），结果回灌聊天流并与 `/ok` `/deny` **严格同源**——按钮只发 `{type:"approval",id,approve}` 帧，后端 `web.rs::approval_frame_command` 把它翻成 `/ok <id>` / `/deny <id>` 走原 `SlashOutcome::Resume` 续跑；`/ok` 文本命令保留为兜底（两处共用 `ApprovalGate`，互不冲突）。刷新/换设备后靠 AC1 端点补回卡片，已在别处解析的卡片标记为失效。事件侧 `TurnEvent::ApprovalRequested` 扩为带 `tool_name/summary/within_workspace`（sink 回调改收 `ApprovalRequest`），QQ 只用 id 不受影响
-  - [x] **AC3 · 实现前过一遍 approval 通路**（2026-09-23）：核过 `ApprovalContext` / `approval_decision` / `resolve_approval` / QQ 内联按钮（`msg_type=2` 键盘 + `ap:ok:<id>` 回调解码）——两条既有事实决定了上面两处形态收窄：① 审批是 **deferred 语义**（pending 注册后本轮即结束，非阻塞等待），所以卡片天然可以事后点击，不依赖 turn 存活；② 卡片动作**不该新增解析逻辑**，翻译成 `/ok` `/deny` 即为最大复用。回写修订已落进 AC1/AC2 条目
-- **MCP 新 spec 兼容——已拆 A/B**（2026-09-12 调研，2026-09-22 grill 定案）：新 spec（2026-07-28）删 initialize 握手 + `Mcp-Session-Id`（SEP-2567/2575），每请求自带 `_meta`（protocolVersion/clientInfo/capabilities），Streamable HTTP 须带 `Mcp-Method`/`Mcp-Name` 头（SEP-2243），另增可选 `server/discover`、list 响应 `ttlMs` 缓存提示（SEP-2549）。**背景修正（grill 2026-09-22）**：原「HTTP session 管理被删对 llaia 是利好」前提不成立——`HttpTransport` 已是 Streamable HTTP（2025-06-18 风格），session 管理仅 ~40 行且工作正常；真实暴露面在 **stdio**：新 SDK（Python mcp 2.0 起）上的 server 可能对 `initialize` 回 -32601，现 `client.rs::handshake` 失败即 server dead。在用 server（blender-mcp / sketchup-mcp）均为 stdio；sketchup-mcp 已遇 SDK 2.0 破碎（`--with mcp==1.3.0` pin 缓解——属 server 侧 Python API 破碎，非协议层，llama 无感）。**定案：以旧协议为主，只做 stdio 兜底（A）；HTTP 双协议（B）留观**。
-  - [x] **A1 · stdio `-32601` 容忍降级**（2026-09-22，`mcp/client.rs::handshake` + `mcp/transport.rs::TransportError::JsonRpc`）：`initialize` 收 -32601 → log warn（一行）→ 跳过握手直接发 `tools/list`；降级后所有 JSON-RPC 请求带 `_meta`（protocolVersion = 新 spec 档 + clientInfo，`McpServer::with_stateless_meta`）；`notifications/initialized` 不发；旧协议握手主路径不动
-  - [x] **A2 · 协商版本记录 + 校验**（2026-09-22，`McpServer::record_negotiated_version` + `negotiated_version` 字段）：initialize 成功路径不再丢弃响应——记录 server 协商的 `protocolVersion`，不在支持集合 → warn，不静默
-  - [x] **A3 · 版本集合**（2026-09-22，`mcp/protocol.rs`）：`MCP_PROTOCOL_VERSION`（2024-11-05）保留为握手默认档，`MCP_SUPPORTED_PROTOCOL_VERSIONS` 五档（含 `MCP_STATELESS_PROTOCOL_VERSION = "2026-07-28"`）
-  - [x] **A4 · 测试**（2026-09-22，`mcp::client::tests`）：mock stdio transport（不 spawn 真实子进程）两态（完整握手 / initialize 回 -32601）+ 降级后 tools/list 与 tools/call 的 `_meta` 断言 + 协商版本越界 warn 不拒连 + 非 -32601 错误仍失败
-  - **B 留观（不定案、无勾选）**：HTTP 无状态/auto/legacy 双协议协商、四档版本集合、SSE transport 标记 deprecated。触发条件：真要接 HTTP server，或想用的 server 只发新 spec HTTP。届时先拍 auto 判定信号（白名单：400 缺 session / 404 session 不存在 / -32601；**401/403、5xx、超时一律不回退**——auth 配错与 server 挂了都不是协议不匹配）再实施。
-  - **不做项（留档）**：MCP server 模式（纯 client 定位不变）、OAuth/CIMD、Tasks/MRTR/MCP Apps 扩展、ttlMs tools/list 缓存（工具列表握手后缓存到重连即可，中途变化极罕见，过期刷新的时序问题配不上收益）、WebUI 降级状态位（用户定 2026-09-22：log warn 足够）。
-
----
-
-## P8 — 模型目录重构（Model Catalog）
-
-**状态**：✅ 已实现（2026-09-25 三轮 grill 定案，[plan 文档](plans/2026-09-25-model-catalog.md)；落盘语义细节见 AGENTS.md「模型目录」段与 [ADR-0008](adr/0008-config-schema-v1.1.md) 演进记录）
-
-`[provider]` 升级为**统一连接注册表**：llm family（openai_compatible/anthropic/gemini，可挂 model、进 probe）+ service family（tavily/baidu/brave 等纯凭据，无 model 条目、不进 probe，`type` 即判别器、显式未知 type 报错）。模型独立成 `[model.<id>]` 目录按 kind 分型（chat/tts/image/…，缺省 chat）；agents 与 tools（tts/image_gen/search，未来 embedding）一律从注册表/目录引用，api_key 管线只在 provider 层一份。配置格式不兼容 → 一步到位无迁移（`deny_unknown_fields` 报错安全网），目标随 **v0.6.0** 发版。
-
-- [x] **核心 schema**：`ProviderConfig` 收窄 + 双 family type 判别 + `ModelEntry`（kind/capabilities/enabled）+ `model_from_ref` 唯一解析收口 + 引用存在性/kind 匹配校验（agent model/fallback/compact/vision 仅 kind=chat，vision 顺手过滤 multimodal）。实现注记：serde rename 单数 `model`（TOML/JSON 键 `[model.<id>]`，对齐文档）；显式未知 type 报错
-- [x] **tools 引用化**：`[tools.tts]` / `[tools.image_gen]` 删 inline base_url/api_key，改 `model = "<id>"` 引用（kind 过滤；不符 → 不注册 + warn）；`[tools.search]`/`web_fetch` 改引用 service family provider，`[tools.tavily]/[tools.baidu]/[tools.brave]` 段删除；secrets/mask/merge 的 tools 层 api_key 分支全删
-- [x] **WebUI Models 选项卡**：卡片网格 + provider/kind/multimodal 过滤；添加流 = 选 provider（仅 llm family）→ probe → 必选 kind → kind 专属表单；批量添加删除；Provider 表单瘦身（service family 只渲染 api_key）。实现注记：`probe_models` 端点显式拒 service family；静态资源回归测试断言换新标记
-- [x] **CLI 收尾**：`/models`（模型目录）+ `/providers`（连接注册表）拆分，`/provider` 保留别名转发；CONFIG_TEMPLATE 重写；doctor；加载期自动迁移层（`migrate_legacy_config`：旧 model 子表/凭据段/内联端点原地改写为新结构，agent 旧引用零改动）
-- [x] **文档与版本**：AGENTS.md / configuration guide / CHANGELOG / ADR-0008 演进记录；直升 v0.6.0
+- **RAG → 留观**：现有记忆栈三层已覆盖（MEMORY + `memory_research` FTS5 + sqlite 留底），RAG 真实增量只有语义召回与非会话语料库；届时嵌入（Ollama 本地）+ sqlite-vec 契合 sqlite-first 架构，纯加法不迟。**触发条件：出现一批反复被查询的本地文档语料，且 `memory_research` 关键词召回不满意。**
+- **浏览器自动化 → 不自建**：MCP 外挂完胜（基础设施现成、`McpTool` 默认审批、playwright-mcp 维护中），内嵌 chromiumoxide = 几百行新维护面。**触发动作：需要时改 mcp.toml 接 playwright-mcp，零代码零立项（浏览器工具绝不进 `safe_tools` 白名单）。**
+- **搜索增强 → 不做**：多源聚合/rerank 要高频搜索才摊得平成本，tavily/baidu/brave 三路由已够用。**触发条件：搜索质量真实卡住任务且换 provider 解决不了。**
+- **原子工具优化增强 → 撤项**：无痛点清单就没有项目；既有 H 系列止血 + 定期主干体检两条通路承接，痛点出现时随用随修。
+- **WebUI 增强**：① session-rail 已交付（§v0.5.0）；② bound path 可视化（session-rail + `[scope]` 文本行已覆盖）、④ 运行状态提示 → 留观，**触发条件：日常使用中实际造成困扰**；⑤ 已删除（伪问题）。
+- **MCP HTTP 双协议（B）→ 留观**（stdio 兜底 A1–A4 已交付）：**触发条件：真要接 HTTP server，或想用的 server 只发新 spec HTTP。** 届时先拍 auto 判定信号（白名单：400 缺 session / 404 session 不存在 / -32601；**401/403、5xx、超时一律不回退**）。不做项留档：MCP server 模式（纯 client 定位不变）、OAuth/CIMD、Tasks/MRTR/MCP Apps 扩展、ttlMs tools/list 缓存、WebUI 降级状态位（log warn 足够）。
 
 ---
 
 ## P9 — 安全模型落地（ADR-0033）
 
-**状态**：⏳ 计划中（2026-10-02 [ADR-0033](adr/0033-security-model.md) 评审定案转 Accepted）
+**状态**：🚧 进行中（2026-10-02 [ADR-0033](adr/0033-security-model.md) 评审定案转 Accepted；Phase 1 + Phase 2 首刀已于 2026-10-05 落地）
 
 依 ADR-0033：资产分级（**A0 人格主权 / A1 凭据 / A2 隐私历史 / A3 全盘机器**，A 编号刻意避开既有闸门 T2/T3/T6）+ 五层防线（L1 可恢复性基建 → L5 字符串启发）。总体顺序：先建可恢复性基建给全部闸门的放行宽松度供底气，再做防泄露组合刀（L3 读入侧收缩 + L4 出站首闸），字符串层降级为审计线索，最后做闸门减法。
 
-- [ ] **Phase 1 · workspace 快照基建**：git-backed 或定时 shadow copy，A0/A2 写前留底；快照存储本身对 agent 只读（防「先改本体再改快照」洗白）
+- [x] **Phase 1 · workspace 快照基建**（2026-10-05，`src/snapshot.rs`，[plan](plans/2026-10-05-p9-snapshot-and-env-scrub.md)）：时间戳镜像目录 + sha1 去重（`<config_dir>/snapshots/<时刻>/<key>`，零新依赖，弃 git-backed——外部 git 依赖与轻量单 exe 定位冲突）。A0/A2 写前留底走双通道：写前挂钩（memory_write 双通路 / file 工具家目录人格文件 / `/memory-compact`，经 `ApprovalContext.snapshot` 与工具构造注入）+ 定时 sweep（10 分钟；sessions.db 用 `VACUUM INTO` 一致副本、24h 节流，防 WAL 活拷损坏与爆盘）；保留窗口 `[runtime].snapshot_retention_days`（默认 14 天）日清 GC；`snapshot_enabled` 总开关。**快照库对 agent 只读**：位置在 config_dir 顶层天然界外 + file/terminal 工具持 `snapshot_root` 硬拒（execute 与 execute_approved 同拒，堵 delegate/批准豁免绕行；`bash -s` stdin 内路径不可见属 L5 固有局限，硬边界归 Phase 3 T2）。恢复 = 从快照目录手工拷回
 - [ ] **Phase 2 · 防泄露组合刀**（顺序即优先级；env 剔除与 Phase 1 无依赖，可提前单独落地）：
-    - [ ] **env 变量密钥剔除**：spawn terminal/MCP 子进程剔除 `*KEY*`/`*SECRET*`/`*TOKEN*`（学 codex），config 键 `runtime.scrub_child_env`（默认 true）。现状 dotenvy 把 .env 灌进进程 env（`main.rs`），terminal 一条 `env` 即倒出全部 API key
+    - [x] **env 变量密钥剔除**（2026-10-05，`src/child_env.rs` + `tools/terminal.rs::run_command` + `mcp/transport.rs::spawn_child`）：spawn terminal/MCP 子进程剔除变量名含 `KEY`/`SECRET`/`TOKEN` 的继承变量（学 codex），config 键 `runtime.scrub_child_env`（默认 true）。MCP server 的 mcp.toml `env` 段显式提供的键在白名单内不剔除；`StdioTransport` 持标志，reset 重连 respawn 同样生效。dotenvy 灌进进程 env 的 .env 凭据不再随一条 `env` 命令倒出
     - [ ] **基础设施文件只读守卫**：config.toml / sessions.db / mcp.toml / trusted_dirs.json 对 agent 只读（file 工具审批→直接拒 + terminal 路径校验收紧），扩展 forbidden_home 守卫
     - [ ] **web_fetch 出站闸门（两道分离）**：SSRF 校验无条件常开（私网/环回/云元数据 IP + DNS 解析后复验，学 zeroclaw domain_guard）；域名允许清单只收紧非交互频道（未配置 = fail-closed），交互频道走 trusted_dirs 同款模式（首访新域名审批一次、批准持久化）
     - [ ] **terminal 网络命令风险标记**：curl/wget/nc/ssh/scp 等进 High 风险类，audit.log 强化记录（不拦截，留痕）
