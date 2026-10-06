@@ -484,6 +484,14 @@ pub async fn build_single_agent(
         "trimmed MEMORY to budget"
     );
 
+    // 自动压缩触发（P9 记忆卫生）：MEMORY 实际超 ADR-0025 预算（trim 即将开始
+    // 丢弃内容）→ 后台跑结构化压缩（确定性去重优先，必要时 LLM 语义合并）。有
+    // 写前快照（判据 1 可恢复性放行）→ 免交互审批。模板未引导完不压（bootstrap
+    // 期间无内容可压）；无 provider（降级模式）跳过；仅 main MEMORY。
+    let auto_compact_due = is_main
+        && !crate::memory::is_unfilled(&raw_memory, MEMORY_TEMPLATE)
+        && crate::memory::trim::estimate_tokens(&raw_memory) > agent_cfg.memory_token_budget;
+
     // 构建完整工具集（用新字段）
     let skills_dir = config_dir.join("skills");
     // sqlite 会话存储：memory_research 工具跨会话搜索历史用（FTS5），需在工具集构建前就位。
@@ -545,6 +553,46 @@ pub async fn build_single_agent(
         config_dir,
         config.tools.web_fetch.allowed_domains.clone(),
     ));
+    // 自动压缩后台任务（须在 Agent::new 消费 provider 之前取好 Arc）。
+    // 每进程至多一次（随启动/热重载评估）；压缩结果与 /memory-compact 同语义，
+    // 重启后才进 system prompt（init_system_meta 缓存性质）。
+    if auto_compact_due {
+        match compact_provider.clone().or_else(|| provider.clone()) {
+            Some(p) => {
+                let mem_path = memory_path.clone();
+                let backup_dir = workspace.join("backups");
+                let guard = guard_ctx.clone();
+                let tz = config.runtime.timezone.clone();
+                let budget = agent_cfg.memory_token_budget;
+                tokio::spawn(async move {
+                    guard
+                        .snapshot_target(&mem_path, "before_auto_compact")
+                        .await;
+                    match crate::memory::markdown::compress_memory(
+                        &mem_path,
+                        p.as_ref(),
+                        &backup_dir,
+                        &tz,
+                        Some(budget),
+                    )
+                    .await
+                    {
+                        Ok(report) => tracing::info!(
+                            report = %report,
+                            "auto memory-compact done; restart applies it to the system prompt"
+                        ),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "auto memory-compact failed; original file preserved"
+                        ),
+                    }
+                });
+            }
+            None => tracing::warn!(
+                "MEMORY exceeds token budget but no provider is configured; auto-compact skipped"
+            ),
+        }
+    }
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(FileRead::new(
             workspace_root.clone(),

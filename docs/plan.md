@@ -87,9 +87,9 @@
 - [ ] **Phase 3 · 部署级 T2 受限进程落地**：Windows 受限 token / 专用低权账户，含部署文档（T2 指部署规范旧名，与资产层 A2 无关）
 - [ ] **Phase 4 · 闸门复审减法**：用 ADR-0033 判据 3 逐个过现有机制，该降级降级、该删除删除（T3 内联闸门为第一候选）
 - **记忆卫生三档**（A0 特许写入口的落地点，与 ADR-0033 同日定案；三档独立排期，第 0 档随时可做）：
-    - [ ] **第 0 档 · memory_write 写入时防重**：entry 归一化（空白/标点折叠）后与现有行比对，已存在即返回 already remembered 不落盘——多数膨胀是字面重复，无需 LLM
-    - [ ] **第 1 档 · compress_memory 结构化升级**（`memory/markdown.rs`，现为裸 LLM 单发）：① 确定性预检——按 `- [YYYY-MM-DD] entry` 契约解析条目，精确/近似重复直接合并不经 LLM；② LLM 只做语义合并（输入输出均为条目列表）；③ 输出结构校验——每行匹配条目正则 + 每行可溯源到至少一条输入 + 凭空行即失败，重试一次仍败则原文件保留并报错。校验即注入防线：被骗压缩器加不进任何新内容（ADR-0033「A0 特许写入例外」的对症控制）
-    - **触发**：`trim_memory_to_budget` 实际开始丢弃内容（文件超 ADR-0025 预算）为自动压缩信号——有写前备份，按 ADR-0033 判据 1（可恢复性放行）免交互审批；`/memory-compact` 保留为手动覆盖
+    - [x] **第 0 档 · memory_write 写入时防重**（2026-10-06，`memory/hygiene.rs::normalize_entry`，[plan](plans/2026-10-06-memory-hygiene.md)）：entry 归一化（小写 + 标点/符号/空白折叠，CJK 保留）后与现有行比对，已存在即返回 `already remembered` 不落盘——多数膨胀是字面重复，无需 LLM。两条写通路（main 共享工具 + 实例路由）同接
+    - [x] **第 1 档 · compress_memory 结构化升级**（2026-10-06，`memory/hygiene.rs` + `markdown.rs::compress_memory` 三段管线）：① 确定性预检——按 `- [YYYY-MM-DD] entry` 契约逐行解析，归一化重复直接合并（保留最早条目）不经 LLM；头部/注释与不合规行原样保留、不进 LLM；② LLM 只做语义合并（输入输出均为条目列表，提示词明令禁止发明新条目）；③ 输出结构校验——每行匹配契约 + 每行可溯源到至少一条输入（归一化互含或字符二元组 Jaccard ≥ 0.3），违规**整体**拒绝（不部分采用），带原因重试一次仍败则原文件保留并报错。校验即注入防线：被骗压缩器加不进任何新内容（ADR-0033「A0 特许写入例外」的对症控制）。签名变更：`compress_memory(..., budget: Option<usize>) -> Result<String>`（手动 `/memory-compact` 传 None 恒走 LLM）
+    - [x] **触发**（2026-10-06，`cli.rs::build_single_agent` 后台任务）：启动构建 main agent 时 `estimate_tokens(raw_memory) > memory_token_budget`（ADR-0025 同款 chars/4 启发式，即 trim 实际开始丢弃内容）且 MEMORY 非模板 → spawn 后台压缩——先 `GuardCtx::snapshot_target` 写前快照（判据 1 可恢复性放行，免交互审批），`compress_memory(budget=Some)` 确定性去重已达预算即跳过 LLM；成功/失败均 tracing 留痕，无 provider 降级跳过。每进程至多一次；压缩结果与 `/memory-compact` 同语义（重启后才进 system prompt）；仅 main，实例私有 MEMORY 不自动压。`/memory-compact` 保留为手动覆盖（恒走 LLM）
     - **SOUL/USER 压缩 → 留观**：人格文件让 sidecar LLM 改写与 A0「直接拒」立场冲突，增长压力远小于 MEMORY。触发条件：实测增长出现；届时只做结构性去重（同节合并重复 bullet、逐字重复行）+ diff 人审，永不丢唯一内容
 - **留档不排期**：cron T3 豁免扩大 A2 可读面（`cron_allow_inline_interpreter` 让内联 python 可读 sessions.db，dream 首跑实证）；读入侧收缩若立项，考虑给 cron 走 scoped 会话查询 helper 而非裸文件。详见 ADR-0033 §5 留档项
 

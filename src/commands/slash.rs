@@ -426,10 +426,10 @@ pub async fn try_handle(
                     .snapshot_target(&memory_path, "before_memory_compact")
                     .await;
             }
-            match compress_memory(&memory_path, provider.as_ref(), &backup_dir, &tz).await {
-                Ok(_) => Ok(SlashOutcome::Handled(
-                    "[memory-compact] MEMORY.md compressed and saved (backup in workspace/backups/). Restart to apply in the running session.".into(),
-                )),
+            match compress_memory(&memory_path, provider.as_ref(), &backup_dir, &tz, None).await {
+                Ok(report) => Ok(SlashOutcome::Handled(format!(
+                    "[memory-compact] {report} (backup in workspace/backups/). Restart to apply in the running session."
+                ))),
                 Err(e) => Ok(SlashOutcome::Handled(format!(
                     "[memory-compact failed: {}]",
                     e

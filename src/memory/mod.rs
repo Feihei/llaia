@@ -1,3 +1,4 @@
+pub mod hygiene;
 pub mod markdown;
 pub mod sqlite;
 pub mod trim;

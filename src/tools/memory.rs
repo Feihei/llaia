@@ -53,6 +53,15 @@ pub async fn write_memory_entry(
     let mut content = tokio::fs::read_to_string(memory_path)
         .await
         .unwrap_or_default();
+    // 第 0 档防重（P9 记忆卫生）：归一化后与现有条目比对，字面重复不落盘
+    let (_, existing, _) = crate::memory::hygiene::parse_memory(&content);
+    let norm_new = crate::memory::hygiene::normalize_entry(&entry);
+    if existing
+        .iter()
+        .any(|e| crate::memory::hygiene::normalize_entry(&e.text) == norm_new)
+    {
+        return Ok(format!("already remembered: {}", entry));
+    }
     // 缺尾换行时先补一个，否则新条目会粘在最后一条记忆的同一行上，两条一起报废
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
@@ -146,6 +155,15 @@ impl Tool for MemoryWrite {
         let mut content = tokio::fs::read_to_string(&self.memory_path)
             .await
             .unwrap_or_default();
+        // 第 0 档防重（P9 记忆卫生）：归一化后与现有条目比对，字面重复不落盘
+        let (_, existing, _) = crate::memory::hygiene::parse_memory(&content);
+        let norm_new = crate::memory::hygiene::normalize_entry(&entry);
+        if existing
+            .iter()
+            .any(|e| crate::memory::hygiene::normalize_entry(&e.text) == norm_new)
+        {
+            return Ok(format!("already remembered: {}", entry));
+        }
         // 缺尾换行时先补一个，否则新条目会粘在最后一条记忆的同一行上，两条一起报废
         if !content.is_empty() && !content.ends_with('\n') {
             content.push('\n');
@@ -297,6 +315,44 @@ mod tests {
         let content = tokio::fs::read_to_string(&mem_path).await.unwrap();
         let expected = crate::time::now(&Some("Asia/Shanghai".into())).ymd();
         assert!(content.contains(&format!("- [{}] tz check", expected)));
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_entry_not_written() {
+        let dir = tempdir().unwrap();
+        let mem_path = dir.path().join("MEMORY.md");
+        let user_path = dir.path().join("USER.md");
+        let tool = MemoryWrite::new(mem_path.clone(), user_path, true);
+        tool.execute(&serde_json::json!({"entry": "user likes rust"}), "cli")
+            .await
+            .unwrap();
+        // 字面重复：Ok 但不落盘
+        let out = tool
+            .execute(&serde_json::json!({"entry": "user likes rust"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains("already remembered"), "{out}");
+        // 大小写/标点变体同样折叠命中
+        let out = tool
+            .execute(&serde_json::json!({"entry": "User likes RUST!"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains("already remembered"), "{out}");
+        let content = tokio::fs::read_to_string(&mem_path).await.unwrap();
+        assert_eq!(
+            content
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+                .count(),
+            1,
+            "重复条目不得落盘: {content}"
+        );
+        // 不同条目照常写入
+        let out = tool
+            .execute(&serde_json::json!({"entry": "user moved to berlin"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.starts_with("remembered:"), "{out}");
     }
 
     #[tokio::test]
