@@ -40,6 +40,12 @@ struct State {
     last_gc: i64,
 }
 
+/// main agent 家目录（`config_dir/workspace`）：GuardCtx 的 home/sessions.db
+/// 锚点与 sweep 根统一从这里取——子 agent 的守卫上下文也锚主家资产。
+pub fn main_home(config_dir: &Path) -> PathBuf {
+    config_dir.join("workspace")
+}
+
 pub struct SnapshotStore {
     /// `<config_dir>/snapshots/`
     root: PathBuf,
@@ -47,19 +53,26 @@ pub struct SnapshotStore {
     state: Mutex<State>,
 }
 
-/// 工具侧快照上下文（仅 main agent Some）：写前留底 + 快照库只读守卫。
+/// 工具侧资产守卫上下文（ADR-0033 L1 快照 + L3 基础设施只读）。
+/// 全 agent 注入（堵 delegate 拿子 agent 工具写主家基础设施的口）；`store`
+/// 仅 main 且 `snapshot_enabled` 时 Some——快照挂钩与快照库守卫随之启停，
+/// infra 只读守卫不受总开关影响。
 /// 由 build_single_agent 构造，注入 FileWrite / FileEdit / MemoryWrite / Terminal
-/// 与 `Agent.snapshot`（slash 命令、ApprovalContext 复用同一 Arc）。
+/// 与 `Agent.guard`（slash 命令、ApprovalContext 复用同一 Arc）。
 #[derive(Clone)]
-pub struct SnapshotCtx {
-    pub store: Arc<SnapshotStore>,
-    /// agent 家目录：A0 判定基准（目标在其下且文件名为 SOUL/USER/MEMORY 时写前留底）
+pub struct GuardCtx {
+    /// A0/A2 快照存储（main 专属；None = 快照关闭，快照守卫一并失活）
+    pub store: Option<Arc<SnapshotStore>>,
+    /// 主 agent 家目录（固定）：A0 判定基准 + sessions.db 守卫锚点。
+    /// 全 agent 统一指 main 家（子 agent 的 ctx 也守主家基础设施）。
     pub home: PathBuf,
     /// 快照库根，写入目标命中即拒（`[snapshot-guard]`）
     pub root: PathBuf,
+    /// 配置根目录：基础设施文件（config.toml/.env/mcp.toml/trusted_dirs.json）锚点
+    pub config_dir: PathBuf,
 }
 
-impl SnapshotCtx {
+impl GuardCtx {
     /// 目标落在家目录 A0 人格文件（SOUL.md / USER.md / MEMORY.md，含实例与子
     /// agent 的 MEMORY）上时返回快照 key（相对家目录的 `/` 分隔路径）。
     pub fn persona_write_target(&self, resolved: &Path) -> Option<String> {
@@ -72,15 +85,23 @@ impl SnapshotCtx {
     }
 
     /// 快照库只读守卫：目标（审批解析或范围校验后的规范化路径）命中快照库根。
-    pub fn blocks_write(&self, resolved: &Path) -> bool {
-        resolved.starts_with(&self.root)
+    /// 快照总开关关闭（store = None）时不启用——没有要保护的东西。
+    pub fn blocks_snapshot_write(&self, resolved: &Path) -> bool {
+        self.store.is_some() && resolved.starts_with(&self.root)
+    }
+
+    /// 基础设施文件只读守卫（L3/A1+A2）：A1 凭据文件与 A2 会话库对 agent 只读，
+    /// execute 与 execute_approved 同拒（判据 2：A1 直接拒不给人审被哄骗的机会）。
+    pub fn blocks_infra_write(&self, resolved: &Path) -> bool {
+        crate::path_guard::infra_readonly_target(resolved, &self.config_dir, &self.home)
     }
 
     /// A0 写前留底：目标是家目录人格文件时快照旧内容。失败仅 log warn
     /// 不阻断主操作（快照与目标同盘，快照失败时写入大概率也失败）。
     pub async fn snapshot_target(&self, resolved: &Path, reason: &str) {
+        let Some(store) = &self.store else { return };
         if let Some(key) = self.persona_write_target(resolved) {
-            if let Err(e) = self.store.snapshot_file(resolved, &key, reason).await {
+            if let Err(e) = store.snapshot_file(resolved, &key, reason).await {
                 tracing::warn!(error = %e, key, reason, "pre-write snapshot failed");
             }
         }

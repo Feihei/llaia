@@ -216,9 +216,12 @@ pub struct ApprovalContext {
     /// file_write/file_edit 目标落入其内即拒绝（SOUL/USER/主 MEMORY 归 main 主权）；
     /// main 为 None（守卫关闭）。
     pub forbidden_home: Option<PathBuf>,
-    /// A0 快照上下文（ADR-0033 L1，P9 Phase 1）：实例 memory_write 路由的
-    /// 覆盖写前留底。main 与任务实例经 `Agent.snapshot` 携带，测试为 None。
-    pub snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>,
+    /// 资产守卫上下文（ADR-0033）：实例 memory_write 路由的覆盖写前留底 +
+    /// web_fetch 出站闸门判定。经 `Agent.guard` 携带，测试为 None。
+    pub guard: Option<Arc<crate::snapshot::GuardCtx>>,
+    /// web_fetch 出站闸门（ADR-0033 L4，P9 Phase 2）：非交互频道 fail-closed、
+    /// 交互频道首访新域名强制人审。经 `Agent.web_fetch_gate` 携带，测试为 None。
+    pub web_fetch_gate: Option<Arc<crate::tools::web::WebFetchGate>>,
     /// `[runtime].timezone`（实例 memory 路由的条目日期用；随 live_config 读）。
     pub timezone: Option<String>,
 }
@@ -275,8 +278,8 @@ pub enum ApprovalAction {
 }
 
 /// 根据权限档位 + 工具副作用 + workspace/受信目录范围，决定一次工具调用是否需要审批
-// 参数随闸门演进增长（T3 第 7 参、Delete Guard 第 8 参、cron 豁免第 9 参），
-// 结构化收编留待下次重审。
+// 参数随闸门演进增长（T3 第 7 参、Delete Guard 第 8 参、cron 豁免第 9 参、
+// web_fetch 出站闸门第 10 参），结构化收编留待下次重审。
 #[allow(clippy::too_many_arguments)]
 pub fn approval_decision(
     tool: &dyn Tool,
@@ -288,11 +291,42 @@ pub fn approval_decision(
     terminal_inline_gate: bool,
     terminal_delete_guard: bool,
     cron_allow_inline: bool,
+    web_fetch_gate: Option<&crate::tools::web::WebFetchGate>,
 ) -> ApprovalAction {
+    // web_fetch 出站闸门（L4，ADR-0033 Phase 2）：放在 delegate/yolo 早退**之前**
+    // ——出站是政策边界，不吃 profile/channel 豁免。非交互频道（cron/delegate/mail）
+    // 域名未列允许清单 = fail-closed 拒绝；交互频道首访新域名强制人审（批准后
+    // 由 execute_approved 持久化，trusted_dirs 同款）。执行层 execute 复查同规则
+    // （双保险，堵 yolo+cron 组合漏网）。SSRF 校验无条件常开，在执行层。
+    if tool.name() == "web_fetch" {
+        if let Some(gate) = web_fetch_gate {
+            let host = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .and_then(crate::tools::web::url_host);
+            if let Some(host) = host {
+                if !is_interactive_channel(channel) {
+                    if !gate.allowed_contains(&host) {
+                        return ApprovalAction::Denied {
+                            reason: format!(
+                                "web_fetch domain `{host}` is not on the configured allowlist and channel `{channel}` is non-interactive (fail-closed). {}",
+                                crate::path_guard::HARD_BOUNDARY_NOTICE
+                            ),
+                        };
+                    }
+                } else if profile != "yolo" && !gate.permits(&host) {
+                    return ApprovalAction::NeedsApproval {
+                        within_workspace: true,
+                    };
+                }
+            }
+        }
+    }
     // 子 agent 委派：不受审批拦截（与 P2-a 一致，channel 固定为 "delegate"）。
     // T3 边界（注释留档）：delegate 通道的解释器内联载荷同样绕过审批——
     // 主 agent 把内联载荷塞进 delegate 任务即可绕过 T3，这是 P2-a 既有性质的
-    // 自然延伸；真正的封堵归 T2（无特权账户）部署规范。
+    // 自然延伸；真正的封堵归 T2（无特权账户）部署规范。（web_fetch 例外：
+    // 出站闸门在上文已先于本早退判定。）
     if channel == "delegate" {
         return ApprovalAction::Approved;
     }
@@ -354,9 +388,10 @@ pub fn approval_decision(
     } else {
         ApprovalAction::Denied {
             reason: format!(
-                "operation `{}` requires approval, but channel `{}` is non-interactive and cannot wait for confirmation; skipped",
+                "operation `{}` requires approval, but channel `{}` is non-interactive and cannot wait for confirmation; skipped. {}",
                 tool.name(),
-                channel
+                channel,
+                crate::path_guard::HARD_BOUNDARY_NOTICE
             ),
         }
     }
@@ -681,6 +716,7 @@ mod tests {
             gate,
             delete_guard,
             cron_allow,
+            None,
         )
     }
 
@@ -940,6 +976,108 @@ mod tests {
         ));
     }
 
+    // ---------------- web_fetch 出站闸门（L4） ----------------
+
+    #[test]
+    fn test_web_fetch_gate_non_interactive_fail_closed() {
+        let gate = std::sync::Arc::new(crate::tools::web::WebFetchGate::new(vec![
+            "wikipedia.org".into()
+        ]));
+        // cron 未列域名 → Denied（fail-closed）
+        let d = approval_decision(
+            &ToolStub { name: "web_fetch" },
+            &json!({ "url": "https://example.com/x" }),
+            Path::new("/tmp/ws"),
+            &[],
+            "default",
+            "cron:dream",
+            false,
+            false,
+            false,
+            Some(&gate),
+        );
+        assert!(matches!(d, ApprovalAction::Denied { .. }), "实际 {d:?}");
+        // 列入允许清单 → 直接放行（requires_confirm=false）
+        let d = approval_decision(
+            &ToolStub { name: "web_fetch" },
+            &json!({ "url": "https://wikipedia.org/x" }),
+            Path::new("/tmp/ws"),
+            &[],
+            "default",
+            "cron:dream",
+            false,
+            false,
+            false,
+            Some(&gate),
+        );
+        assert!(matches!(d, ApprovalAction::Approved), "实际 {d:?}");
+        // delegate 未列域名同样 Denied（闸门在 delegate 早退之前）
+        let d = approval_decision(
+            &ToolStub { name: "web_fetch" },
+            &json!({ "url": "https://example.com/x" }),
+            Path::new("/tmp/ws"),
+            &[],
+            "default",
+            "delegate",
+            false,
+            false,
+            false,
+            Some(&gate),
+        );
+        assert!(matches!(d, ApprovalAction::Denied { .. }), "实际 {d:?}");
+    }
+
+    #[test]
+    fn test_web_fetch_gate_interactive_first_visit_approval() {
+        let gate = std::sync::Arc::new(crate::tools::web::WebFetchGate::new(Vec::new()));
+        // 交互频道首访新域名 → NeedsApproval
+        let d = approval_decision(
+            &ToolStub { name: "web_fetch" },
+            &json!({ "url": "https://example.com/x" }),
+            Path::new("/tmp/ws"),
+            &[],
+            "default",
+            "web",
+            false,
+            false,
+            false,
+            Some(&gate),
+        );
+        assert!(
+            matches!(d, ApprovalAction::NeedsApproval { .. }),
+            "实际 {d:?}"
+        );
+        // 批准（持久化集）后 → 放行
+        gate.approve("example.com");
+        let d = approval_decision(
+            &ToolStub { name: "web_fetch" },
+            &json!({ "url": "https://www.example.com/y" }),
+            Path::new("/tmp/ws"),
+            &[],
+            "default",
+            "web",
+            false,
+            false,
+            false,
+            Some(&gate),
+        );
+        assert!(matches!(d, ApprovalAction::Approved), "实际 {d:?}");
+        // yolo 交互豁免域名审批（yolo 语义），但闸门对象缺省（None）时零影响
+        let d = approval_decision(
+            &ToolStub { name: "web_fetch" },
+            &json!({ "url": "https://never-approved.com/x" }),
+            Path::new("/tmp/ws"),
+            &[],
+            "yolo",
+            "web",
+            false,
+            false,
+            false,
+            Some(&gate),
+        );
+        assert!(matches!(d, ApprovalAction::Approved), "实际 {d:?}");
+    }
+
     // ---------------- Delete Guard：破坏性命令三档语义 ----------------
 
     #[test]
@@ -989,6 +1127,7 @@ mod tests {
             false,
             true,
             false,
+            None,
         );
         assert!(
             matches!(decision, ApprovalAction::NeedsApproval { .. }),
@@ -1006,6 +1145,7 @@ mod tests {
             false,
             true,
             false,
+            None,
         );
         assert!(matches!(decision, ApprovalAction::NeedsApproval { .. }));
 
@@ -1021,6 +1161,7 @@ mod tests {
             false,
             true,
             false,
+            None,
         );
         assert!(matches!(decision, ApprovalAction::Approved));
     }

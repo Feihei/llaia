@@ -421,8 +421,9 @@ pub async fn try_handle(
             let tz = agent.timezone().await;
             // A0 写前留底（ADR-0033 L1）：workspace/backups 备份在家目录内、agent
             // 可触碰，不构成 agent 之外的留底；快照库（config_dir/snapshots/）才是。
-            if let Some(snap) = &agent.snapshot {
-                snap.snapshot_target(&memory_path, "before_memory_compact")
+            if let Some(guard) = &agent.asset_guard {
+                guard
+                    .snapshot_target(&memory_path, "before_memory_compact")
                     .await;
             }
             match compress_memory(&memory_path, provider.as_ref(), &backup_dir, &tz).await {
@@ -838,6 +839,34 @@ async fn resolve_approval(
             pending.tool_name
         )
     };
+
+    // 审计批准执行（P9 Phase 2 顺手收口）：/ok 路径此前绕过 execute_tool_calls、
+    // 完全不过 audit.log（P3-a「记录所有 requires_confirm 调用」的漏网）。
+    // terminal 网络命令同样按 L4 留痕口径附 reason=network=<prog>。
+    if approve {
+        if let Some(a) = &agent.audit {
+            let network_marker = (pending.tool_name == "terminal")
+                .then(|| pending.args.get("command").and_then(|v| v.as_str()))
+                .flatten()
+                .and_then(crate::path_guard::network_command_hit)
+                .map(|prog| format!("network={prog}"));
+            let outcome = if result.starts_with("[error:") {
+                "error"
+            } else {
+                "ok"
+            };
+            let _ = a
+                .write(
+                    &agent.alias,
+                    &pending.channel,
+                    &pending.tool_name,
+                    &pending.args.to_string(),
+                    outcome,
+                    network_marker.as_deref(),
+                )
+                .await;
+        }
+    }
 
     let notice = format!(
         "[{}] {}",

@@ -182,8 +182,8 @@ pub async fn execute_tool_calls(
         if call.name == "memory_write" {
             if let Some(mem_path) = &ctx.instance_memory_path {
                 // A0 写前留底（ADR-0033 L1）：实例 MEMORY 覆盖写前快照旧内容
-                if let Some(snap) = &ctx.snapshot {
-                    snap.snapshot_target(mem_path, "before_memory_write").await;
+                if let Some(guard) = &ctx.guard {
+                    guard.snapshot_target(mem_path, "before_memory_write").await;
                 }
                 let out = match crate::tools::memory::write_memory_entry(
                     mem_path,
@@ -235,6 +235,7 @@ pub async fn execute_tool_calls(
             ctx.terminal_inline_gate,
             ctx.terminal_delete_guard,
             ctx.cron_allow_inline,
+            ctx.web_fetch_gate.as_deref(),
         ) {
             // 直接执行
             ApprovalAction::Approved => {}
@@ -320,6 +321,14 @@ pub async fn execute_tool_calls(
         }
 
         tracing::info!(tool = %call.name, args = %call.arguments, "executing tool");
+        // 网络命令风险标记（ADR-0033 L4 留痕，不拦截）：terminal 命令含
+        // curl/wget/ssh 等出站程序时，审计条目附 `reason=network=<prog>`，
+        // audit.log 可 grep。硬边界归 L2（OS 沙箱网络限制）。
+        let network_marker = (call.name == "terminal")
+            .then(|| call.arguments.get("command").and_then(|v| v.as_str()))
+            .flatten()
+            .and_then(crate::path_guard::network_command_hit)
+            .map(|prog| format!("network={prog}"));
         let outcome = match tool
             .execute_with_events(&call.arguments, channel, event_tx)
             .await
@@ -335,7 +344,7 @@ pub async fn execute_tool_calls(
                             &call.name,
                             &call.arguments.to_string(),
                             "error",
-                            Some(&e.to_string()),
+                            Some(&network_marker.clone().unwrap_or_else(|| e.to_string())),
                         )
                         .await;
                 }
@@ -353,7 +362,7 @@ pub async fn execute_tool_calls(
                     &call.name,
                     &call.arguments.to_string(),
                     "ok",
-                    None,
+                    network_marker.as_deref(),
                 )
                 .await;
         }
@@ -415,7 +424,8 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
-                snapshot: None,
+                guard: None,
+                web_fetch_gate: None,
                 timezone: None,
             },
             None,
@@ -454,7 +464,8 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
-                snapshot: None,
+                guard: None,
+                web_fetch_gate: None,
                 timezone: None,
             },
             None,
@@ -515,7 +526,8 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
-                snapshot: None,
+                guard: None,
+                web_fetch_gate: None,
                 timezone: None,
             },
             None,
@@ -544,7 +556,8 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
-                snapshot: None,
+                guard: None,
+                web_fetch_gate: None,
                 timezone: None,
             },
             None,
@@ -572,7 +585,8 @@ mod tests {
                 cron_allow_inline: false,
                 instance_memory_path: None,
                 forbidden_home: None,
-                snapshot: None,
+                guard: None,
+                web_fetch_gate: None,
                 timezone: None,
             },
             None,
@@ -611,7 +625,8 @@ mod tests {
             cron_allow_inline: false,
             instance_memory_path: Some(inst_mem.clone()),
             forbidden_home: None,
-            snapshot: None,
+            guard: None,
+            web_fetch_gate: None,
             timezone: None,
         };
         let calls = vec![ToolCall {
@@ -658,7 +673,8 @@ mod tests {
             gate: ApprovalGate::new(),
             agent_alias: "main".into(),
             audit: None,
-            snapshot: None,
+            guard: None,
+            web_fetch_gate: None,
             ask_user_timeout_secs: 0,
             terminal_inline_gate: false,
             terminal_delete_guard: false,

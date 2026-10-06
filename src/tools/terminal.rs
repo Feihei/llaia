@@ -26,9 +26,10 @@ pub struct Terminal {
     /// spawn 前剔除变量名含 KEY/SECRET/TOKEN 的继承变量，防 `env` 一条命令
     /// 倒出 .env 灌进进程 env 的全部 API key。默认关闭，`with_hardening` 开启。
     scrub_child_env: bool,
-    /// 快照库根（`<config_dir>/snapshots/`，ADR-0033 L1）：Some 时命令路径解析
-    /// 后命中即拒——快照存储对 agent 只读，execute 与 execute_approved 同拒。
-    snapshot_root: Option<PathBuf>,
+    /// 资产守卫上下文（ADR-0033）：Some 时命令路径解析后命中快照库根
+    /// （`[snapshot-guard]`）或基础设施文件（`[infra-guard]`）即拒——
+    /// execute 与 execute_approved 同拒。
+    guard: Option<Arc<crate::snapshot::GuardCtx>>,
     /// Windows 上探测到的 Git Bash 路径；None 表示未找到，执行回退到 `cmd /C`。
     #[cfg(windows)]
     bash_path: Option<PathBuf>,
@@ -51,16 +52,20 @@ impl Terminal {
             skills_dir,
             delete_guard,
             scrub_child_env: false,
-            snapshot_root: None,
+            guard: None,
             #[cfg(windows)]
             bash_path: detect_bash(),
         }
     }
 
-    /// 运行时加固（ADR-0033）：env 密钥剔除 + 快照库只读守卫。仅 main agent 开启。
-    pub fn with_hardening(mut self, scrub_child_env: bool, snapshot_root: Option<PathBuf>) -> Self {
+    /// 运行时加固（ADR-0033）：env 密钥剔除 + 资产只读守卫（快照库 + 基础设施）。
+    pub fn with_hardening(
+        mut self,
+        scrub_child_env: bool,
+        guard: Option<Arc<crate::snapshot::GuardCtx>>,
+    ) -> Self {
         self.scrub_child_env = scrub_child_env;
-        self.snapshot_root = snapshot_root;
+        self.guard = guard;
         self
     }
 
@@ -274,16 +279,23 @@ impl Terminal {
                 .unwrap_or_default();
         }
 
-        // 快照库守卫（ADR-0033 L1，P9 Phase 1）：`<config_dir>/snapshots/` 对 agent
-        // 只读——execute 与 execute_approved 同拒（delegate 自动放行与批准豁免跳过
-        // 范围检查的既有绕行，到这道闸为止）。路径提取是 L5 启发：`bash -s` stdin
-        // 脚本内的路径不可见，硬边界归 Phase 3 T2 受限进程；file 工具侧有精确拦截。
-        if let Some(root) = &self.snapshot_root {
+        // 资产守卫（ADR-0033 L1/L3）：快照库与基础设施文件对 agent 只读——
+        // execute 与 execute_approved 同拒（delegate 自动放行与批准豁免跳过
+        // 范围检查的既有绕行，到这两道闸为止）。路径提取是 L5 启发：`bash -s`
+        // stdin 脚本内的路径不可见，硬边界归 Phase 3 T2 受限进程；file 工具侧
+        // 有精确拦截。
+        if let Some(guard) = &self.guard {
             for token in path_guard::extract_path_tokens(command) {
                 if let Ok(resolved) = path_guard::resolve_approved_path(&workspace, &token) {
-                    if resolved.starts_with(root) {
+                    if guard.blocks_snapshot_write(&resolved) {
                         anyhow::bail!(
                             "[snapshot-guard] snapshots dir is read-only to the agent: {}",
+                            token
+                        );
+                    }
+                    if guard.blocks_infra_write(&resolved) {
+                        anyhow::bail!(
+                            "[infra-guard] {} is read-only to the agent (infrastructure file)",
                             token
                         );
                     }

@@ -934,6 +934,11 @@ pub struct WebFetchConfig {
     /// provider，如 tavily）。空 = 本地抽取；引用无效 → 自动退化本地抽取 + warn。
     #[serde(default)]
     pub extract_provider: String,
+    /// 域名允许清单（ADR-0033 L4 出站闸门，P9 Phase 2）：**只收紧非交互频道**
+    /// （cron/delegate/mail）——未配置 = fail-closed 全拒；匹配 = 精确或子域后缀。
+    /// 交互频道不受清单约束，走首访新域名审批 + 批准持久化（web_domains.json）。
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
 }
 
 impl Default for WebFetchConfig {
@@ -941,6 +946,7 @@ impl Default for WebFetchConfig {
         Self {
             max_chars: default_web_fetch_max_chars(),
             extract_provider: String::new(),
+            allowed_domains: Vec::new(),
         }
     }
 }

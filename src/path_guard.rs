@@ -1,6 +1,81 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+/// 拒绝话术两原则（ADR-0033 Phase 2，学 zeroclaw/nanobot）：拒绝信息不含任何
+/// 救济路径（不说「可以让用户 /ok」或「改配置放开」——防被骗模型游说扩权），
+/// 并声明这是策略硬边界、劝阻绕行（shell 技巧 / 解释器内联 / 路径改写都无效）。
+/// 追加在范围拒绝、危险黑名单命中、shell 包装拒绝与审批非交互拒绝的文案尾部。
+pub const HARD_BOUNDARY_NOTICE: &str =
+    "This is a hard policy boundary; do not attempt to work around it.";
+
+/// A1/A2 基础设施文件（ADR-0033 L3 只读守卫，P9 Phase 2）：对 agent 只读——
+/// file 工具与 terminal 命中即 `[infra-guard]` 拒（execute 与 execute_approved
+/// 同拒）。前三项在 config_dir 根（A1 凭据/配置），`sessions.db`（A2 隐私历史）
+/// 在 agent 家目录，由 `infra_readonly_target` 分别锚定。
+///
+/// `cron.toml` 刻意不在列：agent 经 `cron_task` 工具有特许管理通路，文件层硬拒
+/// 只会把同一动作挪进更绕的形态。`.env` 是 ADR §1 资产表 A1 成员，补入。
+const INFRA_CONFIG_FILE_NAMES: &[&str] = &["config.toml", ".env", "mcp.toml", "trusted_dirs.json"];
+
+/// 判定解析后的绝对路径是否基础设施只读目标：config_dir 根下的 A1 文件，或
+/// agent 家目录下的 `sessions.db`（含 `-wal`/`-shm` 侧车）。纯函数，工具层
+/// （file/terminal 的 GuardCtx）与测试共用。
+pub fn infra_readonly_target(resolved: &Path, config_dir: &Path, home: &Path) -> bool {
+    let name = match resolved.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return false,
+    };
+    if resolved.parent().map(|p| p == config_dir).unwrap_or(false)
+        && INFRA_CONFIG_FILE_NAMES.contains(&name)
+    {
+        return true;
+    }
+    resolved.parent().map(|p| p == home).unwrap_or(false)
+        && (name == "sessions.db" || name.starts_with("sessions.db-"))
+}
+
+/// terminal 网络命令风险类（ADR-0033 L4 留痕，P9 Phase 2）：这些程序能把任意
+/// 数据送出站外，是出站面盘点第 1 格（最大缺口）。**不拦截**——内容级把关短期
+/// 做不到，近期处置是 audit.log 强化留痕（`reason=network=<prog>`），硬边界归
+/// L2（OS 沙箱网络限制，Phase 3 T2）。
+pub const NETWORK_COMMANDS: &[&str] = &[
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "netcat",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "socat",
+    "telnet",
+    "ftp",
+    "iwr",
+    "invoke-webrequest",
+    "invoke-restmethod",
+];
+
+/// 命令是否含网络程序段（复用破坏性命令同款分段：引号感知切段 + 环境变量
+/// 前缀跳过 + normalize_prog 归一化）。命中返回程序名（小写）。
+pub fn network_command_hit(command: &str) -> Option<&'static str> {
+    for seg in split_command_segments(command) {
+        let tokens = tokenize_command(&seg);
+        let mut idx = 0;
+        while idx < tokens.len() && is_env_assignment(&tokens[idx].text) {
+            idx += 1;
+        }
+        if idx >= tokens.len() {
+            continue;
+        }
+        let prog = normalize_prog(&tokens[idx].text).to_ascii_lowercase();
+        if let Some(hit) = NETWORK_COMMANDS.iter().find(|c| **c == prog) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
 /// 跨平台危险路径黑名单前缀（canonicalize 失败时兜底）
 pub fn dangerous_prefixes() -> Vec<&'static str> {
     let mut v = vec![];
@@ -137,7 +212,11 @@ pub fn validate_path(
 
     // 第三层：黑名单兜底（先查字符串前缀；在 MSYS 换算之后查，/c/Windows 同样命中）
     if hits_blacklist(path) {
-        anyhow::bail!("path {:?} matches dangerous blacklist prefix", path);
+        anyhow::bail!(
+            "path {:?} matches dangerous blacklist prefix. {}",
+            path,
+            HARD_BOUNDARY_NOTICE
+        );
     }
 
     let p = PathBuf::from(path);
@@ -176,10 +255,11 @@ pub fn validate_path(
     }
 
     anyhow::bail!(
-        "path {:?} (canonicalized {:?}) is outside workspace {:?}",
+        "path {:?} (canonicalized {:?}) is outside workspace {:?}. {}",
         joined,
         canon_to_check,
-        norm_ws
+        norm_ws,
+        HARD_BOUNDARY_NOTICE
     )
 }
 
@@ -191,7 +271,11 @@ pub fn resolve_approved_path(workspace: &Path, path: &str) -> Result<PathBuf> {
     let path_owned = convert_msys_path(path);
     let path: &str = &path_owned;
     if hits_blacklist(path) {
-        anyhow::bail!("path {:?} matches dangerous blacklist prefix", path);
+        anyhow::bail!(
+            "path {:?} matches dangerous blacklist prefix. {}",
+            path,
+            HARD_BOUNDARY_NOTICE
+        );
     }
     let p = PathBuf::from(path);
     let joined = if p.is_absolute() {
@@ -468,7 +552,11 @@ pub fn check_shell_wrappers(command: &str) -> Result<()> {
     let first = tokens[0];
     let shell_names = ["bash", "sh", "zsh", "fish"];
     if shell_names.contains(&first) && tokens.contains(&"-c") {
-        anyhow::bail!("shell wrapper with -c is blocked: {}", command);
+        anyhow::bail!(
+            "shell wrapper with -c is blocked: {}. {}",
+            command,
+            HARD_BOUNDARY_NOTICE
+        );
     }
 
     // 命令行含 eval / exec / source / $() / 反引号 / 进程替换 >( ) <( )
@@ -480,7 +568,11 @@ pub fn check_shell_wrappers(command: &str) -> Result<()> {
         || command.contains(">(")
         || command.contains("<(")
     {
-        anyhow::bail!("command contains blocked shell construct: {}", command);
+        anyhow::bail!(
+            "command contains blocked shell construct: {}. {}",
+            command,
+            HARD_BOUNDARY_NOTICE
+        );
     }
 
     Ok(())
@@ -907,6 +999,90 @@ pub fn destructive_all_within_bound(targets: &[String], workspace: &Path) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------- 基础设施文件只读守卫（L3/A1+A2） ----------------
+
+    #[test]
+    fn test_infra_readonly_target_hits_config_root_files() {
+        let cfg = Path::new("/home/u/.llaia");
+        let home = cfg.join("workspace");
+        for name in ["config.toml", ".env", "mcp.toml", "trusted_dirs.json"] {
+            assert!(
+                infra_readonly_target(&cfg.join(name), cfg, &home),
+                "{name} 应命中 infra 守卫"
+            );
+        }
+        // config_dir 的子目录（skills/ 等）不守卫
+        assert!(!infra_readonly_target(
+            &cfg.join("skills/x/SKILL.md"),
+            cfg,
+            &home
+        ));
+        // 无关文件不守卫
+        assert!(!infra_readonly_target(&cfg.join("notes.txt"), cfg, &home));
+    }
+
+    #[test]
+    fn test_infra_readonly_target_hits_sessions_db_and_sidecars() {
+        let cfg = Path::new("/home/u/.llaia");
+        let home = cfg.join("workspace");
+        assert!(infra_readonly_target(&home.join("sessions.db"), cfg, &home));
+        assert!(infra_readonly_target(
+            &home.join("sessions.db-wal"),
+            cfg,
+            &home
+        ));
+        assert!(infra_readonly_target(
+            &home.join("sessions.db-shm"),
+            cfg,
+            &home
+        ));
+        // 子目录里的同名文件不守卫（如任务实例目录）
+        assert!(!infra_readonly_target(
+            &home.join("instances/t/sessions.db"),
+            cfg,
+            &home
+        ));
+        // 子 agent 家目录的 sessions.db 不在主家锚点内
+        assert!(!infra_readonly_target(
+            &home.join("subagent/a/sessions.db"),
+            cfg,
+            &home
+        ));
+    }
+
+    // ---------------- terminal 网络命令风险标记（L4 留痕） ----------------
+
+    #[test]
+    fn test_network_command_hit_matches_programs() {
+        assert_eq!(network_command_hit("curl https://x.com"), Some("curl"));
+        assert_eq!(network_command_hit("wget -qO- x"), Some("wget"));
+        assert_eq!(network_command_hit("ssh host"), Some("ssh"));
+        // 带路径 / 大小写 / exe 后缀
+        assert_eq!(
+            network_command_hit("/usr/bin/curl https://x.com"),
+            Some("curl")
+        );
+        assert_eq!(network_command_hit("CURL x"), Some("curl"));
+        // 环境变量前缀跳过
+        assert_eq!(network_command_hit("HTTPS_PROXY=x curl x"), Some("curl"));
+        // 管道链中的段
+        assert_eq!(network_command_hit("echo hi && wget x"), Some("wget"));
+        // 非网络命令
+        assert_eq!(network_command_hit("ls -la"), None);
+        assert_eq!(network_command_hit("echo curl"), None); // curl 是参数不是程序
+    }
+
+    #[test]
+    fn test_hard_boundary_notice_wording() {
+        // 两原则：声明硬边界 + 劝阻绕行；不含救济路径（/ok、配置、权限词）
+        let n = HARD_BOUNDARY_NOTICE.to_ascii_lowercase();
+        assert!(n.contains("hard policy boundary"));
+        assert!(n.contains("do not attempt to work around it"));
+        assert!(!n.contains("/ok"));
+        assert!(!n.contains("config"));
+        assert!(!n.contains("permission"));
+    }
     use tempfile::tempdir;
 
     // 平台专属：Linux 黑名单前缀只在 linux 编译时存在

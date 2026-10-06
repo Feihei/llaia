@@ -19,16 +19,16 @@ pub struct FileWrite {
     workspace: Arc<RwLock<PathBuf>>,
     trusted: Arc<RwLock<Vec<PathBuf>>>,
     is_main: bool,
-    /// A0 快照上下文（ADR-0033 L1，仅 main agent Some）：写前留底人格文件 +
-    /// 快照库只读守卫。默认 None（子 agent / 测试不受影响）。
-    snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>,
+    /// 资产守卫上下文（ADR-0033，全 agent 注入）：A0 写前留底（main）+ 快照库 /
+    /// 基础设施文件只读守卫。默认 None（测试不受影响）。
+    guard: Option<Arc<crate::snapshot::GuardCtx>>,
 }
 pub struct FileEdit {
     workspace: Arc<RwLock<PathBuf>>,
     trusted: Arc<RwLock<Vec<PathBuf>>>,
     is_main: bool,
-    /// 同 FileWrite.snapshot
-    snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>,
+    /// 同 FileWrite.guard
+    guard: Option<Arc<crate::snapshot::GuardCtx>>,
 }
 
 impl FileRead {
@@ -56,13 +56,13 @@ impl FileWrite {
             workspace,
             trusted,
             is_main,
-            snapshot: None,
+            guard: None,
         }
     }
 
-    /// 注入 A0 快照上下文（仅 main agent）。
-    pub fn with_snapshot(mut self, snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>) -> Self {
-        self.snapshot = snapshot;
+    /// 注入资产守卫上下文（ADR-0033）。
+    pub fn with_guard(mut self, guard: Option<Arc<crate::snapshot::GuardCtx>>) -> Self {
+        self.guard = guard;
         self
     }
 }
@@ -76,13 +76,13 @@ impl FileEdit {
             workspace,
             trusted,
             is_main,
-            snapshot: None,
+            guard: None,
         }
     }
 
-    /// 注入 A0 快照上下文（仅 main agent）。
-    pub fn with_snapshot(mut self, snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>) -> Self {
-        self.snapshot = snapshot;
+    /// 注入资产守卫上下文（ADR-0033）。
+    pub fn with_guard(mut self, guard: Option<Arc<crate::snapshot::GuardCtx>>) -> Self {
+        self.guard = guard;
         self
     }
 }
@@ -299,15 +299,22 @@ impl FileWrite {
             }
         }
 
-        // 快照库只读守卫（ADR-0033 L1）：execute 与 execute_approved 同拒
-        if let Some(snap) = &self.snapshot {
-            if snap.blocks_write(&resolved) {
+        // 资产守卫（ADR-0033）：快照库只读（L1）+ 基础设施文件只读（L3/A1+A2），
+        // execute 与 execute_approved 同拒
+        if let Some(guard) = &self.guard {
+            if guard.blocks_snapshot_write(&resolved) {
                 anyhow::bail!(
                     "[snapshot-guard] snapshots dir is read-only to the agent: {}",
                     path
                 );
             }
-            snap.snapshot_target(&resolved, "before_file_write").await;
+            if guard.blocks_infra_write(&resolved) {
+                anyhow::bail!(
+                    "[infra-guard] {} is read-only to the agent (infrastructure file)",
+                    path
+                );
+            }
+            guard.snapshot_target(&resolved, "before_file_write").await;
         }
 
         if let Some(parent) = resolved.parent() {
@@ -390,15 +397,22 @@ impl FileEdit {
             }
         }
 
-        // 快照库只读守卫 + A0 写前留底（ADR-0033 L1）：execute 与 execute_approved 同拒
-        if let Some(snap) = &self.snapshot {
-            if snap.blocks_write(&resolved) {
+        // 资产守卫（ADR-0033）：快照库只读（L1）+ 基础设施文件只读（L3/A1+A2）
+        // + A0 写前留底，execute 与 execute_approved 同拒
+        if let Some(guard) = &self.guard {
+            if guard.blocks_snapshot_write(&resolved) {
                 anyhow::bail!(
                     "[snapshot-guard] snapshots dir is read-only to the agent: {}",
                     path
                 );
             }
-            snap.snapshot_target(&resolved, "before_file_edit").await;
+            if guard.blocks_infra_write(&resolved) {
+                anyhow::bail!(
+                    "[infra-guard] {} is read-only to the agent (infrastructure file)",
+                    path
+                );
+            }
+            guard.snapshot_target(&resolved, "before_file_edit").await;
         }
 
         let content = tokio::fs::read_to_string(&resolved)

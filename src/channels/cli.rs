@@ -505,11 +505,11 @@ pub async fn build_single_agent(
             "removed todo lists of deleted sessions"
         );
     }
-    // 快照基建（ADR-0033 L1 可恢复性，P9 Phase 1）：仅 main agent 构建——
-    // 家目录资产（SOUL/USER/MEMORY、sessions.db、uploads/）归 main 主权，子 agent
-    // 与任务实例经共享工具实例 / ApprovalContext 复用同一 Arc。写前挂钩 + 定时
-    // sweep 双通道；`snapshot_enabled = false` 时不建 store（kill switch）。
-    let snapshot_ctx: Option<Arc<crate::snapshot::SnapshotCtx>> =
+    // 资产守卫上下文（ADR-0033 L1 快照 + L3 基础设施只读）：全 agent 注入——
+    // infra 守卫不随快照总开关关闭，堵 delegate 拿子 agent 工具写主家基础设施
+    // 的口；快照存储仅 main 且 `snapshot_enabled` 时构建（写前挂钩 + 定时 sweep
+    // 双通道，kill switch 只关快照）。
+    let snapshot_store: Option<Arc<crate::snapshot::SnapshotStore>> =
         if is_main && config.runtime.snapshot_enabled {
             match crate::snapshot::SnapshotStore::open(
                 config_dir,
@@ -520,13 +520,9 @@ pub async fn build_single_agent(
                     crate::snapshot::SnapshotStore::spawn_periodic(
                         &store,
                         &session_store,
-                        workspace.clone(),
+                        crate::snapshot::main_home(config_dir),
                     );
-                    Some(Arc::new(crate::snapshot::SnapshotCtx {
-                        store,
-                        home: workspace.clone(),
-                        root: config_dir.join("snapshots"),
-                    }))
+                    Some(store)
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "snapshot store unavailable, snapshots disabled");
@@ -536,6 +532,19 @@ pub async fn build_single_agent(
         } else {
             None
         };
+    let guard_ctx = Arc::new(crate::snapshot::GuardCtx {
+        store: snapshot_store,
+        // 统一锚 main 家目录（子 agent 的 ctx 也守主家 sessions.db 与 A0 文件）
+        home: crate::snapshot::main_home(config_dir),
+        root: config_dir.join("snapshots"),
+        config_dir: config_dir.to_path_buf(),
+    });
+    // web_fetch 出站闸门（ADR-0033 L4）：每 agent 一份实例（允许清单同源配置、
+    // 已批准集共享同一个 web_domains.json，并发追加 benign）。
+    let web_fetch_gate = Arc::new(crate::tools::web::WebFetchGate::load(
+        config_dir,
+        config.tools.web_fetch.allowed_domains.clone(),
+    ));
     let mut all_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(FileRead::new(
             workspace_root.clone(),
@@ -545,11 +554,11 @@ pub async fn build_single_agent(
         )),
         Arc::new(
             FileWrite::new(workspace_root.clone(), trusted_dirs.clone(), is_main)
-                .with_snapshot(snapshot_ctx.clone()),
+                .with_guard(Some(guard_ctx.clone())),
         ),
         Arc::new(
             FileEdit::new(workspace_root.clone(), trusted_dirs.clone(), is_main)
-                .with_snapshot(snapshot_ctx.clone()),
+                .with_guard(Some(guard_ctx.clone())),
         ),
         Arc::new(
             Terminal::new(
@@ -560,10 +569,7 @@ pub async fn build_single_agent(
                 Some(skills_dir.clone()),
                 config.tools.terminal.delete_guard != "off",
             )
-            .with_hardening(
-                config.runtime.scrub_child_env,
-                snapshot_ctx.as_ref().map(|c| c.root.clone()),
-            ),
+            .with_hardening(config.runtime.scrub_child_env, Some(guard_ctx.clone())),
         ),
         Arc::new({
             // web_fetch 正文抽取：extract_provider 引用支持 extract 能力的
@@ -583,11 +589,15 @@ pub async fn build_single_agent(
                     }
                 },
             };
-            WebFetch::new(config.tools.web_fetch.max_chars, extractor)?
+            WebFetch::new(
+                config.tools.web_fetch.max_chars,
+                extractor,
+                web_fetch_gate.clone(),
+            )?
         }),
         Arc::new(
             MemoryWrite::new(memory_path.clone(), user_path.clone(), is_main)
-                .with_snapshot(snapshot_ctx.clone())
+                .with_guard(Some(guard_ctx.clone()))
                 .with_timezone(config.runtime.timezone.clone()),
         ),
         // memory_research（plan.md）：跨会话 FTS5 全文搜索历史消息，只读。
@@ -760,8 +770,10 @@ pub async fn build_single_agent(
     .await;
     // 记录 system 前缀与 tool-instructions 标记，供热加载 skills 时重建
     agent.init_system_meta(system_prompt_base, has_tool_instructions);
-    // A0 快照上下文（P9 Phase 1）：main 持 Some，ApprovalContext / /memory-compact 复用
-    agent.snapshot = snapshot_ctx;
+    // 资产守卫上下文与出站闸门（P9）：全 agent Some——ApprovalContext / 审批层 /
+    // /memory-compact 复用同一 Arc
+    agent.asset_guard = Some(guard_ctx);
+    agent.web_fetch_gate = Some(web_fetch_gate);
 
     // 环境探测（P5 E1）：仅 main agent 启动时探测一次，注入 Runtime Context；
     // 子 agent（委派任务）不探测，避免启动开销。/env 命令可手动刷新。

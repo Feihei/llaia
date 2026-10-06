@@ -70,8 +70,8 @@ pub struct MemoryWrite {
     pub user_path: PathBuf,
     pub is_main: bool,
     pub lock: Arc<Mutex<()>>,
-    /// A0 快照上下文（ADR-0033 L1，仅 main agent Some）：覆盖写前留底旧 MEMORY。
-    snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>,
+    /// 资产守卫上下文（ADR-0033，main 快照挂钩用）：覆盖写前留底旧 MEMORY。
+    guard: Option<Arc<crate::snapshot::GuardCtx>>,
     /// `[runtime].timezone` 启动快照：决定条目日期用哪个时区。
     /// Docker 镜像默认 UTC，不带这个值时北京用户的记忆会整体早一天落盘。
     /// 构造期快照即可——改时区属于低频操作，重启生效可接受。
@@ -85,14 +85,14 @@ impl MemoryWrite {
             user_path,
             is_main,
             lock: Arc::new(Mutex::new(())),
-            snapshot: None,
+            guard: None,
             timezone: None,
         }
     }
 
-    /// 注入 A0 快照上下文（仅 main agent）。
-    pub fn with_snapshot(mut self, snapshot: Option<Arc<crate::snapshot::SnapshotCtx>>) -> Self {
-        self.snapshot = snapshot;
+    /// 注入资产守卫上下文（ADR-0033）。
+    pub fn with_guard(mut self, guard: Option<Arc<crate::snapshot::GuardCtx>>) -> Self {
+        self.guard = guard;
         self
     }
 
@@ -152,8 +152,9 @@ impl Tool for MemoryWrite {
         }
         content.push_str(&line);
         // A0 写前留底（ADR-0033 L1）：快照失败不阻断记忆写入
-        if let Some(snap) = &self.snapshot {
-            snap.snapshot_target(&self.memory_path, "before_memory_write")
+        if let Some(guard) = &self.guard {
+            guard
+                .snapshot_target(&self.memory_path, "before_memory_write")
                 .await;
         }
         crate::memory::write_memory_atomic(&self.memory_path, &content)

@@ -200,6 +200,16 @@ voice = "alloy"                # default voice (call parameter, not a model attr
 enabled = false                # sd-server (stable-diffusion.cpp), agnes, OpenAI, ...
 model = ""                     # model id of a kind = "image" entry; its `size` field is the default output size
 timeout_secs = 300             # local diffusion can be slow
+
+[tools.web_fetch]
+max_chars = 20000
+extract_provider = ""          # optional service-family provider id (tavily) for server-side extraction
+# Domain allowlist (ADR-0033 egress gate): constrains NON-interactive channels only
+# (cron/delegate/mail). Empty = fail-closed (non-interactive channels cannot fetch at all).
+# Match is exact-or-subdomain, case-insensitive. Interactive channels (cli/web/qq/...)
+# instead approve new domains once via the normal approval flow; approvals persist to
+# web_domains.json. SSRF checks (private/loopback/metadata IPs) are always on and not configurable.
+# allowed_domains = ["wikipedia.org", "news.ycombinator.com"]
 "#;
 
 /// Default .env template for `init`: secrets live here, kept out of config.toml plaintext.
