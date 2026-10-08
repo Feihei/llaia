@@ -603,7 +603,7 @@
                     <span class="hint" x-show="probeMsg[addModelDraft.provider]" x-text="probeMsg[addModelDraft.provider]"></span>
                     <template x-if="probeModels[addModelDraft.provider] && probeModels[addModelDraft.provider].length">
                       <div class="form-row"><label>pick probed</label>
-                        <select @change="addModelDraft.model = $event.target.value; $event.target.value = ''">
+                        <select @change="const v = $event.target.value; addModelDraft.model = v; if (!addModelDraft.id.trim()) addModelDraft.id = v; $event.target.value = ''">
                           <option value="">— pick a probed model —</option>
                           <template x-for="pm in probeModels[addModelDraft.provider]" :key="pm.id">
                             <option :value="pm.id" x-text="pm.id"></option>
@@ -616,7 +616,7 @@
                 <div class="form-row"><label>server model</label>
                   <input x-model="addModelDraft.model" style="width:400px" placeholder="model name on the wire (e.g. qwen3:32b) — probe results fill this in"></div>
                 <div class="form-row"><label>model id</label>
-                  <input x-model="addModelDraft.id" style="width:400px" placeholder="unique catalog id, e.g. qwen3-32b"></div>
+                  <input x-model="addModelDraft.id" style="width:400px" placeholder="unique catalog id, e.g. qwen3-32b (auto-filled from probe picks)"></div>
                 <div class="form-row"><label>kind</label>
                   <select x-model="addModelDraft.kind">
                     <option value="chat">chat</option>
@@ -1172,12 +1172,6 @@
       </div>
     </div>
     <div id="stats-pane" class="pane" :class="{active: tab==='stats'}">
-      <div class="stats-toolbar">
-        <span class="stats-label">Range:</span>
-        <button :class="{active: statsDays===1}" @click="setStatsDays(1)">1d</button>
-        <button :class="{active: statsDays===3}" @click="setStatsDays(3)">3d</button>
-        <button :class="{active: statsDays===7}" @click="setStatsDays(7)">7d</button>
-      </div>
       <div x-show="statsLoading" class="hint">Loading…</div>
       <div x-show="statsError" class="err" x-text="statsError"></div>
       <!-- turn 中 /api/stats/tokens 抢不到 agent 锁（后端 handler 与回合循环互斥），请求只会挂着；
@@ -1185,45 +1179,62 @@
       <div x-show="busy" class="err">Agent turn in progress — stats data can't be fetched right now. Try again after the turn finishes.</div>
       <template x-if="stats">
         <div>
-          <div class="stats-cards">
-            <div class="stats-card">
-              <div class="stats-card-label">Total tokens</div>
-              <div class="stats-card-value" x-text="fmtTokens(stats.total_tokens)"></div>
-              <div class="stats-card-sub">
-                <span x-text="fmtTokens(stats.total_prompt) + ' prompt / ' + fmtTokens(stats.total_completion) + ' completion'"></span>
-              </div>
-            </div>
-            <div class="stats-card">
-              <div class="stats-card-label">Requests</div>
-              <div class="stats-card-value" x-text="stats.total_requests"></div>
-              <div class="stats-card-sub">over <span x-text="stats.days"></span> days</div>
-            </div>
-            <div class="stats-card">
-              <div class="stats-card-label">Avg tokens/req</div>
-              <div class="stats-card-value" x-text="stats.total_requests ? Math.round(stats.total_tokens / stats.total_requests) : 0"></div>
-              <div class="stats-card-sub">across all models</div>
-            </div>
-          </div>
-
           <div class="stats-section">
-            <div class="stats-section-title">Token usage per day</div>
+            <div class="stats-section-title">Token usage (last 54 weeks)</div>
             <div x-show="!stats.series.some(d => d.prompt_tokens + d.completion_tokens > 0)" class="hint">
               No usage data in this range. Note: LMStudio / bare endpoints may not report usage — missing data there is expected, not a bug.
             </div>
-            <div class="stats-bars">
-              <template x-for="(d, i) in stats.series" :key="i">
-                <div class="stats-bar-col" :title="d.date + ': ' + d.prompt_tokens + ' in / ' + d.completion_tokens + ' out (' + d.requests + ' req)'">
-                  <div class="stats-bar-wrap">
-                    <div class="stats-bar-in" :style="{ height: (d.prompt_tokens / stats._max * 100).toFixed(1) + '%' }"></div>
-                    <div class="stats-bar-out" :style="{ height: (d.completion_tokens / stats._max * 100).toFixed(1) + '%' }"></div>
-                  </div>
-                  <div class="stats-bar-label" x-text="d.date.slice(5)"></div>
+            <div class="stats-grid-wrap">
+              <div class="stats-grid-months">
+                <template x-for="(label, i) in stats._months" :key="'sm' + i">
+                  <span class="stats-grid-month" x-text="label"></span>
+                </template>
+              </div>
+              <div class="stats-grid-body">
+                <div class="stats-grid-days">
+                  <span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span>
                 </div>
-              </template>
+                <div class="stats-grid">
+                  <template x-for="(week, wi) in stats._grid" :key="'sw' + wi">
+                    <div class="stats-grid-col">
+                      <template x-for="(cell, ci) in week" :key="'sc' + wi + '-' + ci">
+                        <div class="stats-grid-cell"
+                             :class="cell ? ('lvl' + gridLevel(cell.prompt_tokens + cell.completion_tokens)) : 'empty'"
+                             :title="gridCellTitle(cell)"></div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </div>
+              <div class="stats-legend">
+                <span>Less</span>
+                <i class="stats-grid-cell lvl0"></i>
+                <i class="stats-grid-cell lvl1"></i>
+                <i class="stats-grid-cell lvl2"></i>
+                <i class="stats-grid-cell lvl3"></i>
+                <i class="stats-grid-cell lvl4"></i>
+                <span>More</span>
+              </div>
             </div>
-            <div class="stats-legend">
-              <span><i class="swatch swatch-in"></i> prompt</span>
-              <span><i class="swatch swatch-out"></i> completion</span>
+          </div>
+
+          <div class="stats-cards">
+            <div class="stats-card">
+              <div class="stats-card-label">Total tokens (7d)</div>
+              <div class="stats-card-value" x-text="fmtTokens(stats._week.tokens)"></div>
+              <div class="stats-card-sub">
+                <span x-text="fmtTokens(stats._week.prompt) + ' prompt / ' + fmtTokens(stats._week.completion) + ' completion'"></span>
+              </div>
+            </div>
+            <div class="stats-card">
+              <div class="stats-card-label">Requests (7d)</div>
+              <div class="stats-card-value" x-text="stats._week.requests"></div>
+              <div class="stats-card-sub">last 7 days</div>
+            </div>
+            <div class="stats-card">
+              <div class="stats-card-label">Avg tokens/req (7d)</div>
+              <div class="stats-card-value" x-text="stats._week.requests ? Math.round(stats._week.tokens / stats._week.requests) : 0"></div>
+              <div class="stats-card-sub">across all models</div>
             </div>
           </div>
 

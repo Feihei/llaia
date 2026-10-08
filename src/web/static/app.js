@@ -146,7 +146,6 @@ function llaiaApp() {
     updateCheckInfo: null,
     checkingUpdate: false,
     // stats (plan.md W3)
-    statsDays: 7,
     stats: null,
     statsError: '',
     statsLoading: false,
@@ -1712,10 +1711,6 @@ function llaiaApp() {
       this.tab = 'stats';
       if (!this.stats) this.loadStats();
     },
-    setStatsDays(d) {
-      this.statsDays = d;
-      this.loadStats();
-    },
     async loadStats() {
       // turn 中 /api/stats/tokens 抢不到 agent 锁，请求会一直挂着：短路不发，提示用户稍后再试
       if (this.busy) {
@@ -1725,16 +1720,24 @@ function llaiaApp() {
       }
       this.statsLoading = true;
       this.statsError = '';
-      // 切换 range 时清掉旧数据：避免请求挂起/失败期间继续显示上个 range 的 7d 数字与柱状图
+      // GitHub 风格 54 列贡献网格：53 个整周 + 当前周（周日起至今天），每格一天
+      const days = 53 * 7 + new Date().getDay() + 1;
       this.stats = null;
       try {
-        const r = await this.apiFetch('/api/stats/tokens?days=' + this.statsDays, { method: 'GET' });
+        const r = await this.apiFetch('/api/stats/tokens?days=' + days, { method: 'GET' });
         if (!this.authed) return;
         if (r.ok) {
           this.stats = await r.json();
-          // 计算柱状图最大值（含 prompt+completion 堆叠）
-          const max = Math.max(1, ...this.stats.series.map(d => d.prompt_tokens + d.completion_tokens));
-          this.stats._max = max;
+          // 网格亮度分档的最大值（prompt+completion 合计）
+          this.stats._max = Math.max(1, ...this.stats.series.map(d => d.prompt_tokens + d.completion_tokens));
+          this.stats._grid = this.buildStatsGrid(this.stats.series);
+          this.stats._months = this.buildStatsMonthLabels(this.stats._grid);
+          // grid 下方汇总卡：最近 7 天（series 尾部 7 个补零 bucket）
+          const w = this.stats.series.slice(-7);
+          const p = w.reduce((s, d) => s + d.prompt_tokens, 0);
+          const c = w.reduce((s, d) => s + d.completion_tokens, 0);
+          const n = w.reduce((s, d) => s + d.requests, 0);
+          this.stats._week = { prompt: p, completion: c, tokens: p + c, requests: n };
         } else {
           this.statsError = 'Failed to load stats: HTTP ' + r.status;
         }
@@ -1743,6 +1746,35 @@ function llaiaApp() {
       } finally {
         this.statsLoading = false;
       }
+    },
+    // 把逐天 series 排成 54 列 × 7 行（行=周日..周六，列=周）；首日应为周日（服务端按本地日补零）
+    buildStatsGrid(series) {
+      if (!series.length) return [];
+      const cells = series.map(d => d);
+      while (cells.length % 7 !== 0) cells.push(null);
+      const weeks = [];
+      for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+      return weeks;
+    },
+    // 每列顶部的月份标签：该列首个有效日的月份与前列不同时标注
+    buildStatsMonthLabels(weeks) {
+      const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return weeks.map((w, i) => {
+        const cell = w.find(x => x);
+        if (!cell || i === 0) return '';
+        const prev = weeks[i - 1].find(x => x);
+        return prev && prev.date.slice(5, 7) !== cell.date.slice(5, 7) ? names[+cell.date.slice(5, 7) - 1] : '';
+      });
+    },
+    // 对数分档（token 用量重尾，线性分档会让多数格子同色）：0=无用量，1..4 按亮度递增
+    gridLevel(v) {
+      if (!v) return 0;
+      const t = Math.log(v + 1) / Math.log((this.stats._max || 1) + 1);
+      return 1 + Math.min(3, Math.floor(t * 4));
+    },
+    gridCellTitle(cell) {
+      if (!cell) return '';
+      return cell.date + ': ' + this.fmtTokens(cell.prompt_tokens) + ' in / ' + this.fmtTokens(cell.completion_tokens) + ' out (' + cell.requests + ' req)';
     },
     fmtTokens(n) {
       if (n == null) return '0';

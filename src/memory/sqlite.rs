@@ -770,6 +770,7 @@ END;
 
     /// 逐模型 token 用量聚合（plan.md W3-④ Stats dashboard）。
     /// 仅统计主对话（kind='chat'），供 `GET /api/stats/tokens?days=N` 使用。
+    /// 天级 bucket 按机器本地时区切日（`datetime(ts,'localtime')`），与用户直觉一致。
     pub fn token_stats(&self, days: u32) -> Result<TokenStats> {
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -788,13 +789,14 @@ END;
             },
         )?;
 
-        // 天级 bucket（ts 为 RFC3339 UTC，取前 10 字符得 YYYY-MM-DD）
+        // 天级 bucket（ts 为 RFC3339 UTC；datetime(ts,'localtime') 按机器本地时区切日）
         let mut by_day: std::collections::HashMap<String, (i64, i64, i64)> =
             std::collections::HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT substr(ts,1,10), SUM(prompt_tokens), SUM(completion_tokens), COUNT(*)
-                 FROM turn_usage WHERE kind='chat' AND ts >= ?1 GROUP BY substr(ts,1,10)",
+                "SELECT substr(datetime(ts, 'localtime'),1,10), SUM(prompt_tokens), SUM(completion_tokens), COUNT(*)
+                 FROM turn_usage WHERE kind='chat' AND ts >= ?1
+                 GROUP BY substr(datetime(ts, 'localtime'),1,10)",
             )?;
             let rows = stmt.query_map(rusqlite::params![cutoff], |r| {
                 Ok((
@@ -809,10 +811,10 @@ END;
                 by_day.insert(day, (p, c, n));
             }
         }
-        // 补全 last-days 天标签（含无数据的天，前端柱状图对齐 X 轴）
+        // 补全 last-days 天标签（本地日界，含无数据的天，前端网格对齐 X 轴）
         let mut series = Vec::with_capacity(days as usize);
         for i in (0..days).rev() {
-            let day = (chrono::Utc::now() - chrono::Duration::days(i as i64))
+            let day = (chrono::Local::now() - chrono::Duration::days(i as i64))
                 .format("%Y-%m-%d")
                 .to_string();
             let (p, c, n) = by_day.get(&day).copied().unwrap_or((0, 0, 0));
