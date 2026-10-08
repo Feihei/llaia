@@ -255,12 +255,22 @@ impl SnapshotStore {
         Ok(None)
     }
 
+    /// 快照时刻目录：微秒精度 + 存在性碰撞保护。毫秒粒度在快速连续写入
+    /// （CI 或同一回合内多次留底）下会撞同名目录，第二次写静默覆盖第一次、
+    /// 丢中间态——目录已存在时追加 `-NNN` 序号保证新快照永不落旧路径。
+    /// 序号后缀不破坏 `latest()` 的字典序时间序（微秒段定宽，后缀只延长）。
     fn timestamp_dir(&self) -> PathBuf {
-        let ts = crate::time::now(&None)
+        let base = crate::time::now(&None)
             .naive
-            .format("%Y%m%d-%H%M%S-%3f")
+            .format("%Y%m%d-%H%M%S-%6f")
             .to_string();
-        self.root.join(ts)
+        let mut dir = self.root.join(&base);
+        let mut n = 0u32;
+        while dir.exists() {
+            n += 1;
+            dir = self.root.join(format!("{base}-{n:03}"));
+        }
+        dir
     }
 
     fn persist_state(&self, state: &State) -> Result<()> {
