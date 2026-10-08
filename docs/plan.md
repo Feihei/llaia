@@ -73,7 +73,7 @@
 
 ## P9 — 安全模型落地（ADR-0033）
 
-**状态**：🚧 进行中（2026-10-02 [ADR-0033](adr/0033-security-model.md) 评审定案转 Accepted；Phase 1 + Phase 2 首刀 2026-10-05 落地，Phase 2 余项 + 记忆卫生三档 2026-10-06 落地，Phase 3 2026-10-08 落地；余 Phase 4）
+**状态**：✅ 全部 Phase 落地（2026-10-02 [ADR-0033](adr/0033-security-model.md) 评审定案转 Accepted；Phase 1+2 首刀 2026-10-05、Phase 2 余项+记忆卫生三档 2026-10-06、Phase 3 2026-10-08、Phase 4 复审收口 2026-10-08。交付明细随 v0.6.1 发版迁入 CHANGELOG；「留档不排期」项见节尾）
 
 依 ADR-0033：资产分级（**A0 人格主权 / A1 凭据 / A2 隐私历史 / A3 全盘机器**，A 编号刻意避开既有闸门 T2/T3/T6）+ 五层防线（L1 可恢复性基建 → L5 字符串启发）。总体顺序：先建可恢复性基建给全部闸门的放行宽松度供底气，再做防泄露组合刀（L3 读入侧收缩 + L4 出站首闸），字符串层降级为审计线索，最后做闸门减法。
 
@@ -85,7 +85,7 @@
     - [x] **terminal 网络命令风险标记**（2026-10-06，`path_guard::NETWORK_COMMANDS` + `network_command_hit`）：curl/wget/nc/ssh/scp/sftp/rsync/socat/telnet/ftp + iwr 等命中时 audit 条目附 `reason=network=<prog>`（不拦截，留痕）。顺手收口既有缺口：`/ok` 批准执行路径此前完全不过 audit.log（`resolve_approval` 补写）
     - [x] **拒绝话术两原则**（2026-10-06，`path_guard::HARD_BOUNDARY_NOTICE`）：范围拒绝 / 危险黑名单 / shell 包装拒绝 / 审批非交互 Denied 文案统一追加「hard policy boundary; do not attempt to work around it」；不含任何救济路径（审批**提示**文案的 `/ok` 指引不是拒绝，保持不变）
 - [x] **Phase 3 · 部署级 T2 受限进程落地**（2026-10-08，方案 A「部署手册 + doctor 自检」，[plan](plans/2026-10-08-p9-phase3-t2.md)）：security-hardening.md 的 T2 节扩为完整部署手册（Windows 专用账户 + schtasks/sc 服务化 + ACL 授予/敏感目录确认 + 验证清单；Linux useradd 系统账户 + systemd 加固 unit：NoNewPrivileges/ProtectSystem=strict/ReadWritePaths）；`src/privilege.rs` 零依赖提权探测（Windows whoami 完整性 SID / Unix id -u，探测失败降级 unknown）接入 `llaia doctor` 与 WebUI `/api/doctor` 的 `security.privilege` 检查（elevated → warn）。弃选方案留档 plan 文档：per-command 包装断 `bash -s` piped stdin、原生受限 token 需 windows-sys 新依赖且 Basic User 对自身 profile 读写仍放行
-- [ ] **Phase 4 · 闸门复审减法**：用 ADR-0033 判据 3 逐个过现有机制，该降级降级、该删除删除（T3 内联闸门为第一候选）
+- [x] **Phase 4 · 闸门复审减法**（2026-10-08，纯文档，[复审记录](plans/2026-10-08-p9-phase4-gate-review.md)）：判据 3 全量过 13 项闸门——**零删除、零代码降级**（每个残余缺口都有「无兜底」格子撑着对应闸门存在，准入看判据不凑减法 KPI）；交付两类叙事重定位（T3 定性「无意识操作人审点 + 审计信号」非边界 + T2 部署后 `interpret_inline = "off"` 摘除路径；catastrophic 黑名单降为提示层）+ Generation Guard 补归位 L5。T3 fork 定案：保留默认 approval（A），弃 audit 默认档（B）/删除（C）留档复审记录
 - **记忆卫生三档**（A0 特许写入口的落地点，与 ADR-0033 同日定案；三档独立排期，第 0 档随时可做）：
     - [x] **第 0 档 · memory_write 写入时防重**（2026-10-06，`memory/hygiene.rs::normalize_entry`，[plan](plans/2026-10-06-memory-hygiene.md)）：entry 归一化（小写 + 标点/符号/空白折叠，CJK 保留）后与现有行比对，已存在即返回 `already remembered` 不落盘——多数膨胀是字面重复，无需 LLM。两条写通路（main 共享工具 + 实例路由）同接
     - [x] **第 1 档 · compress_memory 结构化升级**（2026-10-06，`memory/hygiene.rs` + `markdown.rs::compress_memory` 三段管线）：① 确定性预检——按 `- [YYYY-MM-DD] entry` 契约逐行解析，归一化重复直接合并（保留最早条目）不经 LLM；头部/注释与不合规行原样保留、不进 LLM；② LLM 只做语义合并（输入输出均为条目列表，提示词明令禁止发明新条目）；③ 输出结构校验——每行匹配契约 + 每行可溯源到至少一条输入（归一化互含或字符二元组 Jaccard ≥ 0.3），违规**整体**拒绝（不部分采用），带原因重试一次仍败则原文件保留并报错。校验即注入防线：被骗压缩器加不进任何新内容（ADR-0033「A0 特许写入例外」的对症控制）。签名变更：`compress_memory(..., budget: Option<usize>) -> Result<String>`（手动 `/memory-compact` 传 None 恒走 LLM）

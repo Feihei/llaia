@@ -9,7 +9,7 @@
 | 防线 | 层级 | 覆盖 | 不覆盖 |
 |---|---|---|---|
 | 命令黑名单 / 路径校验 | 进程内，命令行字符串 | 直接路径越界、危险命令 | 解释器载荷、引号内内容 |
-| T3 内联载荷审批 | 进程内，审批闸门 | `python -c` / `node -e` / `curl \| bash` 等内联执行 | `python script.py`（跑文件）、delegate 通道 |
+| T3 内联载荷审批 | 进程内，审批闸门 | `python -c` / `node -e` / `curl \| bash` 等内联执行 | `python script.py`（跑文件）、delegate 通道。**非安全边界**（ADR-0033 Phase 4 复审定性）：无意识操作的强制人审点 + 审计信号，T2 部署后可摘（见纵深组合建议） |
 | **T2 无特权账户** | **OS 权限** | workspace 外的一切写/删（内核强制 `EACCES`） | 读敏感文件（需配合 ACL / HOME 隔离） |
 | T1 OS 沙箱 | OS 隔离 | 一切未知载荷 | ——（经评估**不采纳**，见下） |
 
@@ -130,6 +130,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now llaia
 
 1. 权限档位保持 `default`（workspace 内自动放行、外审批），T3 闸门保持默认 `approval`；
 2. 日常以专用低权限账户跑 `serve`（T2，见上方部署手册），`llaia doctor` 确认 `security.privilege` 非 elevated；
-3. 长任务离机跑时注意 delegate 通道不受审批约束（见下）——不在 delegate 任务里放未审查的执行类指令。
+3. **T2 部署完成后摘除 T3**（ADR-0033 Phase 4 复审定案）：OS 权限接管「界外内联写」这最后一格后，T3 的审批摩擦失去兜底依据——`config.toml` 设 `[tools.terminal] interpret_inline = "off"`，闸门关闭（cron 豁免键随之不需要）。T3 届时只剩审计价值，audit.log 留痕不中断；
+4. 长任务离机跑时注意 delegate 通道不受审批约束（见下）——不在 delegate 任务里放未审查的执行类指令。
 
 > **已知边界（2026-09-07 定案接受）**：delegate 子 agent 不走审批（P2-a 既有性质），主 agent 可借 delegate 绕过 T3；误删场景无自动备份兜底（T4 归档不做）。这些边界的代价已在立项时明确权衡。

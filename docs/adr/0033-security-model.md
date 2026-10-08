@@ -78,7 +78,7 @@
 | forbidden_home（T6 人格守卫） | L3 范本 | **保留强化**：扩展覆盖 A1 凭据文件写入；A0 保留唯一特许写入口 = 结构校验通过的记忆压缩工具（P9 记忆卫生三档落地） |
 | Delete Guard（rm → .trash） | L1 思想萌芽 + L3 | **保留**；界内免审的底气正是"可恢复"，判据 1 的活例 |
 | 审批档位（P4-d）/ trusted dirs | L3/L4 之间 | 保留；权限档位继续作为交互频道的总开关 |
-| T3 内联闸门（含 cron 豁免） | L5 | **降级候选**：定位为"无意识操作的强制人审点 + 审计信号"，非边界；待 L1/L2 落地后复审是否进一步降级 |
+| T3 内联闸门（含 cron 豁免） | L5 | **保留默认 + 叙事重定位**（2026-10-08 Phase 4 复审定案）：默认部署（未上 T2）下 A3 界外内联写无兜底 → 判据 3「无兜底允许存在」；定性为「无意识操作人审点 + 审计信号」非边界；T2 部署后 `interpret_inline = "off"` 摘除（复审记录见 [docs/plans/2026-10-08-p9-phase4-gate-review.md](../plans/2026-10-08-p9-phase4-gate-review.md)） |
 | 命令黑名单 / 路径提取 | L5 | 保留为提示与审计，不再承担边界叙事 |
 | 出站口 | L4 | **缺位**——按 §2.1 盘点：terminal 网络命令是最大缺口（近期标记+留痕，远期归 L2），web_fetch 是首刀；渠道推送已结构性封死无需动作 |
 | 子进程环境变量 | L3/A1 | **缺位**——terminal 子进程继承完整环境，模型一条 `env` 即可读出全部 API key；学 codex 默认剔除 `*KEY*`/`*SECRET*`/`*TOKEN*` |
@@ -98,7 +98,7 @@
   - [x] terminal 网络命令风险标记：curl/wget/nc/ssh/scp 等进 High 风险类，audit.log 强化记录（不拦截，留痕）。2026-10-06 落地（`path_guard::network_command_hit`，审计条目附 `reason=network=<prog>`；/ok 批准路径补审计）
   - [x] 拒绝话术两原则：不含救济路径、声明硬边界劝阻绕行（进 approval 拒绝消息与 path_guard 错误文案）。2026-10-06 落地（`path_guard::HARD_BOUNDARY_NOTICE` 统一追加）
 - [x] Phase 3：T2 受限进程落地（2026-10-08，方案 A「部署手册 + doctor 自检」：security-hardening.md T2 节扩为完整部署手册（Windows 专用账户 + 服务化 + ACL 验证清单；Linux systemd 加固 unit）+ `src/privilege.rs` 零依赖提权探测接入 `llaia doctor` / `/api/doctor` 的 `security.privilege` 检查。弃选 per-command 包装与原生受限 token 的理由留档 [docs/plans/2026-10-08-p9-phase3-t2.md](../plans/2026-10-08-p9-phase3-t2.md)——runas 包装断 `bash -s` piped stdin、windows-sys 新依赖与轻量单 crate 定位冲突）
-- [ ] Phase 4：闸门复审减法——用判据 3 逐个过现有机制，该降级降级、该删除删除
+- [x] Phase 4：闸门复审减法（2026-10-08，判据 3 全量过 13 项闸门，复审记录见 [docs/plans/2026-10-08-p9-phase4-gate-review.md](../plans/2026-10-08-p9-phase4-gate-review.md)）：**零删除、零代码降级**——每个残余缺口都有「无兜底」格子撑着对应闸门存在；交付两类叙事重定位（T3 定性为非边界人审点 + T2 部署后摘除路径；catastrophic 黑名单降为提示层）+ Generation Guard 补归位 L5。闸门准入看判据，不凑减法 KPI
 - [ ] 刻意不做：脚本文件内容的 destructive 模式扫描（`os.remove` / `Remove-Item` 等）——又一个猜不完的黑名单，误报成本高（正常脚本普遍带临时文件清理），且 L1/L2 兜底后无增量收益
 - 留档不排期（Phase 3 后评估）：cron T3 豁免扩大 A2 可读面——`cron_allow_inline_interpreter` 让内联 python 可读 sessions.db（dream 首跑实证）；读入侧收缩若立项，考虑给 cron 走 scoped 会话查询 helper 而非裸文件访问
 
