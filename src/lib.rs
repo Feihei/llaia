@@ -14,6 +14,7 @@ pub mod memory;
 pub mod migrate;
 pub mod path_guard;
 pub mod pid;
+pub mod privilege;
 pub mod provider;
 pub mod skill;
 pub mod snapshot;

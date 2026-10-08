@@ -97,7 +97,7 @@
   - [x] web_fetch 出站闸门，两道分离（评审修订）：**SSRF 校验无条件常开**（私网/环回/云元数据 IP、DNS 解析后复验，学 zeroclaw domain_guard——不涉可用性取舍）；**域名允许清单只收紧非交互频道**（cron/delegate：未配置 = 拒绝 fail-closed），交互频道走 trusted_dirs 同款模式（首访新域名审批一次、批准持久化），不把单用户助理最高频的「帮我查这个」闸死——cron T3 已证明「闸门堆砌 = 功能死亡」。2026-10-06 落地（`tools/web.rs::ssrf_check` 无条件 + `WebFetchGate`/`allowed_domains` 非交互 fail-closed + 交互首访审批持久化 web_domains.json；闸门判定在 delegate/yolo 早退之前）
   - [x] terminal 网络命令风险标记：curl/wget/nc/ssh/scp 等进 High 风险类，audit.log 强化记录（不拦截，留痕）。2026-10-06 落地（`path_guard::network_command_hit`，审计条目附 `reason=network=<prog>`；/ok 批准路径补审计）
   - [x] 拒绝话术两原则：不含救济路径、声明硬边界劝阻绕行（进 approval 拒绝消息与 path_guard 错误文案）。2026-10-06 落地（`path_guard::HARD_BOUNDARY_NOTICE` 统一追加）
-- [ ] Phase 3：T2 受限进程落地（Windows 受限 token / 专用低权账户，含部署文档）
+- [x] Phase 3：T2 受限进程落地（2026-10-08，方案 A「部署手册 + doctor 自检」：security-hardening.md T2 节扩为完整部署手册（Windows 专用账户 + 服务化 + ACL 验证清单；Linux systemd 加固 unit）+ `src/privilege.rs` 零依赖提权探测接入 `llaia doctor` / `/api/doctor` 的 `security.privilege` 检查。弃选 per-command 包装与原生受限 token 的理由留档 [docs/plans/2026-10-08-p9-phase3-t2.md](../plans/2026-10-08-p9-phase3-t2.md)——runas 包装断 `bash -s` piped stdin、windows-sys 新依赖与轻量单 crate 定位冲突）
 - [ ] Phase 4：闸门复审减法——用判据 3 逐个过现有机制，该降级降级、该删除删除
 - [ ] 刻意不做：脚本文件内容的 destructive 模式扫描（`os.remove` / `Remove-Item` 等）——又一个猜不完的黑名单，误报成本高（正常脚本普遍带临时文件清理），且 L1/L2 兜底后无增量收益
 - 留档不排期（Phase 3 后评估）：cron T3 豁免扩大 A2 可读面——`cron_allow_inline_interpreter` 让内联 python 可读 sessions.db（dream 首跑实证）；读入侧收缩若立项，考虑给 cron 走 scoped 会话查询 helper 而非裸文件访问

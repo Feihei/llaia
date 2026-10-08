@@ -1329,6 +1329,28 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
         ),
     }
 
+    // T2 自检（ADR-0033 L2）：报告运行账户与提权状态，指引部署手册
+    let priv_info = crate::privilege::elevation_info();
+    println!("\nsecurity:");
+    println!("  account: {}", priv_info.account);
+    match priv_info.elevated {
+        Some(true) => {
+            println!("  privilege: elevated (High/System integrity or root)");
+            println!(
+                "  [warn] running with elevated privileges - prefer a dedicated low-privilege account per T2 (docs/guide/security-hardening.md)"
+            );
+        }
+        Some(false) => {
+            println!("  privilege: not elevated (medium integrity / non-root)");
+            println!(
+                "  hint: for full T2 hardening run under a dedicated low-privilege account (docs/guide/security-hardening.md)"
+            );
+        }
+        None => {
+            println!("  privilege: unknown (probe failed)");
+        }
+    }
+
     Ok(())
 }
 
@@ -1478,6 +1500,35 @@ pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
             "skills",
             format!("{} skills, {} active", skills.len(), active),
         ));
+    }
+
+    // T2 自检（ADR-0033 L2）：提权状态探测，探测失败降级为 ok/unknown 而非 error
+    let priv_info = crate::privilege::elevation_info();
+    match priv_info.elevated {
+        Some(true) => checks.push(DoctorCheck::warn(
+            "security.privilege",
+            format!(
+                "running as '{}' with elevated privileges; prefer a dedicated low-privilege \
+                 account per T2 (docs/guide/security-hardening.md)",
+                priv_info.account
+            ),
+        )),
+        Some(false) => checks.push(DoctorCheck::ok(
+            "security.privilege",
+            format!(
+                "running as '{}', not elevated (T2 deployment guide: \
+                 docs/guide/security-hardening.md)",
+                priv_info.account
+            ),
+        )),
+        None => checks.push(DoctorCheck::ok(
+            "security.privilege",
+            format!(
+                "account '{}' (elevation unknown; probe failed) — T2 guide: \
+                 docs/guide/security-hardening.md",
+                priv_info.account
+            ),
+        )),
     }
 
     Ok(checks)

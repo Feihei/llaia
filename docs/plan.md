@@ -73,7 +73,7 @@
 
 ## P9 — 安全模型落地（ADR-0033）
 
-**状态**：🚧 进行中（2026-10-02 [ADR-0033](adr/0033-security-model.md) 评审定案转 Accepted；Phase 1 + Phase 2 首刀已于 2026-10-05 落地）
+**状态**：🚧 进行中（2026-10-02 [ADR-0033](adr/0033-security-model.md) 评审定案转 Accepted；Phase 1 + Phase 2 首刀 2026-10-05 落地，Phase 2 余项 + 记忆卫生三档 2026-10-06 落地，Phase 3 2026-10-08 落地；余 Phase 4）
 
 依 ADR-0033：资产分级（**A0 人格主权 / A1 凭据 / A2 隐私历史 / A3 全盘机器**，A 编号刻意避开既有闸门 T2/T3/T6）+ 五层防线（L1 可恢复性基建 → L5 字符串启发）。总体顺序：先建可恢复性基建给全部闸门的放行宽松度供底气，再做防泄露组合刀（L3 读入侧收缩 + L4 出站首闸），字符串层降级为审计线索，最后做闸门减法。
 
@@ -84,7 +84,7 @@
     - [x] **web_fetch 出站闸门（两道分离）**（2026-10-06，`tools/web.rs::ssrf_check` + `WebFetchGate` + `approval_decision` 前置判定）：SSRF 校验无条件常开（scheme 白名单 http/https；私网/环回/链路本地/云元数据/ULA/IPv4-mapped 封锁；域名 DNS 解析后逐 IP 复验）；域名允许清单 `[tools.web_fetch].allowed_domains` **只收紧非交互频道**（cron/delegate/mail，未配置 = fail-closed 全拒，精确或子域匹配），判定放 delegate/yolo 早退**之前**（政策边界不吃 profile 豁免）；交互频道走 trusted_dirs 同款模式（首访新域名审批一次，`/ok` 后 `execute_approved` 持久化 `<config_dir>/web_domains.json`，子域匹配）；yolo 豁免交互域名审批、不豁免非交互 fail-closed；SSRF 连 execute_approved 都不豁免
     - [x] **terminal 网络命令风险标记**（2026-10-06，`path_guard::NETWORK_COMMANDS` + `network_command_hit`）：curl/wget/nc/ssh/scp/sftp/rsync/socat/telnet/ftp + iwr 等命中时 audit 条目附 `reason=network=<prog>`（不拦截，留痕）。顺手收口既有缺口：`/ok` 批准执行路径此前完全不过 audit.log（`resolve_approval` 补写）
     - [x] **拒绝话术两原则**（2026-10-06，`path_guard::HARD_BOUNDARY_NOTICE`）：范围拒绝 / 危险黑名单 / shell 包装拒绝 / 审批非交互 Denied 文案统一追加「hard policy boundary; do not attempt to work around it」；不含任何救济路径（审批**提示**文案的 `/ok` 指引不是拒绝，保持不变）
-- [ ] **Phase 3 · 部署级 T2 受限进程落地**：Windows 受限 token / 专用低权账户，含部署文档（T2 指部署规范旧名，与资产层 A2 无关）
+- [x] **Phase 3 · 部署级 T2 受限进程落地**（2026-10-08，方案 A「部署手册 + doctor 自检」，[plan](plans/2026-10-08-p9-phase3-t2.md)）：security-hardening.md 的 T2 节扩为完整部署手册（Windows 专用账户 + schtasks/sc 服务化 + ACL 授予/敏感目录确认 + 验证清单；Linux useradd 系统账户 + systemd 加固 unit：NoNewPrivileges/ProtectSystem=strict/ReadWritePaths）；`src/privilege.rs` 零依赖提权探测（Windows whoami 完整性 SID / Unix id -u，探测失败降级 unknown）接入 `llaia doctor` 与 WebUI `/api/doctor` 的 `security.privilege` 检查（elevated → warn）。弃选方案留档 plan 文档：per-command 包装断 `bash -s` piped stdin、原生受限 token 需 windows-sys 新依赖且 Basic User 对自身 profile 读写仍放行
 - [ ] **Phase 4 · 闸门复审减法**：用 ADR-0033 判据 3 逐个过现有机制，该降级降级、该删除删除（T3 内联闸门为第一候选）
 - **记忆卫生三档**（A0 特许写入口的落地点，与 ADR-0033 同日定案；三档独立排期，第 0 档随时可做）：
     - [x] **第 0 档 · memory_write 写入时防重**（2026-10-06，`memory/hygiene.rs::normalize_entry`，[plan](plans/2026-10-06-memory-hygiene.md)）：entry 归一化（小写 + 标点/符号/空白折叠，CJK 保留）后与现有行比对，已存在即返回 `already remembered` 不落盘——多数膨胀是字面重复，无需 LLM。两条写通路（main 共享工具 + 实例路由）同接
