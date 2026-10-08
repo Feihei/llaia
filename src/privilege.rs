@@ -106,6 +106,7 @@ fn unix_probe() -> ElevationInfo {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn windows_csv_detects_medium_integrity() {
         let sample = "\"Group Name\",\"Type\",\"SID\",\"Attributes\"\n\
@@ -114,6 +115,7 @@ mod tests {
         assert_eq!(parse_windows_group_csv(sample), Some(false));
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_csv_detects_high_integrity() {
         let sample = "\"Mandatory Label\\High Mandatory Level\",\"Label\",\"S-1-16-12288\",\"\"\n\
@@ -121,6 +123,7 @@ mod tests {
         assert_eq!(parse_windows_group_csv(sample), Some(true));
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_csv_detects_system_integrity() {
         let sample =
@@ -128,12 +131,14 @@ mod tests {
         assert_eq!(parse_windows_group_csv(sample), Some(true));
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_csv_without_integrity_row_is_unknown() {
         let sample = "\"Everyone\",\"Well-known group\",\"S-1-1-0\",\"Mandatory group\"\n";
         assert_eq!(parse_windows_group_csv(sample), None);
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_csv_empty_output_is_unknown() {
         assert_eq!(parse_windows_group_csv(""), None);
