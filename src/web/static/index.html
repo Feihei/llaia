@@ -487,6 +487,7 @@
             <div class="form-row"><label>permission</label><select x-model="cfg.runtime.permission"><option value="">unset (→ default)</option><option value="default">default</option><option value="read-only">read-only</option><option value="yolo">yolo</option></select></div>
             <div class="form-row"><label>keepalive_interval_secs</label><input type="number" min="30" x-model.number="cfg.runtime.keepalive_interval_secs" title="long-task heartbeat interval (seconds): chat channels send a still-working notice this often"></div>
             <div class="form-row"><label>max_turn_duration_secs</label><input type="number" min="60" x-model.number="cfg.runtime.max_turn_duration_secs" title="max wall-clock seconds per turn; the turn is interrupted beyond this, guarding against runaway loops"></div>
+            <div class="form-row"><label>cron_allow_inline_interpreter</label><label class="switch"><input type="checkbox" x-model="cfg.runtime.cron_allow_inline_interpreter"> exempt cron channels from the T3 inline interpreter gate (non-interactive channels cannot approve anyway; out-of-scope ops are still denied)</label></div>
           </div>
         </template>
         <template x-if="configSection==='log'">

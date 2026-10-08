@@ -3298,6 +3298,10 @@ model = "qwen"
             idx.contains("m.role === 'tool'"),
             "index.html missing tool-message content folding (stale embed?)"
         );
+        assert!(
+            idx.contains("cron_allow_inline_interpreter"),
+            "index.html missing runtime cron_allow_inline_interpreter toggle (stale embed?)"
+        );
 
         let js = StaticAsset::get("app.js")
             .expect("app.js embedded")
