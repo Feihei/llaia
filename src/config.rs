@@ -2224,6 +2224,39 @@ model = "qwen"
     }
 
     #[test]
+    fn test_model_id_with_dots_roundtrips_toml() {
+        // model id 含点号合法（TOML quoted key）：`[model."gpt-4.1"]`。写回时 toml crate
+        // 必须自动加引号——漏引会被解析成嵌套表 model.gpt-4 → 1，目录条目直接丢键。
+        let toml = r#"
+[provider.default]
+type = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+
+[model."gpt-4.1"]
+provider = "default"
+model = "gpt-4.1-2025-04-14"
+
+[agent.main]
+model = "gpt-4.1"
+workspace = "~/.llaia"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert!(config.models.contains_key("gpt-4.1"));
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            out.contains("[model.\"gpt-4.1\"]"),
+            "dotted model id must be written as a quoted key, got:\n{out}"
+        );
+        let mut tmp2 = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", out).unwrap();
+        let config2 = Config::load(&tmp2.path().to_path_buf()).unwrap();
+        assert_eq!(config2.models["gpt-4.1"].model, "gpt-4.1-2025-04-14");
+        assert_eq!(config2.agent["main"].model, "gpt-4.1");
+    }
+
+    #[test]
     fn test_explicit_md_paths_expanded() {
         let toml = r#"
 [provider.default]
