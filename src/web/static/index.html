@@ -373,6 +373,7 @@
         <div :class="{active: configSection==='cron'}" @click="switchCron()">Cron</div>
         <div :class="{active: configSection==='mcp'}" @click="switchMcp()">MCP</div>
         <div :class="{active: configSection==='skills'}" @click="switchSkills()">Skills</div>
+        <div :class="{active: configSection==='uploads'}" @click="switchUploads()">Uploads</div>
         <div :class="{active: configSection==='raw'}" @click="switchRaw()">Raw TOML</div>
         <div :class="{active: configSection==='doctor'}" @click="switchDoctor()">Doctor</div>
         <div :class="{active: configSection==='about'}" @click="switchAbout()">About</div>
@@ -442,6 +443,12 @@
                 <button @click="saveSkillContent()">Save</button>
                 <button @click="skillEditing=null">Back</button>
                 <span class="cron-msg" x-text="skillContentMsg"></span>
+              </span>
+            </template>
+            <template x-if="configSection==='uploads'">
+              <span class="config-head-actions">
+                <button @click="loadUploads()">Refresh</button>
+                <span class="cron-msg" x-text="uploadsMsg"></span>
               </span>
             </template>
             <template x-if="configSection==='doctor'">
@@ -948,6 +955,34 @@
                 <div class="hint">Skills are hot-reloaded into the system prompt when the config is saved; no serve restart needed.</div>
               </div>
             </template>
+          </div>
+        </template>
+        <template x-if="configSection==='uploads'">
+          <div>
+            <template x-if="!uploads || uploads.length === 0">
+              <div class="placeholder">No inbound files in uploads/. QQ and mail attachments land here.</div>
+            </template>
+            <template x-if="uploads && uploads.length > 0">
+              <table class="cron-table">
+                <thead>
+                  <tr><th>name</th><th>size</th><th>modified</th><th>actions</th></tr>
+                </thead>
+                <tbody>
+                  <template x-for="f in uploads" :key="f.name">
+                    <tr>
+                      <td x-text="f.name"></td>
+                      <td x-text="formatBytes(f.size)"></td>
+                      <td x-text="f.modified ? new Date(f.modified * 1000).toLocaleString() : ''"></td>
+                      <td><button class="btn-delete" @click="deleteUpload(f.name)">Delete</button></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </template>
+            <div class="hint">
+              <span x-text="uploads ? uploads.length : 0"></span> file(s), total <span x-text="formatBytes(uploadsTotal)"></span> &mdash; <span x-text="uploadsDir"></span>.
+              No automatic cleanup: chat history may reference these paths; delete only files you know are stale.
+            </div>
           </div>
         </template>
         <template x-if="configSection==='raw'">

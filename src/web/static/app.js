@@ -171,6 +171,11 @@ function llaiaApp() {
     skillEditing: null,
     skillContent: '',
     skillContentMsg: '',
+    // uploads（H5 手动清理：入站附件列表 + 逐个删除，零自动回收）
+    uploads: [],
+    uploadsTotal: 0,
+    uploadsDir: '',
+    uploadsMsg: '',
     // per-agent fallback draft (dropdown selection before "Add")
     fallbackDraft: {},
     // 模型探测（P5 W2，P8 复用于 Models 选项卡的添加流：probe 结果按 provider 缓存）
@@ -1567,6 +1572,34 @@ function llaiaApp() {
       if (!this.authed) return;
       if (r.ok) { this.skillMsg = '✓ Deleted ' + name; await this.loadSkills(); }
       else { let j; try { j = await r.json(); } catch { j = {}; } this.skillMsg = '✗ ' + (j.error || r.status); }
+    },
+
+    // ---- uploads（H5 手动清理） ----
+    async switchUploads() {
+      if (!this.confirmLeaveRawActive()) return;
+      this.configSection = 'uploads';
+      this.tab = 'config';
+      await this.loadUploads();
+    },
+    async loadUploads() {
+      this.uploadsMsg = '';
+      const r = await this.apiFetch('/api/uploads');
+      if (!this.authed) return;
+      if (r.ok) {
+        const j = await r.json();
+        this.uploads = j.files || [];
+        this.uploadsTotal = j.total_bytes || 0;
+        this.uploadsDir = j.dir || '';
+      } else { this.uploadsMsg = 'Load failed: ' + r.status; }
+    },
+    async deleteUpload(name) {
+      if (!confirm('Delete ' + name + '? Chat history referencing it will lose the file.')) return;
+      const r = await this.apiFetch(`/api/uploads/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      if (!this.authed) return;
+      let j;
+      try { j = await r.json(); } catch { j = {}; }
+      if (r.ok) { this.uploadsMsg = '✓ Deleted ' + name; await this.loadUploads(); }
+      else { this.uploadsMsg = '✗ ' + (j.error || r.status); }
     },
 
     // ---- doctor（P6） ----

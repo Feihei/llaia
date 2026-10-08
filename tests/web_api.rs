@@ -2,7 +2,27 @@ use axum::http::HeaderMap;
 use llaia::config::Config;
 use llaia::web::{
     check_token, extract_token, generate_token, mask_sensitive, merge_masked, resolve_within,
+    upload_name_or_err,
 };
+
+// H5（2026-10-08）：uploads 手动清理——文件名校验拒绝一切穿越形态
+#[test]
+fn test_upload_name_rejects_traversal() {
+    assert!(upload_name_or_err("../secret.txt").is_err());
+    assert!(upload_name_or_err("a/b.png").is_err());
+    assert!(upload_name_or_err("a\\b.png").is_err());
+    assert!(upload_name_or_err("..").is_err());
+    assert!(upload_name_or_err(".").is_err());
+    assert!(upload_name_or_err("").is_err());
+    assert!(upload_name_or_err("bad\nname.txt").is_err());
+}
+
+#[test]
+fn test_upload_name_accepts_plain_filenames() {
+    assert!(upload_name_or_err("1749020000_report.pdf").is_ok());
+    assert!(upload_name_or_err("img photo (1).png").is_ok());
+    assert!(upload_name_or_err("中文名.jpg").is_ok());
+}
 
 #[test]
 fn test_resolve_within_rejects_traversal() {

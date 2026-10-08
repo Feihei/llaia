@@ -1798,6 +1798,97 @@ pub async fn get_skill_content(
     }
 }
 
+// ───────────────────────── Uploads API（H5，2026-10-08） ─────────────────────────
+//
+// 入站附件（QQ / mail / /upload 产物）落 `<workspace>/uploads/`，此前只增不减。
+// 定案（2026-09-07 grill）：只做 WebUI 手动清理——列表 + 逐个删除 + 容量显示，
+// 零自动回收（消息历史引用这些路径，自动删/挪会断链）。
+
+/// 校验 URL 路径中的 uploads 文件名（防路径穿越）：只接受纯文件名——
+/// 非空、非 `.`/`..`、不含目录分隔符与控制字符。文件名本无字符集约束
+/// （`<msg_id>_<原文件名>`），不做白名单以免误拒合法附件。
+pub fn upload_name_or_err(name: &str) -> Result<(), Box<Response>> {
+    let ok = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\'])
+        && !name.chars().any(char::is_control);
+    if ok {
+        Ok(())
+    } else {
+        Err(Box::new(json_err(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid upload file name: {}", name),
+        )))
+    }
+}
+
+/// GET /api/uploads → 入站附件清单（name / size / modified / total_bytes / dir）
+pub async fn list_uploads(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    let dir = state.workspace.join("uploads");
+    let mut files = Vec::new();
+    let mut total_bytes: u64 = 0;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue; // 目录/符号链接不进清单，也不计容量
+            }
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            total_bytes += meta.len();
+            files.push(serde_json::json!({
+                "name": entry.file_name().to_string_lossy(),
+                "size": meta.len(),
+                "modified": modified,
+            }));
+        }
+    }
+    files.sort_by_key(|f| std::cmp::Reverse(f["modified"].as_u64().unwrap_or(0)));
+    axum::Json(serde_json::json!({
+        "files": files,
+        "total_bytes": total_bytes,
+        "dir": dir.display().to_string(),
+    }))
+    .into_response()
+}
+
+/// DELETE /api/uploads/:name → 删除单个入站附件（手动，无批量、无自动回收）
+pub async fn delete_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    if !authorize(&state, &headers, &q) {
+        return unauthorized();
+    }
+    if let Err(r) = upload_name_or_err(&name) {
+        return *r;
+    }
+    let path = state.workspace.join("uploads").join(&name);
+    if !path.is_file() {
+        return json_err(
+            StatusCode::NOT_FOUND,
+            &format!("upload not found: {}", name),
+        );
+    }
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => axum::Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("remove: {}", e)),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SkillContentBody {
     pub content: String,
@@ -2813,6 +2904,9 @@ pub fn build_system_routes() -> axum::Router<AppState> {
             "/api/skills/{name}/content",
             axum::routing::get(get_skill_content).put(put_skill_content),
         )
+        // H5（2026-10-08）：uploads 手动清理——列表 + 逐个删除，零自动回收
+        .route("/api/uploads", axum::routing::get(list_uploads))
+        .route("/api/uploads/{name}", axum::routing::delete(delete_upload))
 }
 
 #[cfg(test)]
