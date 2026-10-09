@@ -8,7 +8,8 @@
 //! 形态：时间戳镜像目录 + hash 去重——`snapshots/<YYYYMMDD-HHMMSS>/<key>`，
 //! key 为相对 agent 家目录的 `/` 分隔路径。内容未变（sha1 命中 `.state.json`）
 //! 不落新拷贝；sessions.db 经 `VACUUM INTO` 产出一致副本（裸拷 WAL 活库可能损坏），
-//! 且至多每 24h 一次。已知留档：A→B→A 的中间态若无任何快照触发点经过则不留底，
+//! 间隔由 `[runtime].snapshot_db_interval_hours` 节流（默认 24h）。已知留档：
+//! A→B→A 的中间态若无任何快照触发点经过则不留底，
 //! sweep 节奏（10 分钟）给出损失上界；快照失败 log warn 不阻断主操作。
 
 use anyhow::{Context, Result};
@@ -23,8 +24,8 @@ use std::time::Duration;
 const MAX_FILE_BYTES: u64 = 200 * 1024 * 1024;
 /// 兜底 sweep 间隔：A0 被 terminal 等未挂钩路径改写时，留底损失上界。
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10 * 60);
-/// sessions.db 一致副本的最小间隔：消息每次落库 mtime 都变，按 sweep 频率拷贝会爆盘。
-const DB_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+/// sessions.db 快照间隔下限：配 0 会让每轮 sweep 都 VACUUM 一份整库副本，爆盘。
+const MIN_DB_INTERVAL_HOURS: u64 = 1;
 const GC_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 
 #[derive(Serialize, Deserialize, Default)]
@@ -50,6 +51,8 @@ pub struct SnapshotStore {
     /// `<config_dir>/snapshots/`
     root: PathBuf,
     retention_days: u64,
+    /// sessions.db 一致副本的最小间隔（`[runtime].snapshot_db_interval_hours`）
+    db_interval: Duration,
     state: Mutex<State>,
 }
 
@@ -102,14 +105,16 @@ impl GuardCtx {
         let Some(store) = &self.store else { return };
         if let Some(key) = self.persona_write_target(resolved) {
             if let Err(e) = store.snapshot_file(resolved, &key, reason).await {
-                tracing::warn!(error = %e, key, reason, "pre-write snapshot failed");
+                tracing::warn!(error = %format!("{:#}", e), key, reason, "pre-write snapshot failed");
             }
         }
     }
 }
 
 impl SnapshotStore {
-    pub fn open(config_dir: &Path, retention_days: u64) -> Result<Self> {
+    /// 从 `[runtime]` 取保留窗口与 sessions.db 快照间隔——刻意收整段配置而非
+    /// 两个同类型位置参数，防止 retention_days / db_interval_hours 被调换。
+    pub fn open(config_dir: &Path, rt: &crate::config::RuntimeConfig) -> Result<Self> {
         let root = config_dir.join("snapshots");
         std::fs::create_dir_all(&root)
             .with_context(|| format!("create snapshot dir {:?}", root))?;
@@ -119,7 +124,12 @@ impl SnapshotStore {
             .unwrap_or_default();
         Ok(Self {
             root,
-            retention_days,
+            retention_days: rt.snapshot_retention_days,
+            db_interval: Duration::from_secs(
+                rt.snapshot_db_interval_hours
+                    .max(MIN_DB_INTERVAL_HOURS)
+                    .saturating_mul(3600),
+            ),
             state: Mutex::new(state),
         })
     }
@@ -174,7 +184,7 @@ impl SnapshotStore {
         Ok(true)
     }
 
-    /// sessions.db 一致副本（VACUUM INTO），24h 节流。dest 由本方法落在新的时刻目录。
+    /// sessions.db 一致副本（VACUUM INTO），节流间隔可配。dest 落在新的时刻目录。
     pub async fn snapshot_session_db(
         &self,
         store: &Arc<crate::memory::sqlite::SessionStore>,
@@ -182,11 +192,17 @@ impl SnapshotStore {
         let now = crate::time::unix_now();
         {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if now - state.last_db < DB_SNAPSHOT_INTERVAL.as_secs() as i64 {
+            if now - state.last_db < self.db_interval.as_secs() as i64 {
                 return Ok(false);
             }
         }
-        let dest = self.timestamp_dir().join("sessions.db");
+        let dir = self.timestamp_dir();
+        let dest = dir.join("sessions.db");
+        // timestamp_dir 刻意返回尚不存在的路径（碰撞规避），而 VACUUM INTO 不会
+        // 自建父目录——不先建目录就得到 SQLite CANTOPEN。
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .with_context(|| format!("create snapshot dir {:?}", dir))?;
         let store = store.clone();
         let dest_for_log = dest.clone();
         tokio::task::spawn_blocking(move || store.snapshot_into(&dest))
@@ -311,7 +327,7 @@ impl SnapshotStore {
                             }
                         }
                         if let Err(e) = store.snapshot_session_db(&ss).await {
-                            tracing::warn!(error = %e, "sessions.db snapshot failed");
+                            tracing::warn!(error = %format!("{:#}", e), "sessions.db snapshot failed");
                         }
                         if ok > 0 {
                             tracing::debug!(stored = ok, "periodic snapshot sweep");
@@ -319,7 +335,7 @@ impl SnapshotStore {
                     }
                     _ = gc.tick() => {
                         if let Err(e) = store.gc().await {
-                            tracing::warn!(error = %e, "snapshot gc failed");
+                            tracing::warn!(error = %format!("{:#}", e), "snapshot gc failed");
                         }
                     }
                 }
@@ -394,8 +410,15 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn rt(days: u64) -> crate::config::RuntimeConfig {
+        crate::config::RuntimeConfig {
+            snapshot_retention_days: days,
+            ..Default::default()
+        }
+    }
+
     fn store(dir: &Path) -> SnapshotStore {
-        SnapshotStore::open(dir, 14).unwrap()
+        SnapshotStore::open(dir, &rt(14)).unwrap()
     }
 
     #[tokio::test]
@@ -445,6 +468,21 @@ mod tests {
             .unwrap());
         let latest = s.latest("instances/work/MEMORY.md").await.unwrap().unwrap();
         assert_eq!(std::fs::read_to_string(&latest).unwrap(), "inst");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_session_db_creates_missing_dir() {
+        // 回归：sessions.db 副本落在全新时刻目录里，而 timestamp_dir 按碰撞规避
+        // 契约返回"尚不存在"的路径——VACUUM INTO 不自建父目录，漏建即 SQLite CANTOPEN。
+        let dir = tempdir().unwrap();
+        let s = store(dir.path());
+        let ss = Arc::new(crate::memory::sqlite::SessionStore::open_in_memory().unwrap());
+        assert!(s.snapshot_session_db(&ss).await.unwrap());
+        let copy = s.latest("sessions.db").await.unwrap().unwrap();
+        assert!(copy.is_file());
+
+        // 间隔内第二次：节流命中，静默跳过（不产新副本）
+        assert!(!s.snapshot_session_db(&ss).await.unwrap());
     }
 
     #[tokio::test]

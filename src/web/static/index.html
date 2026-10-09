@@ -488,6 +488,11 @@
             <div class="form-row"><label>keepalive_interval_secs</label><input type="number" min="30" x-model.number="cfg.runtime.keepalive_interval_secs" title="long-task heartbeat interval (seconds): chat channels send a still-working notice this often"></div>
             <div class="form-row"><label>max_turn_duration_secs</label><input type="number" min="60" x-model.number="cfg.runtime.max_turn_duration_secs" title="max wall-clock seconds per turn; the turn is interrupted beyond this, guarding against runaway loops"></div>
             <div class="form-row"><label>cron_allow_inline_interpreter</label><label class="switch"><input type="checkbox" x-model="cfg.runtime.cron_allow_inline_interpreter" title="exempt cron channels from the T3 inline interpreter gate: non-interactive channels cannot approve anyway, so out-of-scope ops stay fail-fast denied while in-workspace inline commands (python -c etc.) run without approval"></label></div>
+            <h3>snapshots <span class="hint">(backups of personality files, chat history and uploads — kept in <code>&lt;config_dir&gt;/snapshots/</code>)</span></h3>
+            <div class="form-row"><label>snapshot_enabled</label><label class="switch"><input type="checkbox" x-model="cfg.runtime.snapshot_enabled" title="keep a copy of SOUL/USER/MEMORY, sessions.db and uploads/ before overwriting them, plus a periodic sweep every 10 minutes. The backup folder is read-only to the agent. Default on"></label></div>
+            <div class="form-row"><label>snapshot_retention_days</label><input type="number" min="1" x-model.number="cfg.runtime.snapshot_retention_days" title="timestamped snapshot dirs older than this are GC'd daily. Default 14"></div>
+            <div class="form-row"><label>snapshot_db_interval_hours</label><input type="number" min="1" x-model.number="cfg.runtime.snapshot_db_interval_hours" title="minimum hours between chat-history backups. Each one copies the whole database, which would fill the disk at sweep frequency; floor 1 hour, default 24"></div>
+            <div class="hint">Snapshot settings are read when the agent is built — they apply after <b>About → Reload Service</b>, not on Save.</div>
           </div>
         </template>
         <template x-if="configSection==='log'">

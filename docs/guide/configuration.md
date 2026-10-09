@@ -31,6 +31,9 @@
 | `guard_thinking_cap` | `32000` | 思考流字符上限（`<think>` 块与 reasoning_content 累计），`0` = 不限。 |
 | `guard_max_retries` | `1` | 判退化后重试次数（重试注入 `[guard]` 提示并强制关思考）。 |
 | `guard_breaker_threshold` | `2` | 连续退化回合数达到该值时在诊断消息附加醒目警告。 |
+| `snapshot_enabled` | `true` | 快照总开关：人格与记忆文件（SOUL/USER/MEMORY）、会话库 sessions.db、uploads/ 附件在覆盖前留底，另有 10 分钟兜底 sweep；快照目录对 agent 只读。详见 `docs/plans/2026-10-05-p9-snapshot-and-env-scrub.md`。 |
+| `snapshot_retention_days` | `14` | 副本**留多久**（天）：更早的时刻目录每日 GC。与备份频率无关，也不改变每份副本的内容——它只决定你最多能往回翻多少天。 |
+| `snapshot_db_interval_hours` | `24` | sessions.db **多久备一次**（小时，下限 1）：每份副本都是全量库而非时间窗口，间隔只决定产新副本的节奏；相邻两份的差就是这段时间里新增的消息，整库回滚最多丢这么多尾巴。改动需 Reload Service。 |
 
 **Generation Guard（输出退化防护）**：针对小参数本地模型在长上下文下的退化
 （重复循环、思考流失控、空输出）。流式判定退化 → 中途断流、丢弃退化产物 →

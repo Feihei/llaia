@@ -519,10 +519,7 @@ pub async fn build_single_agent(
     // 双通道，kill switch 只关快照）。
     let snapshot_store: Option<Arc<crate::snapshot::SnapshotStore>> =
         if is_main && config.runtime.snapshot_enabled {
-            match crate::snapshot::SnapshotStore::open(
-                config_dir,
-                config.runtime.snapshot_retention_days,
-            ) {
+            match crate::snapshot::SnapshotStore::open(config_dir, &config.runtime) {
                 Ok(store) => {
                     let store = Arc::new(store);
                     crate::snapshot::SnapshotStore::spawn_periodic(

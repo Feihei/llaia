@@ -3302,6 +3302,10 @@ model = "qwen"
             idx.contains("cron_allow_inline_interpreter"),
             "index.html missing runtime cron_allow_inline_interpreter toggle (stale embed?)"
         );
+        assert!(
+            idx.contains("snapshot_db_interval_hours"),
+            "index.html missing runtime snapshot settings rows (stale embed?)"
+        );
 
         let js = StaticAsset::get("app.js")
             .expect("app.js embedded")

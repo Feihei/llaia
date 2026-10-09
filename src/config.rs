@@ -121,6 +121,10 @@ pub struct RuntimeConfig {
     /// 快照保留窗口（天）：GC 删除早于 N 天的时刻目录。默认 14。
     #[serde(default = "default_snapshot_retention_days")]
     pub snapshot_retention_days: u64,
+    /// sessions.db 一致副本的最小间隔（小时）：整库 VACUUM 成本高，按 sweep 频率
+    /// 拷贝会爆盘；下限 1 小时兜底。默认 24。
+    #[serde(default = "default_snapshot_db_interval_hours")]
+    pub snapshot_db_interval_hours: u64,
     /// 子进程环境变量密钥剔除（ADR-0033 Phase 2 首刀，学 codex）：
     /// spawn terminal/MCP 子进程时剔除变量名含 KEY/SECRET/TOKEN 的继承变量，
     /// 防 `env` 一条命令倒出 .env 里全部 API key。默认 true。
@@ -151,6 +155,7 @@ impl Default for RuntimeConfig {
             guard_breaker_threshold: default_guard_breaker_threshold(),
             snapshot_enabled: default_snapshot_enabled(),
             snapshot_retention_days: default_snapshot_retention_days(),
+            snapshot_db_interval_hours: default_snapshot_db_interval_hours(),
             scrub_child_env: default_scrub_child_env(),
         }
     }
@@ -214,6 +219,10 @@ fn default_snapshot_enabled() -> bool {
 
 fn default_snapshot_retention_days() -> u64 {
     14
+}
+
+fn default_snapshot_db_interval_hours() -> u64 {
+    24
 }
 
 fn default_scrub_child_env() -> bool {
