@@ -1503,14 +1503,19 @@ impl QqChannel {
             return Ok(());
         };
         // 幂等：pending 已被文本 /ok /deny 或 /cancel 处理 → code=3（重复操作），
-        // 提示文本走 event_id 被动回复，不再触发续跑
-        let exists = {
-            let a = agent.lock().await;
-            a.approval_gate
+        // 提示文本走 event_id 被动回复，不再触发续跑。
+        // 检查用 try_lock：agent 锁可能被运行中的 turn 持有（同一条消息里的
+        // 另一个审批刚被批准续跑），阻塞等锁会把 ack 拖过 QQ 的 ~3s 时限，
+        // 客户端报第三方应用异常。锁被持有时 pending 不可能已被解析（解析
+        // 同样要拿锁），按仍待审批处理：先 ack，后续 /ok 排队等锁自然续跑。
+        let exists = match agent.try_lock() {
+            Ok(a) => a
+                .approval_gate
                 .list()
                 .await
                 .iter()
-                .any(|p| p.id == approval_id)
+                .any(|p| p.id == approval_id),
+            Err(_busy) => true,
         };
         if !exists {
             tracing::info!(id = %approval_id, "qq button click on already-resolved approval");
