@@ -911,6 +911,19 @@ white-space: pre-wrap; word-break: break-word;
   background: var(--bg-elev); border: 1px solid var(--border);
 }
 #config-pane .model-filter select { width: auto; min-width: 120px; }
+/* 名字过滤输入框：右侧内嵌清空按钮，仅在有输入时显示（x-show 控制） */
+#config-pane .name-filter {
+  position: relative; display: inline-flex; align-items: center;
+}
+#config-pane .name-filter input { width: 220px; padding-right: 26px; }
+#config-pane .name-filter-clear {
+  position: absolute; right: 4px;
+  width: 18px; height: 18px; padding: 0; line-height: 16px;
+  border: none; border-radius: 50%;
+  background: var(--border-bright); color: var(--text); font-size: 12px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+#config-pane .name-filter-clear:hover { background: var(--text-dim); }
 /* 模型卡片瀑布流：JS 固定分列（app.js modelColumns 按条数分配）。
    不用 CSS columns——它的列内容由浏览器自动平衡，任何卡片高度变化都会
    触发整页重新分列（展开 thinking 相邻卡片跟着跳）。flex 列里卡片归属

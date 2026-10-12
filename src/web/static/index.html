@@ -505,6 +505,14 @@
         </template>
         <template x-if="configSection==='provider'">
           <div>
+            <!-- 名字过滤：子串命中才显示卡片；有输入时右侧出现清空按钮 -->
+            <div class="model-filter">
+              <div class="name-filter">
+                <input type="text" placeholder="filter providers by name…" x-model="providerNameFilter">
+                <button type="button" class="name-filter-clear" x-show="providerNameFilter" @click="providerNameFilter=''" title="clear">×</button>
+              </div>
+              <span class="hint" x-text="filteredProviderIds().length + ' provider(s)'"></span>
+            </div>
             <!-- 与 Models 相同的固定分列瀑布流：compat 展开/折叠只撑自己所在列 -->
             <div class="model-cols" @resize.window="updateModelColCount()">
               <template x-for="(col, ci) in providerColumns()" :key="'pcol' + ci">
@@ -638,8 +646,12 @@
                 <span class="hint">Added to the in-memory catalog below — click Save to persist.</span>
               </div>
             </template>
-            <!-- 过滤条：provider / kind / multimodal -->
+            <!-- 过滤条：名字 / provider / kind / multimodal -->
             <div class="model-filter">
+              <div class="name-filter">
+                <input type="text" placeholder="filter models by name…" x-model="modelNameFilter">
+                <button type="button" class="name-filter-clear" x-show="modelNameFilter" @click="modelNameFilter=''" title="clear">×</button>
+              </div>
               <select x-model="modelFilter.provider">
                 <option value="">all providers</option>
                 <template x-for="pid in llmProviders()" :key="pid">

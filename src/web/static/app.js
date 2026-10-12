@@ -188,6 +188,9 @@ function llaiaApp() {
     probeModelBusy: {},
     // Models 选项卡（P8）：过滤条 + 卡片网格 + 添加流
     modelFilter: { provider: '', kind: '', multimodal: false },
+    // Providers / Models 卡片名字过滤（大小写不敏感子串命中，命中才显示卡片）
+    providerNameFilter: '',
+    modelNameFilter: '',
     // 瀑布流列数（resize 跟随）：卡片按索引轮转固定分列，位置与高度解耦，
     // 任一卡片展开/折叠 thinking 只影响自己所在列，不会像 CSS columns 那样整页重新分列
     modelColCount: Math.min(3, Math.max(1, Math.floor(window.innerWidth / 420))) || 1,
@@ -1123,12 +1126,17 @@ function llaiaApp() {
     },
 
     // ---- Models 选项卡（P8）：目录 CRUD + 添加流 ----
-    // 过滤后的模型 id 列表（过滤条：provider / kind / multimodal）
+    // 名字过滤：大小写不敏感子串命中（命中 = 输入串是卡片名的一部分）
+    nameFilterHit(text, filter) {
+      return !filter.trim() || String(text || '').toLowerCase().includes(filter.trim().toLowerCase());
+    },
+    // 过滤后的模型 id 列表（过滤条：名字 / provider / kind / multimodal）
     filteredModels() {
       const f = this.modelFilter;
       const out = [];
       for (const id in this.cfg.model || {}) {
         const m = this.cfg.model[id];
+        if (!this.nameFilterHit(id, this.modelNameFilter) && !this.nameFilterHit(m.model, this.modelNameFilter)) continue;
         if (f.provider && m.provider !== f.provider) continue;
         if (f.kind && (m.kind || 'chat') !== f.kind) continue;
         if (f.multimodal && !(m.capabilities || []).includes('multimodal')) continue;
@@ -1165,11 +1173,15 @@ function llaiaApp() {
       return this.dealColumns(this.filteredModels());
     },
     // Provider 选项卡与 Models 共用同一套瀑布流（列数/resize 也共用 modelColCount）
-    providerIds() {
-      return Object.keys(this.cfg.provider || {}).sort();
+    filteredProviderIds() {
+      const out = [];
+      for (const pid of Object.keys(this.cfg.provider || {}).sort()) {
+        if (this.nameFilterHit(pid, this.providerNameFilter)) out.push(pid);
+      }
+      return out;
     },
     providerColumns() {
-      return this.dealColumns(this.providerIds());
+      return this.dealColumns(this.filteredProviderIds());
     },
     openAddModel() {
       this.addModelDraft = { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false };
