@@ -1227,7 +1227,18 @@ fn migrate_legacy_config(raw: &mut toml::Value) -> Vec<String> {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        if !base.trim().is_empty() && !server_model.trim().is_empty() {
+        if catalog.contains_key(&server_model) {
+            // model 值已是目录条目 id = 上轮迁移的引用被 WebUI 结构化保存写回了磁盘
+            // （tools 段 preserve 合并不删表单未暴露的 legacy base_url）。
+            // 再迁移会把引用当服务端模型名再包一层 `tts.` 前缀并新增重复条目，
+            // 每轮 保存+重启 增殖一次——引用已可解析，直接跳过。
+            if !base.trim().is_empty() {
+                notices.push(format!(
+                    "tools.tts.model already references catalog entry \"{server_model}\"; \
+                     legacy base_url ignored"
+                ));
+            }
+        } else if !base.trim().is_empty() && !server_model.trim().is_empty() {
             let model_id = format!("tts.{server_model}");
             ensure_provider(
                 &mut providers,
@@ -1274,7 +1285,15 @@ fn migrate_legacy_config(raw: &mut toml::Value) -> Vec<String> {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        if !base.trim().is_empty() && !server_model.trim().is_empty() {
+        if catalog.contains_key(&server_model) {
+            // 同 tts：引用写回磁盘 + legacy base_url 残留会导致重迁移增殖，跳过
+            if !base.trim().is_empty() {
+                notices.push(format!(
+                    "tools.image_gen.model already references catalog entry \"{server_model}\"; \
+                     legacy base_url ignored"
+                ));
+            }
+        } else if !base.trim().is_empty() && !server_model.trim().is_empty() {
             // 旧配置的 base_url 常是完整端点（…/images/generations）；新代码按
             // provider.base_url + "/images/generations" 拼接，须剥掉尾巴防双写
             let provider_base = base
@@ -1965,6 +1984,43 @@ model = "llamacpp.qwen"
 
         // 5. web_fetch 开关 → 引用
         assert_eq!(config.tools.web_fetch.extract_provider, "tavily");
+    }
+
+    #[test]
+    fn migrate_tts_reference_writeback_no_proliferation() {
+        // WebUI 结构化保存会把迁移后的引用（tools.tts.model = "tts.tts-1"）写回磁盘，
+        // 而 tools 段 preserve 合并会保留表单未暴露的 legacy base_url/api_key。
+        // 重迁移必须识别"值已是目录引用"并跳过，否则每轮 保存+重启 都会
+        // 多套一层 `tts.` 前缀、多出一个重复条目（tts.tts.tts-1, tts.tts.tts.tts-1, …）。
+        let leaked = r#"
+[provider.tts]
+type = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+api_key = ""
+
+[model."tts.tts-1"]
+provider = "tts"
+model = "tts-1"
+kind = "tts"
+
+[tools.tts]
+enabled = true
+base_url = "https://api.openai.com/v1"
+api_key = ""
+model = "tts.tts-1"
+voice = "alloy"
+
+[agent.main]
+model = "tts.tts-1"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", leaked).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+
+        // 不再新增 tts.tts.tts-1 之类的重迁移条目；引用原样保留
+        assert_eq!(config.models.len(), 1);
+        assert!(config.models.contains_key("tts.tts-1"));
+        assert_eq!(config.tools.tts.model, "tts.tts-1");
     }
 
     #[test]
