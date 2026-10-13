@@ -640,6 +640,10 @@
                   <span class="hint" x-show="addModelDraft.provider && effectiveType(addModelDraft.provider) !== 'openai_compatible'">anthropic / gemini only support chat</span></div>
                 <div class="form-row" x-show="addModelDraft.kind==='image'"><label>size</label>
                   <input x-model="addModelDraft.size" placeholder="512x512 (default output size)"></div>
+                <div class="form-row" x-show="addModelDraft.kind==='chat'"><label>ctx</label>
+                  <input type="number" x-model.number="addModelDraft.context_size" style="width:140px" title="context window (tokens); empty = probe at startup, fallback 128000"></div>
+                <div class="form-row" x-show="addModelDraft.kind==='chat'"><label>max_tokens</label>
+                  <input type="number" x-model.number="addModelDraft.max_tokens" style="width:140px" title="single-response token cap; required for anthropic, ignored elsewhere"></div>
                 <div class="form-row"><label>capabilities</label>
                   <label class="switch"><input type="checkbox" x-model="addModelDraft.multimodal"> multimodal</label></div>
                 <button class="inline-add" @click="confirmAddModel()">Add model</button>

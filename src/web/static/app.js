@@ -195,7 +195,7 @@ function llaiaApp() {
     // 任一卡片展开/折叠 thinking 只影响自己所在列，不会像 CSS columns 那样整页重新分列
     modelColCount: Math.min(3, Math.max(1, Math.floor(window.innerWidth / 420))) || 1,
     addModelOpen: false,
-    addModelDraft: { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false },
+    addModelDraft: { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false, context_size: '', max_tokens: '' },
     // 会话历史（P5 W1）
     sessions: [],
     selectedSession: null,
@@ -1147,11 +1147,9 @@ function llaiaApp() {
     updateModelColCount() {
       this.modelColCount = Math.min(3, Math.max(1, Math.floor(window.innerWidth / 420))) || 1;
     },
-    // 卡片标题两行拆分：id 首个 '.' 前是 provider（含点作首行），其余是尾段。
-    // 手工添加的无点 id 退回用 entry 的 provider 补首行；都没有就整 id 落尾段。
+    // 卡片标题两行拆分：P8 起 id 是一元标识、可含任意点号（如 qwen3.8-flash-coder），
+    // 不能按 '.' 切分——首行固定用 entry 的 provider 字段，尾段用完整 id。
     modelTitleParts(id) {
-      const i = id.indexOf('.');
-      if (i > 0) return { head: id.slice(0, i + 1), tail: id.slice(i + 1) };
       const p = (this.cfg.model[id] && this.cfg.model[id].provider) || '';
       return p ? { head: p + '.', tail: id } : { head: '', tail: id };
     },
@@ -1184,7 +1182,7 @@ function llaiaApp() {
       return this.dealColumns(this.filteredProviderIds());
     },
     openAddModel() {
-      this.addModelDraft = { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false };
+      this.addModelDraft = { provider: '', id: '', model: '', kind: 'chat', size: '', multimodal: false, context_size: '', max_tokens: '' };
       this.addModelOpen = true;
     },
     confirmAddModel() {
@@ -1205,6 +1203,11 @@ function llaiaApp() {
       const entry = { provider: pid, model: serverModel, kind, enabled: true,
                       context_size: null, max_tokens: null,
                       capabilities: d.multimodal ? ['multimodal'] : [] };
+      // 可选参数：留空 = null（保持"探针探测 / 兜底基线"行为），填了才覆盖
+      const ctx = parseInt(d.context_size, 10);
+      const mt = parseInt(d.max_tokens, 10);
+      if (Number.isFinite(ctx)) entry.context_size = ctx;
+      if (Number.isFinite(mt)) entry.max_tokens = mt;
       if (kind === 'image' && (d.size || '').trim()) entry.size = d.size.trim();
       this.cfg.model[id] = entry;
       this.thinkingOpen[id] = false;
