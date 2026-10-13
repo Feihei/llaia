@@ -1509,6 +1509,7 @@ impl Agent {
                 guard: self.asset_guard.clone(),
                 web_fetch_gate: self.web_fetch_gate.clone(),
                 timezone: self.live_config.read().await.runtime.timezone.clone(),
+                skills_dir: Some(self.config_dir.join("skills")),
             };
             let (tool_msgs, deferred) =
                 execute_tool_calls(&self.tools, &calls, channel, &ctx, Some(&event_tx)).await?;

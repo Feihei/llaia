@@ -224,6 +224,9 @@ pub struct ApprovalContext {
     pub web_fetch_gate: Option<Arc<crate::tools::web::WebFetchGate>>,
     /// `[runtime].timezone`（实例 memory 路由的条目日期用；随 live_config 读）。
     pub timezone: Option<String>,
+    /// skills 目录（`<config_dir>/skills`）：terminal 审批判定对齐执行层放行口径
+    /// （见 `tool_within_workspace` terminal 分支注释）。测试为 None。
+    pub skills_dir: Option<PathBuf>,
 }
 
 /// 是否交互式频道（能等待用户 /ok /deny /answer）
@@ -245,6 +248,7 @@ pub fn tool_within_workspace(
     args: &Value,
     workspace: &Path,
     trusted: &[PathBuf],
+    skills_dir: Option<&Path>,
 ) -> bool {
     match tool_name {
         "file_write" | "file_edit" | "file_read" => {
@@ -253,9 +257,14 @@ pub fn tool_within_workspace(
         }
         "terminal" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            // 不把 skills_dir 作为 extra_readable 传进来：terminal 引用 skill 目录
-            // 脚本仍判为 workspace 外 → 走审批（执行 skill 代码需人肉确认，符合 ADR-0028）。
-            crate::path_guard::validate_command_paths_in_scope(cmd, workspace, trusted, None)
+            // skills_dir 作为 extra_readable 传入（2026-10-13，推翻 ADR-0028 的
+            // 「执行 skill 代码需人审」）：与执行层 terminal.rs 的放行口径对齐——
+            // 执行层本就放行 skill 目录的读/执行（shell 字符串层读写在 path_guard
+            // 注释里明确不可区分、对读写一视同仁），审批层单独收紧只剩每条命令
+            // 一次的纯摩擦（2026-10-11 skill 查看任务 12 次审批实证）。file_write /
+            // file_edit 的写防线不受影响：file 分支不传 skills_dir，skills 目录
+            // 写入仍判界外 → 审批后走 execute_approved 通道。
+            crate::path_guard::validate_command_paths_in_scope(cmd, workspace, trusted, skills_dir)
                 .is_ok()
         }
         // MCP 工具一律视为 workspace 外（ADR-0020：安全默认，需审批）
@@ -278,8 +287,8 @@ pub enum ApprovalAction {
 }
 
 /// 根据权限档位 + 工具副作用 + workspace/受信目录范围，决定一次工具调用是否需要审批
-// 参数随闸门演进增长（T3 第 7 参、Delete Guard 第 8 参、cron 豁免第 9 参、
-// web_fetch 出站闸门第 10 参），结构化收编留待下次重审。
+// 参数随闸门演进增长（T3、Delete Guard、cron 豁免、web_fetch 出站闸门、
+// skills 放行），结构化收编留待下次重审。
 #[allow(clippy::too_many_arguments)]
 pub fn approval_decision(
     tool: &dyn Tool,
@@ -292,6 +301,7 @@ pub fn approval_decision(
     terminal_delete_guard: bool,
     cron_allow_inline: bool,
     web_fetch_gate: Option<&crate::tools::web::WebFetchGate>,
+    skills_dir: Option<&Path>,
 ) -> ApprovalAction {
     // web_fetch 出站闸门（L4，ADR-0033 Phase 2）：放在 delegate/yolo 早退**之前**
     // ——出站是政策边界，不吃 profile/channel 豁免。非交互频道（cron/delegate/mail）
@@ -337,7 +347,7 @@ pub fn approval_decision(
     if !tool.requires_confirm() {
         return ApprovalAction::Approved;
     }
-    let within = tool_within_workspace(tool.name(), args, workspace, trusted);
+    let within = tool_within_workspace(tool.name(), args, workspace, trusted, skills_dir);
     let mut required = match profile {
         "read-only" => true,
         // default 或未识别档位：仅 workspace 外需审批
@@ -586,7 +596,8 @@ mod tests {
 
         // 目录内绝对路径的终端命令应视为 workspace 内 → default 档免审批
         let cmd = format!("cat {}", dir.path().join("notes.txt").display());
-        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), &moved, &[]);
+        let within =
+            tool_within_workspace("terminal", &json!({ "command": cmd }), &moved, &[], None);
         assert!(within, "moved 目录内绝对路径命令应判定为 workspace 内");
     }
 
@@ -608,6 +619,7 @@ mod tests {
             &json!({ "path": file_in_trusted }),
             &current_ws,
             &trusted_set,
+            None,
         );
         assert!(within, "受信目录内的文件读取应免审批");
 
@@ -618,6 +630,7 @@ mod tests {
             &json!({ "command": cmd }),
             &current_ws,
             &trusted_set,
+            None,
         );
         assert!(within, "受信目录内的终端命令应免审批");
 
@@ -627,6 +640,7 @@ mod tests {
             &json!({ "path": file_in_trusted }),
             &current_ws,
             &[],
+            None,
         );
         assert!(!without_trust, "无受信记录时，受信目录外的读取应需审批");
 
@@ -641,6 +655,7 @@ mod tests {
             &json!({ "path": outside }),
             &current_ws,
             &trusted_set,
+            None,
         );
         assert!(!within, "逃出 workspace 与受信集合的操作仍应需审批");
     }
@@ -660,7 +675,7 @@ mod tests {
             "cd \"E:/AIAD_Group/20260807-Agent科普\" && officecli get \"AI Agent科普.pptx\" / --json 2>&1 | head -30",
             "cd \"E:/AIAD_Group/20260807-Agent科普\" && ls -la",
         ] {
-            let within = tool_within_workspace("terminal", &json!({ "command": real }), &ws, &[]);
+            let within = tool_within_workspace("terminal", &json!({ "command": real }), &ws, &[], None);
             assert!(within, "moved 目录内的真实命令应免审批:\n{real}");
         }
     }
@@ -673,7 +688,7 @@ mod tests {
         // 等价于 `cd "E:/AIAD_Group/20260807-Agent科普" && ls -la`
         let quoted = ws.to_string_lossy().replace('\\', "/");
         let cmd = format!("cd \"{}\" && ls -la", quoted);
-        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), ws, &[]);
+        let within = tool_within_workspace("terminal", &json!({ "command": cmd }), ws, &[], None);
         assert!(
             within,
             "moved 目录内带引号的 cd 命令应判定为 workspace 内:\n{cmd}"
@@ -716,6 +731,7 @@ mod tests {
             gate,
             delete_guard,
             cron_allow,
+            None,
             None,
         )
     }
@@ -995,6 +1011,7 @@ mod tests {
             false,
             false,
             Some(&gate),
+            None,
         );
         assert!(matches!(d, ApprovalAction::Denied { .. }), "实际 {d:?}");
         // 列入允许清单 → 直接放行（requires_confirm=false）
@@ -1009,6 +1026,7 @@ mod tests {
             false,
             false,
             Some(&gate),
+            None,
         );
         assert!(matches!(d, ApprovalAction::Approved), "实际 {d:?}");
         // delegate 未列域名同样 Denied（闸门在 delegate 早退之前）
@@ -1023,6 +1041,7 @@ mod tests {
             false,
             false,
             Some(&gate),
+            None,
         );
         assert!(matches!(d, ApprovalAction::Denied { .. }), "实际 {d:?}");
     }
@@ -1042,6 +1061,7 @@ mod tests {
             false,
             false,
             Some(&gate),
+            None,
         );
         assert!(
             matches!(d, ApprovalAction::NeedsApproval { .. }),
@@ -1060,6 +1080,7 @@ mod tests {
             false,
             false,
             Some(&gate),
+            None,
         );
         assert!(matches!(d, ApprovalAction::Approved), "实际 {d:?}");
         // yolo 交互豁免域名审批（yolo 语义），但闸门对象缺省（None）时零影响
@@ -1074,6 +1095,7 @@ mod tests {
             false,
             false,
             Some(&gate),
+            None,
         );
         assert!(matches!(d, ApprovalAction::Approved), "实际 {d:?}");
     }
@@ -1128,6 +1150,7 @@ mod tests {
             true,
             false,
             None,
+            None,
         );
         assert!(
             matches!(decision, ApprovalAction::NeedsApproval { .. }),
@@ -1146,6 +1169,7 @@ mod tests {
             true,
             false,
             None,
+            None,
         );
         assert!(matches!(decision, ApprovalAction::NeedsApproval { .. }));
 
@@ -1161,6 +1185,7 @@ mod tests {
             false,
             true,
             false,
+            None,
             None,
         );
         assert!(matches!(decision, ApprovalAction::Approved));

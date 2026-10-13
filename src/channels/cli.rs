@@ -12,7 +12,7 @@ use crate::provider::Provider;
 use crate::tool_call::build_tool_instructions;
 use crate::tools::cron::CronTool;
 use crate::tools::delegate::DelegateTool;
-use crate::tools::file::{FileEdit, FileRead, FileWrite};
+use crate::tools::file::{FileEdit, FileList, FileRead, FileWrite};
 use crate::tools::memory::MemoryWrite;
 use crate::tools::search::UnifiedSearch;
 use crate::tools::send_media::{SendFile, SendImage};
@@ -597,6 +597,12 @@ pub async fn build_single_agent(
             is_main,
             Some(skills_dir.clone()),
         )),
+        Arc::new(FileList::new(
+            workspace_root.clone(),
+            trusted_dirs.clone(),
+            is_main,
+            Some(skills_dir.clone()),
+        )),
         Arc::new(
             FileWrite::new(workspace_root.clone(), trusted_dirs.clone(), is_main)
                 .with_guard(Some(guard_ctx.clone())),
@@ -737,7 +743,7 @@ pub async fn build_single_agent(
     }
 
     let system_prompt_base = format!(
-        "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}\n\n# WORKSPACE\n{}\n\nWorkspace note: all relative paths in tools resolve against WORKSPACE; terminal commands run under WORKSPACE. Use absolute paths when you need to write elsewhere.",
+        "# SOUL\n{}\n\n# USER\n{}\n\n# MEMORY\n{}\n\n# WORKSPACE\n{}\n\nWorkspace note: all relative paths in tools resolve against WORKSPACE; terminal commands run under WORKSPACE. Use absolute paths when you need to write elsewhere.\nTool choice: prefer file_read / file_list / file_write / file_edit for reading, listing, and editing files; use terminal for running commands and only for file operations the file tools cannot do (this also avoids unnecessary approval prompts).",
         soul, user, memory, workspace.display()
     );
     // Skills（P3-e）：Progressive Disclosure，只注入 active skill 的 name + description + 路径

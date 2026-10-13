@@ -55,7 +55,8 @@ pub fn build_skills_prompt(skills: &[SkillManifest]) -> String {
          2. When to trigger — 用户显式提到 skill 名，或任务明确匹配 skill 的 description 时使用\n\
          3. Mandatory grounding — 执行 skill 前必须先 file_read 它的 SKILL.md（用上面给出的路径）\n\
          4. Progressive disclosure — 只读 SKILL.md 直接引用的文件，不要深度追引用\n\
-         5. Failure handling — skill 无法应用时清楚说明问题，继续用最佳替代方案\n",
+         5. Failure handling — skill 无法应用时清楚说明问题，继续用最佳替代方案\n\
+         6. Zero-friction reads — skill 目录下任意文件/子目录可直接 file_read 读取、file_list 列目录（支持通配符 pattern），均免审批；探查 skill 内容优先用它们而非 terminal 的 ls/cat/grep\n",
     );
     out
 }

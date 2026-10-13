@@ -445,6 +445,193 @@ impl FileEdit {
     }
 }
 
+/// 只读列目录工具（2026-10-13）：消掉「列目录/按名找文件只能走 terminal → 引用
+/// 界外路径必审批」的结构性摩擦（2026-10-11 skill 查看任务 12 次审批里 ls/find
+/// 占半数）。范围与 FileRead 同口径：workspace ∪ 受信目录 ∪ main 的 subagent/
+/// 额外可读 ∪ skills 目录特殊放行（resolve_skill_path 对目录同样成立）。
+/// requires_confirm 缺省 false → default 档全免审批。
+pub struct FileList {
+    workspace: Arc<RwLock<PathBuf>>,
+    trusted: Arc<RwLock<Vec<PathBuf>>>,
+    is_main: bool,
+    skills_dir: Option<PathBuf>,
+}
+
+/// 条目输出上限：防深目录（node_modules 类）刷爆上下文
+const FILE_LIST_MAX_ENTRIES: usize = 500;
+/// 递归深度上限（pattern 模式递归 walk 用）
+const FILE_LIST_MAX_DEPTH: usize = 8;
+
+impl FileList {
+    pub fn new(
+        workspace: Arc<RwLock<PathBuf>>,
+        trusted: Arc<RwLock<Vec<PathBuf>>>,
+        is_main: bool,
+        skills_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            workspace,
+            trusted,
+            is_main,
+            skills_dir,
+        }
+    }
+
+    async fn run(&self, args: &Value) -> Result<String> {
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty());
+        let ws = self.workspace.read().await;
+        // skills 目录特殊放行（同 FileRead：resolve_skill_path 对目录同样成立）
+        let root = match self
+            .skills_dir
+            .as_deref()
+            .and_then(|d| crate::skill::loader::resolve_skill_path(d, &ws, path))
+        {
+            Some(p) => p,
+            None => {
+                let extra = if self.is_main {
+                    extra_readable_for_main(&ws)
+                } else {
+                    None
+                };
+                let trusted = self.trusted.read().await.clone();
+                path_guard::validate_path_in_scope(&ws, &trusted, path, extra.as_deref())?
+            }
+        };
+        if !root.is_dir() {
+            anyhow::bail!("not a directory: {}", root.display());
+        }
+        let mut entries = Vec::new();
+        let mut truncated = false;
+        list_dir(&root, &root, 0, pattern, &mut entries, &mut truncated).await?;
+        entries.sort();
+        if entries.is_empty() {
+            return Ok(match pattern {
+                Some(p) => format!("(no match for `{p}`)"),
+                None => "(empty directory)".into(),
+            });
+        }
+        let mut out = entries.join("\n");
+        if truncated {
+            out.push_str(&format!("\n(truncated at {FILE_LIST_MAX_ENTRIES} entries)"));
+        }
+        Ok(out)
+    }
+}
+
+async fn list_dir(
+    dir: &Path,
+    base: &Path,
+    depth: usize,
+    pattern: Option<&str>,
+    out: &mut Vec<String>,
+    truncated: &mut bool,
+) -> Result<()> {
+    if out.len() >= FILE_LIST_MAX_ENTRIES {
+        *truncated = true;
+        return Ok(());
+    }
+    if depth > FILE_LIST_MAX_DEPTH {
+        return Ok(());
+    }
+    let mut rd = tokio::fs::read_dir(dir)
+        .await
+        .map_err(|e| anyhow!("read_dir {:?}: {}", dir, e))?;
+    while let Some(entry) = rd
+        .next_entry()
+        .await
+        .map_err(|e| anyhow!("read_dir {:?}: {}", dir, e))?
+    {
+        if out.len() >= FILE_LIST_MAX_ENTRIES {
+            *truncated = true;
+            return Ok(());
+        }
+        let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+        let rel = entry
+            .path()
+            .strip_prefix(base)
+            .unwrap_or(entry.path().as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        let display = if is_dir {
+            format!("{rel}/")
+        } else {
+            let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+            format!("{rel} ({size} B)")
+        };
+        if pattern.is_none_or(|p| wildcard_match(p, &rel)) {
+            out.push(display);
+        }
+        // 有 pattern 才递归；无 pattern 保持「列一层」直觉
+        if is_dir && pattern.is_some() {
+            Box::pin(list_dir(
+                &entry.path(),
+                base,
+                depth + 1,
+                pattern,
+                out,
+                truncated,
+            ))
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// 通配符匹配（`*` 任意串、`?` 单字符，大小写不敏感）：file_list pattern 用。
+/// 两点式回溯，避免为一个小功能引 glob 依赖。
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (None::<usize>, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+#[async_trait]
+impl Tool for FileList {
+    fn name(&self) -> &str {
+        "file_list"
+    }
+    fn description(&self) -> &str {
+        "List directory entries (read-only). One entry per line: `dir/` for directories, `file (N B)` for files. Optional `pattern` uses wildcards (* and ?) matched case-insensitively against relative paths and searches recursively. Use this instead of terminal ls/find."
+    }
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Directory to list (relative paths resolve to the agent workspace). Defaults to the workspace root." },
+                "pattern": { "type": "string", "description": "Optional wildcard filter (* and ?) matched against relative paths; when present the listing is recursive." }
+            }
+        })
+    }
+    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
+        self.run(args).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,5 +1022,110 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    // ---------------- file_list ----------------
+
+    #[test]
+    fn test_wildcard_match() {
+        assert!(wildcard_match("*.md", "README.md"));
+        assert!(wildcard_match("*.md", "a/b/NOTE.MD"), "大小写不敏感");
+        assert!(!wildcard_match("*.md", "README.txt"));
+        assert!(wildcard_match("SKILL.md", "skill.md"));
+        assert!(wildcard_match("file?.txt", "file1.txt"));
+        assert!(!wildcard_match("file?.txt", "file10.txt"));
+        assert!(wildcard_match("*", "anything/here"));
+        assert!(wildcard_match("a*b*c", "a-x-b-y-c"));
+        assert!(!wildcard_match("a*b*c", "a-x-y-c"));
+        assert!(wildcard_match("", ""));
+        assert!(!wildcard_match("", "x"));
+    }
+
+    #[tokio::test]
+    async fn test_file_list_basic_and_pattern() {
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        std::fs::write(ws_path.join("a.txt"), "hello").unwrap();
+        std::fs::create_dir_all(ws_path.join("sub/deep")).unwrap();
+        std::fs::write(ws_path.join("sub/b.md"), "x").unwrap();
+        std::fs::write(ws_path.join("sub/deep/c.md"), "yy").unwrap();
+        let tool = FileList::new(
+            Arc::new(RwLock::new(ws_path)),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+            None,
+        );
+
+        // 无 pattern：只列一层
+        let out = tool.execute(&json!({"path": "."}), "cli").await.unwrap();
+        assert!(out.contains("a.txt (5 B)"), "{out}");
+        assert!(out.contains("sub/"), "{out}");
+        assert!(!out.contains("b.md"), "无 pattern 不应递归: {out}");
+
+        // 有 pattern：递归 + 相对路径匹配
+        let out = tool
+            .execute(&json!({"path": ".", "pattern": "*.md"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains("sub/b.md"), "{out}");
+        assert!(out.contains("sub/deep/c.md (2 B)"), "{out}");
+        assert!(!out.contains("a.txt"), "{out}");
+
+        // 子目录
+        let out = tool.execute(&json!({"path": "sub"}), "cli").await.unwrap();
+        assert!(out.contains("deep/"), "{out}");
+        assert!(out.contains("b.md"), "{out}");
+
+        // 非目录 / 不存在 → 报错
+        assert!(tool
+            .execute(&json!({"path": "a.txt"}), "cli")
+            .await
+            .is_err());
+        assert!(tool.execute(&json!({"path": "nope"}), "cli").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_file_list_skills_dir_and_outside_rejected() {
+        let root = tempdir().unwrap();
+        let skills_dir = root.path().join("skills");
+        let skill_dir = skills_dir.join("demo");
+        std::fs::create_dir_all(skill_dir.join("ref")).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "body").unwrap();
+        std::fs::write(skill_dir.join("ref/data.json"), "{}").unwrap();
+
+        let tool = FileList::new(
+            Arc::new(RwLock::new(root.path().join("workspace"))),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+            Some(skills_dir.clone()),
+        );
+
+        // skills 目录可列（同 FileRead 放行口径），含子目录递归
+        let out = tool
+            .execute(
+                &json!({"path": skills_dir.join("demo").to_str().unwrap()}),
+                "cli",
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("SKILL.md"), "{out}");
+        assert!(out.contains("ref/"), "{out}");
+
+        let out = tool
+            .execute(
+                &json!({"path": skills_dir.join("demo").to_str().unwrap(), "pattern": "*.json"}),
+                "cli",
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("ref/data.json"), "{out}");
+
+        // skills 目录之外的界外路径仍拒绝
+        let outside = root.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let result = tool
+            .execute(&json!({"path": outside.to_str().unwrap()}), "cli")
+            .await;
+        assert!(result.is_err(), "界外目录列举必须拒绝");
     }
 }
