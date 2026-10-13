@@ -6,6 +6,26 @@
 
 ---
 
+## v0.6.1（未发版，交付至 2026-10-08）
+
+> 开发中积累段；发版时补日期与 release-notes。
+
+**Milestone**：安全模型落地（P9，[ADR-0033](adr/0033-security-model.md) 全部 Phase：L1 可恢复性基建 → 防泄露组合刀 → T2 部署级防线 → 闸门复审减法，2026-10-02 ADR 评审定案转 Accepted）+ 记忆卫生三档 + uploads 手动清理（H5）。
+
+**Features / security**
+- **snapshot**：**P9 Phase 1 · workspace 快照基建**（2026-10-05，`src/snapshot.rs`，[plan](plans/2026-10-05-p9-snapshot-and-env-scrub.md)）——时间戳镜像目录 + sha1 去重（`<config_dir>/snapshots/<时刻>/<key>`，零新依赖，弃 git-backed：外部 git 依赖与轻量单 exe 定位冲突）。A0/A2 写前留底双通道：写前挂钩（memory_write 双通路 / file 工具家目录人格文件 / `/memory-compact`，经 `ApprovalContext.snapshot` 与工具构造注入）+ 定时 sweep（10 分钟；sessions.db 用 `VACUUM INTO` 一致副本、`[runtime].snapshot_db_interval_hours` 节流默认 24h，防 WAL 活拷损坏与爆盘）；保留窗口 `[runtime].snapshot_retention_days`（默认 14 天）日清 GC；`snapshot_enabled` 总开关。**快照库对 agent 只读**：file/terminal 工具持 `snapshot_root` 硬拒（execute 与 execute_approved 同拒，堵 delegate/批准豁免绕行；`bash -s` stdin 内路径不可见属 L5 固有局限，硬边界归 Phase 3 T2）。恢复 = 从快照目录手工拷回
+- **security**：**P9 Phase 2 · env 变量密钥剔除**（2026-10-05，`src/child_env.rs` + `tools/terminal.rs::run_command` + `mcp/transport.rs::spawn_child`）——terminal/MCP 子进程 spawn 前剔除变量名含 `KEY`/`SECRET`/`TOKEN` 的继承变量（学 codex），`runtime.scrub_child_env`（默认 true）；mcp.toml `env` 段显式提供的键在白名单内不剔除，`StdioTransport` 持标志、reset 重连 respawn 同样生效。dotenvy 灌进进程 env 的 .env 凭据不再随一条 `env` 命令倒出
+- **security**：**P9 Phase 2 · 基础设施文件只读守卫**（2026-10-06，`path_guard::infra_readonly_target` + `GuardCtx::blocks_infra_write`，[plan](plans/2026-10-06-p9-phase2-batch2.md)）——config_dir 根的 config.toml / `.env`（A1 资产表成员）/ mcp.toml / trusted_dirs.json + 家目录 sessions.db（含 -wal/-shm）对 agent 只读，file/terminal 命中即 `[infra-guard]` 拒，execute 与 execute_approved 同拒（A1 直接拒不给人审被哄骗的机会）；`SnapshotCtx` 更名 `GuardCtx` 全 agent 注入（堵 delegate 拿子 agent 工具写主家基础设施的口），快照挂钩仍仅 main；cron.toml 刻意不守卫（cron_task 工具是特许通路，文件层硬拒只是挪形态）
+- **security**：**P9 Phase 2 · web_fetch 出站闸门（两道分离）**（2026-10-06，`tools/web.rs::ssrf_check` + `WebFetchGate` + `approval_decision` 前置判定）——SSRF 校验无条件常开（http/https scheme 白名单；私网/环回/链路本地/云元数据/ULA/IPv4-mapped 封锁；DNS 解析后逐 IP 复验）；域名允许清单 `[tools.web_fetch].allowed_domains` 只收紧非交互频道（cron/delegate/mail，未配置 = fail-closed 全拒，精确或子域匹配），判定放 delegate/yolo 早退**之前**（政策边界不吃 profile 豁免）；交互频道走 trusted_dirs 同款模式（首访新域名审批一次，`/ok` 后 `execute_approved` 持久化 `<config_dir>/web_domains.json`，子域匹配）；yolo 豁免交互域名审批、不豁免非交互 fail-closed；SSRF 连 execute_approved 都不豁免
+- **security**：**P9 Phase 2 · terminal 网络命令风险标记**（2026-10-06，`path_guard::NETWORK_COMMANDS` + `network_command_hit`）——curl/wget/nc/ssh/scp/sftp/rsync/socat/telnet/ftp + iwr 等命中时 audit 条目附 `reason=network=<prog>`（不拦截，留痕）；顺手收口既有缺口：`/ok` 批准执行路径此前完全不过 audit.log（`resolve_approval` 补写）
+- **security**：**P9 Phase 2 · 拒绝话术两原则**（2026-10-06，`path_guard::HARD_BOUNDARY_NOTICE`）——范围拒绝 / 危险黑名单 / shell 包装拒绝 / 审批非交互 Denied 文案统一追加 "hard policy boundary; do not attempt to work around it"，不含任何救济路径（审批**提示**文案的 `/ok` 指引不是拒绝，保持不变）
+- **privilege**：**P9 Phase 3 · 部署级 T2 受限进程落地**（2026-10-08，方案 A「部署手册 + doctor 自检」，[plan](plans/2026-10-08-p9-phase3-t2.md)）——[security-hardening.md](guide/security-hardening.md) T2 节扩为完整部署手册（Windows 专用账户 + schtasks/sc 服务化 + ACL 授予/敏感目录确认 + 验证清单；Linux useradd 系统账户 + systemd 加固 unit：NoNewPrivileges/ProtectSystem=strict/ReadWritePaths）；`src/privilege.rs` 零依赖提权探测（Windows whoami 完整性 SID / Unix id -u，探测失败降级 unknown）接入 `llaia doctor` 与 `/api/doctor` 的 `security.privilege` 检查（elevated → warn）。弃选方案留档 plan 文档
+- **security（复审）**：**P9 Phase 4 · 闸门复审减法**（2026-10-08，纯文档，[复审记录](plans/2026-10-08-p9-phase4-gate-review.md)）——判据 3 全量过 13 项闸门，**零删除、零代码降级**（每个残余缺口都有「无兜底」格子撑着对应闸门存在，准入看判据不凑减法 KPI）；交付两类叙事重定位（T3 定性「无意识操作人审点 + 审计信号」非边界 + T2 部署后 `interpret_inline = "off"` 摘除路径；catastrophic 黑名单降为提示层）+ Generation Guard 补归位 L5。T3 fork 定案：保留默认 approval（A），弃 audit 默认档（B）/删除（C）留档复审记录
+- **memory**：**记忆卫生三档**（A0 特许写入口的对症控制，[plan](plans/2026-10-06-memory-hygiene.md)）——**第 0 档 · 写入防重**（2026-10-06，`memory/hygiene.rs::normalize_entry`）：entry 归一化（小写 + 标点/符号/空白折叠，CJK 保留）后与现有行比对，已存在即返回 `already remembered` 不落盘，两条写通路（main 共享工具 + 实例路由）同接，纯函数零 LLM。**第 1 档 · 结构化压缩**（2026-10-06，`markdown.rs::compress_memory` 三段管线）：① 确定性预检——按 `- [YYYY-MM-DD] entry` 契约逐行解析，归一化重复直接合并（保留最早条目）不经 LLM，头部/注释与不合规行原样保留不进 LLM；② LLM 只做语义合并（输入输出均为条目列表，提示词明令禁止发明新条目）；③ 输出结构校验——每行匹配契约 + 可溯源到至少一条输入（归一化互含或字符二元组 Jaccard ≥ 0.3），违规**整体**拒绝，带原因重试一次仍败原文件保留并报错；签名变更 `compress_memory(..., budget: Option<usize>) -> Result<String>`。**自动触发**（2026-10-06，`cli.rs::build_single_agent` 后台任务）：MEMORY 超 ADR-0025 预算（chars/4）且非模板 → 后台压缩（GuardCtx 写前快照免交互审批；确定性去重达标即跳 LLM；每进程至多一次；仅 main，实例私有 MEMORY 不自动压），`/memory-compact` 保留为手动覆盖（恒走 LLM）
+- **webui**：**uploads 手动清理**（H5，2026-10-08）——`GET /api/uploads`（文件清单 + 容量 + mtime 排序）+ `DELETE /api/uploads/{name}`（逐个删除，`upload_name_or_err` 纯文件名校验防穿越），Config 页新增 Uploads section（列表 + 总容量 + 删除按钮）。**零自动回收是特性不是欠账**：消息历史引用这些路径，自动删/挪必断链（定案 grill 2026-09-07）
+
+---
+
 ## v0.6.0 (2026-09-28)
 
 **Milestone**：实例化架构（[ADR-0032](adr/0032-instance-architecture.md)）落地 + 模型目录重构（P8，配置 breaking、带加载期自动迁移）+ 进程内全量重载；原 v0.5.3 段（未单独发布）并入本版。
