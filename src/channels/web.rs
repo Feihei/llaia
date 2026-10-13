@@ -385,7 +385,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                         || lower.starts_with("/task ");
                                     if is_session_cmd {
                                         route_event(&tx, &inst_name, WebEvent::Side {
-                                            text: "[switch or create task instances from the rail on the left; /session is a CLI command]".into(),
+                                            text: "[switch or create task instances from the rail on the left (+ New to create); /session is a CLI command]".into(),
                                         }).await;
                                         continue;
                                     }

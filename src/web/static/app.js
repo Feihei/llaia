@@ -476,6 +476,30 @@ function llaiaApp() {
         this.scrollBottom();
       } catch (e) { /* 非致命：回放失败保持空聊天流 */ }
     },
+    // 新建任务实例：名字镜像后端 valid_instance_name（web.rs）做前端预检，
+    // 实际 spawn 复用 open 帧的按需通路（幂等，后端失败会回 Side 错误进桶）。
+    async createInstance() {
+      const name = (prompt('New task instance name (letters / digits / - _ .):') || '').trim();
+      if (!name) return;
+      if (name.length > 64 || name.startsWith('.') || /[/\\:*?"<>|]/.test(name)) {
+        alert('Invalid instance name: 1-64 chars, no path separators or leading dots');
+        return;
+      }
+      if (name === this.activeInstance) return;
+      this.activeInstance = name;
+      this.syncBusy();
+      if (!this.buckets[name]) this.buckets[name] = [];
+      if (this.wsOpen()) {
+        this.ws.send(JSON.stringify({ type: 'open', instance: name }));
+      }
+      // open 帧是 WS 异步处理，立即拉取可能赶在 spawn 落注册表之前：轻量重试等它出现
+      for (let i = 0; i < 8; i++) {
+        await this.loadInstances();
+        if (this.instances.some(x => x.name === name)) break;
+        await new Promise(r => setTimeout(r, 250));
+      }
+      this.scrollBottom();
+    },
 
     // ---- 会话历史（P5 W1） ----
     async switchSessions() {

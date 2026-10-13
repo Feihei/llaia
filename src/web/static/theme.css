@@ -155,6 +155,12 @@ option { background: var(--bg-input); color: var(--text); }
   color: var(--green-bright); font-size: 12px; letter-spacing: .5px;
   margin-bottom: 8px;
 }
+/* 新建任务实例：独占一行的全宽按钮，位于实例列表最上方 */
+#chat-pane .rail-new {
+  display: block; width: 100%;
+  margin-bottom: 8px; padding: 4px 0;
+  font-size: 12px; text-align: center; white-space: nowrap;
+}
 #chat-pane .session-rail-item {
   padding: 6px 8px; margin-bottom: 4px;
   border: 1px solid var(--border); border-left: 3px solid var(--border);
