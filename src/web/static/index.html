@@ -643,7 +643,9 @@
                         <select @change="const v = $event.target.value; addModelDraft.model = v; if (!addModelDraft.id.trim()) addModelDraft.id = v; $event.target.value = ''">
                           <option value="">— pick a probed model —</option>
                           <template x-for="pm in probeModels[addModelDraft.provider]" :key="pm.id">
-                            <option :value="pm.id" x-text="pm.id"></option>
+                            <option :value="pm.id"
+                                    :disabled="probeModelAdded(addModelDraft.provider, pm.id)"
+                                    x-text="pm.id + (probeModelAdded(addModelDraft.provider, pm.id) ? ' (added)' : '')"></option>
                           </template>
                         </select>
                       </div>

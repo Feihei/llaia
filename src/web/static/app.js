@@ -1480,13 +1480,22 @@ function llaiaApp() {
     },
     ttsModelRefs() { return this.kindModelRefs('tts'); },
     imageModelRefs() { return this.kindModelRefs('image'); },
+    // 该 provider 下是否已有 server model 相同的目录条目（probe 拾取下拉标灰防重复添加）
+    probeModelAdded(pid, serverModel) {
+      for (const id in this.cfg.model) {
+        const m = this.cfg.model[id];
+        if (m.provider === pid && m.model === serverModel) return true;
+      }
+      return false;
+    },
     addFallback(alias) {
       const ref = this.fallbackDraft[alias];
       if (!ref) return;
       const ag = this.cfg.agent[alias];
       if (!ag) return;
       if (!Array.isArray(ag.fallback)) ag.fallback = [];
-      if (!ag.fallback.includes(ref)) ag.fallback.push(ref);
+      // 逻辑层兜底（下拉已禁用主模型与既有条目，这里防 draft 残值等旁路）
+      if (ref !== ag.model && !ag.fallback.includes(ref)) ag.fallback.push(ref);
       this.fallbackDraft[alias] = '';
     },
     removeFallback(alias, i) {
