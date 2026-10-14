@@ -315,6 +315,36 @@ option { background: var(--bg-input); color: var(--text); }
   cursor: pointer; padding: 0 2px; font-size: 14px; line-height: 1;
 }
 #chat-pane .chip-x:hover { color: var(--red, #e05656); }
+/* Alpine：x-cloak 元素在组件初始化前藏身（队列条等条件渲染块防首帧闪现） */
+[x-cloak] { display: none !important; }
+/* turn 进行中的消息队列条（规格 §2，docs/specs/2026-10-14）：composer 上方一行，
+   绿调边框呼应 rail 活跃态；仅当前面板有队列项时显示 */
+#chat-pane .queue-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 6px 10px 0; padding: 5px 8px;
+  border: 1px solid var(--green-deep, #2a7a46);
+  border-left: 3px solid var(--green, #38e07b);
+  background: rgba(56, 224, 123, .06);
+  font-size: 12px; overflow: hidden;
+}
+#chat-pane .queue-flag { color: var(--green); flex: 0 0 auto; }
+#chat-pane .queue-imgs { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+#chat-pane .queue-chip { position: relative; display: inline-flex; }
+#chat-pane .queue-chip .chip-x { position: absolute; top: -2px; right: -2px; }
+#chat-pane .queue-more { color: var(--text-faint); }
+#chat-pane .queue-text {
+  flex: 1 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer;
+}
+#chat-pane .queue-text:hover { color: var(--cyan, #5ad4e6); text-decoration: underline dotted; }
+#chat-pane .queue-steer { flex: 0 0 auto; padding: 2px 10px; font-size: 12px; }
+#chat-pane .queue-ctl {
+  flex: 0 0 auto; border: none; background: none;
+  color: var(--text-dim); padding: 0 2px; font-size: 14px; line-height: 1;
+}
+#chat-pane .queue-ctl:hover { color: var(--green); }
+#chat-pane .queue-ctl:last-child:hover { color: var(--red, #e05656); }
 /* chat 内 tool 结果折叠（与 sessions 同款交互） */
 #chat-pane .tool-result { margin: 4px 0; padding-left: 6px; border-left: 1px dashed var(--border); }
 #chat-pane .tool-result-head { cursor: pointer; color: var(--green); font-size: 12px; user-select: none; }

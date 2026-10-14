@@ -219,13 +219,36 @@
           </div>
         </template>
       </div>
+      <div class="queue-row" x-show="queue" x-cloak>
+        <!-- 队列消息（规格 §2）：turn 结束自动发送；图可逐张删（删光才出 Steer）；
+             点文字/↺ 取回草稿，✕ 丢弃。x-cloak 防刷新瞬间闪现 -->
+        <span class="queue-flag" title="Queued — sends automatically when the turn ends">&#10227;</span>
+        <template x-if="queue && queue.images && queue.images.length">
+          <span class="queue-imgs">
+            <template x-for="(p, i) in (queue.images.slice(0, 3))" :key="p">
+              <span class="queue-chip">
+                <img class="chip-thumb" :src="fileUrl(p)" alt="">
+                <button class="chip-x" @click="queue.images.splice(i, 1); persistQueue()" title="Remove image">×</button>
+              </span>
+            </template>
+            <span class="queue-more" x-show="queue.images.length > 3" x-text="'+' + (queue.images.length - 3)"></span>
+          </span>
+        </template>
+        <span class="queue-text" @click="dequeueToDraft(activeInstance)" :title="queue ? queue.text : ''"
+              x-text="queue && queue.text ? queue.text : (queue && queue.images && queue.images.length ? '(images only)' : '')"></span>
+        <button class="queue-steer" x-show="queue && queue.text.trim() && !(queue.images && queue.images.length)"
+                @click="steerQueue()" title="Insert into the running turn now">Steer</button>
+        <button class="queue-ctl" @click="dequeueToDraft(activeInstance)" title="Take back to input">&#8634;</button>
+        <button class="queue-ctl" @click="setQueue(activeInstance, null)" title="Discard">&times;</button>
+      </div>
       <div class="composer">
         <!-- 原生 file input 会常显「Choose File + 文件名」，与下方待发芯片行重复：
              隐藏它，附件入口改成输入框左侧的 [+]（点它才开选择器） -->
         <input type="file" accept="image/*" multiple @change="onUpload($event)" x-ref="fileInput" hidden>
         <button class="attach" @click="$refs.fileInput.click()" title="Attach images">+</button>
-        <input type="text" x-model="inputText" @keydown.enter="send()" :placeholder="busy ? 'Type steer message or stop...' : 'Type a message...'">
-        <button @click="send()" x-text="busy ? 'Steer' : 'Send'">Send</button>
+        <input type="text" x-model="inputText" @keydown.enter="send()"
+               :placeholder="queue ? 'Queued — edit your draft...' : (busy ? 'Type a message, it will queue...' : 'Type a message...')">
+        <button @click="send()" :disabled="sendDisabled">Send</button>
         <button @click="stop()" :disabled="!busy">Stop</button>
       </div>
       <div class="upload-row" x-show="uploaded.length">

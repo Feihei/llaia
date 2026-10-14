@@ -29,7 +29,6 @@ WebUI 聊天在 turn 进行中，发送按钮会变成 Steer，输入的消息�
 
 ```js
 perQueue: {},      // 实例名 → { text, images: [path...], ts }，每实例最多 1 条
-stopIntent: {},    // 实例名 → bool：本回合是否由 Stop 终止
 // 派生：queue = perQueue[activeInstance] || null
 // Send 置灰 = 队列占用 || 无内容（busy 只影响行为入口，不参与禁用判定）
 ```
@@ -52,7 +51,7 @@ stopIntent: {},    // 实例名 → bool：本回合是否由 Stop 终止
    输入框草稿（Send 恢复可用，可重新入队）
 ```
 
-**done 归因**：`done` 事件不带原因，前端在 `stop()` 被调用时给对应实例置 `stopIntent[inst]=true`，收到该实例 `done` 时读取并复位。无 Stop 意图 → 自动发送；有 → 取回输入框（仅当该实例是当前面板；跨面板时留在队列不动——此时按钮非 Stop，用户按的 Stop 只作用于当时面板，语义待实现时与现状 `stop()` 目标实例对齐）。
+**done 归因（实现修订）**：`done` 事件本身不带原因，但 web 通道的三个终态事件——`done` / `interrupted` / `error`——类型即归因：Stop（按钮与 `/stop` 同路）终态发 `interrupted`，干净结束发 `done`。因此原方案的 `stopIntent` 标记整个不需要，`done` 分支按事件类型分发：`done` → 自动发送、`interrupted` → 取回输入框、`error` → 队列原样停住等用户处理。
 
 **send() 行为矩阵（busy 下）**：
 
@@ -90,7 +89,7 @@ stopIntent: {},    // 实例名 → bool：本回合是否由 Stop 终止
 - placeholder 三态：`"Type a message..."`（空闲）/ `"Queued — edit your draft..."`（busy+占用）/ `"Type a message, it will queue..."`（busy+空闲）
 - Stop 恒可用
 
-- **auto-send 触发点**：`case 'done'`（按实例落 `perBusy` 处）追加：该实例队列非空 → stopIntent 真 → 取回（仅该实例是当前面板时写入输入框，否则留队列等切面板补查）；假 → 队列项当普通消息发出（与面板无关，任何实例的队列在它的 done 到达时都自动发送）。
+- **auto-send 触发点**：`case 'done'/'interrupted'/'error'`（按实例落 `perBusy` 处）分发 `resolveQueueOnDone(inst, ev.type)`：`done` → 自动发送（与面板无关）；`interrupted` → 取回（仅当前面板写入输入框，否则留队列等切面板补查）；`error` → 队列不动。
 
 取回与取回草稿合并规则：输入框已有草稿时追加换行合并（不丢字）。
 
@@ -110,7 +109,7 @@ stopIntent: {},    // 实例名 → bool：本回合是否由 Stop 终止
 **Rust 自动化**（沿用 `test_static_assets_embedded_up_to_date` 字符串断言，防嵌入资源过期）：
 
 - `index.html` 含 `queue-row` 队列条标记与队列 Steer 按钮
-- `app.js` 含 `perQueue`、`stopIntent`、`llaia.msgQueue`、`loadInstances` busy 回填标记
+- `app.js` 含 `perQueue`、`steerQueue`、`llaia.msgQueue`、`loadInstances` busy 回填标记
 
 **手动验收清单**：
 

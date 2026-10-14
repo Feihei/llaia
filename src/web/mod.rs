@@ -3334,6 +3334,16 @@ model = "qwen"
                 && js.contains("routingInstance"),
             "app.js missing instance bucket/routing logic (stale embed?)"
         );
+        // 消息队列（docs/specs/2026-10-14-message-queue-design.md）：turn 进行中
+        // Send 入队 + 队列条自动发送/steer 通路必须随嵌入资源更新
+        assert!(
+            js.contains("perQueue") && js.contains("steerQueue") && js.contains("llaia.msgQueue"),
+            "app.js missing message-queue logic (stale embed?)"
+        );
+        assert!(
+            idx.contains("queue-row") && idx.contains("steerQueue"),
+            "index.html missing queue row markup (stale embed?)"
+        );
 
         let css = StaticAsset::get("theme.css")
             .expect("theme.css embedded")

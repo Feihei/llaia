@@ -25,6 +25,8 @@ function llaiaApp() {
     routingInstance: null, // WS 事件派发中的目标桶名（后台实例事件不顶掉当前面板）
     instances: [],         // /api/instances：rail 数据（活跃实例 + dormant 任务线）
     perBusy: {},           // instance 名 → turn 是否在跑；busy 是当前面板的投影
+    // turn 进行中的消息队列（每实例最多 1 条；设计见 docs/specs/2026-10-14-message-queue-design.md）
+    perQueue: {},          // instance 名 → { text, images:[path], ts }：待 turn 结束自动发送的排队消息
     // 聊天历史是否已回放过（restoreChat 的幂等标记）。
     // 不能用 messages.length 代替：审批卡片可能先于回放落进消息流（WS 事件/刷新恢复），
     // 那样会误判成"已回放"，整个历史就再也不回放了。
@@ -39,6 +41,10 @@ function llaiaApp() {
     },
     // WS 未就绪时的待发送帧队列（连上按序补发，见 flushOutbox）
     outbox: [],
+    // ---- 消息队列派生态（docs/specs/2026-10-14-message-queue-design.md）----
+    get queue() { return this.perQueue[this.activeInstance] || null; },
+    // Send 置灰 = 队列占用 || 无内容；busy 只决定点击走入队还是直发，不参与禁用判定
+    get sendDisabled() { return !!(this.perQueue[this.activeInstance]) || (!this.inputText.trim() && this.uploaded.length === 0); },
     // todo (ADR-0024, read-only display; v1 no click-to-toggle from UI)
     todos: [],
     // 环境探测（P6，只读展示）
@@ -210,6 +216,8 @@ function llaiaApp() {
     async init() {
       // 标记已成功进入初始化，供 index.html 的启动失败兜底检测使用
       window.__llaiaBooted = true;
+      // 消息队列：刷新后从 localStorage 恢复（busy 回填见 loadInstances）
+      this.restoreQueue();
       // prefer URL query token, then localStorage
       const urlParams = new URLSearchParams(location.search);
       const urlToken = urlParams.get('token');
@@ -444,6 +452,25 @@ function llaiaApp() {
         if (!r.ok) return;
         const j = await r.json();
         this.instances = j.instances || [];
+        // busy 回填（规格 §3.1）：刷新/断线丢掉的 perBusy 以服务端为准——否则恢复的
+        // 队列永远等不到自己的 done。turn 已结束且队列非空 → 取回输入框当草稿
+        // （「turn 没在跑就不存在排队理由」），不补发（done 已错过）。
+        for (const it of this.instances) {
+          const was = this.perBusy[it.name];
+          this.perBusy[it.name] = it.busy;
+          if (was === undefined && !it.busy && this.perQueue[it.name]) {
+            if (it.name === this.activeInstance) this.dequeueToDraft(it.name);
+            // 后台实例留队列，切到该面板时由 switchInstance 补查取回
+          }
+        }
+        this.syncBusy();
+        // rail 上已消失的实例：孤儿队列键静默丢弃（规格 §3.5）
+        const seen = new Set(this.instances.map(i => i.name));
+        let pruned = false;
+        for (const k of Object.keys(this.perQueue)) {
+          if (!seen.has(k)) { delete this.perQueue[k]; pruned = true; }
+        }
+        if (pruned) this.persistQueue();
       } catch (e) { /* 非致命：rail 保持上次内容 */ }
     },
     syncBusy() { this.busy = !!this.perBusy[this.activeInstance]; },
@@ -460,6 +487,8 @@ function llaiaApp() {
       if ((this.buckets[name] || []).length === 0 && inst && inst.session_uuid) {
         await this.restoreInstanceChat(name, inst.session_uuid);
       }
+      // 队列补查（规格 §1）：切到「队列存在但已不在跑」的面板 → 立即取回输入框
+      if (this.perQueue[name] && !this.perBusy[name]) this.dequeueToDraft(name);
       this.scrollBottom();
     },
     async restoreInstanceChat(name, uuid) {
@@ -734,6 +763,9 @@ function llaiaApp() {
           this.flushOutbox();
           // 重连后补一次审批/问题卡片状态（断线期间注册/解析的 pending 不会重放）
           if (this.chatLoaded) { this.loadApprovals(); this.loadQuestions(); }
+          // busy 回填：turn 可能在断线期间结束、done 已丢失——不回填的话恢复的
+          // 队列会永远等一个不会来的 done（规格 §3.2）
+          this.loadInstances();
           break;
         case 'auth_failed':
           this.forceLogin('WebSocket authentication failed, check token');
@@ -814,6 +846,8 @@ function llaiaApp() {
           // 终态落目标实例的 busy；busy 是当前面板的投影，后台实例结束不惊动当前面板
           this.perBusy[inst] = false;
           if (inst === this.activeInstance) this.busy = false;
+          // 消息队列（规格 §1）：done=自动发送、interrupted=取回输入框、error=原样停住
+          this.resolveQueueOnDone(inst, ev.type);
           // 流式结束：所有 assistant 消息退出流式态（思考块从自动展开切回折叠）
           this.messages.forEach(m => { if (m.role === 'assistant') m.streaming = false; });
           if (ev.type === 'error') this.messages.push({ role: 'tool', text: `[error: ${ev.message}]` });
@@ -841,7 +875,87 @@ function llaiaApp() {
     wsOpen() { return !!(this.ws && this.ws.readyState === WebSocket.OPEN); },
     // 统一的文件 URL：/file 的作用域含 agent 家目录，uploads/ 产物恒可取回
     fileUrl(p) { return '/file?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(this.token); },
-    // 排队而不是丢弃：socket 未就绪（页面刚打开还在握手、或服务端刚重启）时把帧存进
+    // ---- 消息队列动作（入队/steer/丢弃/取回/自动发送）----
+    // localStorage 镜像：perQueue 每次变更落盘，刷新后启动恢复。
+    // 不监听 storage 事件——多标签页后写覆盖先写，不做互斥（规格 §3.3）。
+    persistQueue() {
+      try { localStorage.setItem('llaia.msgQueue', JSON.stringify(this.perQueue)); } catch (e) { /* 配额满/隐私模式：降级为仅内存 */ }
+    },
+    restoreQueue() {
+      try {
+        const raw = localStorage.getItem('llaia.msgQueue');
+        if (raw) this.perQueue = JSON.parse(raw) || {};
+      } catch (e) { this.perQueue = {}; }
+    },
+    setQueue(inst, item) {
+      if (item) this.perQueue[inst] = item; else delete this.perQueue[inst];
+      this.persistQueue();
+    },
+    // turn 进行中 Send：文本+图整体入队（清空输入框与芯片区），显示在输入框上方
+    enqueueCurrent() {
+      this.setQueue(this.activeInstance, {
+        text: this.inputText.trim(),
+        images: this.uploaded.map(u => u.path),
+        ts: Date.now(),
+      });
+      this.inputText = '';
+      this.uploaded = [];
+      this.scrollBottom();
+    },
+    // 取回：队列项整体回输入框（图回芯片区）。已有草稿时换行合并，不丢字。
+    dequeueToDraft(inst) {
+      const item = this.perQueue[inst];
+      if (!item) return;
+      this.setQueue(inst, null);
+      this.inputText = this.inputText ? this.inputText + '\n' + item.text : item.text;
+      // 图仅在目标恰为当前面板时才进芯片区（芯片区无分桶，跨面板塞会串台）
+      if (inst === this.activeInstance && item.images && item.images.length) {
+        for (const p of item.images) this.uploaded.push({ path: p });
+      }
+      this.scrollBottom();
+    },
+    // Steer 按钮：插话进当前 turn（复用 busy 发送通路），队列即刻腾空。
+    // 断线时走 outbox 补发；不回显对话流——回执由后端 Side 消息呈现。
+    steerQueue() {
+      const inst = this.activeInstance;
+      const item = this.perQueue[inst];
+      if (!item || !item.text.trim() || (item.images && item.images.length)) return;
+      const payload = item.text.toLowerCase().startsWith('/steer') ? item.text : '/steer ' + item.text;
+      const frame = { type: 'chat', text: payload, instance: inst };
+      this.setQueue(inst, null);
+      if (this.wsOpen()) this.ws.send(JSON.stringify(frame));
+      else this.queueFrame(frame, null);
+    },
+    // done 归因分发——事件类型即归因（web.rs 三终态：done/interrupted/error）：
+    //   done        → 干净结束，队列项当普通消息自动发出（带图，与面板无关）
+    //   interrupted → 用户 Stop，队列取回输入框（仅当前面板；后台实例留队列，切面板补查）
+    //   error       → 解释性出错，队列原样停着等用户处理
+    resolveQueueOnDone(inst, evType) {
+      const item = this.perQueue[inst];
+      if (!item) return;
+      if (evType === 'interrupted') {
+        if (inst === this.activeInstance) this.dequeueToDraft(inst);
+        return;
+      }
+      if (evType === 'done') this.sendQueued(inst, item);
+    },
+    sendQueued(inst, item) {
+      this.setQueue(inst, null);
+      const imgs = item.images || [];
+      const frame = { type: 'chat', text: item.text, images: imgs, instance: inst };
+      const bubble = { role: 'user', text: item.text, images: imgs };
+      if (this.wsOpen()) {
+        this.ws.send(JSON.stringify(frame));
+        // 自动发送立新 turn：以目标实例为准落 busy（面板可能不是它）
+        this.perBusy[inst] = true;
+        if (inst === this.activeInstance) this.syncBusy();
+        // 气泡直接进目标实例的桶（不经 messages getter，免与派发路由串桶）
+        (this.buckets[inst] || (this.buckets[inst] = [])).push(bubble);
+      } else {
+        // queueFrame 的 bubble 落当前面板桶：跨面板时不传，气泡只进目标桶
+        this.queueFrame(frame, inst === this.activeInstance ? bubble : null);
+      }
+    },
     // outbox，连上后按序补发。原实现只是回一句「没连上」，等于把竞态转嫁给用户——
     // 实测用户第一次 Send 被拒、原样再按一次才发出去。
     queueFrame(frame, bubble) {
@@ -883,23 +997,12 @@ function llaiaApp() {
         this.stop();
         return;
       }
-      // turn 运行中：Send 按钮即 Steer（标签已切换），输入以 /steer 投递进插话队列
-      // （后端 web.rs 原生支持）。末轮残留的 steer 由后端丢弃并回显提示（plan.md #I ③）。
+      // 队列占用：按钮已置灰，这里兜底拦 Enter 直呼——无操作（规格 §1 矩阵：只能改队列项）
+      if (this.perQueue[inst]) return;
+      // turn 进行中：Send 即入队（规格 §1）——消息显示在输入框上方的队列条，
+      // 等 turn 干净结束（done）自动作为普通消息发出；要立即插话用队列条上的 Steer。
       if (this.busy) {
-        if (this.uploaded.length) {
-          // steer 帧只带文本：图片必须留在芯片里，绝不静默丢掉用户选好的附件
-          this.messages.push({ role: 'tool', text: '[not sent] a running turn only takes text — your images are still attached; wait for it to finish or press Stop.' });
-        }
-        const payload = lc.startsWith('/steer') ? text : '/steer ' + text;
-        const frame = { type: 'chat', text: payload, instance: inst };
-        this.inputText = '';
-        if (this.wsOpen()) {
-          this.ws.send(JSON.stringify(frame));
-          this.messages.push({ role: 'user', text });
-        } else {
-          this.queueFrame(frame, { role: 'user', text });
-        }
-        this.scrollBottom();
+        this.enqueueCurrent();
         return;
       }
       const imgs = this.uploaded.map(u => u.path);
