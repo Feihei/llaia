@@ -1,6 +1,7 @@
 use crate::provider::{
     compat::{Compat, MaxTokensField},
-    ChatRequest, ChatResponse, MessageContent, Provider, Role, StreamEvent, ToolCall, Usage,
+    schema_sanitize, ChatRequest, ChatResponse, MessageContent, Provider, Role, StreamEvent,
+    ToolCall, Usage,
 };
 use anyhow::{anyhow, Result};
 use async_stream::try_stream;
@@ -289,7 +290,9 @@ impl Provider for OpenAiCompatibleProvider {
                         function: OpenAiFunctionSpec {
                             name: t.name.clone(),
                             description: t.description.clone(),
-                            parameters: t.parameters.clone(),
+                            // llama.cpp 等 grammar 编译端点只认根部 $defs；嵌套
+                            // $defs（openCadStudio 等 MCP）会请求级 500，发送前内联。
+                            parameters: schema_sanitize::sanitize_tool_schema(&t.parameters),
                         },
                     })
                     .collect()
