@@ -1,7 +1,7 @@
 use crate::agent::approval::{format_move_prompt, validate_move_target, PendingKind};
 use crate::agent::Agent;
 use crate::agent::AgentRegistry;
-use crate::config::Config;
+use crate::config::{Config, ModelKind};
 use crate::memory::markdown::compress_memory;
 use crate::provider::{ChatMessage, ChatRequest, Role};
 use anyhow::Result;
@@ -1276,14 +1276,15 @@ pub fn split_steer(line: &str) -> Option<&str> {
     Some(&trimmed[trimmed.len() - rest.len()..])
 }
 
-/// 把模型目录中所有**已启用**的条目 id 排序成列表，作为 `/provider <序号>` 的索引基准。
-/// `enabled = false` 的模型不进列表也不占序号（`enabled` 只管可发现性）；显式写
-/// `/provider <model_id>` 仍可切换，见 `model_from_ref`。
+/// 把模型目录中所有**已启用**的 **chat** 条目 id 排序成列表，作为 `/provider <序号>` 的索引基准。
+/// `enabled = false` 的模型不进列表也不占序号（`enabled` 只管可发现性）；非 chat 条目
+/// （tts/image）不可作为对话模型，同样不进列表。显式写 `/provider <model_id>` 仍可切换，
+/// 见 `model_from_ref`。
 pub fn flatten_model_refs(config: &Config) -> Vec<String> {
     let mut ids: Vec<&String> = config
         .models
         .iter()
-        .filter(|(_, m)| m.enabled)
+        .filter(|(_, m)| m.enabled && m.kind == ModelKind::Chat)
         .map(|(id, _)| id)
         .collect();
     ids.sort();
@@ -1831,6 +1832,16 @@ mod tests {
         let mut cfg = test_config();
         cfg.models.get_mut("big").unwrap().enabled = false;
         assert_eq!(flatten_model_refs(&cfg), vec!["qwen", "small"]);
+    }
+
+    #[test]
+    fn test_flatten_model_refs_only_chat() {
+        // tts/image 条目不可作为对话模型，不进列表、不占序号
+        let mut cfg = test_config();
+        let mut entry = cfg.models.get("small").unwrap().clone();
+        entry.kind = crate::config::ModelKind::Tts;
+        cfg.models.insert("speaker".into(), entry);
+        assert_eq!(flatten_model_refs(&cfg), vec!["big", "qwen", "small"]);
     }
 
     #[tokio::test]
