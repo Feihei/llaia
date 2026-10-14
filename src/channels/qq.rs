@@ -1326,7 +1326,7 @@ impl QqChannel {
             buffer: String::new(),
             tool_names: Vec::new(),
             notified_tools: false,
-            approval_ids: Vec::new(),
+            approval_items: Vec::new(),
         });
 
         registry.set_delivery(
@@ -1452,7 +1452,7 @@ impl QqChannel {
                     buffer: String::new(),
                     tool_names: Vec::new(),
                     notified_tools: false,
-                    approval_ids: Vec::new(),
+                    approval_items: Vec::new(),
                 });
                 registry.set_delivery(
                     self.clone()
@@ -1561,9 +1561,10 @@ struct QqSink {
     tool_names: Vec<String>,
     /// 是否已发过工具通知（每回合最多一条）
     notified_tools: bool,
-    /// 本回合注册的待审批 id（on_approval_request 收集）；
-    /// on_done 时第一条消息附「通过/拒绝」按钮键盘
-    approval_ids: Vec<String>,
+    /// 本回合注册的待审批 (id, tool_name)（on_approval_request 收集）；
+    /// on_done 时每个审批单独发一条带按钮的消息（多个审批挤同一条消息
+    /// 会导致第二个按钮的 ack 被第一个审批续跑的 turn 阻塞）
+    approval_items: Vec<(String, String)>,
 }
 
 #[async_trait]
@@ -1618,11 +1619,12 @@ impl OutputSink for QqSink {
                 .await;
         }
     }
-    // 待审批注册：记录 id，on_done 时附按钮键盘（runner 只在 NeedsApproval 分支发送）；
-    // 同时把本回合锚点（原用户消息 msg_id）登记给按钮点击续跑用。
-    // 工具名/摘要只服务于 WebUI 卡片，QQ 只用 id。
+    // 待审批注册：记录 id 与工具名，on_done 时逐个发独立按钮消息（runner 只在
+    // NeedsApproval 分支发送）；同时把本回合锚点（原用户消息 msg_id）登记给
+    // 按钮点击续跑用。摘要只服务于 WebUI 卡片，QQ 用 id + 工具名。
     async fn on_approval_request(&mut self, req: &crate::agent::sink::ApprovalRequest<'_>) {
-        self.approval_ids.push(req.id.to_string());
+        self.approval_items
+            .push((req.id.to_string(), req.tool_name.to_string()));
         self.qq
             .remember_approval_anchor(req.id, self.anchor.clone())
             .await;
@@ -1677,30 +1679,43 @@ impl OutputSink for QqSink {
             total_len = reply.len(),
             "sending reply"
         );
-        // 审批键盘：本回合有 NeedsApproval 注册时，第一条消息附「通过/拒绝」按钮。
-        // 键盘 permission=所有人可点（iOS 对 specify_user_ids 本地拦截），点击者身份
-        // 由 handle_interaction 的服务端 owner 校验兜底，无需在此解析 owner。
-        let keyboard = if self.approval_ids.is_empty() {
-            None
-        } else {
-            Some(approval_keyboard(&self.approval_ids))
-        };
         for (i, chunk) in chunks.iter().enumerate() {
             if chunk.trim().is_empty() {
                 continue;
             }
-            // 只有第一片带锚点（被动回复）+ 按钮，后续片用主动消息
-            let (anchor, kb) = if i == 0 {
-                (Some(&self.anchor), keyboard.as_ref())
-            } else {
-                (None, None)
-            };
+            // 只有第一片带锚点（被动回复），后续片用主动消息
+            let anchor = if i == 0 { Some(&self.anchor) } else { None };
             if let Err(e) = self
                 .qq
-                .send_c2c_anchored(&self.user_openid, chunk, anchor, kb)
+                .send_c2c_anchored(&self.user_openid, chunk, anchor, None)
                 .await
             {
                 tracing::error!(error = %e, chunk = i, "failed to send chunk after retries");
+            }
+        }
+        // 审批键盘：每个待审批单独发一条消息（键盘只挂单行），多个审批不再
+        // 挤同一条消息——拆开后第二个按钮的点击不会被第一个审批续跑的 turn
+        // 拖住 ack 时限。带键盘必须走 msg_type=2 markdown（send_c2c_anchored
+        // 内部处理），锚点沿用本回合被动回复（键盘渲染的已验证通路，msg_seq
+        // 随发送自增）。键盘 permission=所有人可点（iOS 对 specify_user_ids
+        // 本地拦截），点击者身份由 handle_interaction 的服务端 owner 校验兜底。
+        let total = self.approval_items.len();
+        for (i, (id, tool_name)) in self.approval_items.iter().enumerate() {
+            // 文本带 id：按钮降级/丢失时 /ok /deny 文本命令仍可用
+            let text = format!(
+                "🔐 approval needed ({}/{}): `{}` (id={})",
+                i + 1,
+                total,
+                tool_name,
+                id
+            );
+            let kb = approval_keyboard(std::slice::from_ref(id));
+            if let Err(e) = self
+                .qq
+                .send_c2c_anchored(&self.user_openid, &text, Some(&self.anchor), Some(&kb))
+                .await
+            {
+                tracing::error!(error = %e, approval = %id, "failed to send approval message");
             }
         }
     }
