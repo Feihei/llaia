@@ -187,9 +187,19 @@ option { background: var(--bg-input); color: var(--text); }
   background: var(--bg-panel);
 }
 #chat-pane .side-panel .todo-panel { margin: 0 0 10px; }
+/* 左栏拖拽调宽手柄：透明热区压在 rail 右缘，hover 提示可拖（钳制在 startRailResize） */
+#chat-pane .rail-resizer {
+  flex: 0 0 6px; cursor: col-resize;
+  background: transparent;
+}
+#chat-pane .rail-resizer:hover, body.rail-resizing #chat-pane .rail-resizer {
+  background: rgba(56, 224, 123, .25);
+}
+body.rail-resizing { cursor: col-resize; user-select: none; }
 /* 窄屏回退：两个侧栏折到消息流上/下方，限高防挤压 */
 @media (max-width: 900px) {
   #chat-pane .chat-layout { flex-direction: column; }
+  #chat-pane .rail-resizer { display: none; }
   #chat-pane .session-rail {
     flex: none; width: auto; max-height: 160px;
     border-right: none; border-bottom: 1px solid var(--border-bright);

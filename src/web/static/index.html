@@ -85,7 +85,7 @@
         <!-- 左侧栏：实例 rail（ADR-0032 T7）。main 置顶（后端 list 已保证），
              点击切换面板；dormant 任务线点击即发 open 帧唤醒（按需 spawn，幂等）。
              每个实例独立消息桶与并行 turn，互不阻塞 -->
-        <aside class="session-rail">
+        <aside class="session-rail" x-ref="rail">
           <div class="session-rail-head">&#x276F; INSTANCES <button class="inline-add" @click="loadInstances()">Refresh</button></div>
           <button class="rail-new" @click="createInstance()">+ New Instance</button>
           <template x-for="it in instances" :key="it.name">
@@ -100,6 +100,8 @@
           <div class="hint" x-show="instances.length === 0">No instances loaded — press Refresh.</div>
           <div class="hint">Pick an instance to chat in parallel; a dormant line wakes on first message. + New creates a task instance.</div>
         </aside>
+        <!-- 拖拽调宽手柄：钳制范围见 startRailResize（140–420px），窄屏 CSS 隐藏 -->
+        <div class="rail-resizer" @mousedown="startRailResize($event)" title="Drag to resize"></div>
         <div class="chat-main">
       <div class="messages" x-ref="messages">
         <template x-for="(m, i) in messages" :key="i">

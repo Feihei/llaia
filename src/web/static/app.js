@@ -220,6 +220,17 @@ function llaiaApp() {
       window.__llaiaBooted = true;
       // 消息队列：刷新后从 localStorage 恢复（busy 回填见 loadInstances）
       this.restoreQueue();
+      // 左栏宽度记忆：拖拽调整（startRailResize），钳制 140–420px。
+      // refs 在 init 时点未保证就绪，nextTick 后再取
+      this.$nextTick(() => {
+        try {
+          const w = parseInt(localStorage.getItem('llaia_rail_width'), 10);
+          if (w >= 140 && w <= 420 && this.$refs.rail) {
+            this.$refs.rail.style.flex = `0 0 ${w}px`;
+            this.$refs.rail.style.width = `${w}px`;
+          }
+        } catch (_) {}
+      });
       // prefer URL query token, then localStorage
       const urlParams = new URLSearchParams(location.search);
       const urlToken = urlParams.get('token');
@@ -469,7 +480,7 @@ function llaiaApp() {
           else if (m.role === 'tool' && m.content) this.messages.push({ role: 'tool', text: 'tool', output: m.content });
         }
         this.chatLoaded = true;
-        this.scrollBottom();
+        this.scrollBottom(true);
       } catch (e) { /* 非致命：回放失败保持空聊天流 */ }
     },
     // ---- 实例 rail（ADR-0032 T7）：注册实例 + dormant 任务线，点击切换面板 ----
@@ -523,7 +534,7 @@ function llaiaApp() {
       }
       // 队列补查（规格 §1）：切到「队列存在但已不在跑」的面板 → 立即取回输入框
       if (this.perQueue[name] && !this.perBusy[name]) this.dequeueToDraft(name);
-      this.scrollBottom();
+      this.scrollBottom(true);
     },
     async restoreInstanceChat(name, uuid) {
       try {
@@ -536,7 +547,7 @@ function llaiaApp() {
           else if (m.role === 'assistant') b.push({ role: 'assistant', text: m.content, reasoning: m.reasoning_content || '', tool_calls: m.tool_calls || [], streaming: false });
           else if (m.role === 'tool' && m.content) b.push({ role: 'tool', text: 'tool', output: m.content });
         }
-        this.scrollBottom();
+        this.scrollBottom(true);
       } catch (e) { /* 非致命：回放失败保持空聊天流 */ }
     },
     // 新建任务实例：名字镜像后端 valid_instance_name（web.rs）做前端预检，
@@ -561,7 +572,7 @@ function llaiaApp() {
         if (this.instances.some(x => x.name === name)) break;
         await new Promise(r => setTimeout(r, 250));
       }
-      this.scrollBottom();
+      this.scrollBottom(true);
     },
 
     // ---- 会话历史（P5 W1） ----
@@ -1077,7 +1088,7 @@ function llaiaApp() {
       } else {
         this.queueFrame(frame, bubble);
       }
-      this.scrollBottom();
+      this.scrollBottom(true);
     },
     stop() {
       const frame = { type: 'stop', instance: this.activeInstance };
@@ -1112,10 +1123,42 @@ function llaiaApp() {
         return html;
       } catch { return text; }
     },
-    scrollBottom() {
+    scrollBottom(force) {
       // 后台实例的事件正在派发：滚的是当前可见面板，别被后台桶的节奏带走
       if (this.routingInstance && this.routingInstance !== this.activeInstance) return;
-      this.$nextTick(() => { const el = this.$refs.messages; if (el) el.scrollTop = el.scrollHeight; });
+      this.$nextTick(() => {
+        const el = this.$refs.messages;
+        if (!el) return;
+        // sticky bottom：用户上翻阅读时不抢滚动条，仅贴近底部（≤80px）或显式强制才跟随。
+        // 否则流式 chunk 与 5s 审批对账轮询都会把视口拽回底部，无法回看历史。
+        if (!force && el.scrollHeight - el.scrollTop - el.clientHeight > 80) return;
+        el.scrollTop = el.scrollHeight;
+      });
+    },
+
+    // 左栏拖拽调宽：钳制 140–420px，松手持久化到 localStorage（init 恢复）
+    startRailResize(e) {
+      e.preventDefault();
+      const rail = this.$refs.rail;
+      if (!rail) return;
+      const MIN = 140, MAX = 420;
+      const startX = e.clientX;
+      const startW = rail.getBoundingClientRect().width;
+      const move = (ev) => {
+        const w = Math.min(MAX, Math.max(MIN, startW + (ev.clientX - startX)));
+        rail.style.flex = `0 0 ${w}px`;
+        rail.style.width = `${w}px`;
+      };
+      const up = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+        document.body.classList.remove('rail-resizing');
+        try { localStorage.setItem('llaia_rail_width', String(rail.getBoundingClientRect().width)); } catch (_) {}
+      };
+      // 拖拽期间禁止文本选中，光标全程保持 col-resize
+      document.body.classList.add('rail-resizing');
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
     },
 
     // ---- config ----
