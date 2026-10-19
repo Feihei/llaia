@@ -635,7 +635,8 @@ const FILE_GREP_MAX_LINE_CHARS: usize = 300;
 /// 递归深度上限（同 file_list）
 const FILE_GREP_MAX_DEPTH: usize = 8;
 
-/// 已知构建产物/依赖目录：搜索默认跳过（rg 尊重 .gitignore 的廉价近似）
+/// 已知构建产物/依赖目录：搜索默认跳过（rg 尊重 .gitignore 的廉价近似）。
+/// SKIP_PREFIXES 是前缀匹配（实测 .venv-ii 这类带后缀的虚拟环境目录）。
 const FILE_GREP_SKIP_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -644,6 +645,7 @@ const FILE_GREP_SKIP_DIRS: &[&str] = &[
     ".venv",
     "venv",
 ];
+const FILE_GREP_SKIP_PREFIXES: &[&str] = &[".venv", "venv"];
 
 impl FileGrep {
     pub fn new(
@@ -867,7 +869,9 @@ async fn collect_files(
             .replace('\\', "/");
         if is_dir {
             let name = entry.file_name().to_string_lossy().to_string();
-            if FILE_GREP_SKIP_DIRS.contains(&name.as_str()) {
+            if FILE_GREP_SKIP_DIRS.contains(&name.as_str())
+                || FILE_GREP_SKIP_PREFIXES.iter().any(|p| name.starts_with(p))
+            {
                 continue;
             }
             Box::pin(collect_files(
@@ -1493,6 +1497,11 @@ mod tests {
         // 构建产物目录里的文件：整棵跳过
         std::fs::create_dir_all(ws_path.join("node_modules/pkg")).unwrap();
         std::fs::write(ws_path.join("node_modules/pkg/index.js"), "hello binary\n").unwrap();
+        // 虚拟环境带后缀（实测 .venv-ii）：前缀匹配跳过
+        std::fs::create_dir_all(ws_path.join(".venv-ii/lib")).unwrap();
+        std::fs::write(ws_path.join(".venv-ii/lib/x.py"), "hello venv\n").unwrap();
+        std::fs::create_dir_all(ws_path.join("venv_dev")).unwrap();
+        std::fs::write(ws_path.join("venv_dev/y.py"), "hello venv\n").unwrap();
         // 深层可搜文件
         std::fs::write(ws_path.join("keep.txt"), "hello\n").unwrap();
         let tool = FileGrep::new(
@@ -1508,6 +1517,8 @@ mod tests {
         assert!(out.contains("keep.txt:1:hello"), "{out}");
         assert!(!out.contains("node_modules"), "构建产物目录应跳过: {out}");
         assert!(!out.contains("blob.bin"), "二进制文件应跳过: {out}");
+        assert!(!out.contains(".venv-ii"), "带后缀虚拟环境应跳过: {out}");
+        assert!(!out.contains("venv_dev"), "前缀变体虚拟环境应跳过: {out}");
     }
 
     #[tokio::test]

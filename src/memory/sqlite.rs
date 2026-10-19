@@ -165,6 +165,96 @@ pub struct ToolCallDetail {
     pub created_at: String,
 }
 
+/// CJK 统一表意文字区段（主区 + 扩展 A + 兼容区 + 扩展 B）。
+fn is_cjk_ideograph(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2A6DF
+    )
+}
+
+/// FTS 索引变换：在「两侧均为字母数字且至少一侧是 CJK」的相邻对之间插一个
+/// 空格，让 unicode61 tokenizer 把 CJK 逐字成 token、且不与拉丁词粘连（治
+/// 「连续汉字整体成 token」与「中英混排粘成一个 token」两类零命中）。空白
+/// 与标点在 unicode61 里本就是分隔符，不插——保证幂等。
+pub fn fts_zh_transform(content: &str) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let mut out = String::with_capacity(content.len() + 16);
+    for (i, &c) in chars.iter().enumerate() {
+        out.push(c);
+        if let Some(&next) = chars.get(i + 1) {
+            let split = c.is_alphanumeric()
+                && next.is_alphanumeric()
+                && (is_cjk_ideograph(c) || is_cjk_ideograph(next));
+            if split {
+                out.push(' ');
+            }
+        }
+    }
+    out
+}
+
+/// 查询侧预处理：≥2 字连续 CJK 串 → 引号短语 `"护 栏"`（FTS5 phrase 匹配
+/// 相邻 token）；单字 CJK 原样，但与相邻拉丁字母数字之间补边界空格（对齐
+/// 索引侧 fts_zh_transform，防 `查base64` 粘成单 token 落空）。已有空格/
+/// 引号的查询收敛为 no-op；FTS5 语法错误沿用原报错路径。
+fn fts_zh_query(query: &str) -> String {
+    let chars: Vec<char> = query.chars().collect();
+    let is_word = |c: char| c.is_alphanumeric();
+    let mut out = String::with_capacity(query.len() + 8);
+    let mut i = 0;
+    while i < chars.len() {
+        if is_cjk_ideograph(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_cjk_ideograph(chars[i]) {
+                i += 1;
+            }
+            let run = &chars[start..i];
+            // run 前的边界：前一个输出是字母数字（拉丁词）则补空格
+            if out.chars().next_back().map(is_word).unwrap_or(false) {
+                out.push(' ');
+            }
+            if run.len() >= 2 {
+                out.push('"');
+                for (k, c) in run.iter().enumerate() {
+                    if k > 0 {
+                        out.push(' ');
+                    }
+                    out.push(*c);
+                }
+                out.push('"');
+            } else {
+                out.push(run[0]);
+            }
+            // run 后的边界：下一个是字母数字（拉丁词）则补空格（run 已吞尽
+            // 相邻 CJK，此处只可能是拉丁）
+            if chars.get(i).copied().map(is_word).unwrap_or(false) {
+                out.push(' ');
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 注册 fts_zh 标量函数：触发器与回填 SQL 依赖它，必须在 init_schema 之前，
+/// 且 sessions.db 的所有写入连接都要注册（sqlite_query 只读连接不受影响）。
+fn register_fts_zh(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        "fts_zh",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let raw: String = ctx.get(0)?;
+            Ok(fts_zh_transform(&raw))
+        },
+    )?;
+    Ok(())
+}
+
 impl SessionStore {
     pub fn open(db_path: &PathBuf) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
@@ -173,6 +263,7 @@ impl SessionStore {
         let conn =
             Connection::open(db_path).with_context(|| format!("open sqlite {:?}", db_path))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        register_fts_zh(&conn)?;
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -182,6 +273,7 @@ impl SessionStore {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        register_fts_zh(&conn)?;
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -270,11 +362,12 @@ CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id);
 
 -- memory_research（plan.md）：跨会话全文索引。只索引 user/assistant 正文
 -- （system 提示词与 tool 输出是噪音，不参与历史记忆检索）。
+CREATE TABLE IF NOT EXISTS fts_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(content, tokenize='unicode61');
 CREATE TRIGGER IF NOT EXISTS trg_message_fts_insert AFTER INSERT ON messages
 BEGIN
     INSERT INTO message_fts(rowid, content)
-        SELECT NEW.id, NEW.content WHERE NEW.role IN ('user','assistant');
+        SELECT NEW.id, fts_zh(NEW.content) WHERE NEW.role IN ('user','assistant');
 END;
 CREATE TRIGGER IF NOT EXISTS trg_message_fts_delete AFTER DELETE ON messages
 BEGIN
@@ -282,10 +375,45 @@ BEGIN
 END;
 "#,
         )?;
+        // CJK 分词治理（2026-10-19 实测：unicode61 把连续汉字当一个 token，
+        // MATCH '护栏' 零命中）。方案：索引侧在 CJK 边界插空格（fts_zh
+        // 标量函数），unicode61 即可逐字成 token；查询侧 search_messages 把
+        // CJK 串预处理成引号短语。marker 带规则版本号：索引规则再变时 bump
+        // 到 v3 即可让存量库自动重建，无需手工清 marker。
+        const FTS_SPACING_MARKER: &str = "cjk_spacing_v2";
+        let fts_spaced = conn
+            .query_row(
+                "SELECT value FROM fts_meta WHERE key = ?1",
+                rusqlite::params![FTS_SPACING_MARKER],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .is_some();
+        if !fts_spaced {
+            conn.execute_batch(
+                r#"
+DROP TRIGGER IF EXISTS trg_message_fts_insert;
+DROP TRIGGER IF EXISTS trg_message_fts_delete;
+DROP TABLE IF EXISTS message_fts;
+DELETE FROM fts_meta WHERE key LIKE 'cjk_spacing%';
+CREATE VIRTUAL TABLE message_fts USING fts5(content, tokenize='unicode61');
+CREATE TRIGGER trg_message_fts_insert AFTER INSERT ON messages
+BEGIN
+    INSERT INTO message_fts(rowid, content)
+        SELECT NEW.id, fts_zh(NEW.content) WHERE NEW.role IN ('user','assistant');
+END;
+CREATE TRIGGER trg_message_fts_delete AFTER DELETE ON messages
+BEGIN
+    DELETE FROM message_fts WHERE rowid = OLD.id;
+END;
+INSERT INTO fts_meta(key, value) VALUES ('cjk_spacing_v2', '1');
+"#,
+            )?;
+        }
         // 存量回填：仅补 user/assistant 里尚未入索引的行（升级既有库时一次性补齐），幂等。
         conn.execute_batch(
             "INSERT INTO message_fts(rowid, content)
-             SELECT m.id, m.content FROM messages m
+             SELECT m.id, fts_zh(m.content) FROM messages m
              WHERE m.role IN ('user','assistant')
                AND m.id NOT IN (SELECT rowid FROM message_fts);",
         )?;
@@ -715,6 +843,8 @@ END;
     /// 含所属 session 短 id、channel 与时间；content 由调用方截断展示。
     pub fn search_messages(&self, query: &str, limit: i64) -> Result<Vec<MessageFtsHit>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // CJK 串 → 引号短语（与索引侧 fts_zh_transform 的逐字 token 对齐）
+        let processed = fts_zh_query(query);
         let mut stmt = conn.prepare(
             "SELECT m.id, s.session_uuid, s.channel, m.role, m.content, m.created_at
              FROM message_fts f
@@ -724,7 +854,7 @@ END;
              ORDER BY rank
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(rusqlite::params![query, limit], |r| {
+        let rows = stmt.query_map(rusqlite::params![processed, limit], |r| {
             Ok(MessageFtsHit {
                 message_id: r.get(0)?,
                 session_uuid: r.get(1)?,
@@ -1787,5 +1917,107 @@ mod tests {
         let store2 = SessionStore::open(&db_path).unwrap();
         assert_eq!(store2.find_open_task("新任务").unwrap(), Some(t));
         std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn test_fts_zh_transform_unit() {
+        // 相邻 CJK 与 CJK/拉丁字母数字之间插空格；空白/标点边界不插；幂等
+        assert_eq!(fts_zh_transform("护栏"), "护 栏");
+        assert_eq!(fts_zh_transform("这个护栏很好"), "这 个 护 栏 很 好");
+        assert_eq!(fts_zh_transform("用base64编码"), "用 base64 编 码");
+        assert_eq!(fts_zh_transform("导出base64格式"), "导 出 base64 格 式");
+        assert_eq!(fts_zh_transform("abc 护栏"), "abc 护 栏");
+        assert_eq!(fts_zh_transform("护栏 emoji🈯"), "护 栏 emoji🈯");
+        assert_eq!(fts_zh_transform("护栏，很好"), "护 栏，很 好");
+        // 幂等：已间隔的串不变（空白边界不重复插）
+        assert_eq!(fts_zh_transform("护 栏"), "护 栏");
+        assert_eq!(fts_zh_transform("用 base64 编 码"), "用 base64 编 码");
+        assert_eq!(fts_zh_transform(""), "");
+    }
+
+    #[test]
+    fn test_fts_zh_query_unit() {
+        // ≥2 字 CJK run → 引号短语；单字 CJK 与拉丁词间补边界空格；已空格/引号查询 no-op
+        assert_eq!(fts_zh_query("护栏"), "\"护 栏\"");
+        assert_eq!(fts_zh_query("护栏 base64"), "\"护 栏\" base64");
+        assert_eq!(
+            fts_zh_query("查一下 base64 护栏"),
+            "\"查 一 下\" base64 \"护 栏\""
+        );
+        assert_eq!(fts_zh_query("查base64"), "查 base64");
+        assert_eq!(fts_zh_query("base64护栏"), "base64 \"护 栏\"");
+        assert_eq!(fts_zh_query("用base64编码"), "用 base64 \"编 码\"");
+        assert_eq!(fts_zh_query("查"), "查");
+        assert_eq!(fts_zh_query("\"护 栏\""), "\"护 栏\"");
+        assert_eq!(fts_zh_query(""), "");
+    }
+
+    #[test]
+    fn test_fts_chinese_search_roundtrip() {
+        // 修复验证：unicode61 + CJK 逐字间隔后，中文两字词可命中（此前整段
+        // 汉字成单 token，只有整段恰好等于查询才命中）
+        let store = open_temp();
+        let sid = store.create_session("uuid", "cli").unwrap();
+        store
+            .append_message(sid, &Role::User, "帮我看看这个护栏的设计方案")
+            .unwrap();
+        store
+            .append_message(sid, &Role::Assistant, "护栏需要 base64 转码后上传")
+            .unwrap();
+        store
+            .append_message(sid, &Role::Assistant, "导出base64格式为附件")
+            .unwrap();
+        store
+            .append_message(sid, &Role::Assistant, "totally unrelated english text")
+            .unwrap();
+        store
+            .append_message(sid, &Role::System, "system 护栏 不应入索引")
+            .unwrap();
+
+        // 中文短语命中（system 角色不入索引）
+        let hits = store.search_messages("护栏", 10).unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        // 混合查询：CJK 短语 + 拉丁 token AND 语义
+        let hits = store.search_messages("护栏 base64", 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].content.contains("base64"));
+        // 混排边界：粘连 token 已拆开，`base64格式` 可命中 `导出base64格式`
+        let hits = store.search_messages("base64格式", 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].content.contains("base64格式"));
+        // 纯拉丁照常
+        assert_eq!(store.search_messages("unrelated", 10).unwrap().len(), 1);
+        // 单字 CJK
+        assert_eq!(store.search_messages("栏", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_fts_legacy_index_rebuilt_on_marker_missing() {
+        // 存量库升级：marker 缺失（等价于旧版库）→ 重开时重建索引并按新规则回填
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("legacy-fts.db");
+        {
+            let store = SessionStore::open(&db_path).unwrap();
+            let sid = store.create_session("uuid", "cli").unwrap();
+            store
+                .append_message(sid, &Role::User, "这个护栏很好")
+                .unwrap();
+            // 模拟旧版索引：清 marker + 写入未变换的原始文本
+            let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.execute("DELETE FROM fts_meta WHERE key LIKE 'cjk_spacing%'", [])
+                .unwrap();
+            conn.execute("DELETE FROM message_fts", []).unwrap();
+            conn.execute(
+                "INSERT INTO message_fts(rowid, content) VALUES (?1, ?2)",
+                rusqlite::params![1, "这个护栏很好"],
+            )
+            .unwrap();
+            drop(conn);
+            drop(store);
+        }
+        // 重开触发重建；若未重建，旧 token '这个护栏很好' ≠ 查询短语 '护 栏' → 零命中
+        let store2 = SessionStore::open(&db_path).unwrap();
+        let hits = store2.search_messages("护栏", 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
     }
 }

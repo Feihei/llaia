@@ -167,7 +167,7 @@ impl Tool for SqliteQuery {
         "sqlite_query"
     }
     fn description(&self) -> &str {
-        "Run a read-only SELECT query against a local SQLite database file (.db). The connection is opened read-only — writes and DDL always fail. Use this to inspect sessions.db or other sqlite files instead of terminal sqlite3/python. Example: path=\"sessions.db\", query=\"SELECT role, substr(content,1,100) FROM messages ORDER BY rowid DESC LIMIT 20\"."
+        "Run a read-only SELECT query against a local SQLite database file (.db). The connection is opened read-only — writes and DDL always fail. Use this to inspect sessions.db or other sqlite files instead of terminal sqlite3/python. sessions.db tips: message_fts is an FTS5 table whose rowid = messages.id (join for session_id: message_fts f JOIN messages m ON m.id = f.rowid); CJK text in message_fts is stored with a space between characters, so Chinese MATCH needs a quoted phrase like \"护 栏\". Example: path=\"sessions.db\", query=\"SELECT role, substr(content,1,100) FROM messages ORDER BY rowid DESC LIMIT 20\"."
     }
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
