@@ -975,6 +975,10 @@ pub struct ChannelStatus {
 pub struct StatusInfo {
     pub version: String,
     pub build_hash: String,
+    /// 进程启动时刻（unix 秒）。serve 冷启动（cargo run / 重开进程）即变号，前端据
+    /// 此提示刷新页面；/api/restart 进程内 reload 不变号（静态资源也没变，无需刷）。
+    /// build_hash 不能当新鲜度信号：带未提交改动重编译时 HEAD 没变、hash 不变。
+    pub started_at: u64,
     pub workspace: String,
     pub config_path: String,
     pub pid: u32,
@@ -982,6 +986,19 @@ pub struct StatusInfo {
     pub db_size_bytes: u64,
     pub log_dir: String,
     pub uploads_count: u64,
+}
+
+/// 进程启动时刻，首次取用即定格（router 构建于启动期，偏差可忽略）。
+static PROCESS_STARTED_AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+fn process_started_at() -> u64 {
+    *PROCESS_STARTED_AT.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            // 系统时钟早于 1970 不在受支持平台上出现；0 只会让前端首次对比多提示一次
+            .unwrap_or_default()
+            .as_secs()
+    })
 }
 
 /// 三段了点号版本号比较：`1.2.3 > 1.2.2`；忽略 pre-release/build 后缀（`1.2.3-beta` → `1.2.3`）。
@@ -1151,6 +1168,7 @@ pub async fn get_status(
     let info = StatusInfo {
         version: env!("CARGO_PKG_VERSION").into(),
         build_hash: env!("GIT_HASH").into(),
+        started_at: process_started_at(),
         workspace: state.workspace.display().to_string(),
         config_path: state.config_path.display().to_string(),
         pid: std::process::id(),
@@ -1967,11 +1985,16 @@ pub async fn get_approvals(
     }
     let mut approvals: Vec<serde_json::Value> = Vec::new();
     let mut saw_main = false;
+    // 有实例锁被占而被 try_lock 跳过时置位。跳过的实例此刻可能有 pending（turn
+    // 正在跑的实例也可能先注册过审批），空表 ≠ 无 pending——前端心跳据 incomplete
+    // 跳过 stale 标记，只做补卡，否则会把活卡片误标 "already resolved elsewhere"。
+    let mut incomplete = false;
     for inst in state.registry.instances.list().await {
         if inst.kind == InstanceKind::Main {
             saw_main = true;
         }
         let Ok(agent) = inst.agent.try_lock() else {
+            incomplete = true;
             continue;
         };
         for p in agent
@@ -2013,7 +2036,7 @@ pub async fn get_approvals(
             }));
         }
     }
-    let json = serde_json::json!({ "approvals": approvals });
+    let json = serde_json::json!({ "approvals": approvals, "incomplete": incomplete });
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json; charset=utf-8")],

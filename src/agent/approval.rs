@@ -48,13 +48,40 @@ pub struct PendingApproval {
 pub struct ApprovalGate {
     inner: Mutex<HashMap<String, PendingApproval>>,
     counter: AtomicU64,
+    /// 进程生命周期内唯一的前缀（构造时刻毫秒的 base36）。id 拼进 nonce 是因为
+    /// 前端审批/问题卡片按 id 去重（同一 id 只渲染一次），而页面内存桶的存活期
+    /// 可以横跨多次 serve 重启——纯计数器 id 重启后归零，新审批会被上一进程的
+    /// 旧卡片去重吞掉（2026-10-16 实测：WebUI 审批卡片"不出现"）。实例各有独立
+    /// gate，nonce 同时避免跨实例同号。
+    nonce: String,
+}
+
+/// u128 → base36（小写字母数字），把启动毫秒压成短唯一前缀。
+fn base36(mut v: u128) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if v == 0 {
+        return "0".to_string();
+    }
+    let mut buf = Vec::new();
+    while v > 0 {
+        buf.push(DIGITS[(v % 36) as usize]);
+        v /= 36;
+    }
+    buf.reverse();
+    // DIGITS 全为 ASCII，from_utf8 不可能失败
+    String::from_utf8(buf).unwrap_or_default()
 }
 
 impl ApprovalGate {
     pub fn new() -> Arc<Self> {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
         Arc::new(Self {
             inner: Mutex::new(HashMap::new()),
             counter: AtomicU64::new(0),
+            nonce: base36(millis),
         })
     }
 
@@ -76,7 +103,7 @@ impl ApprovalGate {
         within_workspace: bool,
     ) -> String {
         let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let id = format!("ap{}", n);
+        let id = format!("ap{}-{}", self.nonce, n);
         let pending = PendingApproval {
             id: id.clone(),
             kind: PendingKind::Approval,
@@ -106,7 +133,7 @@ impl ApprovalGate {
         timeout_secs: u64,
     ) -> String {
         let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let id = format!("q{}", n);
+        let id = format!("q{}-{}", self.nonce, n);
         let pending = PendingApproval {
             id: id.clone(),
             kind: PendingKind::Question,

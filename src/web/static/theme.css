@@ -317,6 +317,16 @@ option { background: var(--bg-input); color: var(--text); }
 #chat-pane .chip-x:hover { color: var(--red, #e05656); }
 /* Alpine：x-cloak 元素在组件初始化前藏身（队列条等条件渲染块防首帧闪现） */
 [x-cloak] { display: none !important; }
+/* 旧页面提示条（checkBuildFreshness 置位）：serve 冷启动后老页面跑旧 JS，
+   点击整条刷新。置顶通栏、警示色，盖在 header 与 main 之间 */
+.build-stale-banner {
+  position: sticky; top: 0; z-index: 50;
+  padding: 6px 14px; text-align: center;
+  font-size: 13px; cursor: pointer;
+  color: #ffd27d; background: rgba(224, 160, 40, .12);
+  border-bottom: 1px solid rgba(224, 160, 40, .45);
+}
+.build-stale-banner:hover { background: rgba(224, 160, 40, .2); }
 /* turn 进行中的消息队列条（规格 §2，docs/specs/2026-10-14）：composer 上方一行，
    绿调边框呼应 rail 活跃态；仅当前面板有队列项时显示 */
 #chat-pane .queue-row {

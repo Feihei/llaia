@@ -876,7 +876,17 @@ async fn resolve_approval(
     // 裸结果会以 role='user' 落库，WebUI 会话回放里与真人发言无法区分（2026-09-11 用户反馈）。
     // 带标记前缀：人看得出这是工具结果，模型也能识别"这是执行产物而非用户新指令"
     // （与 /answer 的 "[The user answered ...]" 前缀同风格）。
-    let message = format!("[tool result: {}]\n{}", pending.tool_name, result);
+    // 批准路径必须显式声明因果（2026-10-16 实测）：模型只看到 "[awaiting confirmation]"
+    // 占位 + 突然出现的执行结果，会把"批准后执行"误读成"没等审批就跑了"（agent 据此
+    // 对用户断言"审批闸门失效"，实际 audit.log 证明每次都先 blocked 后才 execute）。
+    let message = if approve {
+        format!(
+            "[the user APPROVED pending approval {} via /ok — the tool result below comes from executing it now, not from an earlier unapproved run]\n[tool result: {}]\n{}",
+            pending.id, pending.tool_name, result
+        )
+    } else {
+        format!("[tool result: {}]\n{}", pending.tool_name, result)
+    };
     Ok(Some(ApprovalOutcome::Resume { notice, message }))
 }
 
@@ -2083,10 +2093,11 @@ mod tests {
             SlashOutcome::Resume { notice, message } => {
                 assert!(notice.contains("approved"), "{}", notice);
                 assert!(
-                    message.starts_with("[tool result: note]"),
-                    "message should carry the tool-result marker: {}",
+                    message.starts_with("[the user APPROVED pending approval ap"),
+                    "message should declare the approval provenance: {}",
                     message
                 );
+                assert!(message.contains("[tool result: note]"), "{}", message);
                 assert!(message.contains("did the thing"), "{}", message);
             }
             other => panic!("unexpected outcome: {:?}", other),

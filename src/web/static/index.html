@@ -74,6 +74,11 @@
       <div class="tab" :class="{active: tab==='stats'}" @click="switchStats()">Stats</div>
     </div>
   </header>
+  <!-- 旧页面提示：serve 冷启动后本页可能仍在跑旧 JS（WS 重连不重载页面），
+       新审批卡片等前端改动会静默失效。点击整条刷新 -->
+  <div class="build-stale-banner" x-show="buildStale" x-cloak @click="location.reload()">
+    Server was rebuilt — this page is running outdated code. Click to reload.
+  </div>
   <main>
     <div id="chat-pane" class="pane" :class="{active: tab==='chat'}">
       <div class="chat-layout">

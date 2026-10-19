@@ -98,12 +98,21 @@ pub enum WebEvent {
 pub struct TurnEndSignal(pub String);
 
 /// Web 输出 sink：把 OutputSink 回调转成 WebEvent 推到 mpsc，WS 写 task 消费。
+/// 广播用共享连接表（与 AppState.active_ws 同型）。
+type WsBroadcast = Arc<Mutex<std::collections::HashMap<u64, mpsc::Sender<WebEvent>>>>;
+
 /// 持有 turn-end sender 让 WS handler 主循环感知 turn 结束以清理 current_turn。
 /// `instance` 非 main 时事件包一层 `WebEvent::Instance`（前端按实例分桶）。
 pub struct WebSink {
     tx: mpsc::Sender<WebEvent>,
     turn_end_tx: mpsc::Sender<TurnEndSignal>,
     instance: String,
+    /// 全部活跃 web 连接的发送端。审批/问题卡片是**有状态的全局 pending 项**
+    /// （GET /api/approvals 跨标签页恢复即此语义），必须广播而非点发：事件只进
+    /// 发起连接时，"触发审批的标签页 ≠ 正在看的标签页"（或页面中途重连换了
+    /// 连接）会让卡片在其他页面上静默丢失（2026-10-16 实测）。流式事件仍点发
+    /// ——流只属于发起连接。
+    broadcast: Option<WsBroadcast>,
 }
 
 impl WebSink {
@@ -112,6 +121,7 @@ impl WebSink {
             tx,
             turn_end_tx,
             instance: "main".into(),
+            broadcast: None,
         }
     }
 
@@ -120,15 +130,45 @@ impl WebSink {
         tx: mpsc::Sender<WebEvent>,
         turn_end_tx: mpsc::Sender<TurnEndSignal>,
         instance: &str,
+        broadcast: Option<WsBroadcast>,
     ) -> Self {
         Self {
             tx,
             turn_end_tx,
             instance: instance.to_string(),
+            broadcast,
         }
     }
 
     async fn send_event(&self, ev: WebEvent) {
+        // 审批/问题卡片广播：active_ws 里有包括自己在内的所有连接，全部投递。
+        // 投递计数入日志——卡片"用户没看到"时先查这里，分清服务端没发 vs 前端没渲染。
+        if let Some(broadcast) = &self.broadcast {
+            if matches!(ev, WebEvent::Approval { .. } | WebEvent::Question { .. }) {
+                let wrapped;
+                let ev_ref = if self.instance == "main" {
+                    &ev
+                } else {
+                    wrapped = WebEvent::Instance {
+                        instance: self.instance.clone(),
+                        event: Box::new(ev),
+                    };
+                    &wrapped
+                };
+                let mut delivered = 0usize;
+                for tx in broadcast.lock().await.values() {
+                    if tx.send(ev_ref.clone()).await.is_ok() {
+                        delivered += 1;
+                    }
+                }
+                tracing::info!(
+                    instance = %self.instance,
+                    delivered,
+                    "approval/question card broadcast to web connections"
+                );
+                return;
+            }
+        }
         if self.instance == "main" {
             let _ = self.tx.send(ev).await;
         } else {
@@ -351,6 +391,18 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                         continue;
                                     }
                                 };
+                                // 竞态收口（消息队列 auto-send）：on_done 先发 Done 事件
+                                // 再发 TurnEndSignal，两者走不同 channel；前端收到 done 即
+                                // 自动发送队列消息，该帧可能先于 select 的 end_rx 分支到达
+                                // ——此时 turn 实际已结束，若按 contains_key 回 Busy 会把帧
+                                // 静默丢弃且前端 busy 永久卡死（审批按钮全灰、/ok 只能进队
+                                // 列）。处理帧前先排干已完成的 turn 信号，保证下面的
+                                // contains_key 判定反映真实状态。
+                                while let Ok(sig) = end_rx.try_recv() {
+                                    if let Some((h, _)) = turns.remove(&sig.0) {
+                                        let _ = h.await;
+                                    }
+                                }
                                 // 审批卡片按钮不新增解析逻辑：翻译成用户本来就会敲的
                                 // `/ok <id>` / `/deny <id>`，完整复用 slash → Resume 续跑
                                 // 通路（含"已解析/无此 pending"的既有提示）。审批注册在
@@ -464,7 +516,12 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                         Some(Ok(SlashOutcome::Resume { notice, message })) => {
                                             // 先回显结果摘要，再跑 continuation turn 让模型基于工具结果继续
                                             route_event(&tx, &inst_name, WebEvent::Chunk { delta: notice }).await;
-                                            let sink = Box::new(WebSink::for_instance(tx.clone(), end_tx.clone(), &inst_name));
+                                            let sink = Box::new(WebSink::for_instance(
+                                                tx.clone(),
+                                                end_tx.clone(),
+                                                &inst_name,
+                                                Some(state.active_ws.clone()),
+                                            ));
                                             let stop_n = Arc::new(Notify::new());
                                             let stop_clone = stop_n.clone();
                                             let agent_clone = inst.agent.clone();
@@ -482,7 +539,12 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                                             // 解析到 main 家目录的 uploads/（/upload 只落那里，
                                             // 与实例的 workspace_root 无关）。
                                             let user_msg = build_user_message(&text, chat.images.as_deref(), &workspace);
-                                            let sink = Box::new(WebSink::for_instance(tx.clone(), end_tx.clone(), &inst_name));
+                                            let sink = Box::new(WebSink::for_instance(
+                                                tx.clone(),
+                                                end_tx.clone(),
+                                                &inst_name,
+                                                Some(state.active_ws.clone()),
+                                            ));
                                             let stop_n = Arc::new(Notify::new());
                                             let stop_clone = stop_n.clone();
                                             let agent_clone = inst.agent.clone();
@@ -1062,6 +1124,38 @@ mod tests {
         }
     }
 
+    /// 审批/问题卡片广播：所有活跃连接（含发起连接）都收到；流式事件仍只进发起
+    /// 连接。回归 2026-10-16"触发审批的连接 ≠ 正在看的连接，卡片静默丢失"。
+    #[tokio::test]
+    async fn test_web_sink_broadcasts_approval_to_all_connections() {
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::channel::<WebEvent>(8);
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::channel::<WebEvent>(8);
+        let (end_tx, _end_rx) = tokio::sync::mpsc::channel::<TurnEndSignal>(8);
+        let map: WsBroadcast = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        map.lock().await.insert(1, tx_a.clone());
+        map.lock().await.insert(2, tx_b.clone());
+        let mut sink = WebSink::for_instance(tx_a, end_tx, "main", Some(map));
+        sink.on_chunk("stream only to origin").await;
+        sink.on_approval_request(&crate::agent::sink::ApprovalRequest {
+            id: "apmvaszw8f-1",
+            tool_name: "terminal",
+            summary: "powershell -Command ...",
+            within_workspace: false,
+        })
+        .await;
+        // A：先是流式 chunk（点发），随后是广播的 Approval
+        assert!(matches!(rx_a.recv().await.unwrap(), WebEvent::Chunk { .. }));
+        match rx_a.recv().await.unwrap() {
+            WebEvent::Approval { id, .. } => assert_eq!(id, "apmvaszw8f-1"),
+            other => panic!("expected Approval, got {other:?}"),
+        }
+        // B：直接收到 Approval，没有 chunk
+        match rx_b.recv().await.unwrap() {
+            WebEvent::Approval { id, .. } => assert_eq!(id, "apmvaszw8f-1"),
+            other => panic!("expected Approval, got {other:?}"),
+        }
+    }
+
     // ---- ADR-0032 T7：实例路由协议 ----
 
     /// 路由规则唯一性：手写事件（route_event）与 sink 事件（WebSink::send_event）
@@ -1105,7 +1199,7 @@ mod tests {
     async fn test_web_sink_for_instance_tags_events_and_signal() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<WebEvent>(8);
         let (end_tx, mut end_rx) = tokio::sync::mpsc::channel::<TurnEndSignal>(8);
-        let mut sink = WebSink::for_instance(tx, end_tx, "research");
+        let mut sink = WebSink::for_instance(tx, end_tx, "research", None);
         sink.on_chunk("hi").await;
         sink.on_done().await;
         match rx.recv().await.unwrap() {

@@ -148,6 +148,8 @@ function llaiaApp() {
     restartMsg: '',
     shuttingDown: false,
     shutdownMsg: '',
+    // serve 冷启动后老页面仍跑旧 JS 的提示条（checkBuildFreshness 置位）
+    buildStale: false,
     // update check
     updateCheckInfo: null,
     checkingUpdate: false,
@@ -239,6 +241,17 @@ function llaiaApp() {
           // ask_user（ADR-0022）：只读轮询待回答问题
           this.loadQuestions();
           this._questionTimer = setInterval(() => this.loadQuestions(), 5000);
+          // 审批卡片对账心跳（与 questions 同款）：live 事件只进发起连接且可能丢
+          // （后台标签页冻结断 WS、中途重连、丢帧），5s 轮询 /api/approvals 兜底补卡
+          this.loadApprovals();
+          this._approvalTimer = setInterval(() => this.loadApprovals(), 5000);
+          // 后台标签页被浏览器冻结期间的事件全部迟到：切回前台立即对账一次
+          document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && this.authed && this.chatLoaded) {
+              this.loadApprovals();
+              this.loadQuestions();
+            }
+          });
           // 环境探测（P6）：变化低频，登录时加载一次 + 手动刷新
           this.loadEnv();
           // 实例 rail（ADR-0032 T7）：登录即拉一次，之后在 done/切换时刷新
@@ -327,6 +340,7 @@ function llaiaApp() {
           } finally { this.routingInstance = null; }
         }
       } catch (e) { /* 非致命：卡片保持 live 流状态 */ }
+      this.updateTitle();
     },
     // 作答：不新增协议，只是把 /answer <id> <text> 变成一次点击
     //（chat 帧文本走同一条 slash → Resume 续跑通路，与审批卡片 → /ok 同哲学）。
@@ -351,6 +365,16 @@ function llaiaApp() {
     // ---- 审批卡片（P7）：待审批列表 / 批准 / 拒绝 ----
     // 卡片本体来自 WS 的 approval 事件；本方法只做两件事：补齐刷新后丢失的卡片、
     // 把已在别处（CLI/QQ 文本命令）解析掉的卡片置为失效，避免点了没反应。
+    // 标签页标题标记待处理卡片数：后台标签页看不到聊天流，标题栏 ⚠ 是唯一显眼信号
+    //（冻结的页面不执行 JS，但解冻后第一次对账就会刷新标题）。由 loadApprovals /
+    // loadQuestions 的 5s 心跳持续刷新，无需在每个状态变更点单独调用。
+    updateTitle() {
+      if (this._baseTitle === undefined) this._baseTitle = document.title;
+      const pending = Object.values(this.buckets).flat()
+        .filter(m => (m.role === 'approval' || m.role === 'question') && m.state === 'pending')
+        .length;
+      document.title = pending ? `⚠ ${pending} awaiting — Llaia` : this._baseTitle;
+    },
     async loadApprovals() {
       if (!this.authed) return;
       try {
@@ -358,6 +382,8 @@ function llaiaApp() {
         if (!r.ok) return;
         const j = await r.json();
         const pendings = j.approvals || [];
+        // incomplete：本轮有实例锁被占而跳过扫描，空表 ≠ 无 pending——跳过 stale
+        // 标记只做补卡，否则会把活卡片误标 "already resolved elsewhere"
         const alive = new Set(pendings.map(a => a.id));
         // T7：卡片按实例归属补进各自的面板桶（id 全局唯一，alive 判定跨桶成立）
         for (const a of pendings) {
@@ -377,16 +403,19 @@ function llaiaApp() {
             }
           } finally { this.routingInstance = null; }
         }
-        for (const name of Object.keys(this.buckets)) {
-          this.routingInstance = name;
-          try {
-            for (const m of this.messages) {
-              if (m.role === 'approval' && m.state === 'pending' && !alive.has(m.id)) m.state = 'stale';
-            }
-          } finally { this.routingInstance = null; }
+        if (!j.incomplete) {
+          for (const name of Object.keys(this.buckets)) {
+            this.routingInstance = name;
+            try {
+              for (const m of this.messages) {
+                if (m.role === 'approval' && m.state === 'pending' && !alive.has(m.id)) m.state = 'stale';
+              }
+            } finally { this.routingInstance = null; }
+          }
         }
         this.scrollBottom();
       } catch (e) { /* 非致命：卡片保持 live 流状态 */ }
+      this.updateTitle();
     },
     // 批准/拒绝：按钮不新增协议，只是把 /ok <id> / /deny <id> 变成一次点击
     //（后端把该帧翻译成同样的斜杠命令，走同一条 Resume 续跑通路）。
@@ -457,8 +486,13 @@ function llaiaApp() {
         // （「turn 没在跑就不存在排队理由」），不补发（done 已错过）。
         for (const it of this.instances) {
           const was = this.perBusy[it.name];
-          this.perBusy[it.name] = it.busy;
-          if (was === undefined && !it.busy && this.perQueue[it.name]) {
+          // busy_reason 三态里只有 "running a turn" 表示回合在跑；"waiting for
+          // approval"/"waiting for an answer" 是 deferred 回合结束后的等人决策态——
+          // 把它们灌进 perBusy 会让审批/问题卡片的 :disabled="busy" 永久禁用，
+          // 用户只能 steer 文本命令（2026-10-16 灰按钮根因）。
+          const running = it.busy === 'running a turn';
+          this.perBusy[it.name] = running;
+          if (was === undefined && !running && this.perQueue[it.name]) {
             if (it.name === this.activeInstance) this.dequeueToDraft(it.name);
             // 后台实例留队列，切到该面板时由 switchInstance 补查取回
           }
@@ -719,7 +753,7 @@ function llaiaApp() {
       if (this.ws) { this.ws.onclose = null; this.ws.close(); }
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       this.ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(this.token)}`);
-      this.ws.onopen = () => this.flushOutbox();
+      this.ws.onopen = () => { this.flushOutbox(); this.checkBuildFreshness(); };
       this.ws.onmessage = (e) => this.onWsMessage(JSON.parse(e.data));
       this.ws.onclose = () => {
         // 连接一断就没有事件回流，本地 busy 必须落下：否则 Send 停在 Steer 态、
@@ -741,6 +775,23 @@ function llaiaApp() {
         }
       }, 25000);
     },
+    // 版本漂移自检：serve 冷启动（cargo run / 重开进程）后，老页面只经 WS 重连
+    // 续命、仍跑旧 JS——界面看着活着，新功能（如审批卡片改进）全部静默失效
+    // （2026-10-16 实测：页面多日未重载，审批卡片永远不出现，只能 /ok+steer）。
+    // 对比 /api/status 的进程启动时刻与 localStorage 记录，变号即提示刷新；
+    // 进程内 /api/restart 不变号，不误报。老页面没有本方法，只能手动刷新一次
+    // 自愈；刷新后该检查永久生效。
+    async checkBuildFreshness() {
+      try {
+        const r = await fetch('/api/status?token=' + encodeURIComponent(this.token));
+        if (!r.ok) return;
+        const s = await r.json();
+        const prev = localStorage.getItem('llaia_started_at');
+        if (prev && Number(prev) !== Number(s.started_at)) this.buildStale = true;
+        localStorage.setItem('llaia_started_at', s.started_at);
+      } catch (e) { /* 服务不可达时静默，WS onclose 已有断线提示 */ }
+    },
+
     onWsMessage(ev) {
       // 实例路由封装（ADR-0032 T7）：任务实例的 turn 事件包在 type:"instance" 里，
       // main 不封装（向后兼容）。派发期间 routingInstance 指向目标桶，
@@ -855,10 +906,16 @@ function llaiaApp() {
           // 回合结束立即刷实例 rail：turn 里可能新建/唤醒了实例（/session 等路径）
           this.loadInstances();
           break;
-        case 'busy':
-          // 后台实例的 Busy 提示不弹窗（它的面板当前不可见，弹了让人莫名其妙）
+        case 'busy': {
+          // 帧被后端拒绝且不会产生 done（消息被丢弃）：必须落 busy，否则永久卡死
+          // 在 busy 态——审批/问题按钮 :disabled="busy" 全灰、手敲 /ok 被 send()
+          // 拦进队列（实测：队列 auto-send 撞上 done→Busy 竞态后界面假死）。
+          // alert 保留：真实 turn 在跑（多标签页等残余场景）时用户仍需知道帧被拒。
+          this.perBusy[inst] = false;
+          if (inst === this.activeInstance) this.syncBusy();
           if (inst === this.activeInstance) alert(ev.reason);
           break;
+        }
         case 'side':
           // /btw 侧问答案、/steer 回执：独立样式消息块，不参与 turn 事件流
           this.messages.push({ role: 'side', text: ev.text });
