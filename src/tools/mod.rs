@@ -16,6 +16,7 @@ pub mod search;
 pub mod send_media;
 pub mod skill_create;
 pub mod skill_edit;
+pub mod sqlite_query;
 pub mod terminal;
 pub mod todo;
 pub mod tts;

@@ -610,6 +610,306 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
     pi == p.len()
 }
 
+/// 内置内容搜索（2026-10-19）：file_list 的内容面补全——消掉「文件内容检索只能
+/// 走 terminal grep → cmd 回退下无 grep（环境不稳定）+ 界外路径必审批」的摩擦。
+/// 搜索执行用 ripgrep 官方库栈（grep-searcher：二进制检测 / UTF-16 转码 / 行号；
+/// grep-regex：matcher），walk 层复用 file_list 的范围口径（workspace ∪ 受信 ∪
+/// main 的 subagent/ 额外可读 ∪ skills 目录放行），requires_confirm 缺省 false →
+/// default 档全免审批。刻意不用 ignore crate：它尊重 .gitignore，agent 有时要搜
+/// 被忽略的文件，且与 file_list 口径不一致；改为跳过已知构建产物目录防预算耗尽。
+pub struct FileGrep {
+    workspace: Arc<RwLock<PathBuf>>,
+    trusted: Arc<RwLock<Vec<PathBuf>>>,
+    is_main: bool,
+    skills_dir: Option<PathBuf>,
+}
+
+/// 命中条数上限：防宽 pattern 刷爆上下文
+const FILE_GREP_MAX_MATCHES: usize = 200;
+/// 扫描文件数上限
+const FILE_GREP_MAX_FILES: usize = 2000;
+/// 单文件大小上限：超过跳过（4 MiB，minified/打包产物类）
+const FILE_GREP_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// 单行输出截断
+const FILE_GREP_MAX_LINE_CHARS: usize = 300;
+/// 递归深度上限（同 file_list）
+const FILE_GREP_MAX_DEPTH: usize = 8;
+
+/// 已知构建产物/依赖目录：搜索默认跳过（rg 尊重 .gitignore 的廉价近似）
+const FILE_GREP_SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
+
+impl FileGrep {
+    pub fn new(
+        workspace: Arc<RwLock<PathBuf>>,
+        trusted: Arc<RwLock<Vec<PathBuf>>>,
+        is_main: bool,
+        skills_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            workspace,
+            trusted,
+            is_main,
+            skills_dir,
+        }
+    }
+
+    async fn run(&self, args: &Value) -> Result<String> {
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("missing 'pattern' argument"))?;
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let glob = args
+            .get("glob")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let ws = self.workspace.read().await;
+        // skills 目录特殊放行（同 FileRead/FileList 口径）
+        let root = match self
+            .skills_dir
+            .as_deref()
+            .and_then(|d| crate::skill::loader::resolve_skill_path(d, &ws, path))
+        {
+            Some(p) => p,
+            None => {
+                let extra = if self.is_main {
+                    extra_readable_for_main(&ws)
+                } else {
+                    None
+                };
+                let trusted = self.trusted.read().await.clone();
+                path_guard::validate_path_in_scope(&ws, &trusted, path, extra.as_deref())?
+            }
+        };
+        drop(ws);
+
+        let matcher = grep_regex::RegexMatcherBuilder::new()
+            .build(pattern)
+            .map_err(|e| anyhow!("invalid regex pattern {:?}: {}", pattern, e))?;
+
+        // 单文件直接搜；目录则递归收集候选文件
+        let mut files: Vec<(String, PathBuf)> = Vec::new();
+        let mut files_truncated = false;
+        if root.is_file() {
+            let rel = root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            files.push((rel, root.clone()));
+        } else if root.is_dir() {
+            collect_files(&root, &root, 0, glob, &mut files, &mut files_truncated).await?;
+        } else {
+            anyhow::bail!("not a file or directory: {}", root.display());
+        }
+
+        let mut out: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        let mut skipped_large = 0usize;
+        let mut unreadable = 0usize;
+        let mut searcher = grep_searcher::SearcherBuilder::new()
+            .line_number(true)
+            .binary_detection(grep_searcher::BinaryDetection::quit(0))
+            .build();
+
+        for (rel, file) in &files {
+            if total >= FILE_GREP_MAX_MATCHES || out.len() >= FILE_GREP_MAX_MATCHES {
+                break;
+            }
+            let size = match tokio::fs::metadata(file).await {
+                Ok(m) => m.len(),
+                Err(_) => {
+                    unreadable += 1;
+                    continue;
+                }
+            };
+            if size > FILE_GREP_MAX_FILE_BYTES {
+                skipped_large += 1;
+                continue;
+            }
+            let bytes = match tokio::fs::read(file).await {
+                Ok(b) => b,
+                Err(_) => {
+                    unreadable += 1;
+                    continue;
+                }
+            };
+            let mut sink = GrepSink {
+                out: &mut out,
+                rel,
+                total: &mut total,
+            };
+            let _ = searcher.search_slice(&matcher, &bytes, &mut sink);
+        }
+
+        if out.is_empty() {
+            let mut msg = format!("(no matches for `{pattern}`)");
+            if files_truncated {
+                msg.push_str(&format!(
+                    "\n(note: file scan truncated at {FILE_GREP_MAX_FILES} files)"
+                ));
+            }
+            if skipped_large > 0 {
+                msg.push_str(&format!(
+                    "\n(note: {skipped_large} file(s) skipped for exceeding size limit)"
+                ));
+            }
+            return Ok(msg);
+        }
+        let mut result = out.join("\n");
+        if total >= FILE_GREP_MAX_MATCHES {
+            result.push_str(&format!("\n(truncated at {FILE_GREP_MAX_MATCHES} matches)"));
+        }
+        if files_truncated {
+            result.push_str(&format!(
+                "\n(note: file scan truncated at {FILE_GREP_MAX_FILES} files)"
+            ));
+        }
+        if skipped_large > 0 {
+            result.push_str(&format!(
+                "\n(note: {skipped_large} file(s) skipped for exceeding size limit)"
+            ));
+        }
+        if unreadable > 0 {
+            result.push_str(&format!("\n(note: {unreadable} file(s) unreadable)"));
+        }
+        Ok(result)
+    }
+}
+
+/// 命中收集 sink：输出 `rel:line:text`，命中总数达上限即停（Ok(false) 中止搜索）
+struct GrepSink<'a> {
+    out: &'a mut Vec<String>,
+    rel: &'a str,
+    total: &'a mut usize,
+}
+
+impl grep_searcher::Sink for GrepSink<'_> {
+    type Error = std::io::Error;
+
+    fn matched(
+        &mut self,
+        _searcher: &grep_searcher::Searcher,
+        mat: &grep_searcher::SinkMatch<'_>,
+    ) -> std::result::Result<bool, Self::Error> {
+        if *self.total >= FILE_GREP_MAX_MATCHES {
+            return Ok(false);
+        }
+        let line_no = mat.line_number().unwrap_or(0);
+        let raw = String::from_utf8_lossy(mat.bytes());
+        let text = raw.trim_end_matches(['\r', '\n']);
+        self.out.push(format!(
+            "{}:{}:{}",
+            self.rel,
+            line_no,
+            clip_chars(text, FILE_GREP_MAX_LINE_CHARS)
+        ));
+        *self.total += 1;
+        Ok(*self.total < FILE_GREP_MAX_MATCHES)
+    }
+}
+
+/// 字符感知截断（字节截断会把中文切出 U+FFFD）
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let clipped: String = s.chars().take(max).collect();
+        format!("{clipped}…")
+    }
+}
+
+/// 递归收集候选文件（相对路径 + 全路径）。只收文件；SKIP_DIRS 命中的目录整棵跳过；
+/// glob 有值时按相对路径通配过滤（同 file_list 的 wildcard_match）。
+async fn collect_files(
+    dir: &Path,
+    base: &Path,
+    depth: usize,
+    glob: Option<&str>,
+    out: &mut Vec<(String, PathBuf)>,
+    truncated: &mut bool,
+) -> Result<()> {
+    if out.len() >= FILE_GREP_MAX_FILES {
+        *truncated = true;
+        return Ok(());
+    }
+    if depth > FILE_GREP_MAX_DEPTH {
+        return Ok(());
+    }
+    let mut rd = tokio::fs::read_dir(dir)
+        .await
+        .map_err(|e| anyhow!("read_dir {:?}: {}", dir, e))?;
+    while let Some(entry) = rd
+        .next_entry()
+        .await
+        .map_err(|e| anyhow!("read_dir {:?}: {}", dir, e))?
+    {
+        if out.len() >= FILE_GREP_MAX_FILES {
+            *truncated = true;
+            return Ok(());
+        }
+        let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+        let rel = entry
+            .path()
+            .strip_prefix(base)
+            .unwrap_or(entry.path().as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_dir {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if FILE_GREP_SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            Box::pin(collect_files(
+                &entry.path(),
+                base,
+                depth + 1,
+                glob,
+                out,
+                truncated,
+            ))
+            .await?;
+        } else if glob.is_none_or(|g| wildcard_match(g, &rel)) {
+            out.push((rel, entry.path()));
+        }
+    }
+    Ok(())
+}
+
+#[async_trait]
+impl Tool for FileGrep {
+    fn name(&self) -> &str {
+        "file_grep"
+    }
+    fn description(&self) -> &str {
+        "Search file contents with a regex pattern (read-only). Returns `path:line:text` per match. Recursively searches the given directory (or a single file); common build/dependency dirs (.git, node_modules, target, __pycache__, .venv, venv) are skipped. Optional `glob` (wildcards * and ?) filters which files are searched. Use this instead of terminal grep."
+    }
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Regular expression to search for (Rust regex syntax)" },
+                "path": { "type": "string", "description": "File or directory to search (relative paths resolve to the agent workspace). Defaults to the workspace root." },
+                "glob": { "type": "string", "description": "Optional wildcard filter (* and ?) on relative paths, e.g. `*.rs`" }
+            },
+            "required": ["pattern"]
+        })
+    }
+    async fn execute(&self, args: &Value, _channel: &str) -> Result<String> {
+        self.run(args).await
+    }
+}
+
 #[async_trait]
 impl Tool for FileList {
     fn name(&self) -> &str {
@@ -1127,5 +1427,135 @@ mod tests {
             .execute(&json!({"path": outside.to_str().unwrap()}), "cli")
             .await;
         assert!(result.is_err(), "界外目录列举必须拒绝");
+    }
+
+    // ---------------- file_grep ----------------
+
+    #[tokio::test]
+    async fn test_file_grep_basic_and_glob() {
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        std::fs::write(ws_path.join("a.txt"), "hello world\nsecond line\n").unwrap();
+        std::fs::create_dir_all(ws_path.join("sub")).unwrap();
+        std::fs::write(ws_path.join("sub/b.rs"), "fn hello() {}\n").unwrap();
+        std::fs::write(ws_path.join("sub/c.md"), "no match here\n").unwrap();
+        let tool = FileGrep::new(
+            Arc::new(RwLock::new(ws_path)),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+            None,
+        );
+
+        // 递归 + 行号
+        let out = tool
+            .execute(&json!({"pattern": "hello"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains("a.txt:1:hello world"), "{out}");
+        assert!(out.contains("sub/b.rs:1:fn hello() {}"), "{out}");
+        assert!(!out.contains("c.md"), "{out}");
+
+        // glob 过滤
+        let out = tool
+            .execute(&json!({"pattern": "hello", "glob": "*.rs"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains("sub/b.rs:1"), "{out}");
+        assert!(!out.contains("a.txt"), "{out}");
+
+        // 单文件搜索
+        let out = tool
+            .execute(&json!({"pattern": "second", "path": "a.txt"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains("a.txt:2:second line"), "{out}");
+
+        // 无命中
+        let out = tool
+            .execute(&json!({"pattern": "zzz-not-there"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains("no matches"), "{out}");
+
+        // 非法 regex 报错
+        assert!(tool
+            .execute(&json!({"pattern": "(["}), "cli")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_file_grep_skips_binary_and_build_dirs() {
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        // 二进制文件（NUL 字节触发 BinaryDetection quit）
+        std::fs::write(ws_path.join("blob.bin"), b"hello\x00hello".as_slice()).unwrap();
+        // 构建产物目录里的文件：整棵跳过
+        std::fs::create_dir_all(ws_path.join("node_modules/pkg")).unwrap();
+        std::fs::write(ws_path.join("node_modules/pkg/index.js"), "hello binary\n").unwrap();
+        // 深层可搜文件
+        std::fs::write(ws_path.join("keep.txt"), "hello\n").unwrap();
+        let tool = FileGrep::new(
+            Arc::new(RwLock::new(ws_path)),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+            None,
+        );
+        let out = tool
+            .execute(&json!({"pattern": "hello"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains("keep.txt:1:hello"), "{out}");
+        assert!(!out.contains("node_modules"), "构建产物目录应跳过: {out}");
+        assert!(!out.contains("blob.bin"), "二进制文件应跳过: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_file_grep_out_of_scope_rejected() {
+        let ws = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("x.txt"), "hello\n").unwrap();
+        let tool = FileGrep::new(
+            Arc::new(RwLock::new(ws.path().to_path_buf())),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+            None,
+        );
+        let result = tool
+            .execute(
+                &json!({"pattern": "hello", "path": outside.path().join("x.txt").display().to_string()}),
+                "cli",
+            )
+            .await;
+        assert!(result.is_err(), "界外搜索必须拒绝");
+    }
+
+    #[tokio::test]
+    async fn test_file_grep_utf8_and_line_clip() {
+        let ws = tempdir().unwrap();
+        let ws_path = ws.path().to_path_buf();
+        std::fs::write(ws_path.join("cn.txt"), "中文内容也要能搜到\n").unwrap();
+        std::fs::write(
+            ws_path.join("long.txt"),
+            format!("{}tail\n", "y".repeat(500)),
+        )
+        .unwrap();
+        let tool = FileGrep::new(
+            Arc::new(RwLock::new(ws_path)),
+            Arc::new(RwLock::new(Vec::new())),
+            true,
+            None,
+        );
+        let out = tool
+            .execute(&json!({"pattern": "中文"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains("cn.txt:1:中文内容也要能搜到"), "{out}");
+        let out = tool
+            .execute(&json!({"pattern": "tail", "path": "long.txt"}), "cli")
+            .await
+            .unwrap();
+        assert!(out.contains('…'), "超长行应截断: {out}");
+        assert!(!out.contains(&"y".repeat(500)), "不应输出完整长行");
     }
 }
