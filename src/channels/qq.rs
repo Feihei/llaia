@@ -1752,16 +1752,30 @@ impl Channel for QqChannel {
     async fn run(self: Arc<Self>, registry: Arc<AgentRegistry>) -> Result<()> {
         tracing::info!(app_id = %self.config.app_id, "QqChannel starting");
 
-        // 外层重连循环：ws 断开后等待 5 秒重连，避免 serve 进程退出
+        // 外层重连循环：ws 断开后重连，避免 serve 进程退出。
+        // 连续快速失败走指数退避（5s 起步、封顶 60s）；连接存活过（≥60s）
+        // 说明网络曾恢复，退避归零。瞬态网络错误（reqwest 传输层失败，
+        // 断网/ DNS 故障时每轮必现）降为 warn，避免长时间刷 error
+        let mut backoff = Duration::from_secs(5);
         loop {
+            let started = Instant::now();
             match self.clone().run_connection(&registry).await {
                 Ok(()) => tracing::warn!("qq ws connection closed, will reconnect"),
                 Err(e) => {
-                    tracing::error!(error = %e, "qq ws connection ended with error, will reconnect")
+                    let msg = e.to_string();
+                    if msg.contains("error sending request") {
+                        tracing::warn!(error = %msg, "qq ws connection ended with network error, will reconnect");
+                    } else {
+                        tracing::error!(error = %msg, "qq ws connection ended with error, will reconnect");
+                    }
                 }
             }
-            tracing::info!("reconnecting in 5 seconds...");
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            if started.elapsed() >= Duration::from_secs(60) {
+                backoff = Duration::from_secs(5);
+            }
+            tracing::info!(delay_secs = backoff.as_secs(), "qq reconnecting...");
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(60));
         }
     }
 }
