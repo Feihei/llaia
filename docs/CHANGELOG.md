@@ -27,6 +27,7 @@
 - **webui**：实例栏与卡片增强——实例 rail 加 **+ New 按钮**直接建任务实例（2026-10-13）；rail 右缘可**拖宽**（140–420px 夹紧，localStorage 持久化，窄屏隐藏）（2026-10-19）；Config 页 provider/model 卡片加**名称过滤**（2026-10-12）；Stats 页 token 用量条改 **GitHub 风格贡献格**（2026-10-08）
 - **qq**：审批改为**每条独立按钮消息**（2026-10-14）——此前多条审批挤进一条消息，客户端按钮渲染受限
 - **cli**：**裸启动默认 serve**（2026-10-05）——无参数/双击 exe 等效 `llaia serve`（拉起 WebUI + 启用频道，端口就绪后自动开浏览器），出错停窗等一次回车再退出
+- **runtime**：**出站代理模式 `[runtime].proxy`**（2026-10-22，`src/http.rs`）——reqwest 默认继承系统代理，系统代理开启时发往 127.0.0.1 本地端点（Ollama/LMStudio/sd-server）的请求会被路由进代理而失败（实测：系统代理开着时 19 个环回 mock server 测试挂）。全项目 18 处 `reqwest::Client` 构建点收口到 `http::client_builder()` 统一入口，`[runtime].proxy` 三态：缺省/`"none"` = 强制直连（**默认，行为变化**）、`"system"` = 跟随系统代理、其他值 = 代理 URL（`Config::load` 校验可解析，非法 URL 启动即报错不静默直连）；serve/chat/doctor 入口注入进程级 `ProxyMode`（reload loop 每轮重设，重建的 client 随新值）；MCP HTTP transport 的强制 no_proxy 旧对策并入全局（远程 MCP server 走代理场景随之可用）；WebUI Config → Runtime 三态表单（none/system/custom URL）
 - **runtime**：`cron_allow_inline_interpreter`（2026-10-01）——开启后 cron 通道豁免 T3 内联解释器闸门（非交互频道无法审批，命中即 Denied fail-fast 而模型可写脚本绕行，闸门只剩摩擦）；WebUI Config 表单暴露该开关（2026-10-08）
 
 **Bug fixes**

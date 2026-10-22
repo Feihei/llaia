@@ -267,7 +267,7 @@ impl QqChannel {
     pub fn new(config: QqConfig) -> Self {
         Self {
             config,
-            http: Client::new(),
+            http: crate::http::client_builder().build().unwrap_or_default(),
             api_base: DEFAULT_API_BASE.to_string(),
             auth_base: DEFAULT_AUTH_BASE.to_string(),
             token: Arc::new(Mutex::new(TokenState::default())),
@@ -283,7 +283,7 @@ impl QqChannel {
     pub fn new_with_api_base(config: QqConfig, api_base: String) -> Self {
         Self {
             config,
-            http: Client::new(),
+            http: crate::http::client_builder().build().unwrap_or_default(),
             auth_base: api_base.clone(),
             api_base,
             token: Arc::new(Mutex::new(TokenState::default())),

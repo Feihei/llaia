@@ -143,7 +143,7 @@ impl FeishuChannel {
     pub fn new(config: FeishuConfig) -> Self {
         Self {
             config,
-            http: reqwest::Client::new(),
+            http: crate::http::client_builder().build().unwrap_or_default(),
             tenant_token: Arc::new(Mutex::new(None)),
             ws_seen_ids: Arc::new(Mutex::new(HashMap::new())),
             resolved_bot_open_id: Arc::new(std::sync::Mutex::new(None)),

@@ -21,7 +21,7 @@ pub struct BaiduProvider {
 impl BaiduProvider {
     pub fn new(api_key: String) -> Result<Self> {
         Ok(Self {
-            client: reqwest::Client::builder().build()?,
+            client: crate::http::client_builder().build()?,
             api_key,
         })
     }

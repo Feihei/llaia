@@ -45,7 +45,7 @@ impl DingtalkChannel {
     pub fn new(config: DingtalkConfig) -> Self {
         Self {
             config,
-            http: Client::new(),
+            http: crate::http::client_builder().build().unwrap_or_default(),
         }
     }
 

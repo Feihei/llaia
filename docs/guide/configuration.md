@@ -34,6 +34,7 @@
 | `snapshot_enabled` | `true` | 快照总开关：人格与记忆文件（SOUL/USER/MEMORY）、会话库 sessions.db、uploads/ 附件在覆盖前留底，另有 10 分钟兜底 sweep；快照目录对 agent 只读。详见 `docs/plans/2026-10-05-p9-snapshot-and-env-scrub.md`。 |
 | `snapshot_retention_days` | `14` | 副本**留多久**（天）：更早的时刻目录每日 GC。与备份频率无关，也不改变每份副本的内容——它只决定你最多能往回翻多少天。 |
 | `snapshot_db_interval_hours` | `24` | sessions.db **多久备一次**（小时，下限 1）：每份副本都是全量库而非时间窗口，间隔只决定产新副本的节奏；相邻两份的差就是这段时间里新增的消息，整库回滚最多丢这么多尾巴。改动需 Reload Service。 |
+| `proxy` | `"none"` | 出站代理模式：`none` = 强制直连（**默认**——系统代理开启时，发往 127.0.0.1 本地端点 Ollama / LMStudio / sd-server 的请求会被劫持进代理而失败，直连免疫此问题）；`system` = 跟随操作系统代理；其他值 = 代理 URL（`http://`、`socks5://`，写错启动即报错）。作用于全部出站 HTTP（模型 API、频道、搜索/tts/图片、MCP、web_fetch），改动需 Reload Service。WebUI Config → Runtime 有三态表单。 |
 
 **Generation Guard（输出退化防护）**：针对小参数本地模型在长上下文下的退化
 （重复循环、思考流失控、空输出）。流式判定退化 → 中途断流、丢弃退化产物 →

@@ -214,6 +214,8 @@ requires_assistant_after_tool = false          # 覆盖预设里的 true
 
 > **受信目录持久化（2026-09-13）**：`/move` 批准过的目录此前仅存内存、重启即清，同一目录反复弹审批。现由 `trusted_store.rs` 持久化到 `<config_dir>/trusted_dirs.json`——启动时加载进共享 trusted\_dirs Arc 并把 agent 家目录 workspace 种子进集合（`/move` 切走后 home 内操作依旧免审），`Agent::add_trusted_dir` 时回写。写失败静默降级为会话级。另修 path\_guard 口径：段首程序名若本身是路径形态（`/e/apps/blender.exe --version`）照常纳入路径校验，不再被当程序名整体跳过（裸程序名 `ls`/`git` 不受影响）。
 
+> **出站代理模式（2026-10-22）**：reqwest 默认继承系统代理，系统代理开启时发往 127.0.0.1 本地端点（Ollama/LMStudio/sd-server）的请求会被路由进代理而失败。全项目 `reqwest::Client` 构建收口到 `src/http.rs::client_builder()`（18 处），`[runtime].proxy` 三态——缺省/`"none"` = 强制直连（**默认**）、`"system"` = 跟随系统代理、其他值 = 代理 URL（`Config::load` 校验，非法启动即报错）。进程级 `ProxyMode` 由 serve/chat/doctor 入口注入（reload loop 每轮重设）；MCP transport 的强制 no\_proxy 旧对策并入（远程 MCP 走代理随之可用）。**新增出站 HTTP 客户端必须走 `http::client_builder()`**，自行 `reqwest::Client::new()` 会绕开代理模式。
+
 ### 工具副作用标记
 
 `Tool` trait 提供 `requires_confirm()`（默认 `false`）。有副作用的工具（`file_write` / `file_edit` / `terminal` / `memory_write` 等）override 为 `true`，触发审批流。

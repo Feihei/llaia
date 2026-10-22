@@ -1111,7 +1111,7 @@ pub async fn check_update(
 
 async fn fetch_latest_release() -> Result<UpdateCheck, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let client = reqwest::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .user_agent("llaia-update-check")
         .build()

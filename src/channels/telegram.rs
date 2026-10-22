@@ -72,7 +72,7 @@ struct BotUser {
 
 impl TelegramChannel {
     pub fn new(config: TelegramConfig) -> Result<Self> {
-        let http = Client::builder()
+        let http = crate::http::client_builder()
             // 长轮询 timeout 30s + 网络余量
             .timeout(Duration::from_secs(LONG_POLL_TIMEOUT_SECS + 20))
             .connect_timeout(Duration::from_secs(15))

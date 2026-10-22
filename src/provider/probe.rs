@@ -29,7 +29,7 @@ pub async fn probe_openai_compatible(
 ) -> Result<Vec<ProbableModel>> {
     let base = base_url.trim_end_matches('/');
     let url = format!("{}/models", base);
-    let client = reqwest::Client::builder()
+    let client = crate::http::client_builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()?;

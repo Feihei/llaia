@@ -44,7 +44,7 @@ impl OpenAiCompatibleProvider {
         max_tokens: Option<usize>,
         compat: Compat,
     ) -> Result<Self> {
-        let client = Client::builder()
+        let client = crate::http::client_builder()
             .connect_timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self {

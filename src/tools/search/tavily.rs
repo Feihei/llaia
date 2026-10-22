@@ -20,7 +20,7 @@ pub struct TavilyProvider {
 impl TavilyProvider {
     pub fn new(api_key: String) -> Result<Self> {
         Ok(Self {
-            client: reqwest::Client::builder()
+            client: crate::http::client_builder()
                 .timeout(Duration::from_secs(30))
                 .connect_timeout(Duration::from_secs(10))
                 .build()?,

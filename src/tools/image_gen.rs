@@ -112,7 +112,9 @@ impl Endpoint {
     }
 
     fn client(&self) -> Result<reqwest::Client> {
-        Ok(reqwest::Client::builder().timeout(self.timeout).build()?)
+        Ok(crate::http::client_builder()
+            .timeout(self.timeout)
+            .build()?)
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

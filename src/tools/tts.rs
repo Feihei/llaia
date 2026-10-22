@@ -86,7 +86,7 @@ impl TtsTool {
             tokio::fs::create_dir_all(parent).await?;
         }
         let url = format!("{}/audio/speech", self.base_url);
-        let client = reqwest::Client::builder()
+        let client = crate::http::client_builder()
             .timeout(Duration::from_secs(60))
             .build()?;
         let mut req = client.post(&url).json(&json!({

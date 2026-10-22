@@ -130,6 +130,11 @@ pub struct RuntimeConfig {
     /// 防 `env` 一条命令倒出 .env 里全部 API key。默认 true。
     #[serde(default = "default_scrub_child_env")]
     pub scrub_child_env: bool,
+    /// 出站代理模式（`src/http.rs`）：缺省/"none" = 强制直连（默认；防系统代理
+    /// 劫持 localhost 端点），"system" = 跟随系统代理，其他值 = 代理 URL
+    /// （http://、socks5://，`Config::load` 校验可解析）。
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -157,6 +162,7 @@ impl Default for RuntimeConfig {
             snapshot_retention_days: default_snapshot_retention_days(),
             snapshot_db_interval_hours: default_snapshot_db_interval_hours(),
             scrub_child_env: default_scrub_child_env(),
+            proxy: None,
         }
     }
 }
@@ -1523,6 +1529,26 @@ impl Config {
                 config.runtime.permission = Some(v);
             }
         }
+        // proxy 模式校验：none/system 之外一律按代理 URL 解析。URL 写错时启动即报错
+        // 而不是静默直连——用户配代理往往是为了出墙的云端 API，静默降级只会表现成
+        // 莫名的连接失败（本地端点直连不受影响，报错可见才是对的做法）。
+        if let Some(p) = config.runtime.proxy.take() {
+            let v = p.trim();
+            if v.is_empty() {
+                // 留空 = 未配置（None）
+            } else if v == "none" || v == "system" {
+                config.runtime.proxy = Some(v.to_string());
+            } else {
+                match reqwest::Proxy::all(v) {
+                    Ok(_) => config.runtime.proxy = Some(v.to_string()),
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "invalid [runtime].proxy: {v:?} is not \"none\"/\"system\" or a parsable proxy URL: {e}"
+                        ));
+                    }
+                }
+            }
+        }
         // 长任务心跳/超时校验：过小或倒挂的值会让心跳刷屏或直接秒停，兜底恢复默认
         if config.runtime.keepalive_interval_secs < 30 {
             tracing::warn!(
@@ -2770,5 +2796,56 @@ fallback = ["b"]
         assert_eq!(config.runtime.compact_model.as_deref(), Some("a"));
         assert_eq!(config.runtime.vision_model.as_deref(), Some("b"));
         assert_eq!(config.agent["main"].fallback, vec!["b".to_string()]);
+    }
+
+    /// `[runtime].proxy` 三态：none/system 原样保留、URL 透传、空值视为未配置。
+    #[test]
+    fn test_proxy_modes_accepted() {
+        let toml = r#"
+[runtime]
+proxy = "system"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert_eq!(config.runtime.proxy.as_deref(), Some("system"));
+
+        let toml = r#"
+[runtime]
+proxy = "http://127.0.0.1:7890"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert_eq!(
+            config.runtime.proxy.as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+
+        let toml = r#"
+[runtime]
+proxy = ""
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        assert_eq!(config.runtime.proxy, None, "空串视为未配置");
+    }
+
+    /// 非法代理 URL 启动即报错，不静默降级直连（配代理多为出墙场景，静默直连
+    /// 只会表现成云端 API 莫名连接失败）。
+    #[test]
+    fn test_proxy_invalid_url_errors() {
+        let toml = r#"
+[runtime]
+proxy = "not a proxy url"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let err = Config::load(&tmp.path().to_path_buf()).unwrap_err();
+        assert!(
+            err.to_string().contains("[runtime].proxy"),
+            "error should mention [runtime].proxy, got: {err}"
+        );
     }
 }

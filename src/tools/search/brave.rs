@@ -20,7 +20,7 @@ pub struct BraveProvider {
 impl BraveProvider {
     pub fn new(api_key: String) -> Result<Self> {
         Ok(Self {
-            client: reqwest::Client::builder().build()?,
+            client: crate::http::client_builder().build()?,
             api_key,
         })
     }

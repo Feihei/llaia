@@ -90,7 +90,7 @@ impl WechatChannel {
             config,
             state_dir,
             // 长轮询 35s + 网络余量
-            http: Client::builder()
+            http: crate::http::client_builder()
                 .timeout(Duration::from_secs(LONG_POLL_SECS + 20))
                 .connect_timeout(Duration::from_secs(15))
                 .build()

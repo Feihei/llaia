@@ -212,7 +212,7 @@ impl WebFetch {
         tavily: Option<Arc<TavilyProvider>>,
         gate: Arc<WebFetchGate>,
     ) -> Result<Self> {
-        let client = reqwest::Client::builder()
+        let client = crate::http::client_builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::limited(10))

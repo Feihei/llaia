@@ -1198,6 +1198,8 @@ function llaiaApp() {
           // platform：search 类型必显；llm family / 旧配置省略 → 空串让 select 显示占位
           if (data.provider[pid].platform === undefined) data.provider[pid].platform = '';
         }
+        // proxy：缺省键 = none（强制直连，默认语义），让 select 初始显示正确
+        if (data.runtime && data.runtime.proxy === undefined) data.runtime.proxy = 'none';
         this.cfg = data;
         // 初始化每个 agent 的 fallback 草稿（下拉选择暂存）
         this.fallbackDraft = {};
@@ -1209,6 +1211,20 @@ function llaiaApp() {
       const rr = await this.apiFetch('/api/config/raw');
       if (!this.authed) return;
       if (rr.ok) { this.rawToml = await rr.text(); this.$nextTick(() => this.initEditor()); }
+    },
+    // ---- outbound proxy ([runtime].proxy) ----
+    // select 三态映射：none/system 直存，custom 才暴露 URL 输入框
+    runtimeProxyMode() {
+      const v = this.cfg.runtime && this.cfg.runtime.proxy;
+      return (!v || v === 'none') ? 'none' : (v === 'system' ? 'system' : 'custom');
+    },
+    runtimeProxySet(mode) {
+      if (mode === 'custom') {
+        const cur = this.cfg.runtime.proxy;
+        if (!cur || cur === 'none' || cur === 'system') this.cfg.runtime.proxy = '';
+      } else {
+        this.cfg.runtime.proxy = mode;
+      }
     },
     initEditor() {
       // x-if destroys the editor DOM on section switch; drop stale detached instances

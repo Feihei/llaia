@@ -519,6 +519,17 @@
             <div class="form-row"><label>keepalive_interval_secs</label><input type="number" min="30" x-model.number="cfg.runtime.keepalive_interval_secs" title="long-task heartbeat interval (seconds): chat channels send a still-working notice this often"></div>
             <div class="form-row"><label>max_turn_duration_secs</label><input type="number" min="60" x-model.number="cfg.runtime.max_turn_duration_secs" title="max wall-clock seconds per turn; the turn is interrupted beyond this, guarding against runaway loops"></div>
             <div class="form-row"><label>cron_allow_inline_interpreter</label><label class="switch"><input type="checkbox" x-model="cfg.runtime.cron_allow_inline_interpreter" title="exempt cron channels from the T3 inline interpreter gate: non-interactive channels cannot approve anyway, so out-of-scope ops stay fail-fast denied while in-workspace inline commands (python -c etc.) run without approval"></label></div>
+            <div class="form-row"><label>proxy</label>
+              <span style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <select :value="runtimeProxyMode()" @change="runtimeProxySet($event.target.value)" title="outbound proxy for every HTTP client (providers, channels, tools, MCP). none: direct connections so a system proxy cannot hijack localhost endpoints (Ollama / LMStudio / sd-server); system: follow the OS proxy; custom: explicit proxy URL">
+                  <option value="none">none (direct, default)</option>
+                  <option value="system">system (follow OS proxy)</option>
+                  <option value="custom">custom URL…</option>
+                </select>
+                <input type="text" x-show="runtimeProxyMode()==='custom'" x-model="cfg.runtime.proxy" placeholder="http://127.0.0.1:7890 or socks5://host:port" style="width:300px">
+              </span>
+            </div>
+            <div class="hint">Proxy applies to clients built at agent startup — it takes effect after <b>About → Reload Service</b>, not on Save.</div>
             <h3>snapshots <span class="hint">(backups of personality files, chat history and uploads — kept in <code>&lt;config_dir&gt;/snapshots/</code>)</span></h3>
             <div class="form-row"><label>snapshot_enabled</label><label class="switch"><input type="checkbox" x-model="cfg.runtime.snapshot_enabled" title="keep a copy of SOUL/USER/MEMORY, sessions.db and uploads/ before overwriting them, plus a periodic sweep every 10 minutes. The backup folder is read-only to the agent. Default on"></label></div>
             <div class="form-row"><label>snapshot_retention_days</label><input type="number" min="1" x-model.number="cfg.runtime.snapshot_retention_days" title="timestamped snapshot dirs older than this are GC'd daily. Default 14"></div>

@@ -44,7 +44,7 @@ impl GeminiProvider {
         model: impl Into<String>,
         max_output_tokens: usize,
     ) -> Result<Self> {
-        let client = Client::builder()
+        let client = crate::http::client_builder()
             .connect_timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self {

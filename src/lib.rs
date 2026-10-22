@@ -7,6 +7,7 @@ pub mod commands;
 pub mod config;
 pub mod cron;
 pub mod envprobe;
+pub mod http;
 pub mod image_utils;
 pub mod log;
 pub mod mcp;

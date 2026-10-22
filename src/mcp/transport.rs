@@ -308,12 +308,13 @@ pub(crate) fn parse_sse_response(body: &str) -> Option<JsonRpcResponse> {
     None
 }
 
-/// 构建 MCP 用 reqwest client：不走系统代理。
-/// MCP server 多为本地/内网服务，Windows 系统代理（Clash 等）常不 bypass
-/// loopback，导致 127.0.0.1 请求被代理截断。
+/// 构建 MCP 用 reqwest client：走全局代理模式（`src/http.rs`，`[runtime].proxy`）。
+/// 旧实现强制 no_proxy——MCP server 多为本地/内网服务，Windows 系统代理
+/// （Clash 等）常不 bypass loopback，导致 127.0.0.1 请求被代理截断；该问题的
+/// 全局对策已收口到 `[runtime].proxy`（默认 none 直连），此处跟随全局值，
+/// 远程 MCP server 需要走代理的场景也随之可用。
 fn build_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .no_proxy()
+    crate::http::client_builder()
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }

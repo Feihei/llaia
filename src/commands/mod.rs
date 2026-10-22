@@ -50,6 +50,9 @@ max_iterations = 10
 # snapshot_db_interval_hours = 24  # optional: minimum hours between sessions.db snapshot copies (whole-DB VACUUM INTO, expensive so throttled). Default 24, floor 1
 # scrub_child_env = true           # optional: strip inherited env vars matching *KEY*/*SECRET*/*TOKEN* from terminal/MCP child processes. Default true
 #
+# Outbound proxy (src/http.rs): applies to every HTTP client (providers, channels, tools, MCP)
+# proxy = "none"                   # optional: "none" (default) forces direct connections so a system proxy cannot hijack localhost endpoints (Ollama / LMStudio / sd-server); "system" follows the OS proxy; any other value is used as the proxy URL (http://, socks5://)
+#
 # Generation Guard: output degeneration defense for small local models
 # (repetition loops, runaway thinking, empty replies). On detection the
 # stream is aborted, the partial output discarded, and one retry is made
@@ -407,6 +410,10 @@ pub async fn chat_cmd(config_dir: &Path) -> Result<()> {
     prepare_startup_dir(config_dir)?;
     let config = load_config_or_init(config_dir)?;
     warn_plaintext_secrets(config_dir);
+    // 出站代理模式：chat 的 client 构建全部走 http::client_builder()
+    crate::http::set_proxy(crate::http::ProxyMode::from_config(
+        config.runtime.proxy.as_deref(),
+    ));
 
     let log_dir = PathBuf::from(&config.log.dir);
     let _ = crate::log::init(&config.log.level, &log_dir);
@@ -664,6 +671,11 @@ async fn serve_once(
     // token 由 serve_cmd 解析后注入（配置值或进程级随机值），WebChannel 不再自行生成
     webui.token = webui_token;
     warn_plaintext_secrets(config_dir);
+
+    // 出站代理模式随每轮注入（reload loop 重建子系统前重设，重建的 client 跟随新值）
+    crate::http::set_proxy(crate::http::ProxyMode::from_config(
+        config.runtime.proxy.as_deref(),
+    ));
 
     let (registry, cron_tool, mcp_registry) =
         crate::channels::cli::build_agent(config, config_dir).await?;
@@ -1309,7 +1321,7 @@ pub async fn doctor_cmd(config_dir: &Path) -> Result<()> {
                     m.kind.as_str(),
                     native_label(m.native_tool_calling)
                 );
-                match reqwest::Client::builder()
+                match crate::http::client_builder()
                     .timeout(std::time::Duration::from_secs(5))
                     .build()
                     .map_err(|e| anyhow::anyhow!("failed to build http client: {}", e))?
@@ -1393,7 +1405,11 @@ impl DoctorCheck {
 pub async fn doctor_checks(config_dir: &Path) -> Result<Vec<DoctorCheck>> {
     let (cfg, parse_err) = load_config_for_doctor(config_dir);
     let mut checks = Vec::new();
-    let client = reqwest::Client::builder()
+    // 连通性探测与业务 client 同走代理模式，doctor 结论才与实际运行一致
+    crate::http::set_proxy(crate::http::ProxyMode::from_config(
+        cfg.runtime.proxy.as_deref(),
+    ));
+    let client = crate::http::client_builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
 
