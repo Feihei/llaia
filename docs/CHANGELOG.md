@@ -6,11 +6,9 @@
 
 ---
 
-## v0.6.1（未发版，交付至 2026-10-08）
+## v0.7.0 (2026-10-22)
 
-> 开发中积累段；发版时补日期与 release-notes。
-
-**Milestone**：安全模型落地（P9，[ADR-0033](adr/0033-security-model.md) 全部 Phase：L1 可恢复性基建 → 防泄露组合刀 → T2 部署级防线 → 闸门复审减法，2026-10-02 ADR 评审定案转 Accepted）+ 记忆卫生三档 + uploads 手动清理（H5）。
+**Milestone**：安全模型落地（P9，[ADR-0033](adr/0033-security-model.md) 全部 Phase：L1 可恢复性基建 → 防泄露组合刀 → T2 部署级防线 → 闸门复审减法，2026-10-02 ADR 评审定案转 Accepted）+ 记忆卫生三档 + uploads 手动清理（H5）+ WebUI 消息队列 + 内置只读工具（file_list / file_grep / sqlite_query）+ 审批卡片可用性专项。
 
 **Features / security**
 - **snapshot**：**P9 Phase 1 · workspace 快照基建**（2026-10-05，`src/snapshot.rs`，[plan](plans/2026-10-05-p9-snapshot-and-env-scrub.md)）——时间戳镜像目录 + sha1 去重（`<config_dir>/snapshots/<时刻>/<key>`，零新依赖，弃 git-backed：外部 git 依赖与轻量单 exe 定位冲突）。A0/A2 写前留底双通道：写前挂钩（memory_write 双通路 / file 工具家目录人格文件 / `/memory-compact`，经 `ApprovalContext.snapshot` 与工具构造注入）+ 定时 sweep（10 分钟；sessions.db 用 `VACUUM INTO` 一致副本、`[runtime].snapshot_db_interval_hours` 节流默认 24h，防 WAL 活拷损坏与爆盘）；保留窗口 `[runtime].snapshot_retention_days`（默认 14 天）日清 GC；`snapshot_enabled` 总开关。**快照库对 agent 只读**：file/terminal 工具持 `snapshot_root` 硬拒（execute 与 execute_approved 同拒，堵 delegate/批准豁免绕行；`bash -s` stdin 内路径不可见属 L5 固有局限，硬边界归 Phase 3 T2）。恢复 = 从快照目录手工拷回
@@ -23,6 +21,24 @@
 - **security（复审）**：**P9 Phase 4 · 闸门复审减法**（2026-10-08，纯文档，[复审记录](plans/2026-10-08-p9-phase4-gate-review.md)）——判据 3 全量过 13 项闸门，**零删除、零代码降级**（每个残余缺口都有「无兜底」格子撑着对应闸门存在，准入看判据不凑减法 KPI）；交付两类叙事重定位（T3 定性「无意识操作人审点 + 审计信号」非边界 + T2 部署后 `interpret_inline = "off"` 摘除路径；catastrophic 黑名单降为提示层）+ Generation Guard 补归位 L5。T3 fork 定案：保留默认 approval（A），弃 audit 默认档（B）/删除（C）留档复审记录
 - **memory**：**记忆卫生三档**（A0 特许写入口的对症控制，[plan](plans/2026-10-06-memory-hygiene.md)）——**第 0 档 · 写入防重**（2026-10-06，`memory/hygiene.rs::normalize_entry`）：entry 归一化（小写 + 标点/符号/空白折叠，CJK 保留）后与现有行比对，已存在即返回 `already remembered` 不落盘，两条写通路（main 共享工具 + 实例路由）同接，纯函数零 LLM。**第 1 档 · 结构化压缩**（2026-10-06，`markdown.rs::compress_memory` 三段管线）：① 确定性预检——按 `- [YYYY-MM-DD] entry` 契约逐行解析，归一化重复直接合并（保留最早条目）不经 LLM，头部/注释与不合规行原样保留不进 LLM；② LLM 只做语义合并（输入输出均为条目列表，提示词明令禁止发明新条目）；③ 输出结构校验——每行匹配契约 + 可溯源到至少一条输入（归一化互含或字符二元组 Jaccard ≥ 0.3），违规**整体**拒绝，带原因重试一次仍败原文件保留并报错；签名变更 `compress_memory(..., budget: Option<usize>) -> Result<String>`。**自动触发**（2026-10-06，`cli.rs::build_single_agent` 后台任务）：MEMORY 超 ADR-0025 预算（chars/4）且非模板 → 后台压缩（GuardCtx 写前快照免交互审批；确定性去重达标即跳 LLM；每进程至多一次；仅 main，实例私有 MEMORY 不自动压），`/memory-compact` 保留为手动覆盖（恒走 LLM）
 - **webui**：**uploads 手动清理**（H5，2026-10-08）——`GET /api/uploads`（文件清单 + 容量 + mtime 排序）+ `DELETE /api/uploads/{name}`（逐个删除，`upload_name_or_err` 纯文件名校验防穿越），Config 页新增 Uploads section（列表 + 总容量 + 删除按钮）。**零自动回收是特性不是欠账**：消息历史引用这些路径，自动删/挪必断链（定案 grill 2026-09-07）
+- **webui**：**消息队列**（2026-10-14，[spec](specs/2026-10-14-message-queue-design.md)）——turn 运行中点 Send 将消息入队（每实例一条）；终态事件分别处置：done 自动补发、interrupted 恢复草稿、error 保持排队；队列条展示排队草稿并提供 Send now / Steer 动作
+- **tools**：内置 **`file_grep` / `sqlite_query`**（2026-10-19，只读免审批）——file_grep 基于 ripgrep 库栈（grep-searcher/grep-regex）正则搜文件内容，替代 Windows 下不可靠的 terminal grep（cmd 回退无 grep 且越界路径触发审批）；作用域同 file_list，跳过构建/依赖目录（含 `.venv*`/`venv*` 前缀）、二进制与超大文件，命中数/文件数/行长封顶。sqlite_query 用捆绑 rusqlite（`SQLITE_OPEN_READ_ONLY`）对本地 .db 跑只读 SELECT，解锁此前被 T3 闸门卡住的 sessions.db 检查
+- **tools**：**`file_list`** 工具（2026-10-13，只读免审批）——单层列目录，可选 `*`/`?` 通配（大小写不敏感）递归搜索（深度/条目封顶），作用域同 file_read（含 skills 目录放行）；同时把 skill 目录的 terminal 审批口径与执行器对齐（extra_readable），消除 agent 探索 skill 时逐命令审批的摩擦（2026-10-11 会话 12 次审批）；系统提示词加工具选择守则（读操作优先 file_*）
+- **webui**：实例栏与卡片增强——实例 rail 加 **+ New 按钮**直接建任务实例（2026-10-13）；rail 右缘可**拖宽**（140–420px 夹紧，localStorage 持久化，窄屏隐藏）（2026-10-19）；Config 页 provider/model 卡片加**名称过滤**（2026-10-12）；Stats 页 token 用量条改 **GitHub 风格贡献格**（2026-10-08）
+- **qq**：审批改为**每条独立按钮消息**（2026-10-14）——此前多条审批挤进一条消息，客户端按钮渲染受限
+- **cli**：**裸启动默认 serve**（2026-10-05）——无参数/双击 exe 等效 `llaia serve`（拉起 WebUI + 启用频道，端口就绪后自动开浏览器），出错停窗等一次回车再退出
+- **runtime**：`cron_allow_inline_interpreter`（2026-10-01）——开启后 cron 通道豁免 T3 内联解释器闸门（非交互频道无法审批，命中即 Denied fail-fast 而模型可写脚本绕行，闸门只剩摩擦）；WebUI Config 表单暴露该开关（2026-10-08）
+
+**Bug fixes**
+- **webui**：**审批卡片长驻页面可用性专项**（2026-10-19）——五连修让审批卡片在长生命周期页面真正可用：① 审批/问题 ID 加进程 nonce 前缀（`ap{nonce}-n`），serve 重建后页面不再把新卡当"已渲染"去重吞掉；② turn 终态信号先排干再处理 chat/审批帧、被拒帧正确复位 busy（关 done → auto-send → Busy 竞态）；③ 卡片广播到**全部** WS 连接（原先只发发起连接，换设备/多标签看不到）；④ 按钮禁用只认真正跑回合（"waiting for approval" 等待决策态不再永久禁用按钮）；⑤ `/api/approvals` 扫描时实例锁被持则报 `incomplete=true`，5s 对账心跳跳过 stale 标记防误判"已在别处解决"；`/ok` 续跑消息声明审批来源（模型不再把审批后工具结果误读为未批准执行）；`/api/status` 带 `started_at`，serve 重建后页面顶栏提示点击 reload（旧 JS 静默缺功能）
+- **memory**：**message_fts 中文分词**（2026-10-19）——unicode61 把连续汉字/中英混排粘成单 token，中文 MATCH 必落空；`fts_zh` 标量函数在「两侧均字母数字且至少一侧 CJK」的相邻对插空格，查询侧 CJK run ≥2 包引号短语（memory_research 与裸 SQL 通路同修）；索引经 `cjk_spacing_v2` 版本标记对存量库自动重建一次
+- **provider**：openai_compatible 发送前**内联工具 schema 的 `$ref`/`$defs`**（2026-10-14）——部分端点不解析 JSON Pointer 引用导致工具调用失败
+- **webui**：模型卡标题不再按 `.` 拆分段式 id、添加表单支持可选 context_size/max_tokens（2026-10-13）；probe 已添加条目灰化防重名、agent fallback 链去重防自引用（2026-10-14）
+- **webui**：聊天视图**粘底滚动修正**（2026-10-19）——流式 chunk 与 5s 审批轮询不再无条件 scrollBottom，距底 80px 内才跟随（阅读历史不再被拽回底部）
+- **cli**：`/provider` 序号列表只列 chat-kind 模型（2026-10-14）
+- **qq**：agent 锁忙时**立即 ack** 按钮点击（2026-10-11，防客户端等待超时）；ws 重连**指数退避**（5s 起步封顶 60s，存活 ≥60s 归零），瞬态网络错误降 warn 不再刷 error（2026-10-22）
+- **config**：legacy tts/image_gen 迁移不再对已回写的引用**二次迁移**（2026-10-12，防 base_url 剥尾等改写被重复应用）
+- **snapshot**：`VACUUM INTO` 前先建目标目录（2026-10-09）；连续快速写入的时间戳目录防碰撞（2026-10-08）
 
 ---
 

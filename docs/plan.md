@@ -1,4 +1,4 @@
-# LLAIA 项目 Roadmap
+﻿# LLAIA 项目 Roadmap
 
 > 本文档是 LLAIA 的**前瞻路线图**：顶部是已交付阶段一览（索引），主体是已收口专项的留观/不做定案（触发条件留档）；下一步计划立项后在此追加。
 > 各阶段的**完整交付清单**见 [`CHANGELOG.md`](CHANGELOG.md)；详细实现计划见 [`plans/`](plans/)，设计规格见 [`specs/`](specs/)，架构决策见 [`adr/`](adr/)。
@@ -38,7 +38,7 @@
 | v0.5.2 | ✅ | 补丁版：Delete Guard（破坏性命令进 .trash）+ QQ 审批内联按钮（msg_type=2）+ 思考流 guard 补漏 + path_guard 内联载荷扩面，2026-09-17 打 tag 发版 | [CHANGELOG.md](CHANGELOG.md)（§v0.5.2）、[release-notes/v0.5.2.md](release-notes/v0.5.2.md) |
 | P7 | ✅ | 六项 grill 全部收敛：WebUI 审批/问题卡片（AC1–AC3）、MCP stdio 新 spec 兜底（A1–A4）、session-rail 先行交付；其余留观/不做定案（触发条件留档见下节） | [CHANGELOG.md](CHANGELOG.md)（§v0.5.0、§v0.6.0） |
 | P8 | ✅ | 模型目录重构：provider 连接注册表 + `[model.<id>]` 目录 + 加载期自动迁移，配置 breaking 随 v0.6.0 | [CHANGELOG.md](CHANGELOG.md)（§v0.6.0）、[plans/2026-09-25-model-catalog.md](plans/2026-09-25-model-catalog.md) |
-| P9 | ✅ | 安全模型落地（ADR-0033）：快照基建 + 防泄露组合刀 + T2 部署防线 + 闸门复审减法 + 记忆卫生三档 | [CHANGELOG.md](CHANGELOG.md)（§v0.6.1）、[adr/0033-security-model.md](adr/0033-security-model.md) |
+| P9 | ✅ | 安全模型落地（ADR-0033）：快照基建 + 防泄露组合刀 + T2 部署防线 + 闸门复审减法 + 记忆卫生三档 | [CHANGELOG.md](CHANGELOG.md)（§v0.7.0）、[adr/0033-security-model.md](adr/0033-security-model.md) |
 
 > **P6 已全部交付并归档**：原 P6 节的完整勾选清单（WebUI W1/W2/W3、会话主题总结、provider 针对性优化、`memory_research`、启动优化 #11、主干代码体检、#A–#J 新增发现、Generation Guard、First-run Bootstrap 等）已随各项实现陆续迁入 [CHANGELOG.md](CHANGELOG.md) §v0.3.1 / §v0.4.0，本文件不再保留已交付明细。注意 CHANGELOG 里**没有独立的 §v0.3.2**：原按 0.3.2 攒的开发内容跨版本号当作 v0.4.0 发布，段标题已一并重定。v0.5.0 的三项同样已迁入 CHANGELOG，本文件只留索引与下一步。
 
@@ -46,9 +46,9 @@
 
 ## 近期小修（H 系列）
 
-**状态**：✅ 全部交付并归档（H1–H5；H5 于 2026-10-08 落地，随 v0.6.1 迁入 [CHANGELOG.md](CHANGELOG.md)）
+**状态**：✅ 全部交付并归档（H1–H5；H5 于 2026-10-08 落地，随 v0.7.0 迁入 [CHANGELOG.md](CHANGELOG.md)）
 
-> H1（file_edit 自纠错 + CRLF 宽容）、H2（```` ```json ```` 围栏工具调用）、H3（文档一致性扫尾）、H4（毒锁恢复等机械项）、H6（v0.5.0 发版动作）随 §v0.5.0 迁入 CHANGELOG；H5（uploads 手动清理）随 §v0.6.1 迁入，此处不再保留明细。v0.5.1 窗口内交付的四项代码改动（todo 注入弱化、path_guard 段首程序名、受信目录持久化、chat 回放/审批标注）见 §v0.5.1，它们不属 H 编号序列。
+> H1（file_edit 自纠错 + CRLF 宽容）、H2（```` ```json ```` 围栏工具调用）、H3（文档一致性扫尾）、H4（毒锁恢复等机械项）、H6（v0.5.0 发版动作）随 §v0.5.0 迁入 CHANGELOG；H5（uploads 手动清理）随 §v0.7.0 迁入，此处不再保留明细。v0.5.1 窗口内交付的四项代码改动（todo 注入弱化、path_guard 段首程序名、受信目录持久化、chat 回放/审批标注）见 §v0.5.1，它们不属 H 编号序列。
 
 ---
 
@@ -71,7 +71,7 @@
 
 ## P9 — 安全模型落地（ADR-0033）· 已收口归档（2026-10-02 定案 Accepted，2026-10-08 交付齐）
 
-> 依 [ADR-0033](adr/0033-security-model.md)：资产分级（**A0 人格主权 / A1 凭据 / A2 隐私历史 / A3 全盘机器**）+ 五层防线（L1 可恢复性基建 → L5 字符串启发）。交付明细（Phase 1 快照基建 / Phase 2 防泄露组合刀五项 / Phase 3 T2 部署防线 / Phase 4 闸门复审减法 / 记忆卫生三档）随 §v0.6.1 迁入 [CHANGELOG.md](CHANGELOG.md)，本文件不再保留。
+> 依 [ADR-0033](adr/0033-security-model.md)：资产分级（**A0 人格主权 / A1 凭据 / A2 隐私历史 / A3 全盘机器**）+ 五层防线（L1 可恢复性基建 → L5 字符串启发）。交付明细（Phase 1 快照基建 / Phase 2 防泄露组合刀五项 / Phase 3 T2 部署防线 / Phase 4 闸门复审减法 / 记忆卫生三档）随 §v0.7.0 迁入 [CHANGELOG.md](CHANGELOG.md)，本文件不再保留。
 
 **留观 / 不做定案（触发条件留档，触发后重新评估再立项）**：
 
