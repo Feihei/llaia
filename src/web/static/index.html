@@ -582,8 +582,9 @@
                     <option value="tavily">tavily</option>
                     <option value="baidu">baidu</option>
                     <option value="brave">brave</option>
+                    <option value="tinyfish">tinyfish</option>
                   </select>
-                  <span class="hint">endpoint is fixed per platform — no base_url needed</span>
+                  <span class="hint">endpoint is fixed per platform — no base_url needed (tinyfish = Search + Fetch, both from one key)</span>
                 </div>
                 <div class="form-row" x-show="p.type !== 'search'"><label>base_url</label><input x-model="p.base_url"></div>
                 <div class="form-row"><label>api_key</label><input type="password" x-model="p.api_key"></div>
@@ -950,7 +951,7 @@
                 </template>
               </select>
             </div>
-            <div class="hint">Search providers (tavily/baidu/brave, ...) live in the Provider tab as service-type entries — add endpoints and keys there.</div>
+            <div class="hint">Search providers (tavily/baidu/brave/tinyfish, ...) live in the Provider tab as service-type entries — add endpoints and keys there.</div>
             <div class="form-row"><label>top_k</label><input type="number" x-model.number="cfg.tools.search.top_k"></div>
             <h3>tts <span class="hint">(OpenAI-compatible /audio/speech; model = catalog entry with kind=tts)</span></h3>
             <div class="form-row"><label>enabled</label><input type="checkbox" x-model="cfg.tools.tts.enabled"></div>

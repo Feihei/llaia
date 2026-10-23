@@ -16,6 +16,7 @@ use crate::tools::Tool;
 pub mod baidu;
 pub mod brave;
 pub mod tavily;
+pub mod tinyfish;
 
 /// 归一化后的单条搜索结果。
 #[derive(Debug, Clone)]
@@ -31,15 +32,29 @@ pub struct SearchResult {
 /// type 枚举项，schema/WebUI 零改动）。
 #[async_trait]
 pub trait SearchProvider: Send + Sync {
-    /// provider 标识（tavily / baidu / brave …），用于日志。
+    /// provider 标识（tavily / baidu / brave / tinyfish …），用于日志。
     fn name(&self) -> &str;
     /// 执行一次搜索，返回至多 `top_k` 条归一化结果。
     async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>>;
-    /// 是否支持服务端正文抽取（`web_fetch.extract_provider` 的引用校验依据）。
-    /// v1 仅 tavily（`/extract`）；jina reader / tinyfish Fetch 接入时改写此项。
-    fn supports_extract(&self) -> bool {
-        false
-    }
+}
+
+/// 服务端正文抽取抽象（`[tools.web_fetch].extract_provider` 的解析产物）。
+///
+/// **独立于 [`SearchProvider`]**：搜索与抽取是两件正交的能力，只是同源 provider
+/// 恰好都能提供。把它单列成 trait 的原因——`resolve_extractor` 过去直接返回
+/// `Arc<TavilyProvider>`，等于把「唯一能抽取的实现」硬编码进 `web.rs`；新增
+/// tinyfish Fetch 后必须按 `platform` 分派，硬编码类型撑不住（T2 重构）。
+///
+/// 实现者：`tavily`（`/extract`）、`tinyfish`（Fetch API）。新增抽取商 = 实现
+/// 本 trait + 在 `resolve_extractor` 的 match 里加一支。
+#[async_trait]
+pub trait Extractor: Send + Sync {
+    /// 抽取器标识（tavily / tinyfish …），用于日志与错误信息。
+    /// 刻意不叫 `name`——同一 struct 常常同时实现本 trait 与 [`SearchProvider`]，
+    /// 同名方法会在调用点产生歧义（`p.name()` 无法解析）。
+    fn extractor_name(&self) -> &str;
+    /// 抓取并清洗单个 URL 的正文；失败由调用方退化为本地解析。
+    async fn extract(&self, url: &str) -> Result<String>;
 }
 
 /// 统一 `search` 工具：持有单一 provider，对 agent 只暴露 `query` + 可选 `top_k`。
@@ -81,8 +96,9 @@ impl UnifiedSearch {
         }
         let api_key = prov.api_key.clone();
         // 平台判别：type=search 统一入口，platform（load 期校验必填且合法）选 adapter。
-        // 各家 wire 协议不同（tavily key-in-body / baidu Bearer+chat-style / brave GET+专用头），
-        // 端点 URL 是编译期常量，配置不消费。
+        // 各家 wire 协议不同（tavily key-in-body / baidu Bearer+chat-style /
+        // brave GET+专用头 / tinyfish GET+`X-API-Key` 头），端点 URL 是编译期常量，
+        // 配置不消费。
         let provider: Option<Arc<dyn SearchProvider>> = match prov.search_platform() {
             Some("tavily") if !api_key.is_empty() => {
                 Some(Arc::new(tavily::TavilyProvider::new(api_key)?))
@@ -92,6 +108,9 @@ impl UnifiedSearch {
             }
             Some("brave") if !api_key.is_empty() => {
                 Some(Arc::new(brave::BraveProvider::new(api_key)?))
+            }
+            Some("tinyfish") if !api_key.is_empty() => {
+                Some(Arc::new(tinyfish::TinyFishProvider::new(api_key)?))
             }
             platform => {
                 if api_key.is_empty() {

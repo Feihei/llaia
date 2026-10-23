@@ -65,16 +65,24 @@ type = "anthropic"
 api_key = "${ANTHROPIC_API_KEY}"
 
 # service family：纯凭据搜索/抽取服务，不承载模型、不进 probe 列表。
-# 统一 type = "search"，platform 选 wire adapter（tavily | baidu | brave）——
+# 统一 type = "search"，platform 选 wire adapter（tavily | baidu | brave | tinyfish）——
 # 各家端点编译期固定，base_url 不消费。
 [provider.tv]
 type = "search"
 platform = "tavily"
 api_key = "${TAVILY_API_KEY}"
+
+# tinyfish 一份 key 通吃两条通路：TinySearch（12000 次/天免费）
+# 与 TinyFetch（1000 URL/天免费，服务端渲染 JS 页）。
+[provider.tf]
+type = "search"
+platform = "tinyfish"
+api_key = "${TINYFISH_API_KEY}"
 ```
 
 - `type` 缺省回退 `openai_compatible`；**显式写错的 type 启动即报错**。
 - `type = "search"` 时 `platform` 必填且须为受支持平台（启动即校验）。
+- `[tools.web_fetch].extract_provider` 只能引用**提供抽取能力**的平台：`tavily`、`tinyfish`（`EXTRACT_PLATFORMS`）。引用 brave/baidu 会在注册期告警并退回本地解析。
 - llm family 有 `[provider.<id>.compat]` 可选覆盖层，抹平 OpenAI 兼容端点的实现差异（自动按 base_url 探测，见 ADR-0026）。
 - **旧配置自动迁移**：v0.5 的 `[provider.<id>.<alias>]` model 子表、`[tools.tavily|baidu|brave]` 凭据段、`[tools.tts]`/`[tools.image_gen]` 内联端点在启动时自动改写为新结构（内存态，磁盘文件不动）。model id 沿用 `<provider>.<alias>` 两段式，所以 agent 里的旧引用（如 `model = "default.qwen"`）无需任何改动。P8 短暂用过的 `type = "tavily"` 等写法也在加载期归一化为 `type = "search"` + 对应 `platform`。在 WebUI 保存一次即可把新结构写盘。
 

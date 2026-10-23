@@ -122,8 +122,10 @@ dir = "~/.llaia/logs"
 # max_tokens = 8192              # required for Anthropic; defaults to 4096 if unset
 #
 # Search services (service family): one `search` type, `platform` picks the wire
-# adapter (tavily | baidu | brave). Pure credentials, no model entries, never appear
-# in the add-model probe list. Referenced by [tools.search].provider below.
+# adapter (tavily | baidu | brave | tinyfish). Pure credentials, no model entries,
+# never appear in the add-model probe list. Referenced by [tools.search].provider below.
+# For [tools.web_fetch].extract_provider only tavily and tinyfish qualify (they
+# expose server-side extraction; baidu/brave are search-only).
 # [provider.tv]
 # type = "search"
 # platform = "tavily"
@@ -136,6 +138,12 @@ dir = "~/.llaia/logs"
 # type = "search"
 # platform = "brave"
 # api_key = "${BRAVE_API_KEY}"
+# [provider.tf]
+# type = "search"
+# platform = "tinyfish"
+# api_key = "${TINYFISH_API_KEY}"
+# Free tier: 12k searches/day + 1k fetched URLs/day. One entry serves both
+# [tools.search].provider and [tools.web_fetch].extract_provider.
 
 # Main Agent: leave model empty to enter degraded mode (no provider, WebUI config only)
 # After configuring a provider + model above, set e.g. "qwen" to enable chat

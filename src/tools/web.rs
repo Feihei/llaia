@@ -1,5 +1,7 @@
 use crate::config::Config;
 use crate::tools::search::tavily::TavilyProvider;
+use crate::tools::search::tinyfish::TinyFishProvider;
+use crate::tools::search::Extractor;
 use crate::tools::Tool;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -12,10 +14,10 @@ use std::time::Duration;
 /// 下载字节硬上限：避免把整站大文件/视频灌进内存。抽取后还会按 `max_chars` 二次截断文本。
 const MAX_DOWNLOAD_BYTES: usize = 4 * 1024 * 1024;
 
-/// 解析 `web_fetch.extract_provider` 引用为服务端抽取器（P8）。
-/// 须为支持 extract 能力的 service family provider（v1 = tavily）。
+/// 解析 `web_fetch.extract_provider` 引用为服务端抽取器（P8 / T2 泛化）。
+/// 须为提供 extract 能力的 service family provider（见 `EXTRACT_PLATFORMS`）。
 /// 返回 `Ok(None)` = 引用为空（本地抽取）；`Err` = 引用无效（调用方 warn 后退化本地）。
-pub fn resolve_extractor(config: &Config, id: &str) -> Result<Option<Arc<TavilyProvider>>> {
+pub fn resolve_extractor(config: &Config, id: &str) -> Result<Option<Arc<dyn Extractor>>> {
     let id = id.trim();
     if id.is_empty() {
         return Ok(None);
@@ -26,16 +28,19 @@ pub fn resolve_extractor(config: &Config, id: &str) -> Result<Option<Arc<TavilyP
     if !prov.is_service() {
         anyhow::bail!("provider '{id}' is not a service-family provider");
     }
-    if prov.search_platform() != Some("tavily") {
-        anyhow::bail!(
-            "provider '{id}' (platform {:?}) has no extract capability (v1: tavily only)",
-            prov.search_platform()
-        );
-    }
     if prov.api_key.is_empty() {
         anyhow::bail!("provider '{id}' has an empty api_key");
     }
-    Ok(Some(Arc::new(TavilyProvider::new(prov.api_key.clone())?)))
+    // 按 platform 分派实现（不再硬编码单一类型）：新增抽取商在这里加一支即可。
+    let extractor: Arc<dyn Extractor> = match prov.search_platform() {
+        Some("tavily") => Arc::new(TavilyProvider::new(prov.api_key.clone())?),
+        Some("tinyfish") => Arc::new(TinyFishProvider::new(prov.api_key.clone())?),
+        other => anyhow::bail!(
+            "provider '{id}' (platform {other:?}) has no extract capability (supported: {})",
+            crate::config::EXTRACT_PLATFORMS.join("|")
+        ),
+    };
+    Ok(Some(extractor))
 }
 
 /// web_fetch 出站闸门（ADR-0033 L4，P9 Phase 2）：域名允许清单 + 交互频道
@@ -201,7 +206,7 @@ pub struct WebFetch {
     max_chars: usize,
     /// 可选服务端抽取器（由 `web_fetch.extract_provider` 引用解析）。
     /// `None` 时走本地 readability / html2text 抽取。
-    tavily: Option<Arc<TavilyProvider>>,
+    extractor: Option<Arc<dyn Extractor>>,
     /// 出站域名闸门（允许清单 + 首访批准集）
     gate: Arc<WebFetchGate>,
 }
@@ -209,7 +214,7 @@ pub struct WebFetch {
 impl WebFetch {
     pub fn new(
         max_chars: usize,
-        tavily: Option<Arc<TavilyProvider>>,
+        extractor: Option<Arc<dyn Extractor>>,
         gate: Arc<WebFetchGate>,
     ) -> Result<Self> {
         let client = crate::http::client_builder()
@@ -221,7 +226,7 @@ impl WebFetch {
         Ok(Self {
             client,
             max_chars,
-            tavily,
+            extractor,
             gate,
         })
     }
@@ -244,9 +249,9 @@ impl Tool for WebFetch {
     }
     fn description(&self) -> &str {
         "Fetch a web page and return its main content as clean plain text. \
-         HTML is converted to readable text (via Tavily extract when configured, \
-         otherwise local extraction). JSON / plain text / markdown are returned as-is. \
-         Only GET; follows redirects."
+         HTML is converted to readable text (via the configured server-side \
+         extractor when one is set, otherwise local extraction). JSON / plain text / \
+         markdown are returned as-is. Only GET; follows redirects."
     }
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
@@ -295,13 +300,17 @@ impl Tool for WebFetch {
 
 impl WebFetch {
     async fn fetch(&self, url: &str) -> Result<String> {
-        // 优先走 Tavily 服务端抽取（对反爬 / JS 渲染页成功率更高，对应 AstrBot 做法）。
+        // 优先走服务端抽取（对反爬 / JS 渲染页成功率更高，对应 AstrBot 做法）。
         // 失败则退化为本地解析，保证可用性。
-        if let Some(tavily) = &self.tavily {
-            match tavily.extract(url).await {
+        if let Some(extractor) = &self.extractor {
+            match extractor.extract(url).await {
                 Ok(text) => return Ok(self.truncate(&text)),
                 Err(e) => {
-                    tracing::warn!(error = %e, "tavily extract failed, falling back to local parse")
+                    tracing::warn!(
+                        error = %e,
+                        extractor = extractor.extractor_name(),
+                        "server-side extract failed, falling back to local parse"
+                    )
                 }
             }
         }
@@ -537,9 +546,64 @@ mod tests {
     }
 
     #[test]
-    fn constructs_without_tavily() {
-        // 无 Tavily key 时仍应构造成功（纯本地抽取路径）。
+    fn constructs_without_extractor() {
+        // 未配置服务端抽取器时仍应构造成功（纯本地抽取路径）。
         let wf = WebFetch::new(20_000, None, Arc::new(WebFetchGate::new(Vec::new()))).unwrap();
         assert_eq!(wf.name(), "web_fetch");
+    }
+
+    /// 直接走 serde（跳过 `Config::load` 的迁移与校验）——本组测试只关心
+    /// `resolve_extractor` 的分派，平台合法性由 config.rs 的 load 期测试覆盖。
+    fn cfg_with_provider(platform: &str, api_key: &str) -> Config {
+        let toml = format!(
+            r#"
+[provider.tf]
+type = "search"
+platform = "{platform}"
+api_key = "{api_key}"
+"#
+        );
+        toml::from_str::<Config>(&toml).unwrap()
+    }
+
+    #[test]
+    fn resolve_extractor_dispatches_by_platform() {
+        let tavily = resolve_extractor(&cfg_with_provider("tavily", "k"), "tf")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tavily.extractor_name(), "tavily");
+
+        // T2 的核心断言：tinyfish 不再被 "v1: tavily only" 挡在 extract 通路外。
+        let tinyfish = resolve_extractor(&cfg_with_provider("tinyfish", "k"), "tf")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tinyfish.extractor_name(), "tinyfish");
+    }
+
+    #[test]
+    fn resolve_extractor_empty_reference_means_local_parse() {
+        assert!(resolve_extractor(&cfg_with_provider("tinyfish", "k"), "  ")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn resolve_extractor_rejects_platform_without_extract() {
+        // `Arc<dyn Extractor>` 不实现 Debug，故用 `.err()` 避开 unwrap_err 的 Debug 界。
+        let err = resolve_extractor(&cfg_with_provider("brave", "k"), "tf")
+            .err()
+            .expect("brave is search-only")
+            .to_string();
+        assert!(err.contains("no extract capability"), "{err}");
+        assert!(err.contains("tavily|tinyfish"), "{err}");
+    }
+
+    #[test]
+    fn resolve_extractor_rejects_empty_api_key() {
+        let err = resolve_extractor(&cfg_with_provider("tinyfish", ""), "tf")
+            .err()
+            .expect("empty api_key must be rejected")
+            .to_string();
+        assert!(err.contains("empty api_key"), "{err}");
     }
 }

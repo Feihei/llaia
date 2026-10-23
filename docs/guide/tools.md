@@ -10,8 +10,8 @@ agent 在对话中可以调用的工具。模型通过「原生 function calling
 | `file_write` | 写文件 | 是 |
 | `file_edit` | 精确修改文件 | 是 |
 | `terminal` | 跑终端命令（含 ls/grep 等） | 视命令而定 |
-| `web_fetch` | 抓取网页 | 否 |
-| `search` | 联网搜索（统一工具，按 `[tools.search].provider` 路由到 tavily/baidu/brave，需对应 key） | 否 |
+| `web_fetch` | 抓取网页（配置 `extract_provider` 时优先走服务端抽取：tavily / tinyfish，失败退回本地解析） | 否 |
+| `search` | 联网搜索（统一工具，按 `[tools.search].provider` 路由到 tavily/baidu/brave/tinyfish，需对应 key） | 否 |
 | `todo` | 规划后执行：每会话一份待办清单（`add`/`list`/`update`/`done`），自动注入 Runtime Context（ADR-0024） | 否 |
 | `ask_user` | 执行中主动抛问题并阻塞等待用户回答再继续；交互频道软暂停+续跑，非交互频道按最合理假设继续（ADR-0022） | 否 |
 | `memory_write` | 写 `MEMORY.md` 长期记忆 | 是 |

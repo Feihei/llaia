@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::time::Duration;
 
-use super::{SearchProvider, SearchResult};
+use super::{Extractor, SearchProvider, SearchResult};
 
 const TAVILY_URL: &str = "https://api.tavily.com/search";
 /// Tavily 正文抽取端点（对应 AstrBot 的 `tavily_extract_web_page`）：
@@ -27,10 +27,17 @@ impl TavilyProvider {
             api_key,
         })
     }
+}
+
+#[async_trait]
+impl Extractor for TavilyProvider {
+    fn extractor_name(&self) -> &str {
+        "tavily"
+    }
 
     /// 服务端抽取单个 URL 的正文（Tavily `/extract`）。成功返回清洗后的纯文本；
     /// 失败（网络/鉴权/该页抽取失败）返回 Err，由调用方退化为本地解析。
-    pub async fn extract(&self, url: &str) -> Result<String> {
+    async fn extract(&self, url: &str) -> Result<String> {
         if self.api_key.is_empty() {
             return Err(anyhow!("tavily api_key not configured"));
         }
@@ -139,5 +146,6 @@ mod tests {
         // 不发起网络请求，仅验证构造成功
         let p = TavilyProvider::new("tvly-test".into()).unwrap();
         assert_eq!(p.name(), "tavily");
+        assert_eq!(p.extractor_name(), "tavily");
     }
 }

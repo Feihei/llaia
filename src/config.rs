@@ -274,14 +274,21 @@ pub const LEGACY_SERVICE_TYPES: &[&str] = &["tavily", "baidu", "brave"];
 
 /// search 类型下支持的平台（`platform` 字段合法值；新增搜索商 = 加一个 variant +
 /// 对应 adapter，无共享协议前不合并进同一 wire 实现）
-pub const SEARCH_PLATFORMS: &[&str] = &["tavily", "baidu", "brave"];
+pub const SEARCH_PLATFORMS: &[&str] = &["tavily", "baidu", "brave", "tinyfish"];
+
+/// 其中提供**服务端正文抽取**能力的平台（`[tools.web_fetch].extract_provider`
+/// 可引用的子集）。搜索与抽取是两件正交能力：brave/baidu 只做搜索，tavily 走
+/// `/extract`、tinyfish 走 Fetch API。引用不在本表内的平台在注册期 warn 并退化
+/// 本地解析（不阻断启动）。
+pub const EXTRACT_PLATFORMS: &[&str] = &["tavily", "tinyfish"];
 
 /// 一个 provider 端点（连接信息）：统一连接注册表条目。`type` 即判别器，分两族：
 ///
 /// - **llm family**（`openai_compatible`/`anthropic`/`gemini`）：可被 `[model.<id>]`
 ///   条目引用，出现在添加模型的 probe 列表
 /// - **service family**（`search`）：纯凭据，`platform` 选具体平台
-///   （tavily/baidu/brave），`[tools.search]` / `web_fetch.extract_provider` 按引用消费
+///   （tavily/baidu/brave/tinyfish），`[tools.search]` / `web_fetch.extract_provider`
+///   按引用消费
 ///
 /// `type` 缺省 = openai_compatible（存量习惯保留）；**显式未知值在 `Config::load`
 /// 报错**——静默回退会让打错的 service type 变成一个 LLM provider 蹲进 probe 列表。
@@ -298,7 +305,7 @@ pub struct ProviderConfig {
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
-    /// search 类型的平台判别（tavily/baidu/brave）；llm family 不消费。
+    /// search 类型的平台判别（tavily/baidu/brave/tinyfish）；llm family 不消费。
     /// 缺省 None：load 期校验对 type=search 强制要求该字段存在且合法。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
@@ -972,7 +979,7 @@ fn default_web_fetch_max_chars() -> usize {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
-    /// 搜索 provider 的 id 引用（P8：service family，如 tavily/baidu/brave）。
+    /// 搜索 provider 的 id 引用（P8：service family，如 tavily/baidu/brave/tinyfish）。
     /// 空 = 不注册 search 工具。
     #[serde(default)]
     pub provider: String,
@@ -2123,6 +2130,28 @@ model = "qwen"
             config.provider.get("bd").unwrap().search_platform(),
             Some("baidu")
         );
+    }
+
+    #[test]
+    fn tinyfish_platform_accepted_and_extract_capable() {
+        let toml = r#"
+[provider.tf]
+type = "search"
+platform = "tinyfish"
+api_key = "sk-tinyfish-x"
+
+[agent.main]
+model = "qwen"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(&tmp.path().to_path_buf()).unwrap();
+        let tf = config.provider.get("tf").unwrap();
+        assert!(tf.is_service());
+        assert_eq!(tf.search_platform(), Some("tinyfish"));
+        // tinyfish 同时进两张表：可搜索、也可当 extract_provider
+        assert!(SEARCH_PLATFORMS.contains(&"tinyfish"));
+        assert!(EXTRACT_PLATFORMS.contains(&"tinyfish"));
     }
 
     #[test]

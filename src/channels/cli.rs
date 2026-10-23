@@ -636,8 +636,8 @@ pub async fn build_single_agent(
             .with_hardening(config.runtime.scrub_child_env, Some(guard_ctx.clone())),
         ),
         Arc::new({
-            // web_fetch 正文抽取：extract_provider 引用支持 extract 能力的
-            // service family provider（v1 = tavily）时走服务端抽取。
+            // web_fetch 正文抽取：extract_provider 引用提供 extract 能力的
+            // service family provider（tavily / tinyfish）时走服务端抽取。
             let extractor = match config.tools.web_fetch.extract_provider.trim() {
                 "" => None,
                 id => match crate::tools::web::resolve_extractor(config, id) {
