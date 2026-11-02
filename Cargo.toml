@@ -81,6 +81,10 @@ open = "5"
 # UTF-16 转码 / 行号，grep-regex 提供 matcher），替代 terminal grep 的环境依赖
 grep-searcher = "0.1"
 grep-regex = "0.1"
+# 微信登录二维码：ilink 的 qrcode_img_content 现返回登录短链（text/html，非图片），
+# 需把链接本身编码成二维码给 WebUI / 落盘 PNG。default-features 关掉 image/svg
+# （本仓库自带 image 0.25，避免引入第二个 image 版本）
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 mockito = "1"

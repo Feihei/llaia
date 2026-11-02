@@ -67,7 +67,7 @@ pub struct WechatState {
 pub struct WechatLoginView {
     /// waiting | qr | confirmed | error
     pub status: String,
-    /// status=qr 时的二维码图片（data URL；非 base64 时按直链透传，img src 均可加载）
+    /// status=qr 时的二维码图片（data URL；base64 图与登录短链统一归一化成 PNG data URL）
     pub qr_image: String,
     /// 人类可读说明（错误原因等）
     pub message: String,
@@ -327,37 +327,49 @@ impl WechatChannel {
         }
     }
 
-    /// 展示二维码：写共享视图（WebUI 卡片）+ 日志打印 + 图片落盘兜底（终端用户）
-    /// pub：内部由 ensure_login 调用；测试直接喂两形态（裸 base64 / 直链）验证归一化。
+    /// 展示二维码：写共享视图（WebUI 卡片）+ 日志打印 + 图片落盘兜底（终端用户）。
+    ///
+    /// `img_content` 实测两种形态（2026-10 起上游只剩后者）：
+    /// - base64 / data URL 图片 → 解码后直接落盘 + 进视图
+    /// - 登录短链（`https://liteapp.weixin.qq.com/q/...`，响应 text/html **不是图片**）→
+    ///   把链接本身编码成二维码（微信扫码打开即确认页）；img src 直接放该链接只会
+    ///   加载失败（WebUI 只剩 alt 占位文字），此为 2026-11-02 修复的根因
+    ///
+    /// pub：内部由 ensure_login 调用；测试直接喂各形态验证归一化。
     pub async fn present_qrcode(&self, qrcode: &str, img_content: &str) {
         tracing::info!(
             qrcode = %qrcode,
             "WeChat ClawBot login: scan the QR code with WeChat (with the ClawBot plugin)"
         );
-        // qrcode_img_content 可能是 data URL 或裸 base64
+        let hint = "Scan with WeChat (ClawBot plugin)";
+        // 形态 1：base64（可能包一层 data URL 头）
         let b64 = img_content
             .split_once(";base64,")
             .map(|(_, d)| d)
             .unwrap_or(img_content);
-        let hint = "Scan with WeChat (ClawBot plugin)";
-        match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
-            Ok(bytes) => {
-                let path = self.state_dir.join("wechat_qr.png");
-                match tokio::fs::write(&path, &bytes).await {
-                    Ok(()) => {
-                        tracing::info!(path = %path.display(), "QR code image saved, please scan")
-                    }
-                    Err(e) => tracing::warn!(error = %e, "save qrcode image failed"),
+        let png = match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
+            Ok(bytes) => bytes,
+            Err(_) => match render_login_qr_png(img_content) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    // 理论不达（登录短链远小于 QR 容量）；卡片报错，登录循环 30s 后自愈重试
+                    tracing::error!(error = %e, img = %img_content, "qrcode render failed");
+                    self.set_login_view("error", "", &format!("qrcode render failed: {e}"))
+                        .await;
+                    return;
                 }
-                self.set_login_view("qr", &format!("data:image/png;base64,{}", b64.trim()), hint)
-                    .await;
-            }
-            Err(_) => {
-                tracing::info!(img = %img_content, "qrcode_img_content output as-is");
-                // 多半是图片直链，前端 img src 可直接加载，原样透传
-                self.set_login_view("qr", img_content, hint).await;
-            }
+            },
+        };
+        let path = self.state_dir.join("wechat_qr.png");
+        match tokio::fs::write(&path, &png).await {
+            Ok(()) => tracing::info!(path = %path.display(), "QR code image saved, please scan"),
+            Err(e) => tracing::warn!(error = %e, "save qrcode image failed"),
         }
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        self.set_login_view("qr", &data_url, hint).await;
     }
 
     // ---- 收消息 ----
@@ -908,6 +920,40 @@ impl OutputSink for WechatSink {
 }
 
 // ---- 加密/编码工具 ----
+
+/// 把登录短链编码成二维码 PNG（含 4 模块静区，白底黑点）。
+///
+/// ilink 的 `qrcode_img_content` 自 2026-10 起返回
+/// `https://liteapp.weixin.qq.com/q/<id>?qrcode=...&bot_type=3`（响应 text/html，
+/// 不是图片）——该链接本身就是待扫的二维码内容，微信扫码打开即登录确认页。
+pub fn render_login_qr_png(content: &str) -> Result<Vec<u8>> {
+    use image::{DynamicImage, ImageFormat, Luma};
+    use qrcode::{EcLevel, QrCode, Version};
+    use std::io::Cursor;
+
+    // Version 10（57×57 模块）byte 模式 M 级容量 271 字节，登录短链约 100 字节，余量充足；
+    // 超长内容（理论不达）报错走调用方的透传兜底
+    let code = QrCode::with_version(content.as_bytes(), Version::Normal(10), EcLevel::M)
+        .context("qr encode failed (content too long?)")?;
+    let n = code.width() as i32;
+    let quiet = 4i32;
+    let total = (n + quiet * 2) as u32;
+    let colors = code.to_colors();
+    // 注意：GrayImage::new 初始化为 0（黑）——必须显式填白底，否则整图纯黑
+    let mut img = image::ImageBuffer::from_pixel(total, total, Luma([255u8]));
+    for y in 0..n {
+        for x in 0..n {
+            if colors[(y * n + x) as usize] == qrcode::Color::Dark {
+                img.put_pixel((x + quiet) as u32, (y + quiet) as u32, Luma([0]));
+            }
+        }
+    }
+    let mut buf = Cursor::new(Vec::new());
+    DynamicImage::ImageLuma8(img)
+        .write_to(&mut buf, ImageFormat::Png)
+        .context("qr png encode failed")?;
+    Ok(buf.into_inner())
+}
 
 fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()

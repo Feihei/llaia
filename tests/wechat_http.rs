@@ -200,16 +200,89 @@ async fn test_login_view_data_url_input_normalized_same() {
 }
 
 #[tokio::test]
-async fn test_login_view_url_passthrough() {
+async fn test_login_view_url_becomes_qr_png() {
+    bypass_proxy();
+    let server = Server::new_async().await;
+    let (wx, dir) = channel(&server, None).await;
+    // 上游实测形态（2026-10 起）：登录短链，响应 text/html 非图片——
+    // 直接当 img src 只会加载失败，必须把链接本身编码成二维码
+    wx.present_qrcode(
+        "qr_abc",
+        "https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=bf7be1851f89506d8c7234458727693f&bot_type=3",
+    )
+    .await;
+    let v = wx.login_view().read().await.clone();
+    assert_eq!(v.status, "qr");
+    assert!(
+        v.qr_image.starts_with("data:image/png;base64,"),
+        "URL content should be QR-encoded into a PNG data URL, got: {}",
+        v.qr_image
+    );
+    // data URL 可解码回合法 PNG
+    let b64 = v.qr_image.trim_start_matches("data:image/png;base64,");
+    let bytes = base64_decode(b64);
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    // 落盘兜底同步维护（终端用户不看 WebUI 也能扫）
+    assert!(dir.path().join("wechat_qr.png").exists());
+}
+
+#[tokio::test]
+async fn test_login_view_non_base64_content_also_qr_encoded() {
     bypass_proxy();
     let server = Server::new_async().await;
     let (wx, _dir) = channel(&server, None).await;
-    // 非 base64 形态（直链）不解码、不写 PNG，原样透传给 img src
-    wx.present_qrcode("qr_abc", "https://example.com/qr.png")
-        .await;
+    // 任何非 base64 内容（现实里就是登录短链）统一编码成二维码，不再透传
+    wx.present_qrcode("qr_abc", "https://example.com/qr").await;
     let v = wx.login_view().read().await.clone();
     assert_eq!(v.status, "qr");
-    assert_eq!(v.qr_image, "https://example.com/qr.png");
+    assert!(v.qr_image.starts_with("data:image/png;base64,"));
+}
+
+#[test]
+fn test_render_login_qr_png_has_white_background() {
+    // 回归守卫：GrayImage::new 默认填 0（黑），忘填白底会渲染出整块纯黑的二维码
+    let png = llaia::channels::wechat::render_login_qr_png(
+        "https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=bf7be1851f89506d8c7234458727693f&bot_type=3",
+    )
+    .unwrap();
+    let img = image::load_from_memory(&png).unwrap().to_luma8();
+    let mut dark = 0u64;
+    let mut light = 0u64;
+    for p in img.pixels() {
+        if p.0[0] < 128 {
+            dark += 1;
+        } else {
+            light += 1;
+        }
+    }
+    assert!(dark > 0, "QR has no dark modules");
+    // 静区 + 浅色模块应占多数；纯黑图 light=0
+    assert!(
+        light > dark,
+        "background must be white-dominant, got light={light} dark={dark}"
+    );
+}
+
+/// dev-dependencies 不引 base64：手写一个最小解码器仅覆盖本测试文件的合法输入
+fn base64_decode(s: &str) -> Vec<u8> {
+    const TBL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let val = |c: u8| TBL.iter().position(|&t| t == c).unwrap() as u32;
+    let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'=').collect();
+    let mut out = Vec::new();
+    for chunk in bytes.chunks(4) {
+        let mut acc = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            acc |= val(c) << (18 - 6 * i);
+        }
+        out.push((acc >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((acc >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(acc as u8);
+        }
+    }
+    out
 }
 
 #[tokio::test]
