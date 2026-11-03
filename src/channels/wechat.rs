@@ -65,7 +65,8 @@ pub struct WechatState {
 /// 「config 已开但频道还没随 serve 启动」（前端提示重启）与「正在等扫码」。
 #[derive(Debug, Clone, Default)]
 pub struct WechatLoginView {
-    /// waiting | qr | confirmed | error
+    /// idle | waiting | qr | confirmed | error
+    /// idle = 按需登录挂起中（无 token 且无需求信号，卡片提示打开即申请）
     pub status: String,
     /// status=qr 时的二维码图片（data URL；base64 图与登录短链统一归一化成 PNG data URL）
     pub qr_image: String,
@@ -82,6 +83,9 @@ pub struct WechatChannel {
     state: Mutex<WechatState>,
     /// WebUI 卡片登录进度（serve_cmd 注入共享 Arc；未注入时是无人读的默认值）
     login_view: Arc<RwLock<WechatLoginView>>,
+    /// 按需登录信号：卡片可见（GET 轮询命中 idle/error 态）才申请二维码（2026-11-03，
+    /// 旧逻辑 serve 起来就不停刷码，没人登录时纯浪费）。serve_cmd 注入共享 Arc。
+    login_demand: Arc<Notify>,
 }
 
 impl WechatChannel {
@@ -97,6 +101,7 @@ impl WechatChannel {
                 .expect("build wechat http client cannot fail with static config"),
             state: Mutex::new(WechatState::default()),
             login_view: Arc::new(RwLock::new(WechatLoginView::default())),
+            login_demand: Arc::new(Notify::new()),
         }
     }
 
@@ -139,6 +144,18 @@ impl WechatChannel {
     pub fn with_login_view(mut self, view: Arc<RwLock<WechatLoginView>>) -> Self {
         self.login_view = view;
         self
+    }
+
+    /// 注入按需登录信号（serve_cmd 建共享 Arc，WebUI GET 端点也持有一份）
+    pub fn with_login_demand(mut self, demand: Arc<Notify>) -> Self {
+        self.login_demand = demand;
+        self
+    }
+
+    /// WebUI 侧的登录需求信号：卡片打开且处于 idle/error 态时由 GET 端点触发。
+    /// Notify 至多存一张许可，轮询重复触发自动合并。
+    pub fn demand_login(&self) {
+        self.login_demand.notify_one();
     }
 
     /// 共享视图的 Arc 克隆（接线 AppState 用）
@@ -272,57 +289,56 @@ impl WechatChannel {
         .await
     }
 
-    /// 确保已登录（有 token 直接过；否则走扫码流程直到 confirmed）。
+    /// 走**一轮**扫码登录：申请二维码 → 长轮询直到终态。
+    /// 返回 true = 已登录（token 就绪）；false = 本轮未成（expired/denied），是否再申请由
+    /// 调用方决定（run 循环按需重试，2026-11-03 起受「卡片可见」需求信号约束）。
     /// pub：频道内部循环调用；集成测试经 mockito 直接驱动完整登录流程。
-    pub async fn ensure_login(&self) -> Result<()> {
+    pub async fn ensure_login(&self) -> Result<bool> {
         if !self.state.lock().await.token.is_empty() {
             self.set_login_view("confirmed", "", "Logged in").await;
-            return Ok(());
+            return Ok(true);
         }
-        loop {
-            // 每次重新申请前先清掉旧码（expired/重试走这里），前端不会停留在废 QR
-            self.set_login_view("waiting", "", "Requesting QR code...")
-                .await;
-            let (qrcode, img) = self.get_qrcode().await?;
-            self.present_qrcode(&qrcode, &img).await;
+        self.set_login_view("waiting", "", "Requesting QR code...")
+            .await;
+        let (qrcode, img) = self.get_qrcode().await?;
+        self.present_qrcode(&qrcode, &img).await;
 
-            // 轮询扫码状态直到 confirmed / expired / denied
-            loop {
-                let st = self.poll_qrcode_status(&qrcode).await?;
-                let status = st.get("status").and_then(|v| v.as_str()).unwrap_or("wait");
-                match status {
-                    "confirmed" => {
-                        let token = st
-                            .get("bot_token")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if token.is_empty() {
-                            anyhow::bail!("login confirmed but bot_token missing");
-                        }
-                        let mut state = self.state.lock().await;
-                        state.token = token;
-                        state.account_id = st
-                            .get("ilink_bot_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        drop(state);
-                        self.save_state().await;
-                        self.set_login_view("confirmed", "", "Logged in").await;
-                        tracing::info!("WeChat ClawBot login confirmed");
-                        return Ok(());
+        // 轮询扫码状态直到 confirmed / expired / denied
+        loop {
+            let st = self.poll_qrcode_status(&qrcode).await?;
+            let status = st.get("status").and_then(|v| v.as_str()).unwrap_or("wait");
+            match status {
+                "confirmed" => {
+                    let token = st
+                        .get("bot_token")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if token.is_empty() {
+                        anyhow::bail!("login confirmed but bot_token missing");
                     }
-                    "expired" => {
-                        tracing::warn!("weixin qrcode expired, requesting new one");
-                        break;
-                    }
-                    "cancel" | "canceled" | "denied" => {
-                        tracing::warn!("weixin login denied/canceled, retrying");
-                        break;
-                    }
-                    _ => {} // wait / scanned 等，继续长轮询
+                    let mut state = self.state.lock().await;
+                    state.token = token;
+                    state.account_id = st
+                        .get("ilink_bot_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    drop(state);
+                    self.save_state().await;
+                    self.set_login_view("confirmed", "", "Logged in").await;
+                    tracing::info!("WeChat ClawBot login confirmed");
+                    return Ok(true);
                 }
+                "expired" => {
+                    tracing::warn!("weixin qrcode expired");
+                    return Ok(false);
+                }
+                "cancel" | "canceled" | "denied" => {
+                    tracing::warn!("weixin login denied/canceled");
+                    return Ok(false);
+                }
+                _ => {} // wait / scanned 等，继续长轮询
             }
         }
     }
@@ -789,11 +805,42 @@ impl crate::channels::Channel for WechatChannel {
         self.load_state().await;
         let stop = Arc::new(Notify::new());
         loop {
-            if let Err(e) = self.ensure_login().await {
-                // 网络/响应错误：卡片显示原因；30s 后重跑登录流程会回到 waiting/qr
-                self.set_login_view("error", "", &e.to_string()).await;
-                tracing::warn!(error = %e, "weixin login failed, retry in 30s");
-                tokio::time::sleep(Duration::from_secs(30)).await;
+            // 按需登录门（2026-11-03）：无登录态时先挂起，WebUI 打开微信卡片
+            // （GET /api/channels/wechat/login 轮询命中 idle/error）才唤醒申请二维码。
+            // 旧逻辑 serve 起来就不停刷码 + 落盘 PNG，没人登录时纯浪费。
+            if self.state.lock().await.token.is_empty() {
+                self.set_login_view("idle", "", "QR code is requested when this card is visible")
+                    .await;
+                self.login_demand.notified().await;
+            }
+            // 一次登录会话：最多 3 张码（expired/denied/网络错误都计入），用尽回 idle
+            // 等下一次需求信号，避免「卡片开着但人走了」无限刷码。
+            let mut attempts = 0u32;
+            loop {
+                match self.ensure_login().await {
+                    Ok(true) => break,
+                    Ok(false) => attempts += 1,
+                    Err(e) => {
+                        // 网络/响应错误：卡片显示原因
+                        self.set_login_view("error", "", &e.to_string()).await;
+                        tracing::warn!(error = %e, "weixin login failed");
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        attempts += 1;
+                    }
+                }
+                if attempts >= 3 {
+                    tracing::info!("weixin login session gave up after 3 attempts, back to idle");
+                    self.set_login_view(
+                        "idle",
+                        "",
+                        "Login paused after 3 attempts — reopen this card to request a new QR code",
+                    )
+                    .await;
+                    break;
+                }
+            }
+            // 登录没成（会话用尽）→ 回到按需门等需求
+            if self.state.lock().await.token.is_empty() {
                 continue;
             }
             match self.poll_once(&stop, &registry).await {
@@ -801,7 +848,7 @@ impl crate::channels::Channel for WechatChannel {
                 Err(e) => {
                     let msg = e.to_string();
                     if msg.contains("re-login") {
-                        // 登录态失效：清空重新扫码
+                        // 登录态失效：清空重新扫码（回到按需门）
                         tracing::warn!("weixin session timeout, clearing state for re-login");
                         *self.state.lock().await = WechatState::default();
                         self.save_state().await;

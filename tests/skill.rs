@@ -100,6 +100,7 @@ async fn build_state(tmp: &std::path::Path) -> AppState {
         wechat_login: Arc::new(tokio::sync::RwLock::new(
             llaia::channels::wechat::WechatLoginView::default(),
         )),
+        wechat_login_demand: Arc::new(tokio::sync::Notify::new()),
     }
 }
 

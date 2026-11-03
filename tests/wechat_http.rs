@@ -317,6 +317,38 @@ async fn test_ensure_login_full_flow_updates_view_and_persists_token() {
 }
 
 #[tokio::test]
+async fn test_ensure_login_expired_returns_false_without_token() {
+    bypass_proxy();
+    let mut server = Server::new_async().await;
+    server
+        .mock("GET", "/ilink/bot/get_bot_qrcode")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(r#"{"qrcode":"qr_abc","qrcode_img_content":"aW1nX2Jhc2U2NA=="}"#)
+        .create_async()
+        .await;
+    server
+        .mock("GET", "/ilink/bot/get_qrcode_status")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(r#"{"status":"expired"}"#)
+        .create_async()
+        .await;
+
+    let (wx, _dir) = channel(&server, None).await;
+    // 一轮登录 = 一个二维码生命周期：expired 返回 false，是否再申请由 run 循环
+    // 按「卡片可见」需求信号决定（按需登录，不再无限自动刷码）
+    let ok = wx.ensure_login().await.unwrap();
+    assert!(!ok);
+    let v = wx.login_view().read().await.clone();
+    assert_eq!(
+        v.status, "qr",
+        "expired 后视图停留在最后一张码，等待调用方决策"
+    );
+    assert!(wx.state_snapshot().await.token.is_empty());
+}
+
+#[tokio::test]
 async fn test_ensure_login_existing_token_marks_confirmed_without_http() {
     bypass_proxy();
     // 空 server：任何请求都会 404——通过不了 mock，验证提前返回路径零 HTTP

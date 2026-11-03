@@ -897,6 +897,9 @@
                       <template x-if="wechatLogin.status === 'restart_required'">
                         <div class="wl-hint">Saved. This channel starts with the server — press <b>Reload Service</b> (About page) or re-run <code>llaia serve</code>.</div>
                       </template>
+                      <template x-if="wechatLogin.status === 'idle'">
+                        <div class="wl-hint" x-text="wechatLogin.message || 'QR code is requested on demand — keep this card visible and it will appear shortly.'"></div>
+                      </template>
                       <template x-if="wechatLogin.status === 'waiting'">
                         <div class="wl-hint">Requesting QR code...</div>
                       </template>

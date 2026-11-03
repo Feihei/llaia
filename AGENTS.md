@@ -44,6 +44,8 @@ pub trait Channel: Send + Sync + 'static {
 
 详见 [docs/adr/0009-qq-channel.md](docs/adr/0009-qq-channel.md)。
 
+> **微信按需登录（2026-11-03）**：登录流程改为需求驱动——serve 启动后无 token 时频道在 `idle` 态挂起（`login_demand: Arc<Notify>` 共享槽），`GET /api/channels/wechat/login` 轮询命中 idle/error 即反向触发一次需求（卡片可见 = 登录意图），channel 醒来跑一轮登录（申请二维码 → 长轮询到终态）；`ensure_login` 收窄为单轮返回 `Result<bool>`，run 循环内一个会话最多 3 张码（expired/denied/网络错误均计入），用尽回 idle 等下次需求——旧逻辑 serve 起来就不停刷码 + 落盘 PNG，没人登录时纯浪费。web 侧接线：AppState/WebChannel 新增 `wechat_login_demand` 槽（与 wechat_login 同款模式），前端卡片新增 idle 提示模板。
+
 详见 [docs/adr/0002-agent-architecture.md](docs/adr/0002-agent-architecture.md)。
 
 ## 持久化

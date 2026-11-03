@@ -739,6 +739,9 @@ pub struct WebChannel {
     pub cron_tool: Arc<std::sync::Mutex<Option<Arc<CronTool>>>>,
     /// 微信登录进度共享槽（serve_cmd 先于频道创建，WechatChannel 写、卡片端点读）
     pub wechat_login: Arc<tokio::sync::RwLock<crate::channels::wechat::WechatLoginView>>,
+    /// 微信按需登录信号（与 wechat_login 同款共享槽：卡片端点在 idle/error 态触发，
+    /// WechatChannel 的登录门等待被唤醒申请二维码）
+    pub wechat_login_demand: Arc<Notify>,
 }
 
 impl WebChannel {
@@ -752,6 +755,7 @@ impl WebChannel {
         shutdown_signal: Arc<Notify>,
         reload_signal: Arc<Notify>,
         wechat_login: Arc<tokio::sync::RwLock<crate::channels::wechat::WechatLoginView>>,
+        wechat_login_demand: Arc<Notify>,
     ) -> Self {
         let cron_path = config_path.with_file_name("cron.toml");
         Self {
@@ -768,6 +772,7 @@ impl WebChannel {
             reload_signal,
             cron_tool: Arc::new(std::sync::Mutex::new(None)),
             wechat_login,
+            wechat_login_demand,
         }
     }
 
@@ -812,6 +817,7 @@ impl WebChannel {
             skills_dir: self.cron_path.with_file_name("skills"),
             cron_tool: self.cron_tool.clone(),
             wechat_login: self.wechat_login.clone(),
+            wechat_login_demand: self.wechat_login_demand.clone(),
         };
         // 系统级路由 + WS 路由，共享同一个 state
         build_system_routes()

@@ -52,6 +52,8 @@ pub struct AppState {
     pub cron_tool: Arc<std::sync::Mutex<Option<Arc<crate::tools::cron::CronTool>>>>,
     /// 微信登录进度（WechatChannel 写；GET /api/channels/wechat/login 读，Config 页卡片渲染二维码）
     pub wechat_login: Arc<RwLock<crate::channels::wechat::WechatLoginView>>,
+    /// 微信按需登录信号：GET 端点在 idle/error 态触发，唤醒 WechatChannel 登录门申请二维码
+    pub wechat_login_demand: Arc<Notify>,
 }
 
 /// 生成 32 字节随机 hex token
@@ -872,8 +874,10 @@ pub async fn shutdown_service(
 
 /// GET /api/channels/wechat/login → 微信卡片的登录进度（二维码 + 扫码状态）。
 /// 视图由 WechatChannel 登录循环写入（共享 Arc，唯一写入方）；本端点只读转发。
-/// status 四态之外的派生态：config 未启用 = disabled；已启用但频道没跑过登录 =
+/// status 之外的派生态：config 未启用 = disabled；已启用但频道没跑过登录 =
 /// restart_required（频道随 serve 启动、不热加载，提示用户重启）。
+/// 按需登录（2026-11-03）：卡片可见（本端点被轮询）且处于 idle/error 态时，
+/// 反向触发一次登录需求 —— 打开卡片即「我要连微信」的意图信号。
 pub async fn get_wechat_login(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -891,6 +895,10 @@ pub async fn get_wechat_login(
     } else {
         view.status.as_str()
     };
+    // 卡片在轮询且登录挂起/失败 → 发出登录需求（Notify 许可自动合并，重复触发无害）
+    if enabled && view.started && (view.status == "idle" || view.status == "error") {
+        state.wechat_login_demand.notify_one();
+    }
     axum::Json(serde_json::json!({
         "enabled": enabled,
         "status": status,

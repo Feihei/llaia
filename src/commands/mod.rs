@@ -782,10 +782,12 @@ async fn serve_once(
 
     // 微信 ClawBot channel：启用时构造并 spawn（扫码登录 + 长轮询免公网），克隆一份 Arc 给 cron pusher
     // 登录态持久化在 <config_dir>/wechat_state.json
-    // 登录进度共享视图先建：channel 写、WebChannel 读（Config 页微信卡片显示二维码）
+    // 登录进度共享视图 + 按需登录信号先建：channel 写视图、WebChannel（GET 端点）读视图，
+    // 端点在 idle/error 态反向触发 demand（卡片可见 = 登录需求，避免无人登录时无限刷码）
     let wechat_login = std::sync::Arc::new(tokio::sync::RwLock::new(
         crate::channels::wechat::WechatLoginView::default(),
     ));
+    let wechat_login_demand = std::sync::Arc::new(tokio::sync::Notify::new());
     let wechat_pusher_for_cron: Option<std::sync::Arc<dyn crate::cron::ProactivePusher>> =
         if config.channels.wechat.enabled {
             let wx = std::sync::Arc::new(
@@ -793,7 +795,8 @@ async fn serve_once(
                     config.channels.wechat.clone(),
                     config_dir.to_path_buf(),
                 )
-                .with_login_view(wechat_login.clone()),
+                .with_login_view(wechat_login.clone())
+                .with_login_demand(wechat_login_demand.clone()),
             );
             let pusher: std::sync::Arc<dyn crate::cron::ProactivePusher> = wx.clone();
             let registry = registry.clone();
@@ -856,6 +859,7 @@ async fn serve_once(
         shutdown_signal.clone(),
         reload_signal.clone(),
         wechat_login.clone(),
+        wechat_login_demand.clone(),
     ));
     web.set_mcp_registry(mcp_registry);
     // cron_tool 注入 WebChannel，供热加载 cron 时重新指向新调度器（P4-f）
