@@ -114,8 +114,12 @@ pub fn hits_blacklist(path: &str) -> bool {
         // also rewritten to '\'. Without this, `hits_blacklist("/etc/passwd")` returned
         // false on Linux because "\etc\passwd" didn't start with "/etc".
         let prefix_lower = prefix.to_lowercase().replace('/', "\\");
-        if lower.starts_with(&prefix_lower) {
-            return true;
+        if let Some(rest) = lower.strip_prefix(&prefix_lower) {
+            // 前缀必须结束于路径分隔符边界：`/dev` 命中 `/dev/shm` 与 `/dev` 本身，
+            // 但不该命中 `/development/app/main.rs`（更长的目录名）、同样 `/var` 不该命中 `/variants/x`。
+            if rest.is_empty() || rest.starts_with('\\') {
+                return true;
+            }
         }
     }
     false
@@ -1091,7 +1095,14 @@ mod tests {
     fn test_hits_blacklist_linux() {
         assert!(hits_blacklist("/etc/passwd"));
         assert!(hits_blacklist("/usr/bin/something"));
+        assert!(hits_blacklist("/etc"));
+        assert!(hits_blacklist("/dev/shm"));
         assert!(!hits_blacklist("/home/user/file.txt"));
+        // 更长的同级目录名不得被短前缀误伤
+        assert!(!hits_blacklist("/development/app/main.rs"));
+        assert!(!hits_blacklist("/library/x"));
+        assert!(!hits_blacklist("/system-notes/a.md"));
+        assert!(!hits_blacklist("/variants/x"));
     }
 
     // 平台专属：Windows 黑名单前缀只在 windows 编译时存在
@@ -1100,7 +1111,11 @@ mod tests {
     fn test_hits_blacklist_windows() {
         assert!(hits_blacklist(r"C:\Windows\System32"));
         assert!(hits_blacklist(r"C:\Program Files\app"));
+        assert!(hits_blacklist(r"C:\windows"));
         assert!(!hits_blacklist(r"C:\Users\me\file.txt"));
+        // 更长的同级目录名不得被短前缀误伤
+        assert!(!hits_blacklist(r"C:\WindowsApps\foo"));
+        assert!(!hits_blacklist(r"C:\ProgramDataBackup\x"));
     }
 
     #[test]
